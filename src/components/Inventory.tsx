@@ -124,18 +124,26 @@ export default function Inventory() {
                         <TableCell>{p.brand ?? '-'}</TableCell>
                         <TableCell>{p.model ?? '-'}</TableCell>
                         <TableCell className="text-xs">{p.variant ?? '-'}</TableCell>
-                        <TableCell className="max-w-[200px] text-xs">
+                        <TableCell className="max-w-[240px]">
                           {p.compatibility ? (() => {
                             try {
                               const list = JSON.parse(p.compatibility);
                               if (!Array.isArray(list) || list.length === 0) return <span className="text-muted-foreground">-</span>;
                               return (
-                                <span className="text-muted-foreground">
-                                  {list.slice(0, 3).join(' / ')}
-                                  {list.length > 3 ? <span className="text-primary ml-1">+{list.length - 3}</span> : ''}
-                                </span>
+                                <div className="flex flex-wrap gap-1">
+                                  {list.slice(0, 3).map(m => (
+                                    <span key={m} className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-muted-foreground">
+                                      {m}
+                                    </span>
+                                  ))}
+                                  {list.length > 3 && (
+                                    <span className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-primary font-medium">
+                                      +{list.length - 3}
+                                    </span>
+                                  )}
+                                </div>
                               );
-                            } catch { return <span className="text-muted-foreground">{p.compatibility}</span>; }
+                            } catch { return <span className="text-muted-foreground text-xs">{p.compatibility}</span>; }
                           })() : <span className="text-muted-foreground">-</span>}
                         </TableCell>
                         <TableCell className="text-right">${p.price_cost.toFixed(2)}</TableCell>

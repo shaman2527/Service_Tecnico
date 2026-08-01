@@ -282,15 +282,24 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
               <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
                 {suggestions.map(p => {
                   const compatList = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
+                  const outOfStock = p.stock <= 0;
                   return (
                     <button key={p.id} className="w-full text-left px-3 py-2 text-sm hover:bg-accent border-b last:border-0"
                       onClick={() => selectProduct(p)}>
-                      <span className="font-medium">{p.name.replace(/^Pantalla\s+/i, '')}</span>
-                      {p.brand && <span className="text-muted-foreground ml-1">{p.brand} {p.model}</span>}
-                      <span className="float-right text-muted-foreground">${p.price_sale.toFixed(2)} · Stock: {p.stock}</span>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{p.name.replace(/^Pantalla\s+/i, '')}</span>
+                        <span className={outOfStock ? 'text-danger font-semibold text-xs shrink-0' : 'text-muted-foreground text-xs shrink-0'}>
+                          ${p.price_sale.toFixed(2)} · Stock: {p.stock}
+                        </span>
+                      </div>
+                      {p.brand && <span className="text-muted-foreground text-xs">{p.brand} {p.model}</span>}
                       {compatList.length > 0 && (
-                        <div className="text-[11px] text-muted-foreground/70 mt-0.5 truncate">
-                          {compatList.join(' · ')}
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {compatList.map(m => (
+                            <span key={m} className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-muted-foreground">
+                              {m}
+                            </span>
+                          ))}
                         </div>
                       )}
                     </button>

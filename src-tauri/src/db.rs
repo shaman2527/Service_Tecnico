@@ -1,4 +1,4 @@
-﻿use rusqlite::{Connection, params, Result as SqlResult};
+﻿use rusqlite::{Connection, OptionalExtension, params, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::path::PathBuf;
@@ -631,10 +631,109 @@ impl Database {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
+
+        // Auto-inventory: if status changes to Entregado → deduct screen stock; if leaves Entregado → return stock
+        let prev_status: Option<String> = conn
+            .query_row("SELECT status FROM services WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?;
+        if let Some(prev) = prev_status {
+            if prev != status {
+                if status == "Entregado" {
+                    self.apply_service_stock(&conn, model, -1)?;
+                } else if prev == "Entregado" {
+                    self.apply_service_stock(&conn, model, 1)?;
+                }
+            }
+        }
+
         conn.execute(
             "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19 WHERE id=?10",
             params![client, phone, model, fault, amount, payment_method, date_out, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
         )?;
+        Ok(())
+    }
+
+    // Busca un producto de pantalla cuyo compatibility/model/name coincida con el modelo del servicio.
+    // Si no existe, lo crea automáticamente (categoría Pantalla) y ajusta el stock en delta.
+    fn apply_service_stock(&self, conn: &rusqlite::Connection, model: &str, delta: i64) -> SqlResult<i64> {
+        if model.trim().is_empty() {
+            return Ok(0);
+        }
+        let target = norm_model(model);
+        let mut product_id: Option<i64> = None;
+
+        // 1) Match exacto contra compatibility JSON (modelos individuales) o nombre del producto
+        let mut stmt = conn.prepare(
+            "SELECT id, name, compatibility FROM products WHERE category_id=1 AND compatibility IS NOT NULL AND compatibility != ''",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+        })?;
+        for row in rows {
+            let (pid, name, compat) = row?;
+            let comp: Vec<String> = compat
+                .as_deref()
+                .and_then(|c| serde_json::from_str(c).ok())
+                .unwrap_or_default();
+            let name_norm = norm_model(&name);
+            let name_models: Vec<String> = name_norm.split('/').map(norm_model).collect();
+            if comp.iter().any(|c| norm_model(c) == target)
+                || name_norm == target
+                || name_models.iter().any(|m| m == &target)
+            {
+                product_id = Some(pid);
+                break;
+            }
+        }
+
+        // 2) Fallback: búsqueda LIKE en model/name
+        if product_id.is_none() {
+            let like = format!("%{}%", model.trim());
+            product_id = conn
+                .query_row(
+                    "SELECT id FROM products WHERE category_id=1 AND (model LIKE ?1 OR name LIKE ?1) LIMIT 1",
+                    params![like],
+                    |r| r.get(0),
+                )
+                .optional()?;
+        }
+
+        let pid = match product_id {
+            Some(pid) => pid,
+            None => {
+                // Crear producto automáticamente
+                let name = format!("Pantalla {}", model.trim());
+                let comp = serde_json::json!([model.trim()]).to_string();
+                conn.execute(
+                    "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock) VALUES (?1,1,'','', '', ?2, 0.0, 0.0, 0, 0)",
+                    params![name, comp],
+                )?;
+                conn.last_insert_rowid()
+            }
+        };
+
+        conn.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![delta, pid])?;
+        let mov_type = if delta < 0 { "salida" } else { "entrada" };
+        let reason = if delta < 0 { "Servicio Entregado" } else { "Servicio Reabierto" };
+        conn.execute(
+            "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, ?2, ?3, ?4, 'Servicio')",
+            params![pid, mov_type, delta.abs(), reason],
+        )?;
+        Ok(pid)
+    }
+
+    pub fn delete_service(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        // Si el servicio estaba entregado, devolver el stock antes de borrar
+        let svc: Option<(String, String)> = conn
+            .query_row("SELECT model, status FROM services WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if let Some((model, status)) = svc {
+            if status == "Entregado" {
+                self.apply_service_stock(&conn, &model, 1)?;
+            }
+        }
+        conn.execute("DELETE FROM services WHERE id=?", params![id])?;
         Ok(())
     }
 
@@ -700,13 +799,6 @@ impl Database {
         })?.collect::<Result<Vec<_>, _>>()?;
 
         Ok(ServiceDashboard { total, entregados, pendientes, total_ingresos, method_stats, status_stats })
-    }
-
-    // --- Services: Delete ---
-    pub fn delete_service(&self, id: i64) -> SqlResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM services WHERE id=?", params![id])?;
-        Ok(())
     }
 
     // --- Clients ---
@@ -1298,6 +1390,26 @@ fn day_shift_error(msg: &str) -> rusqlite::Error {
     )
 }
 
+// Normaliza un modelo para matching: minúsculas, sin acentos, sin espacios extra
+fn norm_model(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.to_lowercase().chars() {
+        let c = match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            _ => c,
+        };
+        if !c.is_whitespace() && !c.is_ascii_punctuation() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn val_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
     match val {
         serde_json::Value::Null => Box::new(rusqlite::types::Null),
@@ -1314,6 +1426,11 @@ fn val_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // Ejecuta un cierre tomando el lock de la conexión una sola vez
+    fn conn_query<T, F: FnOnce() -> T>(f: F) -> T {
+        f()
+    }
 
     #[test]
     fn test_all_operations() {
@@ -1383,10 +1500,60 @@ mod tests {
             "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#).unwrap();
         assert!(sid > 0);
 
+        // Auto-inventory: create Samsung A32 screen product (stock 2) before delivering
+        let a32_pid = db.add_product("Pantalla Samsung A32", Some(1), "Samsung", "A32",
+            "", "[\"Samsung A32\"]", 12.0, 15.0, 2, 0).unwrap();
+
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
             "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
             "Entregado", "Garantía 15 días", 0.0, "", "USD",
             "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+
+        let stock_before: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(stock_before, 1, "stock debe bajar de 2 a 1 al entregar servicio");
+        // Reopening returns stock
+        db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
+            "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
+            "Por entregar", "Garantía 15 días", 0.0, "", "USD",
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+        let stock_back: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(stock_back, 2, "stock debe volver a 2 al reabrir");
+        // Entregar de nuevo y borrar el servicio → stock vuelve
+        db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
+            "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
+            "Entregado", "Garantía 15 días", 0.0, "", "USD",
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+
+        // Auto-create: model not in catalog gets created on delivery
+        db.add_service("ORD-TEST-2", "Maria Lopez", "0412-7654321",
+            "Pantalla Inexistente XYZ", "Rota", "Cambio pantalla", 20.0, "Efectivo Bs", "", 0.0, "", "USD",
+            "V-99999999", "", "").unwrap();
+        let sid2 = db.get_services("", "").unwrap().iter().find(|s| s.order_num.as_deref() == Some("ORD-TEST-2")).unwrap().id;
+        let new_prod: Option<i64> = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT id FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).ok()
+        });
+        assert!(new_prod.is_none(), "producto no existe antes de entregar");
+        db.update_service(sid2, "Maria Lopez", "0412-7654321", "Pantalla Inexistente XYZ",
+            "Rota", "Cambio pantalla", 20.0, "Efectivo Bs", "2026-07-30", "Entregado", "", 0.0, "", "USD",
+            "V-99999999", "", "").unwrap();
+        let new_prod_stock: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(new_prod_stock, -1, "producto auto-creado con stock -1 tras entrega");
+        db.delete_service(sid2).unwrap();
+        let new_prod_stock2: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(new_prod_stock2, 0, "borrar servicio entregado devuelve stock");
 
         let services = db.get_services("", "").unwrap();
         assert_eq!(services.len(), 1);

@@ -107,6 +107,13 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Utilidades exportadas: `parseChecklist(json)`, `checklistSummary(json)` en Services.tsx
 - **Regla CDP:** al verificar UI en vivo, esperar la transición y usar `data-state="on"` (no aria-pressed) para toggles radix
 
+### Auto-Inventario en Servicios (descuento al entregar)
+- **Regla:** `update_service` en db.rs compara status previo vs nuevo. Si pasa a "Entregado" → descuenta 1 del producto que matchea el modelo (`apply_service_stock(conn, model, -1)`). Si SALE de "Entregado" (reabierto) → devuelve 1. `delete_service` de un servicio entregado → devuelve stock.
+- **Matching de modelo → producto:** `norm_model()` (minúsculas, sin acentos, sin puntuación) contra compatibility JSON (match exacto por modelo individual), luego name exacto o split por "/", luego fallback LIKE en model/name. Solo categoría 1 (Pantalla).
+- **Auto-create:** si el modelo no existe en catálogo, `apply_service_stock` crea el producto "Pantalla X" (compatibilidad `[X]`, precio 0, stock 0) y descuenta → stock queda negativo (visible como faltante).
+- Movimiento de inventario registrado: type salida/entrada, reason "Servicio Entregado"/"Servicio Reabierto", reference 'Servicio'.
+- UI: sugerencias de modelo en ServiceForm y de producto en SaleForm muestran chips de compatibilidad + stock (rojo si ≤0). Catalog/Inventory muestran compatibilidad en chips (Badge) no texto pegado.
+
 ### Commands Tauri (Rust)
 - 30 comandos registrados en lib.rs (+3: get_bcv_rate, open_day, get_active_day; close_day ampliado con arqueo)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
@@ -166,7 +173,7 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (9.2s)**
+- **Build: ✅ PASS (10.0s)**
 - **Errors:** 0
 - **Warnings:** 0
 

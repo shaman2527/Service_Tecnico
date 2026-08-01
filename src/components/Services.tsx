@@ -415,15 +415,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
                   {modelSuggestions.map(sugg => {
                     const p = sugg.product;
+                    const compatList = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
+                    const outOfStock = p.stock <= 0;
                     return (
                       <button key={sugg.model} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
                         onClick={() => selectModel(sugg)}>
-                        <span className="font-medium">{sugg.model}</span>
-                        {p.brand && <span className="text-muted-foreground ml-1.5 text-xs">{p.brand}</span>}
-                        {p.price_sale > 0 && <span className="float-right text-muted-foreground text-xs">${p.price_sale.toFixed(2)}</span>}
-                        <div className="text-[11px] text-muted-foreground/70 mt-0.5 truncate">
-                          {p.name}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{sugg.model}</span>
+                          <span className={outOfStock ? 'text-danger font-semibold text-xs shrink-0' : 'text-muted-foreground text-xs shrink-0'}>
+                            ${p.price_sale.toFixed(2)} · Stock: {p.stock}
+                          </span>
                         </div>
+                        {p.brand && <span className="text-muted-foreground text-xs">{p.brand}</span>}
+                        {compatList.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1.5">
+                            {compatList.map(m => (
+                              <span key={m} className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-muted-foreground">
+                                {m}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </button>
                     );
                   })}
