@@ -1,0 +1,124 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #ffffff;
+  --color-foreground: #0f172a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0f172a;
+  --color-primary: #2563eb;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f1f5f9;
+  --color-secondary-foreground: #0f172a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-accent: #f1f5f9;
+  --color-accent-foreground: #0f172a;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e2e8f0;
+  --color-input: #e2e8f0;
+  --color-ring: #94a3b8;
+  --color-sidebar-background: #f8fafc;
+  --color-sidebar-foreground: #64748b;
+  --color-sidebar-primary: #2563eb;
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: #e2e8f0;
+  --color-sidebar-accent-foreground: #0f172a;
+  --color-sidebar-border: #e2e8f0;
+  --color-sidebar-ring: #94a3b8;
+  --color-chart-1: #3b82f6;
+  --color-chart-2: #10b981;
+  --color-chart-3: #f59e0b;
+  --color-chart-4: #f97316;
+  --color-chart-5: #ef4444;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --animate-in: enter 0.15s ease-out;
+  --animate-out: exit 0.15s ease-in;
+
+  @keyframes enter {
+    from { opacity: var(--tw-enter-opacity, 1); transform: translate3d(var(--tw-enter-translate-x, 0), var(--tw-enter-translate-y, 0), 0) scale3d(var(--tw-enter-scale, 1), var(--tw-enter-scale, 1), var(--tw-enter-scale, 1)) rotate(var(--tw-enter-rotate, 0)); }
+  }
+  @keyframes exit {
+    to { opacity: var(--tw-exit-opacity, 1); transform: translate3d(var(--tw-exit-translate-x, 0), var(--tw-exit-translate-y, 0), 0) scale3d(var(--tw-exit-scale, 1), var(--tw-exit-scale, 1), var(--tw-exit-scale, 1)) rotate(var(--tw-exit-rotate, 0)); }
+  }
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f1f5f9;
+  --accent-foreground: #0f172a;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #94a3b8;
+  --sidebar-background: #f8fafc;
+  --sidebar-foreground: #64748b;
+  --sidebar-primary: #2563eb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e2e8f0;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #94a3b8;
+  --chart-1: #3b82f6;
+  --chart-2: #10b981;
+  --chart-3: #f59e0b;
+  --chart-4: #f97316;
+  --chart-5: #ef4444;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --radius: 0.5rem;
+  --sidebar-width: 16rem;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@layer base {
+  * { @apply border-border; }
+}
+
+@utility animate-in { animation: enter 0.15s ease-out; }
+@utility animate-out { animation: exit 0.15s ease-in; }
+@utility running { animation-play-state: running; }
+@utility paused { animation-play-state: paused; }
+@utility fade-in-* { --tw-enter-opacity: --value([percentage], [number]); }
+@utility fade-out-* { --tw-exit-opacity: --value([percentage], [number]); }
+@utility zoom-in-* { --tw-enter-scale: --value([percentage], [number]); }
+@utility zoom-out-* { --tw-exit-scale: --value([percentage], [number]); }
+@utility spin-in-* { --tw-enter-rotate: --value([angle]); }
+@utility spin-out-* { --tw-exit-rotate: --value([angle]); }
+@utility slide-in-from-top-* { --tw-enter-translate-y: calc(--value([percentage], [length]) * -1); }
+@utility slide-in-from-bottom-* { --tw-enter-translate-y: --value([percentage], [length]); }
+@utility slide-in-from-left-* { --tw-enter-translate-x: calc(--value([percentage], [length]) * -1); }
+@utility slide-in-from-right-* { --tw-enter-translate-x: --value([percentage], [length]); }
+@utility slide-out-to-top-* { --tw-exit-translate-y: calc(--value([percentage], [length]) * -1); }
+@utility slide-out-to-bottom-* { --tw-exit-translate-y: --value([percentage], [length]); }
+@utility slide-out-to-left-* { --tw-exit-translate-x: calc(--value([percentage], [length]) * -1); }
+@utility slide-out-to-right-* { --tw-exit-translate-x: --value([percentage], [length]); }
+
+@utility duration-* { animation-duration: --value([duration]); }
+@utility delay-* { animation-delay: --value([duration]); }
+@utility ease-* { animation-timing-function: --value([ease]); }

@@ -1,0 +1,29 @@
+{
+  "name": "harness-engineering",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Harness ENGINEERING -- Stack-agnostic tools for AI-assisted software engineering: P Engine, Governance, Loop, Code Generator, Truth, Auto-Fix, Mutation Testing.",
+  "type": "module",
+  "scripts": {
+    "harness": "tsx cli/index.ts",
+    "generate": "tsx code-generator/run.ts",
+    "govern": "tsx governance/run.ts",
+    "loop": "tsx loop/run.ts",
+    "truth": "tsx truth/run.ts",
+    "p-engine": "tsx p-engine/index.ts",
+    "self-improve": "tsx loop/self-improve.ts",
+    "detect": "tsx -e \"import { detectProject, printDetectedProject } from './detector.js'; printDetectedProject(detectProject());\""
+  },
+  "dependencies": {
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0",
+    "zod": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
+  }
+}

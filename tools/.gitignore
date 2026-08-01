@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+.out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific (each project provides these)
+/config.ts
+/code-generator/plans/mvp-pages.ts
+/code-generator/plans/project-pages.ts
+/progress/loops/
+/progress/artifacts/

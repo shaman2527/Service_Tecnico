@@ -1,0 +1,86 @@
+[
+  {
+    "id": 1,
+    "title": "CELL WORLD - Catálogo de pantallas",
+    "description": "921 pantallas importadas con precios CELL WORLD. Cada producto tiene brand, model, price_cost, price_sale, y compatibility con modelos de teléfonos compatibles.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 2,
+    "title": "Búsqueda por compatibilidad",
+    "description": "get_products y suggest_products buscan en compatibility. Buscar 'Redmi Note 11' encuentra la pantalla compatible aunque no esté en el nombre.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 3,
+    "title": "Libro Diario - Control financiero",
+    "description": "DailyLedger.tsx con vista diaria y de cierres. Columnas: Punto, Efectivo, Zelle, Pago Móvil, Transferencias. Botón cerrar día y liquidar Punto.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 4,
+    "title": "Pagos Inteligentes",
+    "description": "Punto de Venta con comisión 3.5% default, Zelle con referencia, moneda USD/VES. Cálculo automático de neto después de comisión.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 5,
+    "title": "Status de Servicio",
+    "description": "Workflow: Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago → Por entregar → Entregado / Cancelado / Devuelto",
+    "status": "done",
+    "priority": "medium"
+  },
+  {
+    "id": 6,
+    "title": "Harness Engineering integrado",
+    "description": "tools/config.ts, governance, learning injector, patterns.md, feature_list.json. Ciclo sistemático con build/security/review.",
+    "status": "done",
+    "priority": "medium"
+  },
+  {
+    "id": 7,
+    "title": "shadcn/ui conventions",
+    "description": "flex flex-col gap-* en vez de space-y-*, colores semánticos, sin mr-* en botones, sin reset redundante, sin tailwindcss-animate.",
+    "status": "done",
+    "priority": "medium"
+  },
+  {
+    "id": 8,
+    "title": "Tipo de Servicio (service_type)",
+    "description": "Registro de qué se le hizo al equipo: Cambio pantalla, Cambio batería, Cambio flex, Reparación (placa), Software / Formateo, etc. Columna service_type en tabla services (migración ALTER TABLE), selector en el formulario, columna Tipo con Badge en la tabla. Backfill heurístico de los 30 servicios existentes.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 9,
+    "title": "Limpieza de datos",
+    "description": "973 productos sin duplicados (GROUP BY nombre+marca = 0), categoría duplicada 'Telefono' (id14) fusionada en 'Teléfono' (id2) y eliminada. Backup en backup/registro_20260731_072603.db.",
+    "status": "done",
+    "priority": "medium"
+  },
+  {
+    "id": 10,
+    "title": "Pestaña Pantallas (Catálogo)",
+    "description": "Catalog.tsx + tab 'Pantallas' en sidebar. Muestra TODA la compatibilidad de cada pantalla (badges, sin truncar). Búsqueda por nombre/marca/modelo O por modelo de teléfono (búsqueda inversa via compatibility LIKE). Filtro por categoría, default Pantalla. Contador de resultados.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 11,
+    "title": "Fix dropdowns en blanco (WebView2)",
+    "description": "SelectContent de shadcn tenía animaciones de popper (data-[state=open]:animate-in + data-[side=*]:translate-*) que WebView2 no renderiza — el dropdown se veía blanco. Fix: quitar animaciones/transforms, dejar popper mínimo (bg-popover + shadow).",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 12,
+    "title": "Catálogo precargado + sugerencias instantáneas",
+    "description": "ServiceForm, SaleForm y Pantallas precargan todo el catálogo en memoria (api.getProducts('', null) al montar) y filtran client-side por tecla (name+brand+model+compatibility, case-insensitive). Sugerencias inline (sin position absolute dentro de DialogContent — WebView2 no las renderiza) mostrando hasta 12 resultados con compatibilidad completa. Búsqueda funciona desde 1 carácter.",
+    "status": "done",
+    "priority": "high"
+  }
+]

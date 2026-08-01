@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri / Rust build
+src-tauri/target
+target
+
+# Binarios de la app
+Registro.exe
+
+# Datos locales (NO subir: datos de negocio del usuario)
+registro.db
+registro.db-shm
+registro.db-wal
+src-tauri/registro.db
+src-tauri/target/**/registro.db
+backup/
+
+# Datos sensibles / planillas
+REGISTRO OFICIAL.xlsx
+registro_export.json
+cellworld_items.json
