@@ -121,6 +121,23 @@ export interface DailyClosing {
   is_closed: boolean;
   closed_at: string | null;
   notes: string | null;
+  tasa_bcv: number;
+  tasa_eur: number;
+  opened_at: string | null;
+  initial_cash_usd: number;
+  actual_cash_usd: number;
+  actual_cash_bs: number;
+  actual_punto_usd: number;
+  actual_punto_bs: number;
+  actual_zelle: number;
+  actual_pago_movil: number;
+  actual_transfer_bs: number;
+  difference: number;
+}
+
+export interface BCVRate {
+  usd: number;
+  eur: number;
 }
 
 export interface SaleStat {

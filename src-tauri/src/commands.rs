@@ -184,6 +184,11 @@ pub fn import_data(db: State<Database>, json_data: String, merge: bool) -> Resul
 // --- Daily Ledger ---
 
 #[tauri::command]
+pub fn get_bcv_rate() -> Result<crate::bcv::TasasBCV, String> {
+    crate::bcv::obtener_tasas()
+}
+
+#[tauri::command]
 pub fn get_daily_totals(db: State<Database>, start_date: String, end_date: String) -> Result<Vec<crate::db::DailyTotals>, String> {
     db.get_daily_totals(&start_date, &end_date).map_err(|e| e.to_string())
 }
@@ -194,8 +199,23 @@ pub fn get_daily_closings(db: State<Database>) -> Result<Vec<crate::db::DailyClo
 }
 
 #[tauri::command]
-pub fn close_day(db: State<Database>, close_date: String, notes: String) -> Result<i64, String> {
-    db.close_day(&close_date, &notes).map_err(|e| e.to_string())
+pub fn open_day(db: State<Database>, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64) -> Result<i64, String> {
+    db.open_day(initial_cash_usd, tasa_bcv, tasa_eur).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_active_day(db: State<Database>) -> Result<Option<crate::db::DailyClosing>, String> {
+    db.get_active_day().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn close_day(db: State<Database>, close_date: String, notes: String, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
+                 actual_cash_usd: f64, actual_cash_bs: f64, actual_punto_usd: f64, actual_punto_bs: f64,
+                 actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64) -> Result<i64, String> {
+    db.close_day(&close_date, &notes, initial_cash_usd, tasa_bcv, tasa_eur,
+                 actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
+                 actual_zelle, actual_pago_movil, actual_transfer_bs)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -72,6 +72,15 @@ registro/
 - Liquidación: pos_settled vs pos_net → diferencia debe ser ~0
 - DailyLedger.tsx: vista diaria y de cierres, botón cerrar día, liquidar Punto
 
+### Turno de Caja Diario (Venta Diaria)
+- **Concepto:** solo hay UN día abierto a la vez (`daily_closings WHERE is_closed=0`). Sin día abierto, `add_sale`/`add_service` fallan en backend con "Debe abrir el día (Libro Diario) antes de registrar ventas o servicios." (gate enforced en db.rs `require_open_day`).
+- **Abrir día:** `open_day(initial_cash_usd, tasa_bcv, tasa_eur)` crea fila de hoy con `is_closed=0`, `opened_at` y la **tasa BCV congelada** (nunca se consulta en vivo al cobrar). Rechaza si ya hay un día abierto.
+- **Cerrar día:** `close_day(...)` recalcula los totales esperados (sales+services), guarda el **arqueo real** por método (actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs), calcula `difference` (USD + Bs/tasa) y pone `is_closed=1`.
+- **Tasa BCV:** `get_bcv_rate` scrapea `https://www.bcv.org.ve/glosario/cambio-oficial` con **curl.exe** (incluido en Windows 10+, `-k -s --max-time 15`) + parse manual de `<strong class="strong-tb">` — SIN dependencias HTTP en Cargo.toml (reqwest tarda minutos en compilar). Fallback: entrada manual en UI (offline-first).
+- UI: banner verde/ámbar en DailyLedger + botón "Auto BCV" en dialog de apertura, arqueo precargado con esperados en dialog de cierre, diferencia en vivo.
+- Gates UI: Sales.tsx y Services.tsx consultan `getActiveDay()` y deshabilitan guardar + muestran banner si el día está cerrado (el backend es el respaldo real).
+- Sidebar colapsable: `w-64` ↔ `w-16`, persistido en `localStorage('sidebar_collapsed')`.
+
 ### Métodos de Pago
 - **Punto de Venta ($)**: USD, comisión tracker
 - **Punto de Venta (Bs)**: VES, comisión tracker
@@ -99,7 +108,7 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - **Regla CDP:** al verificar UI en vivo, esperar la transición y usar `data-state="on"` (no aria-pressed) para toggles radix
 
 ### Commands Tauri (Rust)
-- 27 comandos registrados en lib.rs (+5: get_daily_totals, get_daily_closings, close_day, reopen_day, update_daily_closing_settlement)
+- 30 comandos registrados en lib.rs (+3: get_bcv_rate, open_day, get_active_day; close_day ampliado con arqueo)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
 - Tests: `cd src-tauri && cargo test`
 
@@ -137,6 +146,10 @@ Antes de hacer commit:
 | 2026-07-31 | Duplicados de productos: mismos (brand, model) como "Pantalla X" (cat 1) y "Táctil X" (cat 18) con precios distintos. | Verificar con GROUP BY brand+model+variant HAVING COUNT>1; conservar el de categoría Pantalla, eliminar Táctil si stock 0 y sin movimientos. |
 | 2026-08-01 | **DB NUNCA conectada en la app real — CAUSA RAIZ:** db.ts detectaba Tauri con `window.__TAURI__ !== undefined`, pero Tauri 2 NO expone `window.__TAURI__` (solo `__TAURI_INTERNALS__`, que además solo tiene `plugins` enumerable; el invoke real está en `__TAURI_INTERNALS__.invoke`). Resultado: isTauri=false → getProducts rechazaba → Inventario/Pantallas mostraban "Sin productos registrados" y el Dashboard usaba mocks (0s), aunque el backend respondía 970 productos (verificado vía CDP: `__TAURI_INTERNALS__.invoke('get_products')` → count=970). | Fix en src/db.ts: detectar `window.__TAURI_INTERNALS__ !== undefined` (con fallback a `__TAURI__` para Tauri 1). Verificación en vivo: `npm run build` → rebuild release → lanzar con `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"` → CDP `Runtime.evaluate` para ver filas reales en tbody (970 en Inventario, 921 en Pantallas con 921 botones Editar) y prueba de guardado end-to-end (update via UI → persistió en registro.db real en disco). |
 | 2026-08-01 | `shadcn CLI` falla en este Windows con `EPERM: operation not permitted, scandir 'C:\Users\ROBER\Configuración local'` (con latest y 4.15.0, incluso con HOME/USERPROFILE redirigido). | No usar `npx shadcn add`. Instalar el primitivo radix con npm (`npm install @radix-ui/react-toggle @radix-ui/react-toggle-group`) y crear el componente a mano siguiendo el estilo radix clásico del proyecto. Verificar que el resto del proyecto usa radix, no base-ui. |
+| 2026-08-01 | **reqwest en Cargo.toml → compilación eterna** (hyper/tokio/rustls, >10 min y parece colgada; `cargo test` con timeout de 10-30 min sin terminar). | NO usar reqwest. Para el scraping BCV usar `curl.exe` (viene con Windows 10+) vía `std::process::Command` con `-k -s --max-time 15` + parse manual de `strong-tb`. Compilación del crate en ~25s. |
+| 2026-08-01 | **Deadlock en db.rs**: `close_day`/`open_day` tomaban `self.conn.lock()` y luego llamaban `get_active_day`/`get_daily_totals` (que vuelven a tomar el lock). Mutex no reentrante → test colgado ("running for over 60 seconds"). | Calcular totals con `get_daily_totals` ANTES de tomar el lock, o hacer el query EXISTS inline con el mismo conn en `open_day`/`require_open_day`. |
+| 2026-08-01 | **`rusqlite::ffi::Error::new`**: la firma es `new(result_code: c_int)` — NO acepta mensaje. `rusqlite::Error::SqliteFailure(ffi::Error::new(ErrorCode::CannotOpen as i32), Some(msg))` para errores de negocio con mensaje al frontend. | Usar ese patrón en `day_shift_error()` (db.rs). |
+| 2026-08-01 | **Tasa BCV real en vivo**: scrape de `bcv.org.ve/glosario/cambio-oficial` devuelve ~129KB HTML (200 OK); parsea USD=Bs 748.79 y EUR=Bs 861.19 (agosto 2026). El parse con `find("USD")` → `find("strong-tb")` → primer `<` funciona; PowerShell `-match '(?s)...'` engaña (array de líneas). | Verificado via CDP: botón Auto BCV rellenó el form con tasas reales. |
 
 ## Feedback Loops
 
@@ -153,6 +166,7 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (11.2s)**
+- **Build: ✅ PASS (9.2s)**
 - **Errors:** 0
 - **Warnings:** 0
+

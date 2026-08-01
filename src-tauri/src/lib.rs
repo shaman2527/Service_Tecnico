@@ -1,3 +1,4 @@
+pub mod bcv;
 pub mod db;
 mod commands;
 
@@ -46,6 +47,9 @@ pub fn run() {
             commands::import_data,
             commands::get_daily_totals,
             commands::get_daily_closings,
+            commands::get_bcv_rate,
+            commands::open_day,
+            commands::get_active_day,
             commands::close_day,
             commands::reopen_day,
             commands::update_daily_closing_settlement,
@@ -112,3 +116,4 @@ fn dirs_next() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     { None }
 }
+// force rebuild

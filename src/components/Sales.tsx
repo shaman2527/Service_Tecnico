@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, TrendingUp } from 'lucide-react';
+import { Plus, Search, TrendingUp, Lock, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -22,6 +22,7 @@ export default function Sales() {
   const [showStats, setShowStats] = useState(false);
   const [stats, setStats] = useState<SaleStat[]>([]);
   const [statsDays, setStatsDays] = useState(7);
+  const [dayOpen, setDayOpen] = useState<boolean | null>(null);
 
   const load = async () => {
     let days: number | null = null;
@@ -46,6 +47,10 @@ export default function Sales() {
   useEffect(() => { load(); }, []);
   useEffect(() => { load(); }, [period, search]);
 
+  useEffect(() => {
+    api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
+  }, []);
+
   const openStats = async (days: number) => {
     setStatsDays(days);
     setStats(await api.getSalesStats(days));
@@ -62,9 +67,21 @@ export default function Sales() {
           <h1 className="text-2xl font-bold tracking-tight">Ventas</h1>
           <p className="text-sm text-muted-foreground mt-1">Registro de ventas y estadísticas</p>
         </div>
-        <Button onClick={() => setShowForm(true)}>
-          <Plus className="size-4" /> Nueva Venta
-        </Button>
+        <div className="flex items-center gap-3">
+          {dayOpen === false && (
+            <div className="bg-amber-500/10 border border-amber-500/30 text-amber-700 rounded-lg px-4 py-3 text-sm flex items-center gap-2">
+              <Lock className="size-4" /> Día cerrado — abre el día en Libro Diario para registrar ventas
+            </div>
+          )}
+          {dayOpen === true && (
+            <span className="text-sm text-emerald-600 flex items-center gap-1.5">
+              <CheckCircle2 className="size-4" /> Día abierto
+            </span>
+          )}
+          <Button onClick={() => setShowForm(true)}>
+            <Plus className="size-4" /> Nueva Venta
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
@@ -148,6 +165,7 @@ export default function Sales() {
       {showForm && (
         <SaleForm
           methods={methods}
+          dayOpen={dayOpen}
           onClose={() => setShowForm(false)}
           onSaved={() => { setShowForm(false); load(); }}
         />
@@ -164,8 +182,9 @@ export default function Sales() {
   );
 }
 
-function SaleForm({ methods, onClose, onSaved }: {
+function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   methods: PaymentMethod[];
+  dayOpen: boolean | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -332,7 +351,7 @@ function SaleForm({ methods, onClose, onSaved }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving}>
+          <Button onClick={save} disabled={saving || dayOpen === false || !productName || price <= 0}>
             {saving ? 'Guardando...' : `Guardar Venta ($${(quantity * price).toFixed(2)})`}
           </Button>
         </DialogFooter>

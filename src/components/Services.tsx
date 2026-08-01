@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -51,6 +51,7 @@ export default function Services() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
+  const [dayOpen, setDayOpen] = useState<boolean | null>(null);
 
   const load = async () => {
     const [s, st] = await Promise.all([
@@ -63,6 +64,10 @@ export default function Services() {
 
   useEffect(() => { load(); }, []);
   useEffect(() => { load(); }, [search, statusFilter]);
+
+  useEffect(() => {
+    api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
+  }, []);
 
   const handleDelete = async (s: Service) => {
     await api.deleteService(s.id);
@@ -88,9 +93,21 @@ export default function Services() {
           <h1 className="text-2xl font-bold tracking-tight">Servicio Técnico</h1>
           <p className="text-sm text-muted-foreground mt-1">Órdenes de reparación y seguimiento</p>
         </div>
-        <Button onClick={() => { setEditing(null); setShowForm(true); }}>
-          <Plus className="size-4" /> Nuevo Servicio
-        </Button>
+        <div className="flex items-center gap-3">
+          {dayOpen === false && (
+            <div className="bg-amber-500/10 border border-amber-500/30 text-amber-700 rounded-lg px-4 py-3 text-sm flex items-center gap-2">
+              <Lock className="size-4" /> Día cerrado — abre el día en Libro Diario para registrar servicios
+            </div>
+          )}
+          {dayOpen === true && (
+            <span className="text-sm text-emerald-600 flex items-center gap-1.5">
+              <CheckCircle2 className="size-4" /> Día abierto
+            </span>
+          )}
+          <Button onClick={() => { setEditing(null); setShowForm(true); }}>
+            <Plus className="size-4" /> Nuevo Servicio
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
@@ -218,6 +235,7 @@ export default function Services() {
         <ServiceForm
           service={editing}
           statuses={statuses}
+          dayOpen={dayOpen}
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSaved={() => { setShowForm(false); setEditing(null); load(); }}
         />
@@ -243,9 +261,10 @@ export default function Services() {
   );
 }
 
-function ServiceForm({ service, statuses, onClose, onSaved }: {
+function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   service: Service | null;
   statuses: ServiceStatus[];
+  dayOpen: boolean | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -551,7 +570,7 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving}>
+          <Button onClick={save} disabled={saving || dayOpen === false || !client || !model || !fault}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : 'Guardar Servicio')}
           </Button>
         </DialogFooter>

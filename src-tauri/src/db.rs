@@ -187,6 +187,18 @@ pub struct DailyClosing {
     pub is_closed: bool,
     pub closed_at: Option<String>,
     pub notes: Option<String>,
+    pub tasa_bcv: f64,
+    pub tasa_eur: f64,
+    pub opened_at: Option<String>,
+    pub initial_cash_usd: f64,
+    pub actual_cash_usd: f64,
+    pub actual_cash_bs: f64,
+    pub actual_punto_usd: f64,
+    pub actual_punto_bs: f64,
+    pub actual_zelle: f64,
+    pub actual_pago_movil: f64,
+    pub actual_transfer_bs: f64,
+    pub difference: f64,
 }
 
 pub struct Database {
@@ -298,7 +310,19 @@ impl Database {
                 grand_total REAL DEFAULT 0,
                 is_closed INTEGER DEFAULT 0,
                 closed_at TEXT,
-                notes TEXT
+                notes TEXT,
+                tasa_bcv REAL DEFAULT 0,
+                tasa_eur REAL DEFAULT 0,
+                opened_at TEXT,
+                initial_cash_usd REAL DEFAULT 0,
+                actual_cash_usd REAL DEFAULT 0,
+                actual_cash_bs REAL DEFAULT 0,
+                actual_punto_usd REAL DEFAULT 0,
+                actual_punto_bs REAL DEFAULT 0,
+                actual_zelle REAL DEFAULT 0,
+                actual_pago_movil REAL DEFAULT 0,
+                actual_transfer_bs REAL DEFAULT 0,
+                difference REAL DEFAULT 0
             );
         ")?;
 
@@ -344,6 +368,24 @@ impl Database {
                 ALTER TABLE services ADD COLUMN client_ci TEXT;
                 ALTER TABLE services ADD COLUMN client_address TEXT;
                 ALTER TABLE services ADD COLUMN device_checklist TEXT;
+            ");
+        }
+        // Migration: daily shift (open/close day) with BCV rate + actual count (arqueo)
+        let has_tasa: bool = conn.prepare("SELECT tasa_bcv FROM daily_closings LIMIT 1").is_ok();
+        if !has_tasa {
+            let _ = conn.execute_batch("
+                ALTER TABLE daily_closings ADD COLUMN tasa_bcv REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN tasa_eur REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN opened_at TEXT;
+                ALTER TABLE daily_closings ADD COLUMN initial_cash_usd REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_cash_usd REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_cash_bs REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_punto_usd REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_punto_bs REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_zelle REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_pago_movil REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN actual_transfer_bs REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN difference REAL DEFAULT 0;
             ");
         }
 
@@ -481,6 +523,7 @@ impl Database {
         let bank_fee_amount = if bank_fee_percent > 0.0 { total * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = total - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
+        self.require_open_day(&conn)?;
         conn.execute(
             "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency],
@@ -573,6 +616,7 @@ impl Database {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
+        self.require_open_day(&conn)?;
         conn.execute(
             "INSERT INTO services (order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
@@ -1005,7 +1049,8 @@ impl Database {
 
     pub fn get_daily_closings(&self) -> SqlResult<Vec<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT * FROM daily_closings ORDER BY close_date DESC")?;
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference FROM daily_closings ORDER BY close_date DESC";
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
                 id: r.get(0)?, close_date: r.get(1)?,
@@ -1017,6 +1062,18 @@ impl Database {
                 grand_total: r.get(12)?,
                 is_closed: r.get::<_, i64>(13)? != 0,
                 closed_at: r.get(14)?, notes: r.get(15)?,
+                tasa_bcv: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                tasa_eur: r.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                opened_at: r.get(18)?,
+                initial_cash_usd: r.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                actual_cash_usd: r.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
+                actual_cash_bs: r.get::<_, Option<f64>>(21)?.unwrap_or(0.0),
+                actual_punto_usd: r.get::<_, Option<f64>>(22)?.unwrap_or(0.0),
+                actual_punto_bs: r.get::<_, Option<f64>>(23)?.unwrap_or(0.0),
+                actual_zelle: r.get::<_, Option<f64>>(24)?.unwrap_or(0.0),
+                actual_pago_movil: r.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
+                actual_transfer_bs: r.get::<_, Option<f64>>(26)?.unwrap_or(0.0),
+                difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
             })
         })?;
         let mut closings = Vec::new();
@@ -1024,9 +1081,71 @@ impl Database {
         Ok(closings)
     }
 
-    pub fn close_day(&self, close_date: &str, notes: &str) -> SqlResult<i64> {
+    pub fn get_active_day(&self) -> SqlResult<Option<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        // Calculate totals for this date from sales + services
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query_map([], |r| {
+            Ok(DailyClosing {
+                id: r.get(0)?, close_date: r.get(1)?,
+                pos_charged: r.get(2)?, pos_fees: r.get(3)?,
+                pos_net: r.get(4)?, pos_settled: r.get(5)?,
+                cash_usd: r.get(6)?, cash_bs: r.get(7)?,
+                zelle_total: r.get(8)?, pago_movil_total: r.get(9)?,
+                transfer_bs_total: r.get(10)?, usd_cash_total: r.get(11)?,
+                grand_total: r.get(12)?,
+                is_closed: r.get::<_, i64>(13)? != 0,
+                closed_at: r.get(14)?, notes: r.get(15)?,
+                tasa_bcv: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                tasa_eur: r.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                opened_at: r.get(18)?,
+                initial_cash_usd: r.get::<_, Option<f64>>(19)?.unwrap_or(0.0),
+                actual_cash_usd: r.get::<_, Option<f64>>(20)?.unwrap_or(0.0),
+                actual_cash_bs: r.get::<_, Option<f64>>(21)?.unwrap_or(0.0),
+                actual_punto_usd: r.get::<_, Option<f64>>(22)?.unwrap_or(0.0),
+                actual_punto_bs: r.get::<_, Option<f64>>(23)?.unwrap_or(0.0),
+                actual_zelle: r.get::<_, Option<f64>>(24)?.unwrap_or(0.0),
+                actual_pago_movil: r.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
+                actual_transfer_bs: r.get::<_, Option<f64>>(26)?.unwrap_or(0.0),
+                difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn open_day(&self, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64) -> SqlResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let already_open: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE is_closed=0)",
+            [], |r| r.get(0),
+        )?;
+        if already_open {
+            return Err(day_shift_error("Ya hay un día abierto. Ciérralo antes de abrir uno nuevo."));
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
+             VALUES (?1,?2,?3,?4,datetime('now','localtime'),0)",
+            params![today, initial_cash_usd, tasa_bcv, tasa_eur],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn require_open_day(&self, conn: &rusqlite::Connection) -> SqlResult<()> {
+        let day_open: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE is_closed=0)",
+            [], |r| r.get(0),
+        )?;
+        if !day_open {
+            return Err(day_shift_error("Debe abrir el día (Libro Diario) antes de registrar ventas o servicios."));
+        }
+        Ok(())
+    }
+
+    pub fn close_day(&self, close_date: &str, notes: &str, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
+                     actual_cash_usd: f64, actual_cash_bs: f64, actual_punto_usd: f64, actual_punto_bs: f64,
+                     actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64) -> SqlResult<i64> {
+        // Calculate totals for this date from sales + services (sin lock: get_daily_totals lo toma)
         let totals = self.get_daily_totals(close_date, close_date)?;
         let t = if totals.is_empty() {
             DailyTotals {
@@ -1036,12 +1155,26 @@ impl Database {
                 usd_cash_total: 0.0, grand_total: 0.0,
             }
         } else { totals[0].clone() };
+        let conn = self.conn.lock().unwrap();
+
+        // Expected vs actual difference per currency group
+        // USD group: cash_usd + zelle + usd_cash vs actual_cash_usd + actual_zelle
+        // Bs group: cash_bs + pago_movil + transfer_bs vs actual_cash_bs + actual_pago_movil + actual_transfer_bs
+        let expected_usd = t.cash_usd + t.zelle_total + t.usd_cash_total;
+        let actual_usd = actual_cash_usd + actual_zelle;
+        let expected_bs = t.cash_bs + t.pago_movil_total + t.transfer_bs_total;
+        let actual_bs = actual_cash_bs + actual_pago_movil + actual_transfer_bs;
+        let diff_usd = actual_usd - expected_usd;
+        let diff_bs = actual_bs - expected_bs;
+        let difference = if tasa_bcv > 0.0 { diff_usd + diff_bs / tasa_bcv } else { diff_usd };
 
         conn.execute(
-            "INSERT OR REPLACE INTO daily_closings (close_date, pos_charged, pos_fees, pos_net, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,datetime('now','localtime'),?12)",
+            "INSERT OR REPLACE INTO daily_closings (close_date, pos_charged, pos_fees, pos_net, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,datetime('now','localtime'),?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
-                    t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, t.grand_total, notes],
+                    t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, t.grand_total, notes,
+                    tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
+                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -1158,6 +1291,13 @@ impl Database {
     }
 }
 
+fn day_shift_error(msg: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::ErrorCode::CannotOpen as i32),
+        Some(msg.to_string()),
+    )
+}
+
 fn val_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
     match val {
         serde_json::Value::Null => Box::new(rusqlite::types::Null),
@@ -1181,6 +1321,19 @@ mod tests {
         let _ = std::fs::remove_file(&test_path);
 
         let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Blocking: sales/services require an open day
+        let blocked = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD");
+        assert!(blocked.is_err(), "add_sale must fail without an open day");
+
+        // Open day (shift) with BCV rate
+        let day_id = db.open_day(10.0, 40.5, 45.0).unwrap();
+        assert!(day_id > 0);
+        let active = db.get_active_day().unwrap();
+        assert!(active.is_some(), "There must be an active day");
+        assert_eq!(active.unwrap().tasa_bcv, 40.5);
+        // Cannot open twice
+        assert!(db.open_day(0.0, 0.0, 0.0).is_err());
 
         // Categories
         let cats = db.get_categories().unwrap();
@@ -1285,6 +1438,29 @@ mod tests {
         let items = r#"[{"name":"Pantalla Samsung A15","brand":"Samsung","model":"A15 A155","variant":"Incell con marco","category":"Pantalla","price_cost":14.0,"price_sale":17.5,"compatibility":""}]"#;
         let imported = db.import_price_list(items).unwrap();
         assert_eq!(imported, 1);
+
+        // Close day with arqueo (actual counts) and verify persistence
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let closing_id = db.close_day(&today, "cierre test", 10.0, 40.5, 45.0,
+            15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        assert!(closing_id > 0);
+        let closings = db.get_daily_closings().unwrap();
+        assert!(!closings.is_empty());
+        let c = closings.iter().find(|x| x.close_date == today).unwrap();
+        assert!(c.is_closed, "Day must be closed");
+        assert_eq!(c.tasa_bcv, 40.5);
+        assert_eq!(c.initial_cash_usd, 10.0);
+        assert_eq!(c.actual_cash_usd, 15.0);
+        println!("  Closing: charged={} net={} diff={:.2}", c.pos_charged, c.pos_net, c.difference);
+
+        // After closing, no active day and sales blocked again
+        assert!(db.get_active_day().unwrap().is_none());
+        let blocked_after = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD");
+        assert!(blocked_after.is_err(), "add_sale must fail after closing");
+
+        // Reopen day → active again
+        db.reopen_day(&today).unwrap();
+        assert!(db.get_active_day().unwrap().is_some());
 
         // Clean up
         drop(db);

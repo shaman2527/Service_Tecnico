@@ -1,7 +1,7 @@
 import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service,
   ServiceDashboard, InventoryMovement, PaymentMethod, ServiceStatus,
-  DailyTotals, DailyClosing
+  DailyTotals, DailyClosing, BCVRate
 } from './types';
 
 const isTauri = typeof window !== 'undefined' &&
@@ -127,8 +127,21 @@ export const api = {
 
   getDailyClosings: () => tauriInvoke<DailyClosing[]>('get_daily_closings'),
 
-  closeDay: (closeDate: string, notes: string = '') =>
-    tauriInvoke<number>('close_day', { closeDate, notes }),
+  getBcvRate: () => tauriInvoke<BCVRate>('get_bcv_rate'),
+
+  openDay: (initialCashUsd: number = 0, tasaBcv: number = 0, tasaEur: number = 0) =>
+    tauriInvoke<number>('open_day', { initialCashUsd, tasaBcv, tasaEur }),
+
+  getActiveDay: () => tauriInvoke<DailyClosing | null>('get_active_day'),
+
+  closeDay: (closeDate: string, notes: string = '', initialCashUsd: number = 0, tasaBcv: number = 0, tasaEur: number = 0,
+             actualCashUsd: number = 0, actualCashBs: number = 0, actualPuntoUsd: number = 0, actualPuntoBs: number = 0,
+             actualZelle: number = 0, actualPagoMovil: number = 0, actualTransferBs: number = 0) =>
+    tauriInvoke<number>('close_day', {
+      closeDate, notes, initialCashUsd, tasaBcv, tasaEur,
+      actualCashUsd, actualCashBs, actualPuntoUsd, actualPuntoBs,
+      actualZelle, actualPagoMovil, actualTransferBs
+    }),
 
   reopenDay: (closeDate: string) =>
     tauriInvoke<void>('reopen_day', { closeDate }),

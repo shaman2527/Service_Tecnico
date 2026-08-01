@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
+  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import Sales from './components/Sales';
@@ -26,20 +27,40 @@ const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
 
 function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');
 
   return (
     <div className="flex h-screen bg-background">
-      <aside className="w-64 border-r border-border bg-sidebar-background flex flex-col shrink-0 shadow-sm">
-        <div className="px-5 py-5 border-b border-sidebar-border">
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-lg bg-primary flex items-center justify-center shadow-sm">
-              <Wrench className="size-5 text-primary-foreground" />
+      <aside className={cn('border-r border-border bg-sidebar-background flex flex-col shrink-0 shadow-sm transition-all duration-200', collapsed ? 'w-16' : 'w-64')}>
+        <div className="px-5 py-5 border-b border-sidebar-border flex items-center justify-between">
+          {collapsed ? (
+            <div className="w-full flex items-center justify-center">
+              <div className="size-9 rounded-lg bg-primary flex items-center justify-center shadow-sm">
+                <Wrench className="size-5 text-primary-foreground" />
+              </div>
             </div>
-            <div>
-              <h2 className="text-base font-semibold text-sidebar-accent-foreground leading-tight">Registro</h2>
-              <p className="text-[11px] text-sidebar-foreground leading-tight">Sistema de Servicio</p>
+          ) : (
+            <div className="flex items-center gap-3">
+              <div className="size-9 rounded-lg bg-primary flex items-center justify-center shadow-sm">
+                <Wrench className="size-5 text-primary-foreground" />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-sidebar-accent-foreground leading-tight">Registro</h2>
+                <p className="text-[11px] text-sidebar-foreground leading-tight">Sistema de Servicio</p>
+              </div>
             </div>
-          </div>
+          )}
+          <button
+            onClick={() => setCollapsed(c => {
+              const n = !c;
+              localStorage.setItem('sidebar_collapsed', n ? '1' : '0');
+              return n;
+            })}
+            className="shrink-0 rounded-md p-1.5 text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground transition-colors"
+            title={collapsed ? 'Expandir' : 'Colapsar'}
+          >
+            {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </button>
         </div>
 
         <nav className="flex-1 flex flex-col gap-1.5 px-3 py-5">
@@ -52,6 +73,7 @@ function App() {
                 onClick={() => setTab(item.key)}
                 className={cn(
                   'relative w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
+                  collapsed && 'justify-center px-0',
                   active
                     ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                     : 'text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground'
@@ -61,17 +83,21 @@ function App() {
                   <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 rounded-r-full bg-primary" />
                 )}
                 <Icon className={cn('size-4 shrink-0', active ? 'text-primary' : '')} />
-                {item.label}
+                <span className={cn(collapsed && 'hidden')}>{item.label}</span>
               </button>
             );
           })}
         </nav>
 
         <div className="px-5 py-4 border-t border-sidebar-border">
-          <div className="flex items-center gap-2.5">
+          <div className={cn('flex items-center gap-2.5', collapsed && 'justify-center gap-0')}>
             <span className="size-2 rounded-full bg-success" />
-            <span className="text-xs text-sidebar-foreground">Local</span>
-            <span className="text-xs text-sidebar-foreground/50">v0.2</span>
+            {!collapsed && (
+              <>
+                <span className="text-xs text-sidebar-foreground">Local</span>
+                <span className="text-xs text-sidebar-foreground/50">v0.2</span>
+              </>
+            )}
           </div>
         </div>
       </aside>
