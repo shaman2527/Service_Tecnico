@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -144,90 +144,98 @@ export default function Services() {
         </Select>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Orden</TableHead>
-                <TableHead>Entrada</TableHead>
-                <TableHead>Cliente</TableHead>
-                <TableHead>Teléfono</TableHead>
-                <TableHead>Cédula</TableHead>
-                <TableHead>Modelo</TableHead>
-                <TableHead>Tipo</TableHead>
-                <TableHead>Falla</TableHead>
-                <TableHead className="text-right">Monto</TableHead>
-                <TableHead>Abono</TableHead>
-                <TableHead>Pago</TableHead>
-                <TableHead>Estado</TableHead>
-                <TableHead>Salida</TableHead>
-                <TableHead className="w-20"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {services.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
-                    Sin servicios registrados
-                  </TableCell>
-                </TableRow>
-              ) : (
-                services.map(s => (
-                  <TableRow key={s.id}>
-                    <TableCell className="font-bold">{s.order_num}</TableCell>
-                    <TableCell>{s.date_in ?? '-'}</TableCell>
-                    <TableCell className="font-medium">{s.client ?? '-'}</TableCell>
-                    <TableCell>{s.phone ?? '-'}</TableCell>
-                    <TableCell>{s.client_ci ?? '-'}</TableCell>
-                    <TableCell className="font-medium">{s.model ?? '-'}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-xs">{s.service_type ?? '-'}</Badge>
-                    </TableCell>
-                    <TableCell className="max-w-[150px] truncate" title={s.fault ?? ''}>{s.fault ?? '-'}</TableCell>
-                    <TableCell className="text-right font-bold">${s.amount.toFixed(2)}</TableCell>
-                    <TableCell>
-                      {s.paid_amount > 0 ? (
-                        <span className="text-xs">
-                          <span className="text-muted-foreground">abon. </span>
-                          <span className="font-medium text-emerald-600">${s.paid_amount.toFixed(2)}</span>
-                          {s.amount - s.paid_amount > 0.005 && (
-                            <span className="block text-danger font-medium">${(s.amount - s.paid_amount).toFixed(2)} pend.</span>
-                          )}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell><Badge variant="outline">{s.payment_method ?? '-'}</Badge></TableCell>
-                    <TableCell>
-                      <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
-                    </TableCell>
-                    <TableCell>{s.date_out ?? '-'}</TableCell>
-                    <TableCell>
-                      <div className="flex gap-1 items-center">
-                        <TooltipProvider delayDuration={100}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button variant="ghost" size="icon" className="text-muted-foreground"
-                                onClick={() => { setEditing(s); setShowForm(true); }}>
-                                <ShieldCheck className={parseChecklist(s.device_checklist) && Object.keys(parseChecklist(s.device_checklist)).length > 0 ? "size-4 text-emerald-600" : "size-4"} />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <div className="text-xs space-y-1">
-                                <div className="font-medium">{checklistSummary(s.device_checklist)}</div>
-                                {Object.entries(parseChecklist(s.device_checklist)).map(([k, v]) => {
-                                  const item = CHECKLIST_ITEMS.find(i => i.key === k);
-                                  if (!item || !v) return null;
-                                  return (
-                                    <div key={k}>{item.label}: {v === 'si' ? 'Sí' : 'No'}</div>
-                                  );
-                                })}
-                              </div>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
+      {services.length === 0 ? (
+        <Card>
+          <CardContent className="p-8 text-center text-muted-foreground">
+            Sin servicios registrados
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-4">
+          {services.map(s => {
+            const balance = s.amount - s.paid_amount;
+            const checklist = parseChecklist(s.device_checklist);
+            const hasChecklist = Object.keys(checklist).length > 0;
+            return (
+              <Card key={s.id} className="overflow-hidden transition-shadow hover:shadow-md">
+                <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold">{s.order_num}</span>
+                    <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
+                  </div>
+                  <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
+                </CardHeader>
+                <CardContent className="px-4 pb-4 pt-0">
+                  <div className="flex flex-col gap-3">
+                    <div className="flex items-start gap-2.5">
+                      <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-primary/10 text-primary shrink-0">
+                        <User className="size-3.5" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium leading-tight truncate">{s.client ?? '-'}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {[s.phone, s.client_ci].filter(Boolean).join(' · ') || '—'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-start gap-2.5">
+                      <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-muted text-muted-foreground shrink-0">
+                        <Smartphone className="size-3.5" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium leading-tight truncate">{s.model ?? '-'}</p>
+                        <p className="text-xs text-muted-foreground line-clamp-2">{s.fault ?? '-'}</p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-md bg-muted/50 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
+                        {balance <= 0.005 ? (
+                          <Badge variant="outline" className="text-success">Cancelado</Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-danger">${balance.toFixed(2)} pendiente</Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
+                        <span className="truncate">{s.payment_method ?? '-'}</span>
+                        {s.paid_amount > 0 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {s.service_type && <Badge variant="outline" className="text-xs">{s.service_type}</Badge>}
+                        {s.date_out && (
+                          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                            <CalendarDays className="size-3" /> {s.date_out.slice(0, 10)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {hasChecklist && (
+                          <TooltipProvider delayDuration={100}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button variant="ghost" size="icon" className="text-emerald-600"
+                                  onClick={() => { setEditing(s); setShowForm(true); }}>
+                                  <ShieldCheck className="size-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <div className="text-xs space-y-1">
+                                  <div className="font-medium">{checklistSummary(s.device_checklist)}</div>
+                                  {Object.entries(checklist).map(([k, v]) => {
+                                    const item = CHECKLIST_ITEMS.find(i => i.key === k);
+                                    if (!item || !v) return null;
+                                    return <div key={k}>{item.label}: {v === 'si' ? 'Sí' : 'No'}</div>;
+                                  })}
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
                         <Button variant="outline" size="sm" onClick={() => { setEditing(s); setShowForm(true); }}>
                           Editar
                         </Button>
@@ -236,14 +244,14 @@ export default function Services() {
                           <Trash2 className="size-4" />
                         </Button>
                       </div>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
       {showForm && (
         <ServiceForm

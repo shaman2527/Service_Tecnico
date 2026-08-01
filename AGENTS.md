@@ -105,7 +105,7 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 ### Blindaje del Servicio (client_ci, client_address, device_checklist)
 - Columnas en `services`: `client_ci TEXT`, `client_address TEXT`, `device_checklist TEXT` (JSON `{"key":"si"|"no"}`)
 - Checklist 10 ítems (keys): chip_sim, tapa_trasera, bandeja_sim, botones, boton_home, camara, puerto_carga, parlante, contrasena, accesorios
-- UI: ServiceForm → ToggleGroup Sí/No por ítem (Sí=emerald, No=destructive), columna "Cédula" en tabla, icono ShieldCheck con Tooltip (resumen + detalle por ítem)
+- UI: ServiceForm → ToggleGroup Sí/No por ítem (Sí=emerald, No=destructive), tarjeta con teléfono·cédula juntos, icono ShieldCheck con Tooltip (resumen + detalle por ítem)
 - Modelo: sugerencias listan CADA modelo individual del array de compatibility (dedupe Set, max 12) — al seleccionar setea model = modelo individual + price del producto
 - Utilidades exportadas: `parseChecklist(json)`, `checklistSummary(json)` en Services.tsx
 - **Regla CDP:** al verificar UI en vivo, esperar la transición y usar `data-state="on"` (no aria-pressed) para toggles radix
@@ -124,7 +124,12 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - **Libro Diario (get_daily_totals):** cuenta los PAGOS por `payment_date` (el dinero real del día), NO el amount del servicio. Fallback de compatibilidad: servicios Entregado SIN ningún pago registrado suman su amount en `date_out` (históricos).
 - **Entrega con saldo:** permitido por diseño — el saldo pendiente queda visible (rojo) en la orden y en el historial del cliente.
 - **Clientes:** ServiceForm sugiere clientes existentes (suggestClients) y autocompleta teléfono al seleccionar; al guardar usa `addOrFindClient` → client_id vinculado (nunca duplica). `get_client_services` busca por client_id primero, fallback por nombre.
-- UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; columna "Abono" en tabla de servicios; Clients.tsx muestra Abonado/Saldo por servicio.
+- UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; en la lista de servicios se muestra abonado/saldo en la tarjeta (badge "Cancelado" o "$X pendiente"); Clients.tsx muestra Abonado/Saldo por servicio.
+
+### Lista de Servicios (vista de tarjetas)
+- **NO es tabla** — grid de tarjetas responsive (`grid-cols-1 lg:2 2xl:3`): cada orden es un Card con header (orden + fecha + badge estado), cliente (nombre + teléfono·cédula juntos), equipo (modelo + falla completa sin truncar), finanzas (monto + badge saldo/Cancelado + método + abonado), footer (badge tipo + fecha salida + acciones Editar/Eliminar/Shield).
+- Iconos: User (cliente), Smartphone (equipo), CalendarDays (salida), ShieldCheck (checklist con tooltip), Trash2 (eliminar).
+- Regla: la falla NO se trunca en tarjetas (line-clamp-2); la información completa siempre visible — evita tablas de 13 columnas que aprietan.
 
 ### Commands Tauri (Rust)
 - 33 comandos registrados en lib.rs (+3: get_service_payments, add_service_payment, delete_service_payment)
@@ -185,10 +190,7 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (9.9s)**
+- **Build: ✅ PASS (10.4s)**
 - **Errors:** 0
 - **Warnings:** 0
-- **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
-- **Centro de Ayuda:** Help.tsx en sidebar (quick actions + accordion radix, 8 secciones + abonos + métodos de pago)
-- **Abonos:** service_payments con historial, saldo por orden/cliente, Libro Diario por fecha de pago
 
