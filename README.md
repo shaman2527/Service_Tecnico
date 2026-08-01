@@ -3,6 +3,19 @@
 Aplicación desktop offline-first para gestión de un servicio técnico de celulares:
 inventario de pantallas y repuestos, ventas, órdenes de reparación, clientes y libro diario.
 
+## Repositorio
+
+- **URL:** https://github.com/shaman2527/Service_Tecnico.git
+- **Rama principal:** `main`
+
+```bash
+git clone https://github.com/shaman2527/Service_Tecnico.git
+```
+
+> **Nota:** la base de datos (`registro.db`), el binario (`Registro.exe`) y las planillas
+> de datos están excluidos del repo (`.gitignore`) — son datos de negocio locales.
+> Al clonar, seguir los pasos de [Ejecución](#ejecución).
+
 ## Stack
 
 - **Frontend:** React 19 + TypeScript + Vite + shadcn/ui + Tailwind CSS v4 + Lucide icons
