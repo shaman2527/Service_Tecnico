@@ -90,6 +90,14 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - **Regla:** la migración usa ALTER TABLE → `service_type` queda al FINAL del orden físico de columnas. NUNCA usar `SELECT s.*` con mapping posicional; usar lista de columnas explícita (lesson: InvalidColumnType).
 - UI: selector en ServiceForm (default "Cambio pantalla"), columna "Tipo" con Badge outline en la tabla
 
+### Blindaje del Servicio (client_ci, client_address, device_checklist)
+- Columnas en `services`: `client_ci TEXT`, `client_address TEXT`, `device_checklist TEXT` (JSON `{"key":"si"|"no"}`)
+- Checklist 10 ítems (keys): chip_sim, tapa_trasera, bandeja_sim, botones, boton_home, camara, puerto_carga, parlante, contrasena, accesorios
+- UI: ServiceForm → ToggleGroup Sí/No por ítem (Sí=emerald, No=destructive), columna "Cédula" en tabla, icono ShieldCheck con Tooltip (resumen + detalle por ítem)
+- Modelo: sugerencias listan CADA modelo individual del array de compatibility (dedupe Set, max 12) — al seleccionar setea model = modelo individual + price del producto
+- Utilidades exportadas: `parseChecklist(json)`, `checklistSummary(json)` en Services.tsx
+- **Regla CDP:** al verificar UI en vivo, esperar la transición y usar `data-state="on"` (no aria-pressed) para toggles radix
+
 ### Commands Tauri (Rust)
 - 27 comandos registrados en lib.rs (+5: get_daily_totals, get_daily_closings, close_day, reopen_day, update_daily_closing_settlement)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
@@ -128,6 +136,7 @@ Antes de hacer commit:
 | 2026-07-31 | Cambios de frontend NO llegaban a la app desplegada. cargo no recompila si solo cambió `dist/` (frontendDist no es input rastreado): build termina en ~2s y el exe conserva el frontend VIEJO embebido. | Tocar un .rs (Add-Content lib.rs "// force rebuild") y verificar que aparezca "Compiling registro" + build >30s. Verificar hash del exe desplegado vs target/release. (Requisito previo: feature custom-protocol activa, ver entrada anterior.) |
 | 2026-07-31 | Duplicados de productos: mismos (brand, model) como "Pantalla X" (cat 1) y "Táctil X" (cat 18) con precios distintos. | Verificar con GROUP BY brand+model+variant HAVING COUNT>1; conservar el de categoría Pantalla, eliminar Táctil si stock 0 y sin movimientos. |
 | 2026-08-01 | **DB NUNCA conectada en la app real — CAUSA RAIZ:** db.ts detectaba Tauri con `window.__TAURI__ !== undefined`, pero Tauri 2 NO expone `window.__TAURI__` (solo `__TAURI_INTERNALS__`, que además solo tiene `plugins` enumerable; el invoke real está en `__TAURI_INTERNALS__.invoke`). Resultado: isTauri=false → getProducts rechazaba → Inventario/Pantallas mostraban "Sin productos registrados" y el Dashboard usaba mocks (0s), aunque el backend respondía 970 productos (verificado vía CDP: `__TAURI_INTERNALS__.invoke('get_products')` → count=970). | Fix en src/db.ts: detectar `window.__TAURI_INTERNALS__ !== undefined` (con fallback a `__TAURI__` para Tauri 1). Verificación en vivo: `npm run build` → rebuild release → lanzar con `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"` → CDP `Runtime.evaluate` para ver filas reales en tbody (970 en Inventario, 921 en Pantallas con 921 botones Editar) y prueba de guardado end-to-end (update via UI → persistió en registro.db real en disco). |
+| 2026-08-01 | `shadcn CLI` falla en este Windows con `EPERM: operation not permitted, scandir 'C:\Users\ROBER\Configuración local'` (con latest y 4.15.0, incluso con HOME/USERPROFILE redirigido). | No usar `npx shadcn add`. Instalar el primitivo radix con npm (`npm install @radix-ui/react-toggle @radix-ui/react-toggle-group`) y crear el componente a mano siguiendo el estilo radix clásico del proyecto. Verificar que el resto del proyecto usa radix, no base-ui. |
 
 ## Feedback Loops
 
@@ -144,8 +153,6 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (51.2s frontend / 2m40s release)**
+- **Build: ✅ PASS (11.2s)**
 - **Errors:** 0
 - **Warnings:** 0
-- **Verificado en vivo (CDP remote-debugging):** Inventario 970 productos, Pantallas 921 con botones Editar, guardado update_product persistió en registro.db real, Dashboard con datos reales (30 equipos).
-

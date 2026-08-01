@@ -85,16 +85,18 @@ pub fn get_sales_stats(db: State<Database>, days: i64) -> Result<Vec<crate::db::
 #[tauri::command]
 pub fn add_service(db: State<Database>, order_num: String, client: String, phone: String, model: String,
                    fault: String, service_type: String, amount: f64, payment_method: String, observations: String,
-                   bank_fee_percent: f64, zelle_reference: String, currency: String) -> Result<i64, String> {
-    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency)
+                   bank_fee_percent: f64, zelle_reference: String, currency: String,
+                   client_ci: String, client_address: String, device_checklist: String) -> Result<i64, String> {
+    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_service(db: State<Database>, id: i64, client: String, phone: String, model: String, fault: String,
                       service_type: String, amount: f64, payment_method: String, date_out: String, status: String, observations: String,
-                      bank_fee_percent: f64, zelle_reference: String, currency: String) -> Result<(), String> {
-    db.update_service(id, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency)
+                      bank_fee_percent: f64, zelle_reference: String, currency: String,
+                      client_ci: String, client_address: String, device_checklist: String) -> Result<(), String> {
+    db.update_service(id, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist)
         .map_err(|e| e.to_string())
 }
 

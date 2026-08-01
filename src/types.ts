@@ -81,6 +81,13 @@ export interface Service {
   net_amount: number;
   zelle_reference: string | null;
   currency: string | null;
+  client_ci: string | null;
+  client_address: string | null;
+  device_checklist: string | null;
+}
+
+export interface DeviceChecklist {
+  [key: string]: 'si' | 'no' | '';
 }
 
 export interface DailyTotals {
@@ -122,21 +129,6 @@ export interface SaleStat {
   qty: number;
   total: number;
   count: number;
-}
-
-export interface Service {
-  id: number;
-  order_num: string | null;
-  date_in: string | null;
-  client: string | null;
-  phone: string | null;
-  model: string | null;
-  fault: string | null;
-  amount: number;
-  payment_method: string | null;
-  date_out: string | null;
-  status: string | null;
-  observations: string | null;
 }
 
 export interface ServiceDashboard {

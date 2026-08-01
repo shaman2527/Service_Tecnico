@@ -101,6 +101,9 @@ pub struct Service {
     pub net_amount: f64,
     pub zelle_reference: Option<String>,
     pub currency: Option<String>,
+    pub client_ci: Option<String>,
+    pub client_address: Option<String>,
+    pub device_checklist: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -334,6 +337,15 @@ impl Database {
         if !has_svc_type {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN service_type TEXT;");
         }
+        // Migration: add client data + device checklist to services
+        let has_client_ci: bool = conn.prepare("SELECT client_ci FROM services LIMIT 1").is_ok();
+        if !has_client_ci {
+            let _ = conn.execute_batch("
+                ALTER TABLE services ADD COLUMN client_ci TEXT;
+                ALTER TABLE services ADD COLUMN client_address TEXT;
+                ALTER TABLE services ADD COLUMN device_checklist TEXT;
+            ");
+        }
 
         let defaults = [
             ("INSERT OR IGNORE INTO categories (name) VALUES ('Pantalla')",),
@@ -556,37 +568,39 @@ impl Database {
     // --- Services ---
     pub fn add_service(&self, order_num: &str, client: &str, phone: &str, model: &str,
                        fault: &str, service_type: &str, amount: f64, payment_method: &str, observations: &str,
-                       bank_fee_percent: f64, zelle_reference: &str, currency: &str) -> SqlResult<i64> {
+                       bank_fee_percent: f64, zelle_reference: &str, currency: &str,
+                       client_ci: &str, client_address: &str, device_checklist: &str) -> SqlResult<i64> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO services (order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            params![order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency],
+            "INSERT INTO services (order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
         )?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn update_service(&self, id: i64, client: &str, phone: &str, model: &str, fault: &str,
                           service_type: &str, amount: f64, payment_method: &str, date_out: &str, status: &str, observations: &str,
-                          bank_fee_percent: f64, zelle_reference: &str, currency: &str) -> SqlResult<()> {
+                          bank_fee_percent: f64, zelle_reference: &str, currency: &str,
+                          client_ci: &str, client_address: &str, device_checklist: &str) -> SqlResult<()> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15 WHERE id=?10",
-            params![client, phone, model, fault, amount, payment_method, date_out, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type],
+            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19 WHERE id=?10",
+            params![client, phone, model, fault, amount, payment_method, date_out, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
         )?;
         Ok(())
     }
 
     pub fn get_services(&self, search: &str, status: &str) -> SqlResult<Vec<Service>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM services s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist FROM services s WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
-            sql.push_str(" AND (s.client LIKE ?1 OR s.model LIKE ?1 OR s.order_num LIKE ?1 OR s.phone LIKE ?1)");
+            sql.push_str(" AND (s.client LIKE ?1 OR s.model LIKE ?1 OR s.order_num LIKE ?1 OR s.phone LIKE ?1 OR s.client_ci LIKE ?1)");
             params_vec.push(Box::new(format!("%{}%", search)));
         }
         if !status.is_empty() {
@@ -610,6 +624,9 @@ impl Database {
                 net_amount: r.get(15).unwrap_or(0.0),
                 zelle_reference: r.get(16).unwrap_or(None),
                 currency: r.get(17).unwrap_or(Some("USD".into())),
+                client_ci: r.get(18).unwrap_or(None),
+                client_address: r.get(19).unwrap_or(None),
+                device_checklist: r.get(20).unwrap_or(None),
             })
         })?;
         let mut services = Vec::new();
@@ -725,7 +742,7 @@ impl Database {
         ).ok();
         if let Some(ref name) = client_name {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
+                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
             )?;
             let rows = stmt.query_map(params![name], |r| {
                 Ok(Service {
@@ -739,6 +756,9 @@ impl Database {
                     net_amount: r.get(15).unwrap_or(0.0),
                     zelle_reference: r.get(16).unwrap_or(None),
                     currency: r.get(17).unwrap_or(Some("USD".into())),
+                    client_ci: r.get(18).unwrap_or(None),
+                    client_address: r.get(19).unwrap_or(None),
+                    device_checklist: r.get(20).unwrap_or(None),
                 })
             })?;
             let mut services = Vec::new();
@@ -1206,15 +1226,20 @@ mod tests {
 
         // Add service
         let sid = db.add_service("ORD-TEST-1", "Juan Perez", "0412-1234567",
-            "Samsung A32", "No enciende", "Cambio batería", 25.0, "Efectivo Bs", "", 0.0, "", "USD").unwrap();
+            "Samsung A32", "No enciende", "Cambio batería", 25.0, "Efectivo Bs", "", 0.0, "", "USD",
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#).unwrap();
         assert!(sid > 0);
 
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
             "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
-            "Entregado", "Garantía 15 días", 0.0, "", "USD").unwrap();
+            "Entregado", "Garantía 15 días", 0.0, "", "USD",
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
 
         let services = db.get_services("", "").unwrap();
         assert_eq!(services.len(), 1);
+        assert_eq!(services[0].client_ci.as_deref(), Some("V-12345678"));
+        assert_eq!(services[0].client_address.as_deref(), Some("Av. Principal"));
+        assert!(services[0].device_checklist.as_deref().unwrap_or("").contains("chip_sim"));
 
         // Dashboard
         let dash = db.get_service_dashboard().unwrap();

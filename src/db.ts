@@ -68,13 +68,15 @@ export const api = {
 
   addService: (orderNum: string, client: string, phone: string, model: string,
     fault: string, serviceType: string, amount: number, paymentMethod: string, observations: string,
-    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD') =>
-    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency }),
+    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
+    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '') =>
+    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist }),
 
   updateService: (id: number, client: string, phone: string, model: string, fault: string,
     serviceType: string, amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
-    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD') =>
-    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency }),
+    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
+    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '') =>
+    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist }),
 
   deleteService: (id: number) => tauriInvoke<void>('delete_service', { id }),
 

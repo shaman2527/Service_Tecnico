@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, Trash2 } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -9,8 +9,39 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
+import { cn } from '@/lib/utils';
 import type { Service, ServiceStatus, Product } from '../types';
+
+const CHECKLIST_ITEMS: { key: string; label: string }[] = [
+  { key: 'chip_sim', label: 'Chip (SIM) presente' },
+  { key: 'tapa_trasera', label: 'Tapa trasera en buen estado' },
+  { key: 'bandeja_sim', label: 'Bandeja SIM presente' },
+  { key: 'botones', label: 'Botones (volumen/encendido) funcionan' },
+  { key: 'boton_home', label: 'Botón home/navegación (si aplica)' },
+  { key: 'camara', label: 'Cámara (lente) sin daños' },
+  { key: 'puerto_carga', label: 'Puerto de carga funciona' },
+  { key: 'parlante', label: 'Parlante/micrófono funcionan' },
+  { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente' },
+  { key: 'accesorios', label: 'Accesorios entregados (funda, protector)' },
+];
+
+export function parseChecklist(json: string | null | undefined): Record<string, string> {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+
+export function checklistSummary(json: string | null | undefined): string {
+  const parsed = parseChecklist(json);
+  const total = Object.keys(parsed).length;
+  if (total === 0) return 'Sin revisión registrada';
+  return `${total} de ${CHECKLIST_ITEMS.length} ítems revisados`;
+}
 
 export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
@@ -105,6 +136,7 @@ export default function Services() {
                 <TableHead>Entrada</TableHead>
                 <TableHead>Cliente</TableHead>
                 <TableHead>Teléfono</TableHead>
+                <TableHead>Cédula</TableHead>
                 <TableHead>Modelo</TableHead>
                 <TableHead>Tipo</TableHead>
                 <TableHead>Falla</TableHead>
@@ -129,7 +161,8 @@ export default function Services() {
                     <TableCell>{s.date_in ?? '-'}</TableCell>
                     <TableCell className="font-medium">{s.client ?? '-'}</TableCell>
                     <TableCell>{s.phone ?? '-'}</TableCell>
-                    <TableCell>{s.model ?? '-'}</TableCell>
+                    <TableCell>{s.client_ci ?? '-'}</TableCell>
+                    <TableCell className="font-medium">{s.model ?? '-'}</TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">{s.service_type ?? '-'}</Badge>
                     </TableCell>
@@ -141,7 +174,29 @@ export default function Services() {
                     </TableCell>
                     <TableCell>{s.date_out ?? '-'}</TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div className="flex gap-1 items-center">
+                        <TooltipProvider delayDuration={100}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="icon" className="text-muted-foreground"
+                                onClick={() => { setEditing(s); setShowForm(true); }}>
+                                <ShieldCheck className={parseChecklist(s.device_checklist) && Object.keys(parseChecklist(s.device_checklist)).length > 0 ? "size-4 text-emerald-600" : "size-4"} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <div className="text-xs space-y-1">
+                                <div className="font-medium">{checklistSummary(s.device_checklist)}</div>
+                                {Object.entries(parseChecklist(s.device_checklist)).map(([k, v]) => {
+                                  const item = CHECKLIST_ITEMS.find(i => i.key === k);
+                                  if (!item || !v) return null;
+                                  return (
+                                    <div key={k}>{item.label}: {v === 'si' ? 'Sí' : 'No'}</div>
+                                  );
+                                })}
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                         <Button variant="outline" size="sm" onClick={() => { setEditing(s); setShowForm(true); }}>
                           Editar
                         </Button>
@@ -197,6 +252,8 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
   const [orderNum, setOrderNum] = useState('');
   const [client, setClient] = useState('');
   const [phone, setPhone] = useState('');
+  const [clientCi, setClientCi] = useState('');
+  const [clientAddress, setClientAddress] = useState('');
   const [model, setModel] = useState('');
   const [fault, setFault] = useState('');
   const [serviceType, setServiceType] = useState('Cambio pantalla');
@@ -205,13 +262,14 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
   const [dateOut, setDateOut] = useState('');
   const [status, setStatus] = useState('Por entregar');
   const [observations, setObservations] = useState('');
+  const [checklist, setChecklist] = useState<Record<string, string>>({});
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [bankFeePercent, setBankFeePercent] = useState(0);
   const [zelleReference, setZelleReference] = useState('');
   const [currency, setCurrency] = useState('USD');
   const [modelOpen, setModelOpen] = useState(false);
-  const [modelSuggestions, setModelSuggestions] = useState<Product[]>([]);
+  const [modelSuggestions, setModelSuggestions] = useState<{ model: string; product: Product }[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
 
   const isPos = payment.includes('Punto');
@@ -227,6 +285,8 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
       setOrderNum(service.order_num ?? '');
       setClient(service.client ?? '');
       setPhone(service.phone ?? '');
+      setClientCi(service.client_ci ?? '');
+      setClientAddress(service.client_address ?? '');
       setModel(service.model ?? '');
       setFault(service.fault ?? '');
       setServiceType(service.service_type ?? 'Cambio pantalla');
@@ -235,6 +295,7 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
       setDateOut(service.date_out ?? '');
       setStatus(service.status ?? 'Por entregar');
       setObservations(service.observations ?? '');
+      setChecklist(parseChecklist(service.device_checklist));
       setBankFeePercent(service.bank_fee_percent ?? 0);
       setZelleReference(service.zelle_reference ?? '');
       setCurrency(service.currency ?? 'USD');
@@ -246,13 +307,22 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
   useEffect(() => {
     const q = model.trim().toLowerCase();
     if (q.length >= 1 && catalog.length > 0) {
-      const filtered = catalog
-        .filter(p => {
-          const compat = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
-          const hay = [p.name, p.brand ?? '', p.model ?? '', ...compat].join(' ').toLowerCase();
-          return hay.includes(q);
-        })
-        .slice(0, 12);
+      const seen = new Set<string>();
+      const filtered: { model: string; product: Product }[] = [];
+      for (const p of catalog) {
+        const compat = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
+        const models = compat.length > 0
+          ? compat.map((m: string) => m.trim()).filter(Boolean)
+          : [p.name.replace(/^Pantalla\s+/i, '').split('/')[0].trim()];
+        for (const m of models) {
+          const hay = [m, p.brand ?? '', p.model ?? '', p.name].join(' ').toLowerCase();
+          if (hay.includes(q) && !seen.has(m)) {
+            seen.add(m);
+            filtered.push({ model: m, product: p });
+          }
+        }
+        if (filtered.length >= 12) break;
+      }
       setModelSuggestions(filtered);
       setModelOpen(filtered.length > 0);
     } else {
@@ -261,9 +331,9 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
     }
   }, [model, catalog]);
 
-  const selectModel = (p: Product) => {
-    setModel(p.name.replace(/^Pantalla\s+/i, '').split('/')[0].trim());
-    setAmount(p.price_sale);
+  const selectModel = (sugg: { model: string; product: Product }) => {
+    setModel(sugg.model);
+    setAmount(sugg.product.price_sale);
     setModelOpen(false);
   };
 
@@ -271,10 +341,11 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
     if (!client || !model || !fault) return;
     setSaving(true);
     try {
+      const checklistJson = JSON.stringify(checklist);
       if (service) {
-        await api.updateService(service.id, client, phone, model, fault, serviceType, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency);
+        await api.updateService(service.id, client, phone, model, fault, serviceType, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
       } else {
-        await api.addService(orderNum, client, phone, model, fault, serviceType, amount, payment, observations, bankFeePercent, zelleReference, currency);
+        await api.addService(orderNum, client, phone, model, fault, serviceType, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
       }
       onSaved();
     } finally {
@@ -284,7 +355,7 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
         </DialogHeader>
@@ -300,7 +371,18 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Teléfono</label>
-              <Input value={phone} onChange={e => setPhone(e.target.value)} />
+              <Input value={phone} onChange={e => setPhone(e.target.value)} placeholder="0412-1234567" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Cédula</label>
+              <Input value={clientCi} onChange={e => setClientCi(e.target.value)} placeholder="V-12345678" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Dirección</label>
+              <Input value={clientAddress} onChange={e => setClientAddress(e.target.value)} placeholder="Opcional" />
             </div>
           </div>
 
@@ -312,19 +394,17 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
                 placeholder="Buscar modelo de equipo o pantalla..." />
               {modelOpen && modelSuggestions.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
-                  {modelSuggestions.map(p => {
-                    const compatList = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
+                  {modelSuggestions.map(sugg => {
+                    const p = sugg.product;
                     return (
-                      <button key={p.id} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
-                        onClick={() => selectModel(p)}>
-                        <span className="font-medium">{p.name.replace(/^Pantalla\s+/i, '')}</span>
+                      <button key={sugg.model} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
+                        onClick={() => selectModel(sugg)}>
+                        <span className="font-medium">{sugg.model}</span>
                         {p.brand && <span className="text-muted-foreground ml-1.5 text-xs">{p.brand}</span>}
                         {p.price_sale > 0 && <span className="float-right text-muted-foreground text-xs">${p.price_sale.toFixed(2)}</span>}
-                        {compatList.length > 0 && (
-                          <div className="text-[11px] text-muted-foreground/70 mt-0.5 truncate">
-                            {compatList.join(' · ')}
-                          </div>
-                        )}
+                        <div className="text-[11px] text-muted-foreground/70 mt-0.5 truncate">
+                          {p.name}
+                        </div>
                       </button>
                     );
                   })}
@@ -361,6 +441,37 @@ function ServiceForm({ service, statuses, onClose, onSaved }: {
             <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
             <Textarea value={fault} onChange={e => setFault(e.target.value)}
               placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Estado del equipo al recibir (blindaje)</label>
+            <p className="text-xs text-muted-foreground">
+              Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
+            </p>
+            <div className="flex flex-col gap-1.5">
+              {CHECKLIST_ITEMS.map(item => {
+                const val = checklist[item.key] ?? '';
+                return (
+                  <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
+                    <span className="text-sm">{item.label}</span>
+                    <ToggleGroup type="single" size="sm" value={val}
+                      onValueChange={v => setChecklist(prev => ({ ...prev, [item.key]: v }))}
+                      className="shrink-0">
+                      <ToggleGroupItem value="si" variant="outline"
+                        className={cn('min-w-12 data-[state=on]:bg-emerald-600 data-[state=on]:text-white data-[state=on]:hover:bg-emerald-600',
+                          val === 'si' ? 'bg-emerald-600 text-white hover:bg-emerald-600' : '')}>
+                        Sí
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="no" variant="outline"
+                        className={cn('min-w-12 data-[state=on]:bg-destructive data-[state=on]:text-white data-[state=on]:hover:bg-destructive',
+                          val === 'no' ? 'bg-destructive text-white hover:bg-destructive' : '')}>
+                        No
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
