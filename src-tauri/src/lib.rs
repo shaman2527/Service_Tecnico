@@ -33,6 +33,9 @@ pub fn run() {
             commands::delete_service,
             commands::get_services,
             commands::get_service_dashboard,
+            commands::get_service_payments,
+            commands::add_service_payment,
+            commands::delete_service_payment,
             commands::get_clients,
             commands::add_client,
             commands::add_or_find_client,
@@ -118,3 +121,6 @@ fn dirs_next() -> Option<PathBuf> {
 }
 // force rebuild
 // force rebuild 2
+// force rebuild 3
+// force rebuild 4
+// force rebuild 5

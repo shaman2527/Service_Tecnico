@@ -1,5 +1,5 @@
 import type {
-  Category, Client, ClientSummary, Product, Sale, SaleStat, Service,
+  Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate
 } from './types';
@@ -69,8 +69,9 @@ export const api = {
   addService: (orderNum: string, client: string, phone: string, model: string,
     fault: string, serviceType: string, amount: number, paymentMethod: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
-    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '') =>
-    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist }),
+    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
+    clientId: number | null = null) =>
+    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId }),
 
   updateService: (id: number, client: string, phone: string, model: string, fault: string,
     serviceType: string, amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
@@ -82,6 +83,17 @@ export const api = {
 
   getServices: (search: string = '', status: string = '') =>
     tauriInvoke<Service[]>('get_services', { search, status }),
+
+  getServicePayments: (serviceId: number) =>
+    tauriInvoke<ServicePayment[]>('get_service_payments', { serviceId }),
+
+  addServicePayment: (serviceId: number, amount: number, paymentMethod: string,
+    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
+    notes: string = '') =>
+    tauriInvoke<number>('add_service_payment', { serviceId, amount, paymentMethod, bankFeePercent, zelleReference, currency, notes }),
+
+  deleteServicePayment: (id: number) =>
+    tauriInvoke<void>('delete_service_payment', { id }),
 
   getServiceDashboard: () => tauriInvoke<ServiceDashboard>('get_service_dashboard').catch(() =>
     mock<ServiceDashboard>({

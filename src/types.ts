@@ -84,6 +84,22 @@ export interface Service {
   client_ci: string | null;
   client_address: string | null;
   device_checklist: string | null;
+  client_id: number | null;
+  paid_amount: number;
+}
+
+export interface ServicePayment {
+  id: number;
+  service_id: number;
+  amount: number;
+  payment_method: string | null;
+  bank_fee_percent: number;
+  bank_fee_amount: number;
+  net_amount: number;
+  zelle_reference: string | null;
+  currency: string | null;
+  payment_date: string | null;
+  notes: string | null;
 }
 
 export interface DeviceChecklist {

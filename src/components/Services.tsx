@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2 } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,7 +13,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
 import { cn } from '@/lib/utils';
-import type { Service, ServiceStatus, Product } from '../types';
+import type { Service, ServicePayment, ServiceStatus, Product } from '../types';
 
 const CHECKLIST_ITEMS: { key: string; label: string }[] = [
   { key: 'chip_sim', label: 'Chip (SIM) presente' },
@@ -158,6 +158,7 @@ export default function Services() {
                 <TableHead>Tipo</TableHead>
                 <TableHead>Falla</TableHead>
                 <TableHead className="text-right">Monto</TableHead>
+                <TableHead>Abono</TableHead>
                 <TableHead>Pago</TableHead>
                 <TableHead>Estado</TableHead>
                 <TableHead>Salida</TableHead>
@@ -167,7 +168,7 @@ export default function Services() {
             <TableBody>
               {services.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
                     Sin servicios registrados
                   </TableCell>
                 </TableRow>
@@ -185,6 +186,19 @@ export default function Services() {
                     </TableCell>
                     <TableCell className="max-w-[150px] truncate" title={s.fault ?? ''}>{s.fault ?? '-'}</TableCell>
                     <TableCell className="text-right font-bold">${s.amount.toFixed(2)}</TableCell>
+                    <TableCell>
+                      {s.paid_amount > 0 ? (
+                        <span className="text-xs">
+                          <span className="text-muted-foreground">abon. </span>
+                          <span className="font-medium text-emerald-600">${s.paid_amount.toFixed(2)}</span>
+                          {s.amount - s.paid_amount > 0.005 && (
+                            <span className="block text-danger font-medium">${(s.amount - s.paid_amount).toFixed(2)} pend.</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
                     <TableCell><Badge variant="outline">{s.payment_method ?? '-'}</Badge></TableCell>
                     <TableCell>
                       <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
@@ -290,6 +304,18 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSuggestions, setModelSuggestions] = useState<{ model: string; product: Product }[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
+  const [clientOpen, setClientOpen] = useState(false);
+  const [clientSugs, setClientSugs] = useState<{ id: number; name: string; phone: string | null }[]>([]);
+  const [clientId, setClientId] = useState<number | null>(null);
+  const [payments, setPayments] = useState<ServicePayment[]>([]);
+  const [showPayDialog, setShowPayDialog] = useState(false);
+  const [payAmount, setPayAmount] = useState(0);
+  const [payMethod, setPayMethod] = useState('Divisas (USD Cash)');
+  const [payFee, setPayFee] = useState(0);
+  const [payZelle, setPayZelle] = useState('');
+  const [payNotes, setPayNotes] = useState('');
+  const [payError, setPayError] = useState<string | null>(null);
+  const [savingPay, setSavingPay] = useState(false);
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
@@ -318,10 +344,39 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setBankFeePercent(service.bank_fee_percent ?? 0);
       setZelleReference(service.zelle_reference ?? '');
       setCurrency(service.currency ?? 'USD');
+      setClientId(service.client_id ?? null);
+      api.getServicePayments(service.id).then(setPayments).catch(() => setPayments([]));
     } else {
       api.nextOrderNum().then(setOrderNum);
+      setPayments([]);
+      setClientId(null);
     }
   }, [service]);
+
+  useEffect(() => {
+    if (client.trim().length > 0) {
+      api.suggestClients(client.trim(), 8).then(sugs => {
+        setClientSugs(sugs.filter(s => s.name !== client.trim()));
+        setClientOpen(true);
+      });
+    } else {
+      setClientSugs([]);
+      setClientOpen(false);
+    }
+  }, [client]);
+
+  const selectClient = (c: { id: number; name: string; phone: string | null }) => {
+    setClient(c.name);
+    setClientId(c.id);
+    if (c.phone && !phone) setPhone(c.phone);
+    setClientOpen(false);
+    api.suggestClients(c.name, 1).then(sugs => {
+      if (sugs.length > 0) {
+        const full = sugs[0];
+        if (full.phone && !phone) setPhone(full.phone);
+      }
+    });
+  };
 
   useEffect(() => {
     const q = model.trim().toLowerCase();
@@ -361,15 +416,54 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     setSaving(true);
     try {
       const checklistJson = JSON.stringify(checklist);
+      let cid = clientId;
+      if (client && !cid) {
+        cid = await api.addOrFindClient(client, phone);
+      }
       if (service) {
         await api.updateService(service.id, client, phone, model, fault, serviceType, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
       } else {
-        await api.addService(orderNum, client, phone, model, fault, serviceType, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
+        await api.addService(orderNum, client, phone, model, fault, serviceType, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, cid);
       }
       onSaved();
     } finally {
       setSaving(false);
     }
+  };
+
+  const balance = amount - (payments.reduce((a, p) => a + p.amount, 0));
+
+  const openPayDialog = () => {
+    setPayAmount(balance > 0 ? Math.min(balance, amount) : amount);
+    setPayMethod(payment);
+    setPayFee(payment.includes('Punto') ? 3.5 : 0);
+    setPayZelle('');
+    setPayNotes('');
+    setPayError(null);
+    setShowPayDialog(true);
+  };
+
+  const doAddPayment = async () => {
+    if (!service || payAmount <= 0) return;
+    setSavingPay(true);
+    setPayError(null);
+    try {
+      await api.addServicePayment(service.id, payAmount, payMethod, payFee, payZelle, currency, payNotes);
+      setShowPayDialog(false);
+      const [p] = await Promise.all([api.getServicePayments(service.id)]);
+      setPayments(p);
+      onSaved();
+    } catch (e) {
+      setPayError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingPay(false);
+    }
+  };
+
+  const doDeletePayment = async (pid: number) => {
+    await api.deleteServicePayment(pid);
+    setPayments(await api.getServicePayments(service!.id));
+    onSaved();
   };
 
   return (
@@ -386,7 +480,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente *</label>
-              <Input value={client} onChange={e => setClient(e.target.value)} />
+              <Input value={client} onChange={e => { setClient(e.target.value); setClientId(null); }}
+                onFocus={() => client.trim().length > 0 && setClientOpen(true)}
+                placeholder="Buscar o escribir nombre..." />
+              {clientOpen && clientSugs.length > 0 && (
+                <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">
+                  {clientSugs.map(c => (
+                    <button key={c.id} className="w-full text-left px-3 py-2 text-sm hover:bg-accent border-b last:border-0 transition-colors"
+                      onClick={() => selectClient(c)}>
+                      <span className="font-medium">{c.name}</span>
+                      {c.phone && <span className="text-muted-foreground text-xs ml-2">{c.phone}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Teléfono</label>
@@ -404,6 +511,66 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <Input value={clientAddress} onChange={e => setClientAddress(e.target.value)} placeholder="Opcional" />
             </div>
           </div>
+
+          {service && (
+            <div className="rounded-lg border border-border/70 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold flex items-center gap-2">
+                  <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
+                </p>
+                <Button variant="outline" size="sm" onClick={openPayDialog} disabled={dayOpen === false}>
+                  <Plus className="size-3.5" /> Registrar Pago / Abono
+                </Button>
+              </div>
+              <div className="grid grid-cols-3 gap-3 text-sm">
+                <div className="rounded-md bg-muted/60 px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Total</p>
+                  <p className="font-bold">${amount.toFixed(2)}</p>
+                </div>
+                <div className="rounded-md bg-muted/60 px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Abonado</p>
+                  <p className="font-bold text-emerald-600">${(amount - balance).toFixed(2)}</p>
+                </div>
+                <div className="rounded-md px-3 py-2 border">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
+                  <p className={`font-bold ${balance <= 0.005 ? 'text-success' : 'text-danger'}`}>
+                    {balance <= 0.005 ? 'Cancelado' : `$${balance.toFixed(2)} pendiente`}
+                  </p>
+                </div>
+              </div>
+              {payments.length > 0 && (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Fecha</TableHead>
+                      <TableHead className="text-right">Monto</TableHead>
+                      <TableHead>Método</TableHead>
+                      <TableHead>Notas</TableHead>
+                      <TableHead className="w-10"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {payments.map(p => (
+                      <TableRow key={p.id}>
+                        <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
+                        <TableCell className="text-right font-medium">
+                          {p.currency === 'VES' ? 'Bs.' : '$'}{p.amount.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="text-xs">{p.payment_method ?? '-'}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground max-w-[140px] truncate">{p.notes ?? '-'}</TableCell>
+                        <TableCell>
+                          <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
+                            onClick={() => doDeletePayment(p.id)}>
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -587,6 +754,68 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      <Dialog open={showPayDialog} onOpenChange={setShowPayDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Registrar Pago / Abono</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="text-sm space-y-1 rounded-md bg-muted/60 px-3 py-2">
+              <p>Total: <strong>${amount.toFixed(2)}</strong></p>
+              <p>Saldo pendiente: <strong className={balance <= 0.005 ? 'text-success' : 'text-danger'}>${Math.max(balance, 0).toFixed(2)}</strong></p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Monto ($)</label>
+              <Input type="number" step={0.01} min={0.01} value={payAmount}
+                onChange={e => setPayAmount(Number(e.target.value))} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Método de Pago</label>
+              <Select value={payMethod} onValueChange={v => {
+                setPayMethod(v);
+                if (v.includes('Punto')) setPayFee(3.5);
+              }}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {methods.map(m => (
+                    <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {payMethod.includes('Punto') && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Comisión Punto (%)</label>
+                <Input type="number" step={0.1} min={0} max={100} value={payFee}
+                  onChange={e => setPayFee(Number(e.target.value))} />
+                <p className="text-xs text-muted-foreground">
+                  Comisión: ${((payAmount * payFee) / 100).toFixed(2)} · Neto: ${(payAmount - (payAmount * payFee) / 100).toFixed(2)}
+                </p>
+              </div>
+            )}
+            {payMethod.includes('Zelle') && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Referencia Zelle</label>
+                <Input value={payZelle} onChange={e => setPayZelle(e.target.value)}
+                  placeholder="Número de referencia..." />
+              </div>
+            )}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Notas (opcional)</label>
+              <Input value={payNotes} onChange={e => setPayNotes(e.target.value)}
+                placeholder="Ej: Abono inicial / Saldo al entregar..." />
+            </div>
+            {payError && <p className="text-sm text-danger">{payError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPayDialog(false)}>Cancelar</Button>
+            <Button onClick={doAddPayment} disabled={savingPay || payAmount <= 0 || dayOpen === false}>
+              {savingPay ? 'Guardando...' : 'Guardar Pago'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

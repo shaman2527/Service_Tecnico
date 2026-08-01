@@ -116,8 +116,17 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Movimiento de inventario registrado: type salida/entrada, reason "Servicio Entregado"/"Servicio Reabierto", reference 'Servicio'.
 - UI: sugerencias de modelo en ServiceForm y de producto en SaleForm muestran chips de compatibilidad + stock (rojo si ≤0). Catalog/Inventory muestran compatibilidad en chips (Badge) no texto pegado.
 
+### Abonos y Pagos Parciales (service_payments)
+- **Tabla `service_payments`:** id, service_id (FK), amount, payment_method, bank_fee_percent/amount, net_amount, zelle_reference, currency, payment_date (fecha del pago), notes.
+- **`services` columnas:** `client_id INTEGER REFERENCES clients(id)` (vínculo al registro cliente) + `paid_amount REAL DEFAULT 0` (suma de abonos, se recalcula en add/delete payment).
+- **Comandos:** `add_service_payment(serviceId, amount, method, fee, zelle, currency, notes)` (requiere día abierto), `get_service_payments(serviceId)`, `delete_service_payment(id)` — todos recalcular paid_amount vía subquery SUM.
+- **Libro Diario (get_daily_totals):** cuenta los PAGOS por `payment_date` (el dinero real del día), NO el amount del servicio. Fallback de compatibilidad: servicios Entregado SIN ningún pago registrado suman su amount en `date_out` (históricos).
+- **Entrega con saldo:** permitido por diseño — el saldo pendiente queda visible (rojo) en la orden y en el historial del cliente.
+- **Clientes:** ServiceForm sugiere clientes existentes (suggestClients) y autocompleta teléfono al seleccionar; al guardar usa `addOrFindClient` → client_id vinculado (nunca duplica). `get_client_services` busca por client_id primero, fallback por nombre.
+- UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; columna "Abono" en tabla de servicios; Clients.tsx muestra Abonado/Saldo por servicio.
+
 ### Commands Tauri (Rust)
-- 30 comandos registrados en lib.rs (+3: get_bcv_rate, open_day, get_active_day; close_day ampliado con arqueo)
+- 33 comandos registrados en lib.rs (+3: get_service_payments, add_service_payment, delete_service_payment)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
 - Tests: `cd src-tauri && cargo test`
 
@@ -175,9 +184,10 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (9.7s)**
+- **Build: ✅ PASS (9.9s)**
 - **Errors:** 0
 - **Warnings:** 0
 - **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
-- **Centro de Ayuda:** Help.tsx en sidebar (accordion radix, 8 secciones + métodos de pago)
+- **Centro de Ayuda:** Help.tsx en sidebar (quick actions + accordion radix, 8 secciones + abonos + métodos de pago)
+- **Abonos:** service_payments con historial, saldo por orden/cliente, Libro Diario por fecha de pago
 

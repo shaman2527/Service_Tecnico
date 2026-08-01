@@ -134,6 +134,8 @@ export default function Clients() {
                         <TableHead>Modelo</TableHead>
                         <TableHead>Falla</TableHead>
                         <TableHead className="text-right">Monto</TableHead>
+                        <TableHead className="text-right">Abonado</TableHead>
+                        <TableHead className="text-right">Saldo</TableHead>
                         <TableHead>Estado</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -145,6 +147,18 @@ export default function Clients() {
                           <TableCell>{s.model ?? '-'}</TableCell>
                           <TableCell className="max-w-[120px] truncate">{s.fault ?? '-'}</TableCell>
                           <TableCell className="text-right">${s.amount.toFixed(2)}</TableCell>
+                          <TableCell className="text-right">
+                            {s.paid_amount > 0 && (
+                              <span className="text-xs text-emerald-600">${s.paid_amount.toFixed(2)}</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {s.amount - s.paid_amount > 0.005 ? (
+                              <span className="text-danger text-xs font-semibold">${(s.amount - s.paid_amount).toFixed(2)}</span>
+                            ) : (
+                              <Badge variant="outline" className="text-emerald-600">Cancelado</Badge>
+                            )}
+                          </TableCell>
                           <TableCell><Badge variant="outline">{s.status}</Badge></TableCell>
                         </TableRow>
                       ))}

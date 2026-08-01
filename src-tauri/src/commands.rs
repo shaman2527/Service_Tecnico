@@ -86,8 +86,9 @@ pub fn get_sales_stats(db: State<Database>, days: i64) -> Result<Vec<crate::db::
 pub fn add_service(db: State<Database>, order_num: String, client: String, phone: String, model: String,
                    fault: String, service_type: String, amount: f64, payment_method: String, observations: String,
                    bank_fee_percent: f64, zelle_reference: String, currency: String,
-                   client_ci: String, client_address: String, device_checklist: String) -> Result<i64, String> {
-    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist)
+                   client_ci: String, client_address: String, device_checklist: String,
+                   client_id: Option<i64>) -> Result<i64, String> {
+    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id)
         .map_err(|e| e.to_string())
 }
 
@@ -113,6 +114,24 @@ pub fn get_services(db: State<Database>, search: String, status: String) -> Resu
 #[tauri::command]
 pub fn get_service_dashboard(db: State<Database>) -> Result<crate::db::ServiceDashboard, String> {
     db.get_service_dashboard().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_service_payments(db: State<Database>, service_id: i64) -> Result<Vec<crate::db::ServicePayment>, String> {
+    db.get_service_payments(service_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, payment_method: String,
+                           bank_fee_percent: f64, zelle_reference: String, currency: String,
+                           notes: String) -> Result<i64, String> {
+    db.add_service_payment(service_id, amount, &payment_method, bank_fee_percent, &zelle_reference, &currency, &notes)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_service_payment(db: State<Database>, id: i64) -> Result<(), String> {
+    db.delete_service_payment(id).map_err(|e| e.to_string())
 }
 
 // --- Clients ---
