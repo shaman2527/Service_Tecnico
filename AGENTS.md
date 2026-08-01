@@ -10,7 +10,7 @@
 
 registro/
 ├── src/                       # Frontend React
-│   ├── App.tsx                # Layout + navegación (sidebar w-64)
+│   ├── App.tsx                # Layout + navegación (sidebar colapsable w-64↔w-16)
 │   ├── App.css                # Estilos globales
 │   ├── db.ts                  # Bridge Tauri invoke + mock browser mode
 │   ├── types.ts               # Tipos compartidos
@@ -18,21 +18,22 @@ registro/
 │   │   └── utils.ts           # cn() helper (clsx + tailwind-merge)
 │   ├── components/
 │   │   ├── Dashboard.tsx      # Métricas, stats, stock bajo
-│   │   ├── Help.tsx           # Centro de Ayuda (accordion guía completa)
-│   │   ├── ui/                # 15 componentes shadcn (incl. accordion radix)
+│   │   ├── Help.tsx           # Centro de Ayuda (quick actions + accordion radix)
 │   │   ├── Sales.tsx          # Registrar ventas, stats, top productos
-│   │   ├── Services.tsx       # Órdenes de reparación, seguimiento
+│   │   ├── Services.tsx       # Órdenes de reparación + abonos/pagos + checklist
 │   │   ├── Inventory.tsx      # Productos, compatibilidad, movimientos
-│   │   ├── Clients.tsx        # Gestión de clientes
+│   │   ├── Clients.tsx        # Clientes con historial y saldos por servicio
+│   │   ├── DailyLedger.tsx    # Libro Diario: turno de caja, tasa BCV, arqueo
 │   │   ├── Catalog.tsx        # Pantallas: catálogo + compatibilidad completa
 │   │   ├── ProductForm.tsx    # Form compartido producto (Inventario + Pantallas)
-│   │   └── ui/                # 15 componentes shadcn
+│   │   └── ui/                # 15 componentes shadcn (incl. accordion radix)
 │   └── index.css              # Tailwind v4 + CSS variables
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 27 comandos
-│   │   ├── db.rs              # SQLite CRUD + export/import
+│   │   ├── lib.rs             # Tauri builder + 33 comandos
+│   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario
+│   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
 │   │   └── commands.rs        # Comandos Tauri
 │   └── tauri.conf.json        # frontendDist: ../dist, devUrl: localhost:5173
 ├── run.ps1                    # Script de ejecución
