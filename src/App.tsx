@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
-  PanelLeftClose, PanelLeftOpen,
+  PanelLeftClose, PanelLeftOpen, LifeBuoy,
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import Sales from './components/Sales';
@@ -10,10 +10,11 @@ import Inventory from './components/Inventory';
 import Clients from './components/Clients';
 import DailyLedger from './components/DailyLedger';
 import Catalog from './components/Catalog';
+import Help from './components/Help';
 import { cn } from './lib/utils';
 import './index.css';
 
-type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas';
+type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas' | 'ayuda';
 
 const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -23,6 +24,7 @@ const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'pantallas', label: 'Pantallas', icon: Smartphone },
   { key: 'clientes', label: 'Clientes', icon: Users },
   { key: 'libro', label: 'Libro Diario', icon: BookOpen },
+  { key: 'ayuda', label: 'Ayuda', icon: LifeBuoy },
 ];
 
 function App() {
@@ -111,6 +113,7 @@ function App() {
           {tab === 'pantallas' && <Catalog />}
           {tab === 'clientes' && <Clients />}
           {tab === 'libro' && <DailyLedger />}
+          {tab === 'ayuda' && <Help />}
         </div>
       </main>
     </div>

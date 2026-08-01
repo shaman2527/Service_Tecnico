@@ -18,13 +18,15 @@ registro/
 │   │   └── utils.ts           # cn() helper (clsx + tailwind-merge)
 │   ├── components/
 │   │   ├── Dashboard.tsx      # Métricas, stats, stock bajo
+│   │   ├── Help.tsx           # Centro de Ayuda (accordion guía completa)
+│   │   ├── ui/                # 15 componentes shadcn (incl. accordion radix)
 │   │   ├── Sales.tsx          # Registrar ventas, stats, top productos
 │   │   ├── Services.tsx       # Órdenes de reparación, seguimiento
 │   │   ├── Inventory.tsx      # Productos, compatibilidad, movimientos
 │   │   ├── Clients.tsx        # Gestión de clientes
 │   │   ├── Catalog.tsx        # Pantallas: catálogo + compatibilidad completa
 │   │   ├── ProductForm.tsx    # Form compartido producto (Inventario + Pantallas)
-│   │   └── ui/                # 14 componentes shadcn
+│   │   └── ui/                # 15 componentes shadcn
 │   └── index.css              # Tailwind v4 + CSS variables
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
@@ -61,7 +63,7 @@ registro/
 - **Lesson (2026-08-01):** `window.__TAURI__` NO existe en Tauri 2 — detectar solo con `__TAURI__` deja la app en modo browser silenciosamente (Inventario vacío, Dashboard con mocks) aunque el backend responda.
 
 ### Componentes UI
-- 14 componentes shadcn/ui en `src/components/ui/` (button, card, dialog, table, badge, etc.)
+- 15 componentes shadcn/ui en `src/components/ui/` (button, card, dialog, table, badge, accordion, etc.)
 - Estilos via `cn()` helper → clsx + tailwind-merge
 - NO editar los archivos de ui/ directamente → regenerar con `npx shadcn add`
 
@@ -173,7 +175,9 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-01
-- **Build: ✅ PASS (10.0s)**
+- **Build: ✅ PASS (9.7s)**
 - **Errors:** 0
 - **Warnings:** 0
+- **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
+- **Centro de Ayuda:** Help.tsx en sidebar (accordion radix, 8 secciones + métodos de pago)
 
