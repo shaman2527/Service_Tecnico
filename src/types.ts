@@ -147,6 +147,11 @@ export interface DailyTotals {
   transfer_bs_total: number;
   usd_cash_total: number;
   grand_total: number;
+  /** Desglose por moneda (moneda derivada del método de pago) */
+  grand_usd: number;
+  grand_bs: number;
+  /** Tasa BCV del día (de daily_closings; fallback día abierto) */
+  tasa_bcv: number;
 }
 
 export interface DailyClosing {
@@ -178,6 +183,9 @@ export interface DailyClosing {
   actual_pago_movil: number;
   actual_transfer_bs: number;
   difference: number;
+  /** Desglose del día en moneda real (migración 2026-08-02) */
+  total_usd: number;
+  total_bs: number;
 }
 
 export interface BCVRate {

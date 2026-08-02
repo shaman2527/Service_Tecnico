@@ -210,6 +210,7 @@ Antes de hacer commit:
 | 2026-08-02 | **Llamadas duplicadas getPaymentMethods/getServiceStatuses/getCategories** (cada carga y cada dialog). | Cache estática módulo en db.ts (`cachedMethods/cachedStatuses/cachedCategories`); invoca una vez y reusa. |
 | 2026-08-02 | **Refetch por keystroke** en buscadores (Sales/Services) + estado muerto `setProducts` en Sales + filtrado de 980 productos sin memo en Catalog. | Debounce 350ms en los search effects; eliminada la llamada getProducts inútil en Sales.load; `useMemo` en Catalog (filtered/shown/withCompat). |
 | 2026-08-02 | **ServiceForm plano sin secciones**: ~25 campos seguidos, "1." sin "2.", checklist 1 columna, default status 'Por entregar', borrado de pedidos sin confirmación. | Form en 5 secciones numeradas (1 Cliente, 2 Equipo y diagnóstico, 3 Blindaje, 4 Finanzas y estado, 5 Cierre de la orden en edición) con `SectionTitle` (círculo numerado + línea); checklist en grid 2 columnas + botón "Marcar todo Sí" (10 toggles on verificado vía CDP); default status "Recibido"; AlertDialog de confirmación en Pedidos (aviso especial si el pedido ya fue recibido). |
+| 2026-08-02 | **Libro Diario sumaba Bs como USD — "$2076" falsos**: `grand_total = pos_net + cash_usd + cash_bs + zelle_total + ...` (db.rs) sumaba montos Bs (Pago Móvil 1056, Efectivo Bs 1000, Transf Bs 20) al total en USD → Total General $2076.25 cuando lo real era ~$2.77. Además 2 ventas históricas (Tecno SPARK 56.25 PM, Apple 11 PRO 20 Transf Bs) quedaron con currency='USD' por bug del frontend viejo, y la UI mostraba columnas Comisión/Cash/Zelle que el usuario no usa. | Backend: `compute_daily_totals` extraído (helper conn-level reutilizable, sin re-lock); moneda SIEMPRE derivada del método vía `normalize_payment_currency` en el query; nuevos campos `grand_usd`/`grand_bs`/`tasa_bcv` en DailyTotals; `grand_total = grand_usd + grand_bs/tasa` (tasa del cierre del día, fallback día abierto); `close_day` guarda `total_usd`/`total_bs` (ALTER TABLE) + grand_total correcto; migración init() corrige sales/services Bs→VES y RECALCULA todos los cierres históricos con su propia tasa (idempotente); CSV exporta "Total General USD/Bs/equiv". Test `test_daily_totals_currency` (7/7). Frontend: KPIs por método (Neto Punto, Pago Móvil, Efectivo Bs, Divisas $), Total General con desglose "$X + Bs. Y" + equivalente, tabla diaria `Fecha | Punto Cargado/Comisión/Neto | Pago Móvil | Efectivo Bs | Divisas $ | [Zelle] | [Transf Bs] | Tasa BCV | Total ($ + Bs.)` con Zelle/Transf SOLO si hay movimientos + fila de TOTALES al pie; cierres con Punto Neto/Liquidado/PM/Efectivo Bs/Divisas/Tasa/Total desglose/Diferencia; dialog de cierre sin columnas innecesarias. Verificado en vivo vía CDP: 01-08 → "Bs.2.076,25" (PM 1.056,25 + Efectivo 1.000 + Transf 20), Total "Bs.2.086,25", grand_total 2.77, cierre id5 total_bs=2076.25, ventas corregidas VES. |
 
 ## Feedback Loops
 
@@ -226,21 +227,9 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (4m 25s release, hash Registro.exe B624B723)**
+- **Build: ✅ PASS (npm 3.24s / release 3m30s)**
+- **Registro.exe MD5:** 756FBB6BFB7268C83044BCC1412C14BD
+- **Tests:** 7/7 (incl. test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0
-- **Tests:** 6/6 (incl. test_sales_legacy_physical_order, test_dashboard_analytics, moneda por método en test_all_operations)
-- **Auditoría seguridad/perf/UX (3 subagentes):** inyección SQL en import_data eliminada (whitelist PRAGMA table_info); transacciones en add_sale y pedidos recibidos; get_service_by_id O(1); next_order_num monótono (MAX); open/close_day sin OR REPLACE; índices + WAL; React.lazy code-splitting (501.8KB → 242KB + chunks); cache de métodos/estados; debounce 350ms en buscadores; ServiceForm en 5 secciones numeradas con checklist 2 col + "Marcar todo Sí"; confirmación de borrado en Pedidos
-- **Moneda por método:** abonos y ventas SIEMPRE en la moneda del método de pago (Bs para Pago Móvil/Efectivo Bs/Transf Bs, $ para Divisas/Zelle/Punto $); paid_amount en $ equivalente con conversión por tasa BCV del día del pago; ventas convierten total_usd × tasa; migración automática de pagos viejos
-- **Dashboard analítico:** sincronización (indicador verde/rojo + última actividad), KPI (hoy/7 días/equipos/ingresos), ventas por categoría con barras, top modelos, diagrama de flujo de 6 etapas, stock bajo
-- **Cierre por método:** "Cobros del día por método" (Divisas $, Efectivo Bs, Punto $+Bs con comisión→neto, Zelle $, Pago Móvil Bs con refs, Transf Bs, Total General)
-- **Flujo cliente por cédula:** Services.tsx búsqueda por ci (V-XXXXX) con banner cliente nuevo/existente, cédula obligatoria para nuevo, historial máx 6, autocompletado de teléfono/ci/address editable (addOrFindClient 4 params)
-- **Referencias pago móvil:** campo "Número de referencia (últimos 4 dígitos)" en ventas/servicios/abonos, mostrado en tablas; Libro Diario lista cada referencia+monto
-- **Cierre rediseñado:** solo cuenta Efectivo Bs (cashCounted es-VE cents-first), diferencia en Bs y "Cuadrado ✅", métodos digitales bloqueados (se ajustan con Liquidar después)
-- **Roles PIN:** sin PIN = cajera (sin Dashboard/export/cierre/históricos), PIN 4 dígitos = dueño; pantalla de bloqueo al iniciar, botones en Libro Diario
-- **Export Excel:** export_daily_report → CSV (BOM + `;` + coma decimal es-VE) en %USERPROFILE%\Documents\Registro\, abre con Excel
-- **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
-- **Centro de Ayuda:** Help.tsx en sidebar (v0.4) — quick actions (6) + accordion radix con 11 secciones que cubren TODO el sistema: primeros pasos, Dashboard, ventas (con moneda por método), servicio técnico (cédula + checklist), abonos (conversión Bs→$), inventario/pantallas, pedidos a proveedor, clientes, Libro Diario (abrir/cerrar/exportar), PIN y roles, FAQ
-- **Abonos:** service_payments con historial, saldo por orden/cliente, Libro Diario por fecha de pago
-- **Pedidos:** purchase_orders + sugerencias de reposición (get_reorder_suggestions), recibir suma stock
 

@@ -216,6 +216,11 @@ pub struct DailyTotals {
     pub transfer_bs_total: f64,
     pub usd_cash_total: f64,
     pub grand_total: f64,
+    /// Desglose por moneda: lo cobrado en USD y en Bs (moneda derivada del método)
+    pub grand_usd: f64,
+    pub grand_bs: f64,
+    /// Tasa BCV del día (de daily_closings; fallback día abierto)
+    pub tasa_bcv: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -248,6 +253,9 @@ pub struct DailyClosing {
     pub actual_pago_movil: f64,
     pub actual_transfer_bs: f64,
     pub difference: f64,
+    /// Desglose del día en moneda real (migración 2026-08-02)
+    pub total_usd: f64,
+    pub total_bs: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -590,6 +598,45 @@ impl Database {
                     unit_price REAL DEFAULT 0
                 );
             ");
+        }
+        // Migration: desglose por moneda en cierres (total_usd/total_bs) — bug: grand_total sumaba Bs como USD
+        let has_total_usd: bool = conn.prepare("SELECT total_usd FROM daily_closings LIMIT 1").is_ok();
+        if !has_total_usd {
+            let _ = conn.execute_batch("
+                ALTER TABLE daily_closings ADD COLUMN total_usd REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN total_bs REAL DEFAULT 0;
+            ");
+        }
+        // Corrección de moneda histórica: ventas/servicios con método Bs guardados como USD (bug frontend viejo)
+        for m in BS_METHODS {
+            let _ = conn.execute(
+                "UPDATE sales SET currency='VES' WHERE payment_method=?1 AND (currency IS NULL OR currency='USD')",
+                params![m],
+            );
+            let _ = conn.execute(
+                "UPDATE services SET currency='VES' WHERE payment_method=?1 AND (currency IS NULL OR currency='USD')",
+                params![m],
+            );
+        }
+        // Recalcular totales históricos de cierres con la moneda real (idempotente; tasa del propio cierre)
+        let closed_dates: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT close_date FROM daily_closings WHERE is_closed=1")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for r in rows { v.push(r?); }
+            v
+        };
+        for d in &closed_dates {
+            if let Ok(ts) = self.compute_daily_totals(&conn, d, d) {
+                if let Some(t0) = ts.first() {
+                    let tasa = t0.tasa_bcv;
+                    let gt = t0.grand_usd + if tasa > 0.0 { t0.grand_bs / tasa } else { 0.0 };
+                    let _ = conn.execute(
+                        "UPDATE daily_closings SET total_usd=?1, total_bs=?2, grand_total=?3 WHERE close_date=?4 AND is_closed=1",
+                        params![t0.grand_usd, t0.grand_bs, gt, d],
+                    );
+                }
+            }
         }
 
         let defaults = [
@@ -1717,8 +1764,7 @@ impl Database {
     }
 
     // --- Daily Ledger ---
-    pub fn get_daily_totals(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<DailyTotals>> {
-        let conn = self.conn.lock().unwrap();
+    fn compute_daily_totals(&self, conn: &rusqlite::Connection, start_date: &str, end_date: &str) -> SqlResult<Vec<DailyTotals>> {
         let union_sql = format!(
             "SELECT d, payment_method, total, bank_fee_amount, net_amount, currency FROM (
                 SELECT date(date) as d, payment_method, total, bank_fee_amount,
@@ -1746,6 +1792,20 @@ impl Database {
             let currency: String = r.get(5)?;
             Ok((d, method, total, bank_fee, net, currency))
         })?;
+        // Tasa BCV por fecha: la del cierre del día (daily_closings), fallback día abierto
+        let mut tasa_map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut tasa_stmt = conn.prepare("SELECT close_date, tasa_bcv FROM daily_closings WHERE close_date >= ?1 AND close_date <= ?2 AND tasa_bcv > 0")?;
+        let tasa_rows = tasa_stmt.query_map(params![start_date, end_date], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        for tr in tasa_rows {
+            let (d, t) = tr?;
+            tasa_map.insert(d, t);
+        }
+        let fallback_tasa: f64 = conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE is_closed=0 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional()?.unwrap_or(0.0);
         let mut daily_map: std::collections::HashMap<String, DailyTotals> = std::collections::HashMap::new();
         for row in rows {
             let (d, method, total, bank_fee, net, currency) = row?;
@@ -1754,7 +1814,10 @@ impl Database {
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
+                grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
             });
+            // Moneda SIEMPRE derivada del método (harness): Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES
+            let cur = normalize_payment_currency(method.as_deref().unwrap_or(""), &currency).to_string();
             let pos_methods = ["Punto de Venta ($)", "Punto de Venta (Bs)", "Punto de Venta"];
             let is_pos = method.as_deref().map_or(false, |m| pos_methods.contains(&m));
             let is_zelle = method.as_deref().map_or(false, |m| m == "Transferencia Zelle" || m == "Zelle");
@@ -1771,19 +1834,29 @@ impl Database {
                     Some("Pago Móvil") | Some("Pago Movil") => { entry.pago_movil_total += total; }
                     Some("Transferencia Bs") => { entry.transfer_bs_total += total; }
                     _ => {
-                        if currency == "USD" { entry.usd_cash_total += total; }
+                        if cur == "USD" { entry.usd_cash_total += total; }
                         else { entry.cash_bs += total; }
                     }
                 }
             }
+            // Desglose por moneda (mismo criterio que el antiguo grand_total: Punto usa neto, resto bruto)
+            let contrib = if is_pos { net } else { total };
+            if cur == "USD" { entry.grand_usd += contrib; }
+            else { entry.grand_bs += contrib; }
         }
         let mut totals: Vec<DailyTotals> = daily_map.into_values().collect();
         totals.sort_by(|a, b| a.date.cmp(&b.date));
         for t in &mut totals {
-            t.grand_total = t.pos_net + t.cash_usd + t.cash_bs + t.zelle_total
-                + t.pago_movil_total + t.transfer_bs_total + t.usd_cash_total;
+            let tasa = tasa_map.get(&t.date).copied().unwrap_or(fallback_tasa);
+            t.tasa_bcv = tasa;
+            t.grand_total = t.grand_usd + if tasa > 0.0 { t.grand_bs / tasa } else { 0.0 };
         }
         Ok(totals)
+    }
+
+    pub fn get_daily_totals(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<DailyTotals>> {
+        let conn = self.conn.lock().unwrap();
+        self.compute_daily_totals(&conn, start_date, end_date)
     }
 
     // --- Settings / PIN ---
@@ -1858,6 +1931,7 @@ impl Database {
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
+                grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
             }
         } else { totals[0].clone() };
 
@@ -1992,7 +2066,9 @@ impl Database {
         csv.push_str(&format!("Zelle;{}\n", fmt_num(t.zelle_total)));
         csv.push_str(&format!("Pago Movil;{}\n", fmt_num(t.pago_movil_total)));
         csv.push_str(&format!("Transf Bs;{}\n", fmt_num(t.transfer_bs_total)));
-        csv.push_str(&format!("Total General;{}\n", fmt_num(t.grand_total)));
+        csv.push_str(&format!("Total General USD;{}\n", fmt_num(t.grand_usd)));
+        csv.push_str(&format!("Total General Bs;{}\n", fmt_num(t.grand_bs)));
+        csv.push_str(&format!("Total General (USD equiv);{}\n", fmt_num(t.grand_total)));
 
         let mut dir = std::env::var("USERPROFILE")
             .map(PathBuf::from)
@@ -2012,7 +2088,7 @@ impl Database {
 
     pub fn get_daily_closings(&self) -> SqlResult<Vec<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference FROM daily_closings ORDER BY close_date DESC";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs FROM daily_closings ORDER BY close_date DESC";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -2037,6 +2113,8 @@ impl Database {
                 actual_pago_movil: r.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
                 actual_transfer_bs: r.get::<_, Option<f64>>(26)?.unwrap_or(0.0),
                 difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
+                total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
+                total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
             })
         })?;
         let mut closings = Vec::new();
@@ -2046,7 +2124,7 @@ impl Database {
 
     pub fn get_active_day(&self) -> SqlResult<Option<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -2071,6 +2149,8 @@ impl Database {
                 actual_pago_movil: r.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
                 actual_transfer_bs: r.get::<_, Option<f64>>(26)?.unwrap_or(0.0),
                 difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
+                total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
+                total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -2121,6 +2201,7 @@ impl Database {
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
+                grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
             }
         } else { totals[0].clone() };
         let conn = self.conn.lock().unwrap();
@@ -2135,14 +2216,16 @@ impl Database {
         let diff_usd = actual_usd - expected_usd;
         let diff_bs = actual_bs - expected_bs;
         let difference = if tasa_bcv > 0.0 { diff_usd + diff_bs / tasa_bcv } else { diff_usd };
+        // Total General en USD equivalente: USD + Bs convertidos con la tasa del cierre (nunca sumar Bs como USD)
+        let grand_total = t.grand_usd + if tasa_bcv > 0.0 { t.grand_bs / tasa_bcv } else { 0.0 };
 
         let changes = conn.execute(
-            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23
+            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25
              WHERE close_date=?1 AND is_closed=0",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
-                    t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, t.grand_total, notes,
+                    t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, grand_total, notes,
                     tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
-                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference],
+                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs],
         )?;
         if changes == 0 {
             return Err(day_shift_error("No hay un día abierto con esa fecha para cerrar."));
@@ -2805,6 +2888,50 @@ mod tests {
         assert!(a.product_count >= 1 && a.sale_count >= 2 && a.client_count >= 0);
         assert!(a.last_sale.is_some());
         assert!(a.last_activity.is_some());
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_daily_totals_currency() {
+        // Regresión: grand_total sumaba Bs como USD (bug 2026-08-02: "$2076" falsos).
+        // Verifica el desglose por moneda (grand_usd/grand_bs), la tasa BCV por día,
+        // y que el cierre guarde total_usd/total_bs y grand_total en USD equivalente.
+        let test_path = PathBuf::from("test_daily_totals_currency.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(10.0, 40.5, 45.0).unwrap();
+
+        // Venta en Bs (Pago Móvil) — el frontend guarda total en Bs con currency 'VES'
+        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Pago Móvil", "Cliente", None, "", 0.0, "", "VES").unwrap();
+        // Abono en Bs (Efectivo Bs) + abono en USD (Divisas)
+        let sid = db.add_service("ORD-TEST-LEDGER", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla",
+            50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None).unwrap();
+        db.add_service_payment(sid, 100.0, "Efectivo Bs", 0.0, "", "USD", "abono bs").unwrap();
+        db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono usd").unwrap();
+
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals.len(), 1, "un día con movimientos");
+        let t = &totals[0];
+        assert_eq!(t.grand_usd, 50.0, "desglose USD (solo divisas)");
+        assert_eq!(t.grand_bs, 200.0, "desglose Bs (venta 100 PM + abono 100 Efectivo Bs)");
+        assert_eq!(t.pago_movil_total, 100.0);
+        assert_eq!(t.cash_bs, 100.0);
+        assert_eq!(t.usd_cash_total, 50.0);
+        assert_eq!(t.tasa_bcv, 40.5, "tasa del día abierto");
+        assert!((t.grand_total - (50.0 + 200.0 / 40.5)).abs() < 1e-9, "grand_total en USD equivalente, got {}", t.grand_total);
+
+        // Cierre: guarda desglose + grand_total correcto
+        db.close_day(&today, "cierre moneda", 10.0, 40.5, 45.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let closings = db.get_daily_closings().unwrap();
+        let c = closings.iter().find(|x| x.close_date == today).unwrap();
+        assert_eq!(c.total_usd, 50.0, "cierre guarda total_usd");
+        assert_eq!(c.total_bs, 200.0, "cierre guarda total_bs");
+        assert!((c.grand_total - (50.0 + 200.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv, got {}", c.grand_total);
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);

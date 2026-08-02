@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   BookOpen, CheckCircle2, CreditCard, Download, Landmark, Lock, Play, RefreshCw,
   RotateCcw, DollarSign, TrendingUp, Smartphone, Banknote, Globe,
@@ -12,6 +12,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
 import type { DailyTotals, DailyClosing, PagoMovilDetail } from '../types';
+
+const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+const fmtBs = (n: number) => `Bs.${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const money = (n: number) => n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Desglose "$X + Bs. Y" omitiendo la moneda sin movimientos
+function totalCell(usd: number, bs: number) {
+  const parts: React.ReactNode[] = [];
+  if (usd > 0.005) parts.push(<span className="text-success">{fmtUsd(usd)}</span>);
+  if (bs > 0.005) parts.push(<span className="text-warning">{fmtBs(bs)}</span>);
+  if (parts.length === 0) return <span className="text-muted-foreground">$0.00</span>;
+  return parts.map((p, i) => <span key={i}>{i > 0 && ' + '}{p}</span>);
+}
 
 function MethodRow({ icon, label, detail, value, valueClass }: {
   icon: React.ReactNode; label: string; detail?: string; value: string; valueClass?: string;
@@ -27,8 +40,28 @@ function MethodRow({ icon, label, detail, value, valueClass }: {
           {detail && <div className="text-[11px] text-muted-foreground leading-tight">{detail}</div>}
         </div>
       </div>
-      <div className={`text-sm font-bold ${valueClass ?? ''}`}>{value}</div>
+      <div className={`text-sm font-bold tabular-nums ${valueClass ?? ''}`}>{value}</div>
     </div>
+  );
+}
+
+function Kpi({ icon, label, value, accent, className }: {
+  icon: React.ReactNode; label: string; value: string; accent?: string; className?: string;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+          <span className={`flex h-6 w-6 items-center justify-center rounded-md ${accent ?? 'bg-muted text-muted-foreground'}`}>
+            {icon}
+          </span>
+          {label}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className={`text-xl font-bold tabular-nums ${className ?? ''}`}>{value}</div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -222,7 +255,25 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     }
   };
 
-  const grandTotal = totals.reduce((a, t) => a + t.grand_total, 0);
+  // Sumas del período (memoizado — harness perf)
+  const sums = useMemo(() => totals.reduce((a, t) => ({
+    pos_charged: a.pos_charged + t.pos_charged,
+    pos_fees: a.pos_fees + t.pos_fees,
+    pos_net: a.pos_net + t.pos_net,
+    pago_movil: a.pago_movil + t.pago_movil_total,
+    cash_bs: a.cash_bs + t.cash_bs,
+    usd: a.usd + t.usd_cash_total + t.cash_usd,
+    zelle: a.zelle + t.zelle_total,
+    trans_bs: a.trans_bs + t.transfer_bs_total,
+    grand_usd: a.grand_usd + t.grand_usd,
+    grand_bs: a.grand_bs + t.grand_bs,
+    grand_total: a.grand_total + t.grand_total,
+  }), { pos_charged: 0, pos_fees: 0, pos_net: 0, pago_movil: 0, cash_bs: 0, usd: 0, zelle: 0, trans_bs: 0, grand_usd: 0, grand_bs: 0, grand_total: 0 }), [totals]);
+
+  const hasZelle = totals.some(t => t.zelle_total > 0);
+  const hasTransf = totals.some(t => t.transfer_bs_total > 0);
+  const tableCols = 9 + (hasZelle ? 1 : 0) + (hasTransf ? 1 : 0);
+
   const diffBs = expected ? cashCounted - expected.cash_bs : 0;
   const cuadrado = expected !== null && Math.abs(diffBs) < 0.5;
   const pagoMovilTotal = pagoMovilList.reduce((a, p) => a + p.amount, 0);
@@ -271,11 +322,14 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
 
       {activeDay ? (
         <div className="flex items-center justify-between gap-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
-          <div className="flex items-center gap-3 text-emerald-700">
-            <CheckCircle2 className="size-5" />
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"></span>
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+            </span>
             <div>
-              <p className="font-semibold">Día ABIERTO — {activeDay.close_date}</p>
-              <p className="text-sm">Tasa Bs {activeDay.tasa_bcv.toFixed(2)} · Apertura ${activeDay.initial_cash_usd.toFixed(2)}</p>
+              <p className="font-semibold text-emerald-700">Día ABIERTO — {activeDay.close_date}</p>
+              <p className="text-sm text-emerald-700/80">Tasa Bs {activeDay.tasa_bcv.toFixed(2)} · Apertura ${activeDay.initial_cash_usd.toFixed(2)}</p>
             </div>
           </div>
           <Button variant="default" onClick={openCloseDialog}>
@@ -317,39 +371,39 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       {effectiveTab === 'diario' && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Punto Cargado</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xl font-bold">${totals.reduce((a, t) => a + t.pos_charged, 0).toFixed(2)}</div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Comisión Punto</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xl font-bold text-danger">${totals.reduce((a, t) => a + t.pos_fees, 0).toFixed(2)}</div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Neto Punto</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xl font-bold">${totals.reduce((a, t) => a + t.pos_net, 0).toFixed(2)}</div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Total General</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xl font-bold text-success">${grandTotal.toFixed(2)}</div>
-              </CardContent>
-            </Card>
+            <Kpi icon={<CreditCard className="size-3.5" />} label="Neto Punto" value={fmtUsd(sums.pos_net)}
+              accent="bg-primary/10 text-primary" />
+            <Kpi icon={<Smartphone className="size-3.5" />} label="Pago Móvil" value={fmtBs(sums.pago_movil)}
+              accent="bg-warning/10 text-warning" className="text-warning" />
+            <Kpi icon={<Banknote className="size-3.5" />} label="Efectivo Bs" value={fmtBs(sums.cash_bs)}
+              accent="bg-warning/10 text-warning" className="text-warning" />
+            <Kpi icon={<DollarSign className="size-3.5" />} label="Divisas $" value={fmtUsd(sums.usd)}
+              accent="bg-success/10 text-success" className="text-success" />
           </div>
+
+          <Card className="border-primary/30 bg-primary/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Total General del período
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap items-end gap-x-8 gap-y-2">
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase">USD</p>
+                  <p className="text-3xl font-extrabold tabular-nums text-success">{fmtUsd(sums.grand_usd)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase">Bolívares</p>
+                  <p className="text-3xl font-extrabold tabular-nums text-warning">{fmtBs(sums.grand_bs)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase">Equivalente</p>
+                  <p className="text-xl font-bold tabular-nums">≈ {fmtUsd(sums.grand_total)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardContent className="p-0">
@@ -357,22 +411,22 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <TableHeader>
                   <TableRow>
                     <TableHead>Fecha</TableHead>
-                    <TableHead className="text-right">Punto ($)</TableHead>
+                    <TableHead className="text-right">Punto Cargado</TableHead>
                     <TableHead className="text-right">Comisión</TableHead>
                     <TableHead className="text-right">Neto Punto</TableHead>
-                    <TableHead className="text-right">Efectivo $</TableHead>
-                    <TableHead className="text-right">Efectivo Bs</TableHead>
-                    <TableHead className="text-right">Zelle</TableHead>
                     <TableHead className="text-right">Pago Móvil</TableHead>
-                    <TableHead className="text-right">Transf Bs</TableHead>
-                    <TableHead className="text-right">USD Cash</TableHead>
-                    <TableHead className="text-right font-bold">Total</TableHead>
+                    <TableHead className="text-right">Efectivo Bs</TableHead>
+                    <TableHead className="text-right">Divisas $</TableHead>
+                    {hasZelle && <TableHead className="text-right">Zelle</TableHead>}
+                    {hasTransf && <TableHead className="text-right">Transf Bs</TableHead>}
+                    <TableHead className="text-right">Tasa BCV</TableHead>
+                    <TableHead className="text-right font-bold">Total ($ + Bs.)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {totals.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={tableCols} className="text-center text-muted-foreground py-8">
                         Sin transacciones en este período
                       </TableCell>
                     </TableRow>
@@ -380,18 +434,35 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     totals.map(t => (
                       <TableRow key={t.date}>
                         <TableCell className="font-medium">{t.date}</TableCell>
-                        <TableCell className="text-right">${t.pos_charged.toFixed(2)}</TableCell>
-                        <TableCell className="text-right text-danger">${t.pos_fees.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">${t.pos_net.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">${t.cash_usd.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">Bs.{t.cash_bs.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">${t.zelle_total.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">Bs.{t.pago_movil_total.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">Bs.{t.transfer_bs_total.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">${t.usd_cash_total.toFixed(2)}</TableCell>
-                        <TableCell className="text-right font-bold">${t.grand_total.toFixed(2)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtUsd(t.pos_charged)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-danger">{fmtUsd(t.pos_fees)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtUsd(t.pos_net)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.pago_movil_total)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.cash_bs)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-success">{fmtUsd(t.usd_cash_total + t.cash_usd)}</TableCell>
+                        {hasZelle && <TableCell className="text-right tabular-nums text-success">{fmtUsd(t.zelle_total)}</TableCell>}
+                        {hasTransf && <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.transfer_bs_total)}</TableCell>}
+                        <TableCell className="text-right tabular-nums text-muted-foreground">
+                          {t.tasa_bcv > 0 ? t.tasa_bcv.toFixed(2) : '—'}
+                        </TableCell>
+                        <TableCell className="text-right font-bold tabular-nums">{totalCell(t.grand_usd, t.grand_bs)}</TableCell>
                       </TableRow>
                     ))
+                  )}
+                  {totals.length > 0 && (
+                    <TableRow className="bg-muted/50">
+                      <TableCell className="font-semibold">Total</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums">{fmtUsd(sums.pos_charged)}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums text-danger">{fmtUsd(sums.pos_fees)}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums">{fmtUsd(sums.pos_net)}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtBs(sums.pago_movil)}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtBs(sums.cash_bs)}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums text-success">{fmtUsd(sums.usd)}</TableCell>
+                      {hasZelle && <TableCell className="text-right font-semibold tabular-nums text-success">{fmtUsd(sums.zelle)}</TableCell>}
+                      {hasTransf && <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtBs(sums.trans_bs)}</TableCell>}
+                      <TableCell />
+                      <TableCell className="text-right font-bold tabular-nums">{totalCell(sums.grand_usd, sums.grand_bs)}</TableCell>
+                    </TableRow>
                   )}
                 </TableBody>
               </Table>
@@ -407,24 +478,22 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               <TableHeader>
                 <TableRow>
                   <TableHead>Fecha</TableHead>
-                  <TableHead className="text-right">Punto Cargado</TableHead>
-                  <TableHead className="text-right">Comisiones</TableHead>
-                  <TableHead className="text-right">Neto Esperado</TableHead>
+                  <TableHead className="text-right">Punto Neto</TableHead>
                   <TableHead className="text-right">Liquidado</TableHead>
-                  <TableHead className="text-right">Diferencia</TableHead>
-                  <TableHead className="text-right">Efectivo</TableHead>
-                  <TableHead className="text-right">Zelle</TableHead>
+                  <TableHead className="text-right">Pago Móvil</TableHead>
+                  <TableHead className="text-right">Efectivo Bs</TableHead>
+                  <TableHead className="text-right">Divisas $</TableHead>
                   <TableHead className="text-right">Tasa</TableHead>
-                  <TableHead>Apertura</TableHead>
-                  <TableHead className="text-right font-bold">Total</TableHead>
+                  <TableHead className="text-right font-bold">Total ($ + Bs.)</TableHead>
+                  <TableHead className="text-right">Diferencia</TableHead>
                   <TableHead>Estado</TableHead>
-                  <TableHead className="w-24"></TableHead>
+                  <TableHead className="w-28"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {closings.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
                       Sin cierres registrados
                     </TableCell>
                   </TableRow>
@@ -432,29 +501,29 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   closings.map(c => (
                     <TableRow key={c.id}>
                       <TableCell className="font-medium">{c.close_date}</TableCell>
-                      <TableCell className="text-right">${c.pos_charged.toFixed(2)}</TableCell>
-                      <TableCell className="text-right text-danger">${c.pos_fees.toFixed(2)}</TableCell>
-                      <TableCell className="text-right">${c.pos_net.toFixed(2)}</TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right tabular-nums">{fmtUsd(c.pos_net)}</TableCell>
+                      <TableCell className="text-right tabular-nums">
                         {c.pos_settled > 0
-                          ? <span className="font-medium">${c.pos_settled.toFixed(2)}</span>
+                          ? <span className="font-medium">{fmtUsd(c.pos_settled)}</span>
                           : <span className="text-muted-foreground">—</span>
                         }
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right tabular-nums text-warning">{fmtBs(c.pago_movil_total)}</TableCell>
+                      <TableCell className="text-right tabular-nums text-warning">{fmtBs(c.cash_bs)}</TableCell>
+                      <TableCell className="text-right tabular-nums text-success">{fmtUsd(c.usd_cash_total + c.cash_usd)}</TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {c.tasa_bcv > 0 ? c.tasa_bcv.toFixed(2) : '—'}
+                      </TableCell>
+                      <TableCell className="text-right font-bold tabular-nums">
+                        {!c.is_closed ? <span className="text-muted-foreground">—</span> : totalCell(c.total_usd, c.total_bs)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
                         {c.is_closed ? (
                           <span className={Math.abs(c.difference) < 0.5 ? 'text-success' : 'text-danger'}>
-                            {c.difference >= 0 ? '+' : ''}${c.difference.toFixed(2)}
+                            {c.difference >= 0 ? '+' : ''}{fmtUsd(c.difference)}
                           </span>
                         ) : <span className="text-muted-foreground">—</span>}
                       </TableCell>
-                      <TableCell className="text-right">${(c.cash_usd + c.cash_bs).toFixed(2)}</TableCell>
-                      <TableCell className="text-right">${c.zelle_total.toFixed(2)}</TableCell>
-                      <TableCell className="text-right">{c.tasa_bcv > 0 ? c.tasa_bcv.toFixed(2) : '—'}</TableCell>
-                      <TableCell className="text-muted-foreground" title={c.opened_at ?? undefined}>
-                        {c.opened_at ? c.opened_at.slice(0, 16) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right font-bold">${c.grand_total.toFixed(2)}</TableCell>
                       <TableCell>
                         {c.is_closed ? (
                           <Badge variant="default" className="bg-success">Cerrado</Badge>
@@ -490,12 +559,12 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           <DialogHeader>
             <DialogTitle>Abrir Día</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Efectivo de apertura ($)</label>
               <MoneyInput value={openInitial} onChange={setOpenInitial} />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Tasa Bs/USD</label>
               <div className="flex gap-2">
                 <Input type="number" step={0.01} min={0} value={openTasaUsd}
@@ -505,7 +574,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </Button>
               </div>
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Tasa Bs/EUR</label>
               <Input type="number" step={0.01} min={0} value={openTasaEur}
                 onChange={e => setOpenTasaEur(Number(e.target.value))} />
@@ -529,46 +598,57 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           <DialogHeader>
             <DialogTitle>Cerrar Día: {activeDay?.close_date}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="flex flex-col gap-4">
             <div>
               <p className="text-sm font-semibold mb-2">Cobros del día por método</p>
               <div className="flex flex-col gap-2">
                 <MethodRow icon={<DollarSign className="size-3.5" />} label="Divisas (USD Cash)"
-                  detail="Dinero en efectivo dólares" value={`$${(expected?.usd_cash_total ?? 0).toFixed(2)}`} />
+                  detail="Dinero en efectivo dólares" value={fmtUsd((expected?.usd_cash_total ?? 0) + (expected?.cash_usd ?? 0))}
+                  valueClass="text-success" />
                 <MethodRow icon={<Banknote className="size-3.5" />} label="Efectivo Bs"
-                  detail="Bolívares en caja — se cuenta abajo" value={`Bs.${(expected?.cash_bs ?? 0).toFixed(2)}`}
+                  detail="Bolívares en caja — se cuenta abajo" value={fmtBs(expected?.cash_bs ?? 0)}
                   valueClass="text-warning" />
                 <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta ($ + Bs)"
                   detail={`Cobrado $${(expected?.pos_charged ?? 0).toFixed(2)} · Comisión -$${(expected?.pos_fees ?? 0).toFixed(2)} → Neto $${(expected?.pos_net ?? 0).toFixed(2)}`}
-                  value={`$${(expected?.pos_net ?? 0).toFixed(2)}`} valueClass="text-success" />
-                <MethodRow icon={<Globe className="size-3.5" />} label="Transferencia Zelle"
-                  detail="Cobros por Zelle en USD" value={`$${(expected?.zelle_total ?? 0).toFixed(2)}`} />
+                  value={fmtUsd(expected?.pos_net ?? 0)} valueClass="text-success" />
                 <MethodRow icon={<Smartphone className="size-3.5" />} label="Pago Móvil"
                   detail={`${pagoMovilList.length} pago(s) por referencia`}
-                  value={`Bs.${(expected?.pago_movil_total ?? 0).toFixed(2)}`} valueClass="text-warning" />
-                <MethodRow icon={<Landmark className="size-3.5" />} label="Transferencia Bs"
-                  detail="Transferencias bancarias en bolívares" value={`Bs.${(expected?.transfer_bs_total ?? 0).toFixed(2)}`}
-                  valueClass="text-warning" />
+                  value={fmtBs(expected?.pago_movil_total ?? 0)} valueClass="text-warning" />
+                {(expected?.zelle_total ?? 0) > 0 && (
+                  <MethodRow icon={<Globe className="size-3.5" />} label="Transferencia Zelle"
+                    detail="Cobros por Zelle en USD" value={fmtUsd(expected?.zelle_total ?? 0)}
+                    valueClass="text-success" />
+                )}
+                {(expected?.transfer_bs_total ?? 0) > 0 && (
+                  <MethodRow icon={<Landmark className="size-3.5" />} label="Transferencia Bs"
+                    detail="Transferencias bancarias en bolívares" value={fmtBs(expected?.transfer_bs_total ?? 0)}
+                    valueClass="text-warning" />
+                )}
                 <div className="flex items-center justify-between rounded-md bg-primary/10 px-3 py-2.5">
-                  <span className="text-sm font-bold">Total General del día</span>
-                  <span className="text-base font-extrabold text-success">${(expected?.grand_total ?? 0).toFixed(2)}</span>
+                  <div>
+                    <span className="text-sm font-bold">Total General del día</span>
+                    <p className="text-[11px] text-muted-foreground">
+                      ≈ ${(expected?.grand_total ?? 0).toFixed(2)} USD
+                    </p>
+                  </div>
+                  <span className="text-base font-extrabold tabular-nums">{totalCell(expected?.grand_usd ?? 0, expected?.grand_bs ?? 0)}</span>
                 </div>
               </div>
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
               <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
               <div className="flex items-center gap-3 text-sm">
                 <span>Diferencia:{' '}
                   <span className={`font-bold ${Math.abs(diffBs) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                    {diffBs >= 0 ? '+' : ''}Bs.{diffBs.toFixed(2)}
+                    {diffBs >= 0 ? '+' : ''}{fmtBs(diffBs)}
                   </span>
                 </span>
                 {cuadrado && <span className="text-success font-medium">Cuadrado ✅</span>}
               </div>
               <p className="text-xs text-muted-foreground">Debe dar 0,00 para cuadrar. Si no hay efectivo, escribe 0.</p>
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <p className="text-sm font-medium">Pago Móvil del día</p>
               {pagoMovilList.length === 0 ? (
                 <p className="text-sm text-muted-foreground">Sin pagos móviles hoy</p>
@@ -585,13 +665,13 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     {pagoMovilList.map((p, i) => (
                       <TableRow key={i}>
                         <TableCell className="font-mono">{p.reference ? `····${p.reference.slice(-4)}` : 'Sin referencia'}</TableCell>
-                        <TableCell className="text-right">{p.amount.toFixed(2)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{money(p.amount)}</TableCell>
                         <TableCell>{p.source}</TableCell>
                       </TableRow>
                     ))}
                     <TableRow>
                       <TableCell className="font-medium">Total</TableCell>
-                      <TableCell className="text-right font-bold">{pagoMovilTotal.toFixed(2)}</TableCell>
+                      <TableCell className="text-right font-bold tabular-nums">{money(pagoMovilTotal)}</TableCell>
                       <TableCell />
                     </TableRow>
                   </TableBody>
@@ -599,7 +679,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               )}
             </div>
             <p className="text-xs text-muted-foreground">Los métodos digitales (Punto, Zelle, Pago Móvil, Transf Bs) se registran con los valores esperados del sistema.</p>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Notas</label>
               <Input value={closeNotes} onChange={e => setCloseNotes(e.target.value)}
                 placeholder="Observaciones del cierre..." />
@@ -620,12 +700,12 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           <DialogHeader>
             <DialogTitle>Liquidación Punto: {showSettle?.close_date}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="text-sm space-y-1">
+          <div className="flex flex-col gap-4">
+            <div className="text-sm flex flex-col gap-1">
               <p>Neto esperado: <strong>${(showSettle?.pos_net ?? 0).toFixed(2)}</strong></p>
               <p className="text-muted-foreground">Registra el monto real liquidado por el banco.</p>
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Monto Liquidado ($)</label>
               <MoneyInput value={settleAmount} onChange={setSettleAmount} />
             </div>
@@ -649,15 +729,15 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           <DialogHeader>
             <DialogTitle>{pinStatus ? 'Configurar PIN' : 'Crear PIN de dueño'}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="flex flex-col gap-4">
             {!pinStatus ? (
               <>
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   <label className="text-sm font-medium">PIN nuevo (4 dígitos)</label>
                   <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
                     value={pinNew} onChange={e => setPinNew(digits(e.target.value))} />
                 </div>
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   <label className="text-sm font-medium">Confirmar PIN</label>
                   <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
                     value={pinConfirm} onChange={e => setPinConfirm(digits(e.target.value))} />
@@ -665,7 +745,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               </>
             ) : (
               <>
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   <p className="text-sm font-semibold">Cambiar PIN</p>
                   <label className="text-sm font-medium">PIN actual</label>
                   <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
@@ -678,7 +758,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     value={pinConfirm} onChange={e => setPinConfirm(digits(e.target.value))} />
                   <Button onClick={changePin} className="w-full">Cambiar PIN</Button>
                 </div>
-                <div className="space-y-2 border-t pt-3">
+                <div className="flex flex-col gap-2 border-t pt-3">
                   <p className="text-sm font-semibold">Quitar PIN</p>
                   <label className="text-sm font-medium">PIN actual</label>
                   <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
