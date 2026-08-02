@@ -152,3 +152,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-02: ServiceForm fixes (monto/ci/saldo/moneda)
 // force rebuild 2026-08-02: cards verdes entregados + garantia 7 dias
 // force rebuild 2026-08-02: chips tipo trabajo + card amarilla por entregar
+// force rebuild 2026-08-02: rediseno Total General (split card)

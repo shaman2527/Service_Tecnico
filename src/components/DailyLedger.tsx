@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   BookOpen, CheckCircle2, CreditCard, Download, Landmark, Lock, Play, RefreshCw,
-  RotateCcw, DollarSign, TrendingUp, Smartphone, Banknote, Globe,
+  RotateCcw, DollarSign, TrendingUp, Smartphone, Banknote, Globe, ArrowRightLeft,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import MoneyInput from '@/components/ui/money-input';
@@ -273,6 +274,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const hasZelle = totals.some(t => t.zelle_total > 0);
   const hasTransf = totals.some(t => t.transfer_bs_total > 0);
   const tableCols = 9 + (hasZelle ? 1 : 0) + (hasTransf ? 1 : 0);
+  const diasConMovimientos = totals.filter(t => t.grand_usd > 0.005 || t.grand_bs > 0.005).length;
 
   const diffBs = expected ? cashCounted - expected.cash_bs : 0;
   const cuadrado = expected !== null && Math.abs(diffBs) < 0.5;
@@ -381,26 +383,56 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               accent="bg-success/10 text-success" className="text-success" />
           </div>
 
-          <Card className="border-primary/30 bg-primary/5">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Total General del período
-              </CardTitle>
+          <Card className="overflow-hidden border-primary/30 bg-primary/5">
+            <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-4">
+              <div className="space-y-1">
+                <CardTitle className="text-sm font-semibold">Total General del período</CardTitle>
+                <CardDescription className="text-xs">Ingresos cobrados por moneda</CardDescription>
+              </div>
+              <Badge variant="secondary" className="gap-1.5 tabular-nums shrink-0">
+                <ArrowRightLeft className="size-3" /> ≈ {fmtUsd(sums.grand_total)} USD
+              </Badge>
             </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-x-8 gap-y-2">
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase">USD</p>
-                  <p className="text-3xl font-extrabold tabular-nums text-success">{fmtUsd(sums.grand_usd)}</p>
+            <CardContent className="pb-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-border/60">
+                <div className="flex items-center gap-3 pb-4 sm:pb-0 sm:pr-4">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                    <DollarSign className="size-5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-muted-foreground">Dólares</p>
+                    <p className="text-2xl font-bold tabular-nums text-emerald-600">{fmtUsd(sums.grand_usd)}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase">Bolívares</p>
-                  <p className="text-3xl font-extrabold tabular-nums text-warning">{fmtBs(sums.grand_bs)}</p>
+                <div className="flex items-center gap-3 py-4 sm:py-0 sm:px-4">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning">
+                    <Banknote className="size-5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-muted-foreground">Bolívares</p>
+                    <p className="text-2xl font-bold tabular-nums text-warning">{fmtBs(sums.grand_bs)}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase">Equivalente</p>
-                  <p className="text-xl font-bold tabular-nums">≈ {fmtUsd(sums.grand_total)}</p>
+                <div className="flex items-center gap-3 pt-4 sm:pt-0 sm:pl-4">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <ArrowRightLeft className="size-5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-muted-foreground">Equivalente en USD</p>
+                    <p className="text-2xl font-bold tabular-nums">{fmtUsd(sums.grand_total)}</p>
+                  </div>
                 </div>
+              </div>
+              <Separator className="my-4" />
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>
+                  {diasConMovimientos} día(s) con movimientos
+                </span>
+                <span className="tabular-nums">
+                  {activeDay && activeDay.tasa_bcv > 0
+                    ? `Tasa BCV: Bs ${activeDay.tasa_bcv.toFixed(2)}`
+                    : 'Tasa BCV: —'}
+                </span>
               </div>
             </CardContent>
           </Card>

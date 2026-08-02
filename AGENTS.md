@@ -219,6 +219,7 @@ Antes de hacer commit:
 | 2026-08-02 | **Buscar cédula no encontraba al cliente**: `find_client_by_ci` usaba match EXACTO (`c.ci = ?1`) — "V-24906999" vs "24906999" (o espacios) = no encontrado → el usuario veía "Cliente nuevo" y nada de historial. Además el historial solo se mostraba si había servicios (sin aviso de vacío) y en edición incluía el propio servicio (parecía duplicado). | Backend: búsqueda tolerante a formato con variantes (crudo, solo dígitos vía `norm_ci_digits`, "V-"+dígitos, "E-"+dígitos). Frontend: `normCi()` al buscar; aviso "Sin historial previo de servicios" cuando clientId existe sin servicios; historial excluye el servicio en edición (`filter(s => s.id !== service?.id)`). Verificado vía CDP: findClientByCi con "V-24906999"/"24906999"/"v 24906999" → mismo cliente; nuevo servicio con cédula V- → historial completo. |
 | 2026-08-02 | **Entregados no se distinguían en pantalla + sin base para garantía**: las cards eran todas iguales (solo badge de estado) y `date_out` era manual — al entregar sin poner fecha no existía la fecha de entrega. | Cards: `status='Entregado'` → `border-emerald-500/40 bg-emerald-500/5` (verde clarito) + `CheckCircle2` verde + badge `bg-success`. Garantía 7 días corridos desde `date_out`: backend `update_service` auto-setea `date_out=hoy` al entregar sin fecha y lo LIMPIA al reabrir (la nueva entrega reinicia la garantía); helpers `warrantyEnd`/`warrantyStatus` en utils.ts; badge "Garantía hasta {+7d}" (verde) o "Garantía vencida" (gris) en la card; banner al editar un entregado ("En garantía — vence el X" ámbar / "Garantía vencida" gris). Test `test_service_warranty_dates` (8/8). Verificado vía CDP: ORD-1003 (entregado 01-08) → card verde + "Garantía hasta 2026-08-08" + banner en edición. |
 | 2026-08-02 | **Sin distinción de "Por entregar" ni filtro por tipo de trabajo**: el técnico no podía responder "¿cuántas pantallas tengo por hacer?" — el filtro solo era por estado. | Cards `status='Por entregar'` → `border-amber-500/40 bg-amber-500/5` (amarillo claro) + icono `Clock` ámbar (verde=entregado, amarillo=por entregar, sin color=en taller). Chips contadores por `service_type` (`SERVICE_TYPES` + `ACTIVE_STATUSES` en Services.tsx): "Todos N" + un chip por tipo con conteo de equipos en taller (Recibido→Por entregar, excluye Entregado/Cancelado); click filtra la lista client-side (`visibleServices`, combinable con búsqueda y Select de estado), chip activo resaltado. Verificado vía CDP: chips "Todos 3 · Cambio batería 1 · Cambio conector / puerto 1 · Software / Formateo 1"; click en "Cambio conector / puerto" → 1 card (ORD-1033). |
+| 2026-08-02 | **Card "Total General del período" genérico** (Libro Diario): 3 textos planos (USD/Bs/Equivalente) sin jerarquía visual. | Rediseño split-card con componentes existentes (sin tocar ui/): header con `CardTitle`+`CardDescription` y `Badge` del equivalente (≈ $X USD); cuerpo grid 3 celdas con divisores (`divide-x/y`), cada una con chip de icono semántico (DollarSign emerald / Banknote ámbar / ArrowRightLeft primary) + número `text-2xl tabular-nums`; footer `Separator` + "N día(s) con movimientos" + tasa BCV del día abierto. Verificado vía CDP: Dólares $150.00 · Bolívares Bs.36.386,25 · Equivalente $198.59 · Tasa BCV 748.79. |
 
 ## Feedback Loops
 
@@ -235,8 +236,8 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (npm 2.15s / release 2m39s)**
-- **Registro.exe MD5:** 2C5B6DEF278F3A94965F00A62C94A055
+- **Build: ✅ PASS (npm 2.60s / release 2m50s)**
+- **Registro.exe MD5:** B6C12829BBB6C5711F7338364D303A78
 - **Tests:** 8/8 (incl. test_service_warranty_dates, test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0
