@@ -15,7 +15,6 @@ import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 
 export default function Sales() {
   const [sales, setSales] = useState<Sale[]>([]);
-  const [, setProducts] = useState<Product[]>([]);
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [search, setSearch] = useState('');
   const [period, setPeriod] = useState('todo');
@@ -35,18 +34,20 @@ export default function Sales() {
       start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
       end = now.toISOString().slice(0, 10);
     }
-    const [s, p, m] = await Promise.all([
+    const [s, m] = await Promise.all([
       api.getSales(search, days, start, end),
-      api.getProducts(),
       api.getPaymentMethods(),
     ]);
     setSales(s);
-    setProducts(p);
     setMethods(m);
   };
 
   useEffect(() => { load(); }, []);
-  useEffect(() => { load(); }, [period, search]);
+  // Debounce: la búsqueda solo consulta tras 350ms de inactividad
+  useEffect(() => {
+    const t = setTimeout(load, 350);
+    return () => clearTimeout(t);
+  }, [period, search]);
 
   useEffect(() => {
     api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));

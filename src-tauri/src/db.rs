@@ -617,13 +617,29 @@ impl Database {
         for (sql,) in &defaults {
             conn.execute(sql, [])?;
         }
+        // Índices para queries frecuentes (dashboard, listados, historial, saldo)
+        conn.execute_batch("
+            CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
+            CREATE INDEX IF NOT EXISTS idx_service_payments_service ON service_payments(service_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_movements_product ON inventory_movements(product_id);
+            CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
+            CREATE INDEX IF NOT EXISTS idx_services_client ON services(client_id);
+            CREATE INDEX IF NOT EXISTS idx_daily_closings_closed ON daily_closings(is_closed);
+        ")?;
+        // PRAGMAs de robustez/rendimiento (idempotentes)
+        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;")?;
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
         Ok(())
     }
 
     pub fn next_order_num(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM services", [], |r| r.get(0))?;
-        Ok(format!("ORD-{}", 1000 + count + 1))
+        // Monótono: MAX del número existente (borrar servicios no reutiliza números)
+        let max: Option<i64> = conn.query_row(
+            "SELECT MAX(CAST(SUBSTR(order_num,5) AS INTEGER)) FROM services WHERE order_num LIKE 'ORD-%'",
+            [], |r| r.get(0),
+        ).optional()?;
+        Ok(format!("ORD-{}", max.unwrap_or(999) + 1))
     }
 
     // --- Products ---
@@ -651,7 +667,14 @@ impl Database {
 
     pub fn delete_product(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM products WHERE id=?", params![id])?;
+        conn.execute("DELETE FROM products WHERE id=?", params![id]).map_err(|e| {
+            if let rusqlite::Error::SqliteFailure(f, _) = &e {
+                if f.code == rusqlite::ErrorCode::ConstraintViolation {
+                    return day_shift_error("Producto en uso (ventas, servicios o movimientos) — no se puede eliminar.");
+                }
+            }
+            e
+        })?;
         Ok(())
     }
 
@@ -749,29 +772,34 @@ impl Database {
     pub fn add_sale(&self, product_id: Option<i64>, product_name: &str, quantity: i64, unit_price: f64,
                     total: f64, payment_method: &str, client_name: &str, client_id: Option<i64>, notes: &str,
                     bank_fee_percent: f64, zelle_reference: &str, currency: &str) -> SqlResult<()> {
+        if quantity <= 0 || unit_price < 0.0 || total < 0.0 {
+            return Err(day_shift_error("Cantidad y montos deben ser positivos."));
+        }
         let bank_fee_amount = if bank_fee_percent > 0.0 { total * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = total - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency],
         )?;
-        let sale_id = conn.last_insert_rowid();
+        let sale_id = tx.last_insert_rowid();
         if let Some(pid) = product_id {
-            conn.execute("UPDATE products SET stock = stock - ?1 WHERE id=?2", params![quantity, pid])?;
-            conn.execute(
+            tx.execute("UPDATE products SET stock = stock - ?1 WHERE id=?2", params![quantity, pid])?;
+            tx.execute(
                 "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, 'salida', ?2, 'Venta', ?3)",
                 params![pid, quantity, format!("Venta #{}", sale_id)],
             )?;
         }
         // Update client total_spent and last_purchase
         if let Some(cid) = client_id {
-            conn.execute(
+            tx.execute(
                 "UPDATE clients SET total_spent = total_spent + ?1, last_purchase = datetime('now','localtime') WHERE id=?2",
                 params![total, cid],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1117,8 +1145,9 @@ impl Database {
         if status.as_deref() == Some("Recibido") {
             return Err(day_shift_error("Este pedido ya fue recibido."));
         }
+        let tx = conn.unchecked_transaction()?;
         // Query inline (sin re-tomar el lock)
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT product_id, quantity FROM purchase_order_items WHERE order_id = ?1"
         )?;
         let rows = stmt.query_map(params![order_id], |r| {
@@ -1127,14 +1156,16 @@ impl Database {
         for row in rows {
             let (pid, qty) = row?;
             if let Some(pid) = pid {
-                conn.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![qty, pid])?;
-                conn.execute(
+                tx.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![qty, pid])?;
+                tx.execute(
                     "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, 'entrada', ?2, 'Pedido Recibido', ?3)",
                     params![pid, qty, format!("Pedido #{}", order_id)],
                 )?;
             }
         }
-        conn.execute("UPDATE purchase_orders SET status='Recibido' WHERE id=?1", params![order_id])?;
+        drop(stmt);
+        tx.execute("UPDATE purchase_orders SET status='Recibido' WHERE id=?1", params![order_id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1185,6 +1216,32 @@ impl Database {
         let mut services = Vec::new();
         for row in rows { services.push(row?); }
         Ok(services)
+    }
+
+    pub fn get_service_by_id(&self, id: i64) -> SqlResult<Option<Service>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.client_id, s.paid_amount FROM services s WHERE s.id=?1",
+            params![id],
+            |r| Ok(Service {
+                id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
+                client: r.get(3)?, phone: r.get(4)?, model: r.get(5)?,
+                fault: r.get(6)?, service_type: r.get(7).unwrap_or(None),
+                amount: r.get(8)?, payment_method: r.get(9)?,
+                date_out: r.get(10)?, status: r.get(11)?, observations: r.get(12)?,
+                bank_fee_percent: r.get(13).unwrap_or(0.0),
+                bank_fee_amount: r.get(14).unwrap_or(0.0),
+                net_amount: r.get(15).unwrap_or(0.0),
+                zelle_reference: r.get(16).unwrap_or(None),
+                currency: r.get(17).unwrap_or(Some("USD".into())),
+                client_ci: r.get(18).unwrap_or(None),
+                client_address: r.get(19).unwrap_or(None),
+                device_checklist: r.get(20).unwrap_or(None),
+                client_id: r.get(21).unwrap_or(None),
+                paid_amount: r.get(22).unwrap_or(0.0),
+            }),
+        ).optional()?;
+        Ok(row)
     }
 
     pub fn get_service_dashboard(&self) -> SqlResult<ServiceDashboard> {
@@ -2030,11 +2087,16 @@ impl Database {
             return Err(day_shift_error("Ya hay un día abierto. Ciérralo antes de abrir uno nuevo."));
         }
         conn.execute(
-            "INSERT OR REPLACE INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
-             VALUES (?1,?2,?3,?4,datetime('now','localtime'),0)",
+            "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
+             VALUES (?1,?2,?3,?4,datetime('now','localtime'),0)
+             ON CONFLICT(close_date) DO UPDATE SET
+                initial_cash_usd=excluded.initial_cash_usd, tasa_bcv=excluded.tasa_bcv,
+                tasa_eur=excluded.tasa_eur, opened_at=excluded.opened_at, is_closed=0",
             params![today, initial_cash_usd, tasa_bcv, tasa_eur],
         )?;
-        Ok(conn.last_insert_rowid())
+        // Reabrir un día de hoy previamente cerrado conserva la fila (sin OR REPLACE destructivo)
+        let id: i64 = conn.query_row("SELECT id FROM daily_closings WHERE close_date=?1", params![today], |r| r.get(0))?;
+        Ok(id)
     }
 
     fn require_open_day(&self, conn: &rusqlite::Connection) -> SqlResult<()> {
@@ -2074,15 +2136,21 @@ impl Database {
         let diff_bs = actual_bs - expected_bs;
         let difference = if tasa_bcv > 0.0 { diff_usd + diff_bs / tasa_bcv } else { diff_usd };
 
-        conn.execute(
-            "INSERT OR REPLACE INTO daily_closings (close_date, pos_charged, pos_fees, pos_net, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,datetime('now','localtime'),?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+        let changes = conn.execute(
+            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23
+             WHERE close_date=?1 AND is_closed=0",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
                     t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, t.grand_total, notes,
                     tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
                     actual_zelle, actual_pago_movil, actual_transfer_bs, difference],
         )?;
-        Ok(conn.last_insert_rowid())
+        if changes == 0 {
+            return Err(day_shift_error("No hay un día abierto con esa fecha para cerrar."));
+        }
+        let id: i64 = conn.query_row(
+            "SELECT id FROM daily_closings WHERE close_date=?1", params![close_date], |r| r.get(0),
+        )?;
+        Ok(id)
     }
 
     pub fn reopen_day(&self, close_date: &str) -> SqlResult<()> {
@@ -2100,7 +2168,7 @@ impl Database {
     // --- Export/Import ---
     pub fn export_data(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        let tables = ["categories", "products", "clients", "sales", "services", "inventory_movements", "payment_methods", "service_statuses", "daily_closings"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings"];
         let mut map = serde_json::Map::new();
         for table in &tables {
             let sql = format!("SELECT * FROM {}", table);
@@ -2130,14 +2198,28 @@ impl Database {
         let data: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(e))
         })?;
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "inventory_movements"];
+        // Orden respeta las FK: catálogos → productos → clientes → ventas/servicios → pagos → movimientos → pedidos → cierres
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings"];
+
+        // Validar columnas del JSON contra el schema real (anti inyección SQL por nombre de columna)
+        let valid_columns: std::collections::HashMap<String, Vec<String>> = tables.iter().map(|t| {
+            let mut st = conn.prepare(&format!("PRAGMA table_info({})", t)).unwrap();
+            let cols: Vec<String> = st.query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.filter_map(|x| x.ok()).collect())
+                .unwrap_or_default();
+            (t.to_string(), cols)
+        }).collect();
 
         let tx = conn.unchecked_transaction()?;
         for table in &tables {
             if let Some(arr) = data.get(*table).and_then(|v| v.as_array()) {
+                let valid = valid_columns.get(*table).cloned().unwrap_or_default();
                 for row in arr {
                     if let Some(obj) = row.as_object() {
-                        let cols: Vec<&str> = obj.keys().filter(|k| *k != "id").map(|k| k.as_str()).collect();
+                        let cols: Vec<&str> = obj.keys()
+                            .filter(|k| *k != "id" && valid.iter().any(|v| v == *k))
+                            .map(|k| k.as_str())
+                            .collect();
                         if cols.is_empty() { continue; }
 
                         if merge && obj.contains_key("name") && (*table == "categories" || *table == "payment_methods" || *table == "service_statuses") {

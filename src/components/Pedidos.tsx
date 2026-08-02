@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { api } from '../db';
 import type { Product, PurchaseOrder, PurchaseOrderItem } from '../types';
 
@@ -21,6 +22,7 @@ export default function Pedidos() {
   const [suggestions, setSuggestions] = useState<Product[]>([]);
   const [detailOrder, setDetailOrder] = useState<PurchaseOrder | null>(null);
   const [detailItems, setDetailItems] = useState<PurchaseOrderItem[]>([]);
+  const [deleting, setDeleting] = useState<PurchaseOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -101,6 +103,7 @@ export default function Pedidos() {
   const remove = async (o: PurchaseOrder) => {
     await api.deletePurchaseOrder(o.id);
     if (detailOrder?.id === o.id) setDetailOrder(null);
+    setDeleting(null);
     await load();
   };
 
@@ -247,7 +250,7 @@ export default function Pedidos() {
                             <Truck className="size-3.5" /> Recibido
                           </Button>
                         )}
-                        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger" onClick={() => remove(o)}>
+                        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger" onClick={() => setDeleting(o)}>
                           <Trash2 className="size-3.5" />
                         </Button>
                       </div>
@@ -383,6 +386,25 @@ export default function Pedidos() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deleting} onOpenChange={() => setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar pedido #{deleting?.id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleting?.status === 'Recibido'
+                ? 'Este pedido ya fue recibido y sumó stock al inventario. El registro se eliminará, pero el stock ya descontado no se revierte.'
+                : 'El pedido y sus artículos se eliminarán de forma permanente. Esta acción no se puede deshacer.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => deleting && remove(deleting)}>
+              Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

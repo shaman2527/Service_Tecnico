@@ -1,23 +1,25 @@
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
   PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
 } from 'lucide-react';
-import Dashboard from './components/Dashboard';
-import Sales from './components/Sales';
-import Services from './components/Services';
-import Inventory from './components/Inventory';
-import Clients from './components/Clients';
-import DailyLedger from './components/DailyLedger';
-import Catalog from './components/Catalog';
-import Help from './components/Help';
-import Pedidos from './components/Pedidos';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import { api } from './db';
 import { cn } from './lib/utils';
 import './index.css';
+
+// Lazy: cada pantalla es un chunk separado → arranque más rápido en PCs de bajos recursos
+const Dashboard = lazy(() => import('./components/Dashboard'));
+const Sales = lazy(() => import('./components/Sales'));
+const Services = lazy(() => import('./components/Services'));
+const Inventory = lazy(() => import('./components/Inventory'));
+const Clients = lazy(() => import('./components/Clients'));
+const DailyLedger = lazy(() => import('./components/DailyLedger'));
+const Catalog = lazy(() => import('./components/Catalog'));
+const Help = lazy(() => import('./components/Help'));
+const Pedidos = lazy(() => import('./components/Pedidos'));
 
 type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas' | 'pedidos' | 'ayuda';
 
@@ -175,15 +177,17 @@ function App() {
 
       <main className="flex-1 overflow-y-auto bg-background">
         <div className="max-w-7xl mx-auto px-10 py-8">
-          {tab === 'dashboard' && <Dashboard />}
-          {tab === 'ventas' && <Sales />}
-          {tab === 'servicios' && <Services />}
-          {tab === 'inventario' && <Inventory />}
-          {tab === 'pantallas' && <Catalog />}
-          {tab === 'pedidos' && <Pedidos />}
-          {tab === 'clientes' && <Clients />}
-          {tab === 'libro' && <DailyLedger role={role} />}
-          {tab === 'ayuda' && <Help />}
+          <Suspense fallback={<div className="flex items-center justify-center py-24 text-sm text-muted-foreground">Cargando…</div>}>
+            {tab === 'dashboard' && <Dashboard />}
+            {tab === 'ventas' && <Sales />}
+            {tab === 'servicios' && <Services />}
+            {tab === 'inventario' && <Inventory />}
+            {tab === 'pantallas' && <Catalog />}
+            {tab === 'pedidos' && <Pedidos />}
+            {tab === 'clientes' && <Clients />}
+            {tab === 'libro' && <DailyLedger role={role} />}
+            {tab === 'ayuda' && <Help />}
+          </Suspense>
         </div>
       </main>
     </div>

@@ -118,10 +118,8 @@ pub fn get_services(db: State<Database>, search: String, status: String) -> Resu
 
 #[tauri::command]
 pub fn get_service(db: State<Database>, id: i64) -> Result<crate::db::Service, String> {
-    db.get_services("", "")
+    db.get_service_by_id(id)
         .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|s| s.id == id)
         .ok_or_else(|| "Servicio no encontrado".to_string())
 }
 

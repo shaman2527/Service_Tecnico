@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search, Smartphone, Pencil } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -39,18 +39,19 @@ export default function Catalog() {
   useEffect(() => { load(); }, []);
 
   const q = search.trim().toLowerCase();
-  const filtered = q.length === 0
-    ? products
-    : products.filter(p => {
-        const compat = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
-        const hay = [p.name, p.brand ?? '', p.model ?? '', p.variant ?? '', ...compat].join(' ').toLowerCase();
-        return hay.includes(q);
-      });
+  const filtered = useMemo(() => {
+    if (q.length === 0) return products;
+    return products.filter(p => {
+      const compat = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
+      const hay = [p.name, p.brand ?? '', p.model ?? '', p.variant ?? '', ...compat].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [products, q]);
 
-  const shown = catFilter === '' ? filtered : filtered.filter(p => p.category_id === catFilter);
+  const shown = useMemo(() => (catFilter === '' ? filtered : filtered.filter(p => p.category_id === catFilter)), [filtered, catFilter]);
 
   const total = shown.length;
-  const withCompat = shown.filter(p => parseCompat(p.compatibility).length > 0).length;
+  const withCompat = useMemo(() => shown.filter(p => parseCompat(p.compatibility).length > 0).length, [shown]);
 
   return (
     <div className="flex flex-col gap-6">

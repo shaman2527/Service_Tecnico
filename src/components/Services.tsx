@@ -47,6 +47,16 @@ export function checklistSummary(json: string | null | undefined): string {
   return `${total} de ${CHECKLIST_ITEMS.length} ítems revisados`;
 }
 
+function SectionTitle({ step, title }: { step: number; title: string }) {
+  return (
+    <div className="flex items-center gap-2 pt-1">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-bold">{step}</span>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+      <div className="h-px flex-1 bg-border/70" />
+    </div>
+  );
+}
+
 export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
@@ -67,7 +77,11 @@ export default function Services() {
   };
 
   useEffect(() => { load(); }, []);
-  useEffect(() => { load(); }, [search, statusFilter]);
+  // Debounce: la búsqueda solo consulta tras 350ms de inactividad
+  useEffect(() => {
+    const t = setTimeout(load, 350);
+    return () => clearTimeout(t);
+  }, [search, statusFilter]);
 
   useEffect(() => {
     api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
@@ -310,7 +324,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [amount, setAmount] = useState(0);
   const [payment, setPayment] = useState('Divisas (USD Cash)');
   const [dateOut, setDateOut] = useState('');
-  const [status, setStatus] = useState('Por entregar');
+  const [status, setStatus] = useState('Recibido');
   const [observations, setObservations] = useState('');
   const [checklist, setChecklist] = useState<Record<string, string>>({});
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
@@ -561,9 +575,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             Orden: <strong>{orderNum}</strong>
           </div>
 
+          <SectionTitle step={1} title="Cliente" />
           {!service && (
             <div className="rounded-lg border border-border/70 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-semibold">1. ¿Cliente nuevo o existente?</p>
+              <p className="text-sm font-semibold">¿Cliente nuevo o existente?</p>
               <div className="flex gap-2">
                 <Input value={ciSearch}
                   onChange={e => { setCiSearch(e.target.value); setCiSearched(false); setCiLookup(null); setCiError(null); }}
@@ -732,6 +747,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           )}
 
+          <SectionTitle step={2} title="Equipo y diagnóstico" />
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Modelo *</label>
@@ -800,12 +816,19 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
           </div>
 
+          <SectionTitle step={3} title="Blindaje del equipo" />
           <div className="space-y-2">
-            <label className="text-sm font-medium">Estado del equipo al recibir (blindaje)</label>
-            <p className="text-xs text-muted-foreground">
-              Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
-            </p>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-muted-foreground">
+                Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
+              </p>
+              <Button type="button" size="sm" variant="outline" className="shrink-0"
+                onClick={() => setChecklist(Object.fromEntries(CHECKLIST_ITEMS.map(i => [i.key, 'si'])))}
+                disabled={CHECKLIST_ITEMS.every(i => checklist[i.key] === 'si')}>
+                Marcar todo Sí
+              </Button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {CHECKLIST_ITEMS.map(item => {
                 const val = checklist[item.key] ?? '';
                 return (
@@ -831,6 +854,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          <SectionTitle step={4} title="Finanzas y estado" />
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Método de Pago</label>
@@ -895,6 +919,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
           {service && (
             <>
+              <SectionTitle step={5} title="Cierre de la orden" />
               <div className="space-y-2">
                 <label className="text-sm font-medium">Fecha Salida</label>
                 <Input type="date" value={dateOut} onChange={e => setDateOut(e.target.value)} />

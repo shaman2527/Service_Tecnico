@@ -16,15 +16,38 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 
 const mock = <T>(val: T): Promise<T> => Promise.resolve(val);
 
+// Cache estática: métodos/estados no cambian durante la sesión (evita invoke duplicados)
+let cachedMethods: PaymentMethod[] | null = null;
+let cachedStatuses: ServiceStatus[] | null = null;
+let cachedCategories: Category[] | null = null;
+
 export const api = {
-  getCategories: () => tauriInvoke<Category[]>('get_categories').catch(() =>
-    mock<Category[]>([{ id: 1, name: 'Pantalla', description: null }])),
+  getCategories: () => {
+    if (cachedCategories) return mock(cachedCategories);
+    return tauriInvoke<Category[]>('get_categories').then(c => {
+      cachedCategories = c;
+      return c;
+    }).catch(() =>
+      mock<Category[]>([{ id: 1, name: 'Pantalla', description: null }]));
+  },
 
-  getPaymentMethods: () => tauriInvoke<PaymentMethod[]>('get_payment_methods').catch(() =>
-    mock<PaymentMethod[]>([{ id: 1, name: 'Efectivo' }])),
+  getPaymentMethods: () => {
+    if (cachedMethods) return mock(cachedMethods);
+    return tauriInvoke<PaymentMethod[]>('get_payment_methods').then(m => {
+      cachedMethods = m;
+      return m;
+    }).catch(() =>
+      mock<PaymentMethod[]>([{ id: 1, name: 'Efectivo' }]));
+  },
 
-  getServiceStatuses: () => tauriInvoke<ServiceStatus[]>('get_service_statuses').catch(() =>
-    mock<ServiceStatus[]>([{ id: 1, name: 'Pendiente' }])),
+  getServiceStatuses: () => {
+    if (cachedStatuses) return mock(cachedStatuses);
+    return tauriInvoke<ServiceStatus[]>('get_service_statuses').then(s => {
+      cachedStatuses = s;
+      return s;
+    }).catch(() =>
+      mock<ServiceStatus[]>([{ id: 1, name: 'Pendiente' }]));
+  },
 
   nextOrderNum: () => tauriInvoke<string>('next_order_num').catch(() =>
     mock<string>('DEV-0001')),
