@@ -212,6 +212,8 @@ Antes de hacer commit:
 | 2026-08-02 | **ServiceForm plano sin secciones**: ~25 campos seguidos, "1." sin "2.", checklist 1 columna, default status 'Por entregar', borrado de pedidos sin confirmación. | Form en 5 secciones numeradas (1 Cliente, 2 Equipo y diagnóstico, 3 Blindaje, 4 Finanzas y estado, 5 Cierre de la orden en edición) con `SectionTitle` (círculo numerado + línea); checklist en grid 2 columnas + botón "Marcar todo Sí" (10 toggles on verificado vía CDP); default status "Recibido"; AlertDialog de confirmación en Pedidos (aviso especial si el pedido ya fue recibido). |
 | 2026-08-02 | **Libro Diario sumaba Bs como USD — "$2076" falsos**: `grand_total = pos_net + cash_usd + cash_bs + zelle_total + ...` (db.rs) sumaba montos Bs (Pago Móvil 1056, Efectivo Bs 1000, Transf Bs 20) al total en USD → Total General $2076.25 cuando lo real era ~$2.77. Además 2 ventas históricas (Tecno SPARK 56.25 PM, Apple 11 PRO 20 Transf Bs) quedaron con currency='USD' por bug del frontend viejo, y la UI mostraba columnas Comisión/Cash/Zelle que el usuario no usa. | Backend: `compute_daily_totals` extraído (helper conn-level reutilizable, sin re-lock); moneda SIEMPRE derivada del método vía `normalize_payment_currency` en el query; nuevos campos `grand_usd`/`grand_bs`/`tasa_bcv` en DailyTotals; `grand_total = grand_usd + grand_bs/tasa` (tasa del cierre del día, fallback día abierto); `close_day` guarda `total_usd`/`total_bs` (ALTER TABLE) + grand_total correcto; migración init() corrige sales/services Bs→VES y RECALCULA todos los cierres históricos con su propia tasa (idempotente); CSV exporta "Total General USD/Bs/equiv". Test `test_daily_totals_currency` (7/7). Frontend: KPIs por método (Neto Punto, Pago Móvil, Efectivo Bs, Divisas $), Total General con desglose "$X + Bs. Y" + equivalente, tabla diaria `Fecha | Punto Cargado/Comisión/Neto | Pago Móvil | Efectivo Bs | Divisas $ | [Zelle] | [Transf Bs] | Tasa BCV | Total ($ + Bs.)` con Zelle/Transf SOLO si hay movimientos + fila de TOTALES al pie; cierres con Punto Neto/Liquidado/PM/Efectivo Bs/Divisas/Tasa/Total desglose/Diferencia; dialog de cierre sin columnas innecesarias. Verificado en vivo vía CDP: 01-08 → "Bs.2.076,25" (PM 1.056,25 + Efectivo 1.000 + Transf 20), Total "Bs.2.086,25", grand_total 2.77, cierre id5 total_bs=2076.25, ventas corregidas VES. |
 
+| 2026-08-02 | **Modal de cerrar día fuera de pantalla**: DialogContent sin max-h → el contenido (métodos + PM + notas + botones) crecía sin límite y los botones Cerrar Día/Cancelar quedaban fuera del viewport (no se podía cerrar). | DialogContent `sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden`; DialogHeader + DialogFooter `shrink-0` (footer fijo con border-t, botones siempre visibles); cuerpo `min-h-0 flex-1 overflow-y-auto` (scroll interno); métodos en grid 2 columnas (Total General col-span-2); tabla Pago Móvil con `max-h-44 overflow-y-auto`. Verificado vía CDP: dialog 45–704px dentro de viewport 749px, botones en 643–679px visibles. |
+
 ## Feedback Loops
 
 1. **Build → Verify:** Tras cada build release, verificar que CSS variables estén en el output.
@@ -227,8 +229,8 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (npm 3.24s / release 3m30s)**
-- **Registro.exe MD5:** 756FBB6BFB7268C83044BCC1412C14BD
+- **Build: ✅ PASS (npm 4.28s / release 3m53s)**
+- **Registro.exe MD5:** 5F147F68CC48895DE4ED1C07F7943A8C
 - **Tests:** 7/7 (incl. test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0

@@ -594,14 +594,14 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       </Dialog>
 
       <Dialog open={showClose} onOpenChange={setShowClose}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Cerrar Día: {activeDay?.close_date}</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <div>
               <p className="text-sm font-semibold mb-2">Cobros del día por método</p>
-              <div className="flex flex-col gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <MethodRow icon={<DollarSign className="size-3.5" />} label="Divisas (USD Cash)"
                   detail="Dinero en efectivo dólares" value={fmtUsd((expected?.usd_cash_total ?? 0) + (expected?.cash_usd ?? 0))}
                   valueClass="text-success" />
@@ -624,7 +624,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     detail="Transferencias bancarias en bolívares" value={fmtBs(expected?.transfer_bs_total ?? 0)}
                     valueClass="text-warning" />
                 )}
-                <div className="flex items-center justify-between rounded-md bg-primary/10 px-3 py-2.5">
+                <div className="flex items-center justify-between rounded-md bg-primary/10 px-3 py-2.5 sm:col-span-2">
                   <div>
                     <span className="text-sm font-bold">Total General del día</span>
                     <p className="text-[11px] text-muted-foreground">
@@ -653,29 +653,31 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               {pagoMovilList.length === 0 ? (
                 <p className="text-sm text-muted-foreground">Sin pagos móviles hoy</p>
               ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Referencia</TableHead>
-                      <TableHead className="text-right">Monto (Bs.)</TableHead>
-                      <TableHead>Origen</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pagoMovilList.map((p, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="font-mono">{p.reference ? `····${p.reference.slice(-4)}` : 'Sin referencia'}</TableCell>
-                        <TableCell className="text-right tabular-nums">{money(p.amount)}</TableCell>
-                        <TableCell>{p.source}</TableCell>
+                <div className="max-h-44 overflow-y-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Referencia</TableHead>
+                        <TableHead className="text-right">Monto (Bs.)</TableHead>
+                        <TableHead>Origen</TableHead>
                       </TableRow>
-                    ))}
-                    <TableRow>
-                      <TableCell className="font-medium">Total</TableCell>
-                      <TableCell className="text-right font-bold tabular-nums">{money(pagoMovilTotal)}</TableCell>
-                      <TableCell />
-                    </TableRow>
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {pagoMovilList.map((p, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="font-mono">{p.reference ? `····${p.reference.slice(-4)}` : 'Sin referencia'}</TableCell>
+                          <TableCell className="text-right tabular-nums">{money(p.amount)}</TableCell>
+                          <TableCell>{p.source}</TableCell>
+                        </TableRow>
+                      ))}
+                      <TableRow>
+                        <TableCell className="font-medium">Total</TableCell>
+                        <TableCell className="text-right font-bold tabular-nums">{money(pagoMovilTotal)}</TableCell>
+                        <TableCell />
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                </div>
               )}
             </div>
             <p className="text-xs text-muted-foreground">Los métodos digitales (Punto, Zelle, Pago Móvil, Transf Bs) se registran con los valores esperados del sistema.</p>
@@ -686,7 +688,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             </div>
             {closeError && <p className="text-sm text-danger">{closeError}</p>}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowClose(false)}>Cancelar</Button>
             <Button onClick={doClose}>
               <Lock className="size-4" /> Cerrar Día
