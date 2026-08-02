@@ -1,24 +1,42 @@
-import { useEffect, useState, type ChangeEvent } from 'react';
-import { BookOpen, CheckCircle2, Lock, Play, RefreshCw, RotateCcw, DollarSign, TrendingUp } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import {
+  BookOpen, CheckCircle2, CreditCard, Download, Landmark, Lock, Play, RefreshCw,
+  RotateCcw, DollarSign, TrendingUp, Smartphone, Banknote, Globe,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail } from '../types';
 
-function SummaryItem({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+function MethodRow({ icon, label, detail, value, valueClass }: {
+  icon: React.ReactNode; label: string; detail?: string; value: string; valueClass?: string;
+}) {
   return (
-    <div className="rounded-md border bg-muted/50 px-2 py-1.5">
-      <div className="text-[11px] text-muted-foreground uppercase tracking-wide">{label}</div>
-      <div className={`text-sm font-semibold ${valueClass ?? ''}`}>{value}</div>
+    <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2">
+      <div className="flex items-center gap-2.5">
+        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-background text-muted-foreground">
+          {icon}
+        </span>
+        <div>
+          <div className="text-sm font-medium leading-tight">{label}</div>
+          {detail && <div className="text-[11px] text-muted-foreground leading-tight">{detail}</div>}
+        </div>
+      </div>
+      <div className={`text-sm font-bold ${valueClass ?? ''}`}>{value}</div>
     </div>
   );
 }
 
-export default function DailyLedger() {
+const digits = (v: string) => v.replace(/\D/g, '').slice(0, 4);
+
+export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+  const isOwner = role === 'owner';
+  const today = new Date().toISOString().slice(0, 10);
   const [tab, setTab] = useState<'diario' | 'cierres'>('diario');
   const [startDate, setStartDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 30);
@@ -36,17 +54,26 @@ export default function DailyLedger() {
   const [bcvError, setBcvError] = useState(false);
   const [showClose, setShowClose] = useState(false);
   const [expected, setExpected] = useState<DailyTotals | null>(null);
+  const [cashCounted, setCashCounted] = useState(0);
+  const [pagoMovilList, setPagoMovilList] = useState<PagoMovilDetail[]>([]);
   const [closeNotes, setCloseNotes] = useState('');
   const [closeError, setCloseError] = useState<string | null>(null);
-  const [arqueo, setArqueo] = useState({
-    actualCashUsd: 0, actualCashBs: 0, actualPuntoUsd: 0, actualPuntoBs: 0,
-    actualZelle: 0, actualPagoMovil: 0, actualTransferBs: 0,
-  });
   const [showSettle, setShowSettle] = useState<DailyClosing | null>(null);
   const [settleAmount, setSettleAmount] = useState(0);
+  const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [pinStatus, setPinStatus] = useState(false);
+  const [showPinDialog, setShowPinDialog] = useState(false);
+  const [pinNew, setPinNew] = useState('');
+  const [pinConfirm, setPinConfirm] = useState('');
+  const [pinCurrent, setPinCurrent] = useState('');
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  const effectiveTab = isOwner ? tab : 'diario';
+  const effectiveStart = isOwner ? startDate : today;
+  const effectiveEnd = isOwner ? endDate : today;
 
   const loadTotals = async () => {
-    setTotals(await api.getDailyTotals(startDate, endDate));
+    setTotals(await api.getDailyTotals(effectiveStart, effectiveEnd));
   };
 
   const loadClosings = async () => {
@@ -61,12 +88,12 @@ export default function DailyLedger() {
     }
   };
 
-  useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate]);
+  useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner]);
   useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
   useEffect(() => { refreshActiveDay(); }, []);
-
-  const setArq = (key: keyof typeof arqueo) => (e: ChangeEvent<HTMLInputElement>) =>
-    setArqueo(a => ({ ...a, [key]: Number(e.target.value) }));
+  useEffect(() => {
+    api.getPinStatus().then(setPinStatus).catch(() => setPinStatus(false));
+  }, []);
 
   const doOpen = async () => {
     setOpenError(null);
@@ -97,21 +124,17 @@ export default function DailyLedger() {
     setShowClose(true);
     setCloseNotes('');
     setCloseError(null);
+    setPagoMovilList([]);
     try {
       const dayTotals = await api.getDailyTotals(activeDay.close_date, activeDay.close_date);
       const t = dayTotals[0] ?? null;
       setExpected(t);
-      setArqueo({
-        actualCashUsd: t?.usd_cash_total ?? 0,
-        actualCashBs: t?.cash_bs ?? 0,
-        actualPuntoUsd: t?.pos_charged ?? 0,
-        actualPuntoBs: 0,
-        actualZelle: t?.zelle_total ?? 0,
-        actualPagoMovil: t?.pago_movil_total ?? 0,
-        actualTransferBs: t?.transfer_bs_total ?? 0,
-      });
+      setCashCounted(t?.cash_bs ?? 0);
+      const pms = await api.getPagoMovilDetail(activeDay.close_date);
+      setPagoMovilList(pms);
     } catch {
       setExpected(null);
+      setCashCounted(0);
     }
   };
 
@@ -122,8 +145,11 @@ export default function DailyLedger() {
       await api.closeDay(
         activeDay.close_date, closeNotes,
         activeDay.initial_cash_usd, activeDay.tasa_bcv, activeDay.tasa_eur,
-        arqueo.actualCashUsd, arqueo.actualCashBs, arqueo.actualPuntoUsd, arqueo.actualPuntoBs,
-        arqueo.actualZelle, arqueo.actualPagoMovil, arqueo.actualTransferBs
+        expected?.usd_cash_total ?? 0, cashCounted,
+        expected?.pos_charged ?? 0, 0,
+        expected?.zelle_total ?? 0,
+        expected?.pago_movil_total ?? 0,
+        expected?.transfer_bs_total ?? 0
       );
       setShowClose(false);
       refreshActiveDay();
@@ -135,19 +161,71 @@ export default function DailyLedger() {
   };
 
   const doSettle = async () => {
-    if (!showSettle) return;
+    if (!showSettle || !isOwner) return;
     await api.updateDailyClosingSettlement(showSettle.id, settleAmount);
     setShowSettle(null);
     loadClosings();
   };
 
+  const doExport = async () => {
+    setExportMsg(null);
+    try {
+      const date = activeDay?.close_date ?? today;
+      const path = await api.exportDailyReport(date);
+      setExportMsg({ ok: true, text: `Reporte exportado: ${path}` });
+    } catch (e) {
+      setExportMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const savePin = async () => {
+    setPinError(null);
+    if (pinNew.length !== 4) { setPinError('El PIN debe tener 4 dígitos'); return; }
+    if (pinNew !== pinConfirm) { setPinError('Los PIN no coinciden'); return; }
+    try {
+      await api.setPin(pinNew);
+      setPinStatus(true);
+      setShowPinDialog(false);
+      setPinNew(''); setPinConfirm(''); setPinCurrent('');
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const changePin = async () => {
+    setPinError(null);
+    if (pinCurrent.length !== 4) { setPinError('El PIN actual debe tener 4 dígitos'); return; }
+    if (pinNew.length !== 4) { setPinError('El PIN nuevo debe tener 4 dígitos'); return; }
+    if (pinNew !== pinConfirm) { setPinError('Los PIN no coinciden'); return; }
+    try {
+      const ok = await api.verifyPin(pinCurrent);
+      if (!ok) { setPinError('PIN actual incorrecto'); return; }
+      await api.setPin(pinNew);
+      setShowPinDialog(false);
+      setPinNew(''); setPinConfirm(''); setPinCurrent('');
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const doRemovePin = async () => {
+    setPinError(null);
+    if (pinCurrent.length !== 4) { setPinError('Ingresa el PIN actual (4 dígitos)'); return; }
+    try {
+      const ok = await api.removePin(pinCurrent);
+      if (!ok) { setPinError('PIN incorrecto'); return; }
+      setPinStatus(false);
+      setShowPinDialog(false);
+      setPinNew(''); setPinConfirm(''); setPinCurrent('');
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const grandTotal = totals.reduce((a, t) => a + t.grand_total, 0);
-  const diffUsd = expected
-    ? (arqueo.actualCashUsd + arqueo.actualZelle + arqueo.actualPuntoUsd) - (expected.usd_cash_total + expected.zelle_total + expected.pos_charged)
-    : 0;
-  const diffBs = expected
-    ? (arqueo.actualCashBs + arqueo.actualPagoMovil + arqueo.actualTransferBs + arqueo.actualPuntoBs) - (expected.cash_bs + expected.pago_movil_total + expected.transfer_bs_total)
-    : 0;
+  const diffBs = expected ? cashCounted - expected.cash_bs : 0;
+  const cuadrado = expected !== null && Math.abs(diffBs) < 0.5;
+  const pagoMovilTotal = pagoMovilList.reduce((a, p) => a + p.amount, 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -157,14 +235,39 @@ export default function DailyLedger() {
           <p className="text-sm text-muted-foreground mt-1">Control financiero y cierre diario</p>
         </div>
         <div className="flex gap-2">
-          <Button variant={tab === 'diario' ? 'default' : 'outline'} onClick={() => setTab('diario')}>
+          {isOwner && (
+            <>
+              <Button variant="outline" onClick={doExport}>
+                <Download className="size-4" /> Exportar Excel
+              </Button>
+              <Button variant="outline" onClick={() => {
+                setShowPinDialog(true);
+                setPinError(null);
+                setPinNew(''); setPinConfirm(''); setPinCurrent('');
+              }}>
+                <Lock className="size-4" /> PIN
+              </Button>
+            </>
+          )}
+          <Button variant={effectiveTab === 'diario' ? 'default' : 'outline'} onClick={() => setTab('diario')}>
             <BookOpen className="size-4" /> Diario
           </Button>
-          <Button variant={tab === 'cierres' ? 'default' : 'outline'} onClick={() => setTab('cierres')}>
-            <Lock className="size-4" /> Cierres
-          </Button>
+          {isOwner && (
+            <Button variant={tab === 'cierres' ? 'default' : 'outline'} onClick={() => setTab('cierres')}>
+              <Lock className="size-4" /> Cierres
+            </Button>
+          )}
         </div>
       </div>
+
+      {isOwner && exportMsg && (
+        <p className={exportMsg.ok
+          ? 'flex items-center gap-2 text-sm text-success'
+          : 'text-sm text-danger'}>
+          {exportMsg.ok && <CheckCircle2 className="size-4" />}
+          {exportMsg.text}
+        </p>
+      )}
 
       {activeDay ? (
         <div className="flex items-center justify-between gap-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
@@ -198,19 +301,21 @@ export default function DailyLedger() {
         </div>
       )}
 
-      {tab === 'diario' && (
-        <>
-          <div className="flex items-center gap-2">
-            <Input type="date" value={startDate}
-              onChange={e => setStartDate(e.target.value)} className="w-44" />
-            <span className="text-muted-foreground">→</span>
-            <Input type="date" value={endDate}
-              onChange={e => setEndDate(e.target.value)} className="w-44" />
-            <Button onClick={loadTotals} variant="outline">
-              <TrendingUp className="size-4" /> Actualizar
-            </Button>
-          </div>
+      {isOwner && effectiveTab === 'diario' && (
+        <div className="flex items-center gap-2">
+          <Input type="date" value={startDate}
+            onChange={e => setStartDate(e.target.value)} className="w-44" />
+          <span className="text-muted-foreground">→</span>
+          <Input type="date" value={endDate}
+            onChange={e => setEndDate(e.target.value)} className="w-44" />
+          <Button onClick={loadTotals} variant="outline">
+            <TrendingUp className="size-4" /> Actualizar
+          </Button>
+        </div>
+      )}
 
+      {effectiveTab === 'diario' && (
+        <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Card>
               <CardHeader className="pb-2">
@@ -295,7 +400,7 @@ export default function DailyLedger() {
         </>
       )}
 
-      {tab === 'cierres' && (
+      {effectiveTab === 'cierres' && (
         <Card>
           <CardContent className="p-0">
             <Table>
@@ -388,8 +493,7 @@ export default function DailyLedger() {
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Efectivo de apertura ($)</label>
-              <Input type="number" step={0.01} min={0} value={openInitial}
-                onChange={e => setOpenInitial(Number(e.target.value))} />
+              <MoneyInput value={openInitial} onChange={setOpenInitial} />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Tasa Bs/USD</label>
@@ -426,62 +530,75 @@ export default function DailyLedger() {
             <DialogTitle>Cerrar Día: {activeDay?.close_date}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-2">
-              <SummaryItem label="Punto $" value={`$${(expected?.pos_charged ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Comisión" value={`$${(expected?.pos_fees ?? 0).toFixed(2)}`} valueClass="text-danger" />
-              <SummaryItem label="Neto Punto" value={`$${(expected?.pos_net ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Efectivo $" value={`$${(expected?.usd_cash_total ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Efectivo Bs" value={`Bs.${(expected?.cash_bs ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Zelle" value={`$${(expected?.zelle_total ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Pago Móvil" value={`Bs.${(expected?.pago_movil_total ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Transf Bs" value={`Bs.${(expected?.transfer_bs_total ?? 0).toFixed(2)}`} />
-              <SummaryItem label="Total General" value={`$${(expected?.grand_total ?? 0).toFixed(2)}`} valueClass="text-success" />
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm font-medium">Arqueo de caja (valores reales)</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Efectivo USD ($)</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualCashUsd} onChange={setArq('actualCashUsd')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Efectivo Bs</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualCashBs} onChange={setArq('actualCashBs')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Punto $</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualPuntoUsd} onChange={setArq('actualPuntoUsd')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Punto Bs</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualPuntoBs} onChange={setArq('actualPuntoBs')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Zelle</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualZelle} onChange={setArq('actualZelle')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Pago Móvil</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualPagoMovil} onChange={setArq('actualPagoMovil')} />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Transf Bs</label>
-                  <Input type="number" step={0.01} min={0} value={arqueo.actualTransferBs} onChange={setArq('actualTransferBs')} />
+            <div>
+              <p className="text-sm font-semibold mb-2">Cobros del día por método</p>
+              <div className="flex flex-col gap-2">
+                <MethodRow icon={<DollarSign className="size-3.5" />} label="Divisas (USD Cash)"
+                  detail="Dinero en efectivo dólares" value={`$${(expected?.usd_cash_total ?? 0).toFixed(2)}`} />
+                <MethodRow icon={<Banknote className="size-3.5" />} label="Efectivo Bs"
+                  detail="Bolívares en caja — se cuenta abajo" value={`Bs.${(expected?.cash_bs ?? 0).toFixed(2)}`}
+                  valueClass="text-warning" />
+                <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta ($ + Bs)"
+                  detail={`Cobrado $${(expected?.pos_charged ?? 0).toFixed(2)} · Comisión -$${(expected?.pos_fees ?? 0).toFixed(2)} → Neto $${(expected?.pos_net ?? 0).toFixed(2)}`}
+                  value={`$${(expected?.pos_net ?? 0).toFixed(2)}`} valueClass="text-success" />
+                <MethodRow icon={<Globe className="size-3.5" />} label="Transferencia Zelle"
+                  detail="Cobros por Zelle en USD" value={`$${(expected?.zelle_total ?? 0).toFixed(2)}`} />
+                <MethodRow icon={<Smartphone className="size-3.5" />} label="Pago Móvil"
+                  detail={`${pagoMovilList.length} pago(s) por referencia`}
+                  value={`Bs.${(expected?.pago_movil_total ?? 0).toFixed(2)}`} valueClass="text-warning" />
+                <MethodRow icon={<Landmark className="size-3.5" />} label="Transferencia Bs"
+                  detail="Transferencias bancarias en bolívares" value={`Bs.${(expected?.transfer_bs_total ?? 0).toFixed(2)}`}
+                  valueClass="text-warning" />
+                <div className="flex items-center justify-between rounded-md bg-primary/10 px-3 py-2.5">
+                  <span className="text-sm font-bold">Total General del día</span>
+                  <span className="text-base font-extrabold text-success">${(expected?.grand_total ?? 0).toFixed(2)}</span>
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-6 text-sm">
-              <span>Diferencia USD:{' '}
-                <span className={`font-bold ${Math.abs(diffUsd) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                  {diffUsd >= 0 ? '+' : ''}${diffUsd.toFixed(2)}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
+              <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
+              <div className="flex items-center gap-3 text-sm">
+                <span>Diferencia:{' '}
+                  <span className={`font-bold ${Math.abs(diffBs) < 0.5 ? 'text-success' : 'text-danger'}`}>
+                    {diffBs >= 0 ? '+' : ''}Bs.{diffBs.toFixed(2)}
+                  </span>
                 </span>
-              </span>
-              <span>Diferencia Bs:{' '}
-                <span className={`font-bold ${Math.abs(diffBs) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                  {diffBs >= 0 ? '+' : ''}Bs.{diffBs.toFixed(2)}
-                </span>
-              </span>
+                {cuadrado && <span className="text-success font-medium">Cuadrado ✅</span>}
+              </div>
+              <p className="text-xs text-muted-foreground">Debe dar 0,00 para cuadrar. Si no hay efectivo, escribe 0.</p>
             </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Pago Móvil del día</p>
+              {pagoMovilList.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Sin pagos móviles hoy</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Referencia</TableHead>
+                      <TableHead className="text-right">Monto (Bs.)</TableHead>
+                      <TableHead>Origen</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pagoMovilList.map((p, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-mono">{p.reference ? `····${p.reference.slice(-4)}` : 'Sin referencia'}</TableCell>
+                        <TableCell className="text-right">{p.amount.toFixed(2)}</TableCell>
+                        <TableCell>{p.source}</TableCell>
+                      </TableRow>
+                    ))}
+                    <TableRow>
+                      <TableCell className="font-medium">Total</TableCell>
+                      <TableCell className="text-right font-bold">{pagoMovilTotal.toFixed(2)}</TableCell>
+                      <TableCell />
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">Los métodos digitales (Punto, Zelle, Pago Móvil, Transf Bs) se registran con los valores esperados del sistema.</p>
             <div className="space-y-2">
               <label className="text-sm font-medium">Notas</label>
               <Input value={closeNotes} onChange={e => setCloseNotes(e.target.value)}
@@ -510,8 +627,7 @@ export default function DailyLedger() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Monto Liquidado ($)</label>
-              <Input type="number" step={0.01} min={0} value={settleAmount}
-                onChange={e => setSettleAmount(Number(e.target.value))} />
+              <MoneyInput value={settleAmount} onChange={setSettleAmount} />
             </div>
             {showSettle && settleAmount > 0 && (
               <div className="text-sm">
@@ -525,6 +641,60 @@ export default function DailyLedger() {
             <Button variant="outline" onClick={() => setShowSettle(null)}>Cancelar</Button>
             <Button onClick={doSettle}>Guardar Liquidación</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showPinDialog} onOpenChange={setShowPinDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{pinStatus ? 'Configurar PIN' : 'Crear PIN de dueño'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            {!pinStatus ? (
+              <>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">PIN nuevo (4 dígitos)</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinNew} onChange={e => setPinNew(digits(e.target.value))} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Confirmar PIN</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinConfirm} onChange={e => setPinConfirm(digits(e.target.value))} />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold">Cambiar PIN</p>
+                  <label className="text-sm font-medium">PIN actual</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinCurrent} onChange={e => setPinCurrent(digits(e.target.value))} />
+                  <label className="text-sm font-medium">PIN nuevo</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinNew} onChange={e => setPinNew(digits(e.target.value))} />
+                  <label className="text-sm font-medium">Confirmar PIN nuevo</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinConfirm} onChange={e => setPinConfirm(digits(e.target.value))} />
+                  <Button onClick={changePin} className="w-full">Cambiar PIN</Button>
+                </div>
+                <div className="space-y-2 border-t pt-3">
+                  <p className="text-sm font-semibold">Quitar PIN</p>
+                  <label className="text-sm font-medium">PIN actual</label>
+                  <Input type="text" inputMode="numeric" maxLength={4} placeholder="••••"
+                    value={pinCurrent} onChange={e => setPinCurrent(digits(e.target.value))} />
+                  <Button variant="outline" onClick={doRemovePin} className="w-full">Quitar PIN</Button>
+                </div>
+              </>
+            )}
+            {pinError && <p className="text-sm text-danger">{pinError}</p>}
+            {!pinStatus && (
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowPinDialog(false)}>Cancelar</Button>
+                <Button onClick={savePin}>Guardar</Button>
+              </DialogFooter>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

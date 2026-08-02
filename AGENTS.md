@@ -119,12 +119,17 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 
 ### Abonos y Pagos Parciales (service_payments)
 - **Tabla `service_payments`:** id, service_id (FK), amount, payment_method, bank_fee_percent/amount, net_amount, zelle_reference, currency, payment_date (fecha del pago), notes.
-- **`services` columnas:** `client_id INTEGER REFERENCES clients(id)` (vínculo al registro cliente) + `paid_amount REAL DEFAULT 0` (suma de abonos, se recalcula en add/delete payment).
-- **Comandos:** `add_service_payment(serviceId, amount, method, fee, zelle, currency, notes)` (requiere día abierto), `get_service_payments(serviceId)`, `delete_service_payment(id)` — todos recalcular paid_amount vía subquery SUM.
-- **Libro Diario (get_daily_totals):** cuenta los PAGOS por `payment_date` (el dinero real del día), NO el amount del servicio. Fallback de compatibilidad: servicios Entregado SIN ningún pago registrado suman su amount en `date_out` (históricos).
+- **`services` columnas:** `client_id INTEGER REFERENCES clients(id)` (vínculo al registro cliente) + `paid_amount REAL DEFAULT 0` (suma de abonos en USD equivalente, se recalcula en add/delete payment).
+- **Comandos:** `add_service_payment(serviceId, amount, method, fee, zelle, currency, notes)` (requiere día abierto), `get_service_payments(serviceId)`, `delete_service_payment(id)` — todos recalcular paid_amount vía subquery.
+- **Moneda SIEMPRE derivada del método (regla de negocio):** métodos Bs (`BS_METHODS` en db.rs: "Efectivo Bs", "Pago Móvil", "Pago Movil", "Transferencia Bs", "Punto de Venta (Bs)") → currency='VES' aunque el frontend mande 'USD'; "Divisas (USD Cash)"/"Transferencia Zelle"/"Punto de Venta ($)" → 'USD'. `normalize_payment_currency(method, currency)` en db.rs. En frontend, helpers en `src/lib/utils.ts`: `isBsMethod()`, `methodCurrency()`, `currencySymbol()`.
+- **Conversión Bs→USD en `paid_amount`:** `recalc_paid_amount` (db.rs) convierte pagos VES con la tasa BCV del cierre del día del pago (`daily_closings.close_date = date(payment_date)`), fallback al día abierto actual, fallback 1. Pagos USD se suman directo. `amount` del servicio SIEMPRE es $ (el monto del form es "Monto ($)").
+- **Migración init():** corrige pagos históricos con método Bs guardados como 'USD' → 'VES' y recalcula paid_amount de TODOS los servicios (idempotente).
+- **Dialog de abono (Services.tsx):** `payCurrency` se deriva del método seleccionado (`methodCurrency(v)`), etiqueta dinámica "Monto (Bs.)"/"Monto ($)", hint "≈ $X (tasa BCV Y)" con la tasa del día abierto (`getActiveDay`), aviso "Este método es en bolívares...". Panel resumen: "Abonado $X + Bs. Y" (desglose por moneda) y "Saldo $X pendiente" / "Cancelado" (usando `svc.paid_amount` refrescado con `api.getService(id)` tras add/delete payment).
+- **Ventas (Sales.tsx):** mismo principio — `saleCurrency = methodCurrency(method)`; si el método es Bs, `addSale` guarda total en Bs (total_usd × tasa BCV del día) con currency='VES' (bloquea si tasa=0 con aviso). Tabla de ventas y tarjeta Total muestran `currencySymbol(s.currency)` y desglose "$ + Bs.". Botón guardar muestra el monto final en la moneda del método.
+- **Libro Diario (get_daily_totals):** agrupa por MÉTODO (no por currency): Pago Móvil/Efectivo Bs/Transf Bs → totales Bs; Divisas/Zelle/Punto ($) → USD. Por eso el `total` guardado debe estar en la moneda del método (los abonos se ingresan tal cual; las ventas convierten en el frontend).
 - **Entrega con saldo:** permitido por diseño — el saldo pendiente queda visible (rojo) en la orden y en el historial del cliente.
 - **Clientes:** ServiceForm sugiere clientes existentes (suggestClients) y autocompleta teléfono al seleccionar; al guardar usa `addOrFindClient` → client_id vinculado (nunca duplica). `get_client_services` busca por client_id primero, fallback por nombre.
-- UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; en la lista de servicios se muestra abonado/saldo en la tarjeta (badge "Cancelado" o "$X pendiente"); Clients.tsx muestra Abonado/Saldo por servicio.
+- UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; en la lista de servicios se muestra abonado/saldo en la tarjeta (badge "Cancelado" o "$X pendiente" — en USD equivalente); Clients.tsx muestra Abonado/Saldo por servicio.
 
 ### Lista de Servicios (vista de tarjetas)
 - **NO es tabla** — grid de tarjetas responsive (`grid-cols-1 lg:2 2xl:3`): cada orden es un Card con header (orden + fecha + badge estado), cliente (nombre + teléfono·cédula juntos), equipo (modelo + falla completa sin truncar), finanzas (monto + badge saldo/Cancelado + método + abonado), footer (badge tipo + fecha salida + acciones Editar/Eliminar/Shield).
@@ -138,8 +143,19 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - UI: Pedidos.tsx en sidebar (icono ShoppingBag) — cards agotados/stock bajo/pendientes, tabla "Por reponer" con botón "Pedir N" (sugerido = min*2 - stock), dialog Nuevo Pedido con buscador del catálogo completo + carrito editable, lista de pedidos con "Ver" (detalle) + "Recibido" + eliminar.
 - Regla deadlock: `mark_purchase_order_received` NO llama `get_purchase_order_items` con el lock tomado — query inline (patrón Entropy Registry).
 
+### Dashboard Analítico (analytics)
+- **Comando:** `get_dashboard_analytics` → struct `DashboardAnalytics` (db.rs): today_usd/today_bs (ventas del día por moneda), week_* (7 días: USD, Bs, unidades, count), `category_stats` (por categoría vía JOIN products→categories, ordenado por USD+Bs DESC), `top_models` (top 6 por producto/modelo/marca), counts (productos/ventas/servicios/clientes) + last_sale/last_service/last_movement/last_activity (para indicador de sincronización).
+- **Moneda:** `COALESCE(s.currency,'USD') = 'USD'` → suma USD; != 'USD' → suma Bs. Nunca mezclar tasas en backend.
+- **UI Dashboard.tsx:** indicador "Sincronizado · datos locales" (verde pulsante / rojo si falla la API), barra con counts + última actividad + hora de refresco, KPI (Ventas Hoy, Ventas 7 Días, Equipos en Taller, Ingresos Servicios), barras por categoría (CSS puro, width % relativo a max unidades — sin librería de charts), Top Modelos, **diagrama de flujo** (6 etapas ordenadas Recibido→Entregado + terminales Cancelado/Devuelto en rojo, nodos con count, opacidad 40% si count=0), tablas de métodos/estados/stock bajo.
+- Test: `test_dashboard_analytics`.
+
+### Cierre de Caja — Resumen por Método
+- Dialog de cierre (DailyLedger.tsx) muestra "Cobros del día por método" con `MethodRow` (icono + label + detalle + monto): Divisas (USD Cash) $, Efectivo Bs, Punto de Venta ($+Bs) con detalle "Cobrado $X · Comisión -$Y → Neto $Z", Transferencia Zelle $, Pago Móvil Bs (+conteo de pagos por referencia), Transferencia Bs, y fila destacada "Total General del día".
+- Los montos vienen de `expected` (get_daily_totals del día activo); si el día no tiene movimientos → expected=null y se muestra todo en 0 (sin "Cuadrado ✅").
+- Métodos digitales siempre con valores esperados del sistema (locked, se ajustan con Liquidar Punto después).
+
 ### Commands Tauri (Rust)
-- 38 comandos registrados en lib.rs (+5: add_purchase_order, get_purchase_orders, get_purchase_order_items, mark_purchase_order_received, delete_purchase_order, get_reorder_suggestions)
+- 39 comandos registrados en lib.rs (+1: get_dashboard_analytics)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
 - Tests: `cd src-tauri && cargo test`
 
@@ -181,6 +197,8 @@ Antes de hacer commit:
 | 2026-08-01 | **Deadlock en db.rs**: `close_day`/`open_day` tomaban `self.conn.lock()` y luego llamaban `get_active_day`/`get_daily_totals` (que vuelven a tomar el lock). Mutex no reentrante → test colgado ("running for over 60 seconds"). | Calcular totals con `get_daily_totals` ANTES de tomar el lock, o hacer el query EXISTS inline con el mismo conn en `open_day`/`require_open_day`. |
 | 2026-08-01 | **`rusqlite::ffi::Error::new`**: la firma es `new(result_code: c_int)` — NO acepta mensaje. `rusqlite::Error::SqliteFailure(ffi::Error::new(ErrorCode::CannotOpen as i32), Some(msg))` para errores de negocio con mensaje al frontend. | Usar ese patrón en `day_shift_error()` (db.rs). |
 | 2026-08-01 | **Tasa BCV real en vivo**: scrape de `bcv.org.ve/glosario/cambio-oficial` devuelve ~129KB HTML (200 OK); parsea USD=Bs 748.79 y EUR=Bs 861.19 (agosto 2026). El parse con `find("USD")` → `find("strong-tb")` → primer `<` funciona; PowerShell `-match '(?s)...'` engaña (array de líneas). | Verificado via CDP: botón Auto BCV rellenó el form con tasas reales. |
+| 2026-08-01 | `InvalidColumnType(9, "notes", Text)` en get_sales/get_client_sales en la app real: `sales.client_id` se agregó por ALTER TABLE (db.rs:415) sobre DB existente → queda físicamente DESPUÉS de notes, pero `SELECT s.*` + mapping posicional asumía client_id en índice 9. Tests pasaban porque la DB en memoria se crea con schema actual (orden correcto). Resultado: Nueva Venta mostraba trigger de método vacío y 0 ventas. | Usar lista de columnas explícita `SELECT s.id, s.date, ... s.notes, s.client_id, ...` en get_sales y get_client_sales (mismo patrón que get_services). Test de regresión `test_sales_legacy_physical_order`: recrea la tabla sales con el orden físico legacy (notes antes que client_id) y verifica ambos queries. Verificado en vivo via CDP: get_sales → "OK 1", trigger "Divisas (USD Cash)" + 7 opciones + campo "Número de referencia" al elegir Pago Móvil. |
+| 2026-08-02 | **Abonos/ventas en Bs registrados como USD**: dialog de abono pasaba el `currency` del SERVICIO (default 'USD') en vez de derivarlo del método → abono de 2000 en Pago Móvil se guardaba como $2000 (servicio de $50 mostraba "Abonado $2010 / Cancelado"). Además `paid_amount` sumaba montos crudos mezclando monedas y Sales.tsx hardcodeaba 'USD' en addSale. | Moneda SIEMPRE del método (`normalize_payment_currency` en db.rs + `methodCurrency()` en utils.ts); `recalc_paid_amount` convierte pagos VES→USD con tasa BCV del día del pago (cierre del día, fallback día abierto); migración init() corrige pagos Bs guardados 'USD' y recalcula todos los paid_amount; dialog de abono con etiqueta/hint dinámicos por moneda; Sales.tsx convierte total_usd × tasa cuando el método es Bs. Tests 6/6 (test_all_operations actualizado: 10 Bs → 10/40.5 USD). Verificado en vivo via CDP: migración aplicada (3 pagos VES, paid_amount 2.68 para 2010 Bs @748.79), panel "Abonado $2.68 + Bs. 2010.00 · Saldo $47.32 pendiente", venta con Pago Móvil → "≈ Bs. 74879.00". |
 
 ## Feedback Loops
 
@@ -197,11 +215,20 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (11.6s)**
+- **Build: ✅ PASS (3m 37s release)**
 - **Errors:** 0
 - **Warnings:** 0
+- **Tests:** 6/6 (incl. test_sales_legacy_physical_order, test_dashboard_analytics, moneda por método en test_all_operations)
+- **Moneda por método:** abonos y ventas SIEMPRE en la moneda del método de pago (Bs para Pago Móvil/Efectivo Bs/Transf Bs, $ para Divisas/Zelle/Punto $); paid_amount en $ equivalente con conversión por tasa BCV del día del pago; ventas convierten total_usd × tasa; migración automática de pagos viejos
+- **Dashboard analítico:** sincronización (indicador verde/rojo + última actividad), KPI (hoy/7 días/equipos/ingresos), ventas por categoría con barras, top modelos, diagrama de flujo de 6 etapas, stock bajo
+- **Cierre por método:** "Cobros del día por método" (Divisas $, Efectivo Bs, Punto $+Bs con comisión→neto, Zelle $, Pago Móvil Bs con refs, Transf Bs, Total General)
+- **Flujo cliente por cédula:** Services.tsx búsqueda por ci (V-XXXXX) con banner cliente nuevo/existente, cédula obligatoria para nuevo, historial máx 6, autocompletado de teléfono/ci/address editable (addOrFindClient 4 params)
+- **Referencias pago móvil:** campo "Número de referencia (últimos 4 dígitos)" en ventas/servicios/abonos, mostrado en tablas; Libro Diario lista cada referencia+monto
+- **Cierre rediseñado:** solo cuenta Efectivo Bs (cashCounted es-VE cents-first), diferencia en Bs y "Cuadrado ✅", métodos digitales bloqueados (se ajustan con Liquidar después)
+- **Roles PIN:** sin PIN = cajera (sin Dashboard/export/cierre/históricos), PIN 4 dígitos = dueño; pantalla de bloqueo al iniciar, botones en Libro Diario
+- **Export Excel:** export_daily_report → CSV (BOM + `;` + coma decimal es-VE) en %USERPROFILE%\Documents\Registro\, abre con Excel
 - **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
-- **Centro de Ayuda:** Help.tsx en sidebar (quick actions + accordion radix, 8 secciones + abonos + métodos de pago)
+- **Centro de Ayuda:** Help.tsx en sidebar (v0.4) — quick actions (6) + accordion radix con 11 secciones que cubren TODO el sistema: primeros pasos, Dashboard, ventas (con moneda por método), servicio técnico (cédula + checklist), abonos (conversión Bs→$), inventario/pantallas, pedidos a proveedor, clientes, Libro Diario (abrir/cerrar/exportar), PIN y roles, FAQ
 - **Abonos:** service_payments con historial, saldo por orden/cliente, Libro Diario por fecha de pago
 - **Pedidos:** purchase_orders + sugerencias de reposición (get_reorder_suggestions), recibir suma stock
 

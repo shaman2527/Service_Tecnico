@@ -1,7 +1,7 @@
 import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
-  ServiceDashboard, InventoryMovement, PaymentMethod, ServiceStatus,
-  DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem
+  ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
+  DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail
 } from './types';
 
 const isTauri = typeof window !== 'undefined' &&
@@ -117,14 +117,28 @@ export const api = {
       method_stats: [], status_stats: []
     })),
 
+  getService: (id: number) => tauriInvoke<Service>('get_service', { id }),
+
+  getDashboardAnalytics: () => tauriInvoke<DashboardAnalytics>('get_dashboard_analytics').catch(() =>
+    mock<DashboardAnalytics>({
+      today_usd: 0, today_bs: 0, week_usd: 0, week_bs: 0, week_units: 0, week_count: 0,
+      category_stats: [], top_models: [], product_count: 0, sale_count: 0,
+      service_count: 0, client_count: 0,
+      last_sale: null, last_service: null, last_movement: null, last_activity: null,
+    })),
+
   getClients: (search: string = '') =>
     tauriInvoke<ClientSummary[]>('get_clients', { search }),
 
   addClient: (name: string, phone: string, email: string, notes: string) =>
     tauriInvoke<number>('add_client', { name, phone, email, notes }),
 
-  addOrFindClient: (name: string, phone: string) =>
-    tauriInvoke<number>('add_or_find_client', { name, phone }),
+  addOrFindClient: (name: string, phone: string, ci: string = '', address: string = '') =>
+    tauriInvoke<number>('add_or_find_client', { name, phone, ci, address }),
+
+  findClientByCi: (ci: string) =>
+    tauriInvoke<Client | null>('find_client_by_ci', { ci }).catch(() =>
+      mock<Client | null>(null)),
 
   findClient: (name: string) =>
     tauriInvoke<number | null>('find_client', { name }),
@@ -176,4 +190,28 @@ export const api = {
 
   updateDailyClosingSettlement: (id: number, posSettled: number) =>
     tauriInvoke<void>('update_daily_closing_settlement', { id, posSettled }),
+
+  setPin: (pin: string) =>
+    tauriInvoke<void>('set_pin', { pin }).catch(() =>
+      mock<void>(undefined)),
+
+  getPinStatus: () =>
+    tauriInvoke<boolean>('get_pin_status').catch(() =>
+      mock<boolean>(false)),
+
+  verifyPin: (pin: string) =>
+    tauriInvoke<boolean>('verify_pin', { pin }).catch(() =>
+      mock<boolean>(true)),
+
+  removePin: (pin: string) =>
+    tauriInvoke<boolean>('remove_pin', { pin }).catch(() =>
+      mock<boolean>(true)),
+
+  getPagoMovilDetail: (date: string) =>
+    tauriInvoke<PagoMovilDetail[]>('get_pago_movil_detail', { date }).catch(() =>
+      mock<PagoMovilDetail[]>([])),
+
+  exportDailyReport: (date: string) =>
+    tauriInvoke<string>('export_daily_report', { date }).catch(() =>
+      mock<string>('mock/report.csv')),
 };

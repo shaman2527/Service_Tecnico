@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plus, Search, TrendingUp, Lock, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Badge } from '@/components/ui/badge';
 
 import { api } from '../db';
+import { methodCurrency, currencySymbol } from '@/lib/utils';
 import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 
 export default function Sales() {
@@ -57,7 +58,8 @@ export default function Sales() {
     setShowStats(true);
   };
 
-  const totalAmount = sales.reduce((a, s) => a + s.total, 0);
+  const totalUsd = sales.reduce((a, s) => a + (s.currency === 'VES' ? 0 : s.total), 0);
+  const totalBs = sales.reduce((a, s) => a + (s.currency === 'VES' ? s.total : 0), 0);
   const totalQty = sales.reduce((a, s) => a + s.quantity, 0);
 
   return (
@@ -95,7 +97,10 @@ export default function Sales() {
         </Card>
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Total</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold text-success">${totalAmount.toFixed(2)}</div></CardContent>
+          <CardContent>
+            <div className="text-2xl font-bold text-success">${totalUsd.toFixed(2)}</div>
+            {totalBs > 0 && <div className="text-sm text-muted-foreground">+ Bs. {totalBs.toFixed(2)}</div>}
+          </CardContent>
         </Card>
       </div>
 
@@ -151,8 +156,13 @@ export default function Sales() {
                     <TableCell className="font-medium">{s.product_name ?? '-'}</TableCell>
                     <TableCell className="text-right">{s.quantity}</TableCell>
                     <TableCell className="text-right">${s.unit_price.toFixed(2)}</TableCell>
-                    <TableCell className="text-right font-bold">${s.total.toFixed(2)}</TableCell>
-                    <TableCell><Badge variant="outline">{s.payment_method ?? '-'}</Badge></TableCell>
+                    <TableCell className="text-right font-bold">{currencySymbol(s.currency)}{s.total.toFixed(2)}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{s.payment_method ?? '-'}</Badge>
+                      {((s.payment_method ?? '').includes('Móvil') || (s.payment_method ?? '').includes('Movil') || (s.payment_method ?? '').includes('Zelle')) && s.zelle_reference && (
+                        <div className="text-[11px] text-muted-foreground">ref ····{s.zelle_reference.slice(-4)}</div>
+                      )}
+                    </TableCell>
                     <TableCell>{s.client_name ?? '-'}</TableCell>
                   </TableRow>
                 ))
@@ -204,9 +214,15 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const [clientSugs, setClientSugs] = useState<{ id: number; name: string; phone: string | null }[]>([]);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<Product[]>([]);
+  const [reference, setReference] = useState('');
+  const [tasaBcv, setTasaBcv] = useState(0);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const productPicked = useRef(false);
+  const clientPicked = useRef(false);
 
   useEffect(() => {
     api.getProducts('', null).then(setCatalog);
+    api.getActiveDay().then(d => setTasaBcv(d?.tasa_bcv ?? 0)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -220,14 +236,14 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
         })
         .slice(0, 12);
       setSuggestions(filtered);
-      setProductOpen(filtered.length > 0);
+      setProductOpen(filtered.length > 0 && !productPicked.current);
     } else {
       setSuggestions([]);
     }
   }, [productQuery, catalog]);
 
   useEffect(() => {
-    if (clientQuery.length > 0) {
+    if (clientQuery.length > 0 && !clientPicked.current) {
       api.suggestClients(clientQuery, 8).then(setClientSugs);
     } else {
       setClientSugs([]);
@@ -235,6 +251,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   }, [clientQuery]);
 
   const selectProduct = (p: Product) => {
+    productPicked.current = true;
     setProductId(p.id);
     setProductName(p.name);
     setPrice(p.price_sale);
@@ -243,23 +260,35 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   };
 
   const selectClient = (c: { id: number; name: string }) => {
+    clientPicked.current = true;
     setClientId(c.id);
     setClientName(c.name);
     setClientQuery(c.name);
     setClientOpen(false);
   };
 
+  const isRef = method.includes('Móvil') || method.includes('Movil') || method.includes('Zelle');
+  const saleCurrency = methodCurrency(method);
+  const isBs = saleCurrency === 'VES';
+  const totalUsdTmp = quantity * price;
+  const totalFinal = isBs ? totalUsdTmp * tasaBcv : totalUsdTmp;
+
   const save = async () => {
     if (!productName) return;
     if (price <= 0) return;
+    if (isBs && tasaBcv <= 0) {
+      setSaveError('Para vender en bolívares se necesita la tasa BCV del día. Ábrela en Libro Diario (el día debe estar abierto con tasa).');
+      return;
+    }
     setSaving(true);
+    setSaveError(null);
     try {
       let cid = clientId;
       if (clientName && !cid) {
         cid = await api.addOrFindClient(clientName, '');
       }
       const total = quantity * price;
-      await api.addSale(productId, productName, quantity, price, total, method, clientName, cid, notes);
+      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, clientName, cid, notes, 0, reference, saleCurrency);
       onSaved();
     } finally {
       setSaving(false);
@@ -276,8 +305,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
           <div className="space-y-2">
             <label className="text-sm font-medium">Producto</label>
             <Input placeholder="Buscar producto..." value={productQuery}
-              onChange={e => { setProductQuery(e.target.value); setProductOpen(true); }}
-              onFocus={() => setProductOpen(true)} />
+              onChange={e => { productPicked.current = false; setProductQuery(e.target.value); setProductOpen(true); }} />
             {productOpen && suggestions.length > 0 && (
               <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
                 {suggestions.map(p => {
@@ -325,7 +353,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Método de Pago</label>
-              <Select value={method} onValueChange={setMethod}>
+              <Select value={method} onValueChange={m => { setMethod(m); setSaveError(null); if (!m.includes('Móvil') && !m.includes('Movil') && !m.includes('Zelle')) setReference(''); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {methods.map(m => (
@@ -333,12 +361,18 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
                   ))}
                 </SelectContent>
               </Select>
+              {methodCurrency(method) === 'VES' && (
+                <p className="text-xs text-amber-600">
+                  {tasaBcv > 0
+                    ? `Se cobra en bolívares: total ≈ Bs. ${totalFinal.toFixed(2)} (tasa BCV ${tasaBcv.toFixed(2)})`
+                    : 'Sin tasa BCV en el día abierto — abre/actualiza el día en Libro Diario para cobrar en Bs.'}
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente</label>
               <Input placeholder="Buscar o escribir nombre..." value={clientQuery}
-                onChange={e => { setClientQuery(e.target.value); setClientOpen(true); }}
-                onFocus={() => setClientOpen(true)} />
+                onChange={e => { clientPicked.current = false; setClientQuery(e.target.value); setClientOpen(true); }} />
               {clientOpen && clientSugs.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">
                   {clientSugs.map(c => (
@@ -353,15 +387,24 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          {isRef && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Referencia</label>
+              <Input placeholder="Número de referencia (últimos 4 dígitos)..." value={reference}
+                onChange={e => setReference(e.target.value)} />
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-sm font-medium">Notas</label>
             <Textarea value={notes} onChange={e => setNotes(e.target.value)} />
           </div>
+          {saveError && <p className="text-sm text-danger">{saveError}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
           <Button onClick={save} disabled={saving || dayOpen === false || !productName || price <= 0}>
-            {saving ? 'Guardando...' : `Guardar Venta ($${(quantity * price).toFixed(2)})`}
+            {saving ? 'Guardando...' : `Guardar Venta (${isBs ? `Bs. ${totalFinal.toFixed(2)}` : `$${totalUsdTmp.toFixed(2)}`})`}
           </Button>
         </DialogFooter>
       </DialogContent>

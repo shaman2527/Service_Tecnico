@@ -117,8 +117,22 @@ pub fn get_services(db: State<Database>, search: String, status: String) -> Resu
 }
 
 #[tauri::command]
+pub fn get_service(db: State<Database>, id: i64) -> Result<crate::db::Service, String> {
+    db.get_services("", "")
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "Servicio no encontrado".to_string())
+}
+
+#[tauri::command]
 pub fn get_service_dashboard(db: State<Database>) -> Result<crate::db::ServiceDashboard, String> {
     db.get_service_dashboard().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_dashboard_analytics(db: State<Database>) -> Result<crate::db::DashboardAnalytics, String> {
+    db.get_dashboard_analytics().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -177,8 +191,13 @@ pub fn add_client(db: State<Database>, name: String, phone: String, email: Strin
 }
 
 #[tauri::command]
-pub fn add_or_find_client(db: State<Database>, name: String, phone: String) -> Result<i64, String> {
-    db.add_or_find_client(&name, &phone).map_err(|e| e.to_string())
+pub fn add_or_find_client(db: State<Database>, name: String, phone: String, ci: String, address: String) -> Result<i64, String> {
+    db.add_or_find_client(&name, &phone, &ci, &address).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn find_client_by_ci(db: State<Database>, ci: String) -> Result<Option<crate::db::Client>, String> {
+    db.find_client_by_ci(&ci).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -275,4 +294,38 @@ pub fn reopen_day(db: State<Database>, close_date: String) -> Result<(), String>
 #[tauri::command]
 pub fn update_daily_closing_settlement(db: State<Database>, id: i64, pos_settled: f64) -> Result<(), String> {
     db.update_daily_closing_settlement(id, pos_settled).map_err(|e| e.to_string())
+}
+
+// --- Settings / PIN ---
+
+#[tauri::command]
+pub fn set_pin(db: State<Database>, pin: String) -> Result<(), String> {
+    db.set_pin(&pin).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_pin_status(db: State<Database>) -> Result<bool, String> {
+    db.get_pin_status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn verify_pin(db: State<Database>, pin: String) -> Result<bool, String> {
+    db.verify_pin(&pin).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_pin(db: State<Database>, pin: String) -> Result<bool, String> {
+    db.remove_pin(&pin).map_err(|e| e.to_string())
+}
+
+// --- Reportes ---
+
+#[tauri::command]
+pub fn get_pago_movil_detail(db: State<Database>, date: String) -> Result<Vec<crate::db::PagoMovilDetail>, String> {
+    db.get_pago_movil_detail(&date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn export_daily_report(db: State<Database>, date: String) -> Result<String, String> {
+    db.export_daily_report(&date).map_err(|e| e.to_string())
 }

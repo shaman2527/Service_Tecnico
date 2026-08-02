@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
   PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
@@ -12,6 +12,10 @@ import DailyLedger from './components/DailyLedger';
 import Catalog from './components/Catalog';
 import Help from './components/Help';
 import Pedidos from './components/Pedidos';
+import { Button } from './components/ui/button';
+import { Input } from './components/ui/input';
+import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
+import { api } from './db';
 import { cn } from './lib/utils';
 import './index.css';
 
@@ -29,9 +33,72 @@ const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'ayuda', label: 'Ayuda', icon: LifeBuoy },
 ];
 
+type Role = 'owner' | 'cashier' | 'loading';
+
 function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');
+  const [role, setRole] = useState<Role>('loading');
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getPinStatus()
+      .then(hasPin => setRole(hasPin ? 'loading' : 'owner'))
+      .catch(() => setRole('owner'));
+  }, []);
+
+  useEffect(() => {
+    if (role === 'cashier' && tab === 'dashboard') setTab('ventas');
+  }, [role, tab]);
+
+  const enterPin = async () => {
+    setPinError(null);
+    try {
+      const ok = await api.verifyPin(pinInput);
+      if (ok) {
+        setRole('owner');
+        setPinInput('');
+      } else {
+        setPinError('PIN incorrecto');
+      }
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  if (role === 'loading') {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle className="text-center">Registro — Acceso restringido</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Input
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              autoFocus
+              className="text-center text-lg tracking-widest"
+              placeholder="PIN de 4 dígitos"
+              value={pinInput}
+              onChange={e => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+              onKeyDown={e => { if (e.key === 'Enter') enterPin(); }}
+            />
+            {pinError && <p className="text-sm text-danger text-center">{pinError}</p>}
+            <Button className="w-full" onClick={enterPin}>Entrar</Button>
+            <Button variant="outline" className="w-full"
+              onClick={() => { setRole('cashier'); setPinInput(''); setPinError(null); }}>
+              Entrar como cajera
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const visibleItems = role === 'cashier' ? navItems.filter(i => i.key !== 'dashboard') : navItems;
 
   return (
     <div className="flex h-screen bg-background">
@@ -68,7 +135,7 @@ function App() {
         </div>
 
         <nav className="flex-1 flex flex-col gap-1.5 px-3 py-5">
-          {navItems.map(item => {
+          {visibleItems.map(item => {
             const Icon = item.icon;
             const active = tab === item.key;
             return (
@@ -115,7 +182,7 @@ function App() {
           {tab === 'pantallas' && <Catalog />}
           {tab === 'pedidos' && <Pedidos />}
           {tab === 'clientes' && <Clients />}
-          {tab === 'libro' && <DailyLedger />}
+          {tab === 'libro' && <DailyLedger role={role} />}
           {tab === 'ayuda' && <Help />}
         </div>
       </main>

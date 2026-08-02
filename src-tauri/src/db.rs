@@ -21,6 +21,8 @@ pub struct Client {
     pub last_service: Option<String>,
     pub last_purchase: Option<String>,
     pub created_at: Option<String>,
+    pub ci: Option<String>,
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,6 +34,7 @@ pub struct ClientSummary {
     pub service_count: i64,
     pub sale_count: i64,
     pub last_date: Option<String>,
+    pub ci: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -194,6 +197,13 @@ pub struct ServiceStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PagoMovilDetail {
+    pub reference: Option<String>,
+    pub amount: f64,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DailyTotals {
     pub date: String,
     pub pos_charged: f64,
@@ -238,6 +248,44 @@ pub struct DailyClosing {
     pub actual_pago_movil: f64,
     pub actual_transfer_bs: f64,
     pub difference: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CategoryStat {
+    pub category_name: Option<String>,
+    pub units: i64,
+    pub total_usd: f64,
+    pub total_bs: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelStat {
+    pub product_name: Option<String>,
+    pub model: Option<String>,
+    pub brand: Option<String>,
+    pub units: i64,
+    pub total_usd: f64,
+    pub total_bs: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DashboardAnalytics {
+    pub today_usd: f64,
+    pub today_bs: f64,
+    pub week_usd: f64,
+    pub week_bs: f64,
+    pub week_units: i64,
+    pub week_count: i64,
+    pub category_stats: Vec<CategoryStat>,
+    pub top_models: Vec<ModelStat>,
+    pub product_count: i64,
+    pub sale_count: i64,
+    pub service_count: i64,
+    pub client_count: i64,
+    pub last_sale: Option<String>,
+    pub last_service: Option<String>,
+    pub last_movement: Option<String>,
+    pub last_activity: Option<String>,
 }
 
 pub struct Database {
@@ -391,6 +439,10 @@ impl Database {
                 actual_transfer_bs REAL DEFAULT 0,
                 difference REAL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
         ")?;
 
         // Migration: add client_id to sales if missing
@@ -437,6 +489,14 @@ impl Database {
                 ALTER TABLE services ADD COLUMN device_checklist TEXT;
             ");
         }
+        // Migration: add ci + address to clients
+        let has_client_ci_col: bool = conn.prepare("SELECT ci FROM clients LIMIT 1").is_ok();
+        if !has_client_ci_col {
+            let _ = conn.execute_batch("
+                ALTER TABLE clients ADD COLUMN ci TEXT;
+                ALTER TABLE clients ADD COLUMN address TEXT;
+            ");
+        }
         // Migration: daily shift (open/close day) with BCV rate + actual count (arqueo)
         let has_tasa: bool = conn.prepare("SELECT tasa_bcv FROM daily_closings LIMIT 1").is_ok();
         if !has_tasa {
@@ -481,6 +541,34 @@ impl Database {
         let has_paid_amount: bool = conn.prepare("SELECT paid_amount FROM services LIMIT 1").is_ok();
         if !has_paid_amount {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN paid_amount REAL DEFAULT 0;");
+        }
+        // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
+        // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
+        if conn.prepare("SELECT id FROM service_payments LIMIT 1").is_ok() {
+            for m in BS_METHODS {
+                let _ = conn.execute(
+                    "UPDATE service_payments SET currency='VES' WHERE payment_method=?1 AND (currency IS NULL OR currency='USD')",
+                    params![m],
+                );
+            }
+            // Recalcular paid_amount de TODOS los servicios con conversión Bs→USD (idempotente)
+            let _ = conn.execute(
+                "UPDATE services SET paid_amount = (
+                    SELECT COALESCE(SUM(CASE
+                        WHEN sp.currency IS NULL OR sp.currency = 'USD' THEN sp.amount
+                        ELSE sp.amount / COALESCE((
+                            SELECT dc.tasa_bcv FROM daily_closings dc
+                            WHERE dc.close_date = date(sp.payment_date) AND dc.tasa_bcv > 0
+                            ORDER BY dc.id DESC LIMIT 1
+                        ), (
+                            SELECT dc2.tasa_bcv FROM daily_closings dc2
+                            WHERE dc2.is_closed = 0 AND dc2.tasa_bcv > 0 LIMIT 1
+                        ), 1)
+                    END), 0)
+                    FROM service_payments sp WHERE sp.service_id = services.id
+                )",
+                [],
+            )?;
         }
         // Migration: purchase orders (pedidos a proveedor)
         let has_purchase_orders: bool = conn.prepare("SELECT id FROM purchase_orders LIMIT 1").is_ok();
@@ -689,7 +777,7 @@ impl Database {
 
     pub fn get_sales(&self, search: &str, days: Option<i64>, start_date: &str, end_date: &str) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.* FROM sales s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM sales s WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -718,7 +806,8 @@ impl Database {
             Ok(Sale {
                 id: r.get(0)?, date: r.get(1)?, product_id: r.get(2)?,
                 product_name: r.get(3)?, quantity: r.get(4)?, unit_price: r.get(5)?,
-                total: r.get(6)?, payment_method: r.get(7)?, client_name: r.get(8)?, client_id: r.get(9)?, notes: r.get(10)?,
+                total: r.get(6)?, payment_method: r.get(7)?, client_name: r.get(8)?,
+                notes: r.get(9)?, client_id: r.get(10)?,
                 bank_fee_percent: r.get(11).unwrap_or(0.0),
                 bank_fee_amount: r.get(12).unwrap_or(0.0),
                 net_amount: r.get(13).unwrap_or(0.0),
@@ -908,6 +997,8 @@ impl Database {
                                notes: &str) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
+        // La moneda se deriva del método (un pago por Pago Móvil/Efectivo Bs/Transf Bs SIEMPRE es Bs)
+        let currency = normalize_payment_currency(payment_method, currency);
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         conn.execute(
@@ -915,10 +1006,7 @@ impl Database {
             params![service_id, amount, payment_method, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if notes.is_empty() { None } else { Some(notes) }],
         )?;
         let pid = conn.last_insert_rowid();
-        conn.execute(
-            "UPDATE services SET paid_amount = (SELECT COALESCE(SUM(amount),0) FROM service_payments WHERE service_id=?1) WHERE id=?1",
-            params![service_id],
-        )?;
+        self.recalc_paid_amount(&conn, service_id)?;
         Ok(pid)
     }
 
@@ -926,8 +1014,29 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let service_id: i64 = conn.query_row("SELECT service_id FROM service_payments WHERE id=?1", params![id], |r| r.get(0))?;
         conn.execute("DELETE FROM service_payments WHERE id=?", params![id])?;
+        self.recalc_paid_amount(&conn, service_id)?;
+        Ok(())
+    }
+
+    // Recalcula paid_amount del servicio en USD equivalente:
+    // pagos en Bs se convierten con la tasa BCV del día del pago (cierre del día)
+    // o la tasa del día abierto actual; pagos USD se suman directo.
+    fn recalc_paid_amount(&self, conn: &rusqlite::Connection, service_id: i64) -> SqlResult<()> {
         conn.execute(
-            "UPDATE services SET paid_amount = (SELECT COALESCE(SUM(amount),0) FROM service_payments WHERE service_id=?1) WHERE id=?1",
+            "UPDATE services SET paid_amount = (
+                SELECT COALESCE(SUM(CASE
+                    WHEN sp.currency IS NULL OR sp.currency = 'USD' THEN sp.amount
+                    ELSE sp.amount / COALESCE((
+                        SELECT dc.tasa_bcv FROM daily_closings dc
+                        WHERE dc.close_date = date(sp.payment_date) AND dc.tasa_bcv > 0
+                        ORDER BY dc.id DESC LIMIT 1
+                    ), (
+                        SELECT dc2.tasa_bcv FROM daily_closings dc2
+                        WHERE dc2.is_closed = 0 AND dc2.tasa_bcv > 0 LIMIT 1
+                    ), 1)
+                END), 0)
+                FROM service_payments sp WHERE sp.service_id = services.id
+            ) WHERE id = ?1",
             params![service_id],
         )?;
         Ok(())
@@ -1102,6 +1211,90 @@ impl Database {
         Ok(ServiceDashboard { total, entregados, pendientes, total_ingresos, method_stats, status_stats })
     }
 
+    // --- Dashboard Analytics (ventas, categorías, modelos, sync) ---
+    pub fn get_dashboard_analytics(&self) -> SqlResult<DashboardAnalytics> {
+        let conn = self.conn.lock().unwrap();
+
+        let sum_sales = |where_sql: &str| -> SqlResult<(f64, f64)> {
+            let sql = format!(
+                "SELECT COALESCE(SUM(CASE WHEN COALESCE(currency,'USD') = 'USD' THEN total ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN COALESCE(currency,'USD') != 'USD' THEN total ELSE 0 END),0)
+                 FROM sales WHERE {}",
+                where_sql
+            );
+            let row = conn.query_row(&sql, [], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)))?;
+            Ok(row)
+        };
+
+        let (today_usd, today_bs) = sum_sales("date(date) = date('now','localtime')")?;
+        let (week_usd, week_bs) = sum_sales("date(date) >= date('now','-6 days')")?;
+        let week_units: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(quantity),0) FROM sales WHERE date(date) >= date('now','-6 days')", [], |r| r.get(0),
+        )?;
+        let week_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sales WHERE date(date) >= date('now','-6 days')", [], |r| r.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(c.name, 'Sin categoría'),
+                    COALESCE(SUM(s.quantity),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') = 'USD' THEN s.total ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') != 'USD' THEN s.total ELSE 0 END),0)
+             FROM sales s
+             LEFT JOIN products p ON s.product_id = p.id
+             LEFT JOIN categories c ON p.category_id = c.id
+             WHERE date(s.date) >= date('now','-6 days')
+             GROUP BY c.name
+             ORDER BY 3 + 4 DESC"
+        )?;
+        let category_stats: Vec<CategoryStat> = stmt.query_map([], |r| {
+            Ok(CategoryStat {
+                category_name: r.get(0)?, units: r.get(1)?,
+                total_usd: r.get(2)?, total_bs: r.get(3)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT s.product_name, p.model, p.brand,
+                    COALESCE(SUM(s.quantity),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') = 'USD' THEN s.total ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') != 'USD' THEN s.total ELSE 0 END),0)
+             FROM sales s
+             LEFT JOIN products p ON s.product_id = p.id
+             WHERE date(s.date) >= date('now','-6 days')
+             GROUP BY s.product_name, p.model, p.brand
+             ORDER BY 5 + 6 DESC
+             LIMIT 6"
+        )?;
+        let top_models: Vec<ModelStat> = stmt.query_map([], |r| {
+            Ok(ModelStat {
+                product_name: r.get(0)?, model: r.get(1)?, brand: r.get(2)?,
+                units: r.get(3)?, total_usd: r.get(4)?, total_bs: r.get(5)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        let product_count: i64 = conn.query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0))?;
+        let sale_count: i64 = conn.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))?;
+        let service_count: i64 = conn.query_row("SELECT COUNT(*) FROM services", [], |r| r.get(0))?;
+        let client_count: i64 = conn.query_row("SELECT COUNT(*) FROM clients", [], |r| r.get(0))?;
+        let last_sale: Option<String> = conn.query_row("SELECT MAX(date) FROM sales", [], |r| r.get(0)).ok();
+        let last_service: Option<String> = conn.query_row("SELECT MAX(date_in) FROM services", [], |r| r.get(0)).ok();
+        let last_movement: Option<String> = conn.query_row("SELECT MAX(date) FROM inventory_movements", [], |r| r.get(0)).ok();
+        let last_activity: Option<String> = conn.query_row(
+            "SELECT MAX(m) FROM (
+                SELECT MAX(date) as m FROM sales
+                UNION ALL SELECT MAX(date_in) FROM services
+                UNION ALL SELECT MAX(date) FROM inventory_movements
+            )", [], |r| r.get(0),
+        ).ok();
+
+        Ok(DashboardAnalytics {
+            today_usd, today_bs, week_usd, week_bs, week_units, week_count,
+            category_stats, top_models, product_count, sale_count, service_count,
+            client_count, last_sale, last_service, last_movement, last_activity,
+        })
+    }
+
     // --- Clients ---
     pub fn get_clients(&self, search: &str) -> SqlResult<Vec<ClientSummary>> {
         let conn = self.conn.lock().unwrap();
@@ -1115,12 +1308,13 @@ impl Database {
                         (SELECT MAX(sv.date_out) FROM services sv WHERE sv.client = c.name),
                         (SELECT MAX(s.date) FROM sales s WHERE s.client_id = c.id),
                         ''
-                    ) as last_date
+                    ) as last_date,
+                    c.ci
              FROM clients c WHERE 1=1"
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if !search.is_empty() {
-            sql.push_str(" AND (c.name LIKE ?1 OR c.phone LIKE ?1)");
+            sql.push_str(" AND (c.name LIKE ?1 OR c.phone LIKE ?1 OR c.ci LIKE ?1)");
             param_values.push(Box::new(format!("%{}%", search)));
         }
         sql.push_str(" ORDER BY c.name");
@@ -1131,6 +1325,7 @@ impl Database {
                 id: r.get(0)?, name: r.get(1)?, phone: r.get(2)?,
                 total_spent: r.get(3)?, service_count: r.get(4)?,
                 sale_count: r.get(5)?, last_date: r.get(6)?,
+                ci: r.get(7).unwrap_or(None),
             })
         })?;
         let mut clients = Vec::new();
@@ -1159,16 +1354,73 @@ impl Database {
         }
     }
 
-    pub fn add_or_find_client(&self, name: &str, phone: &str) -> SqlResult<i64> {
+    pub fn find_client_by_ci(&self, ci: &str) -> SqlResult<Option<Client>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT c.* FROM clients c WHERE c.ci = ?1 LIMIT 1",
+            params![ci],
+            |r| {
+                Ok(Client {
+                    id: r.get(0)?, name: r.get(1)?, phone: r.get(2)?,
+                    email: r.get(3)?, notes: r.get(4)?, total_spent: r.get(5)?,
+                    last_service: r.get(6)?, last_purchase: r.get(7)?, created_at: r.get(8)?,
+                    ci: r.get(9).unwrap_or(None),
+                    address: r.get(10).unwrap_or(None),
+                })
+            },
+        );
+        match result {
+            Ok(client) => Ok(Some(client)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn add_or_find_client(&self, name: &str, phone: &str, ci: &str, address: &str) -> SqlResult<i64> {
+        // 1) Buscar por cédula exacta si viene
+        if !ci.is_empty() {
+            if let Some(client) = self.find_client_by_ci(ci)? {
+                let id = client.id;
+                if !phone.is_empty() || !address.is_empty() {
+                    let conn = self.conn.lock().unwrap();
+                    if !phone.is_empty() {
+                        conn.execute("UPDATE clients SET phone=?1 WHERE id=?2", params![phone, id])?;
+                    }
+                    if !address.is_empty() {
+                        conn.execute("UPDATE clients SET address=?1 WHERE id=?2", params![address, id])?;
+                    }
+                }
+                return Ok(id);
+            }
+        }
+        // 2) Buscar por nombre exacto
         if let Some(id) = self.find_client(name)? {
-            // Update phone if provided
-            if !phone.is_empty() {
+            if !phone.is_empty() || !ci.is_empty() || !address.is_empty() {
                 let conn = self.conn.lock().unwrap();
-                conn.execute("UPDATE clients SET phone=?1 WHERE id=?2", params![phone, id])?;
+                if !phone.is_empty() {
+                    conn.execute("UPDATE clients SET phone=?1 WHERE id=?2", params![phone, id])?;
+                }
+                if !ci.is_empty() {
+                    conn.execute("UPDATE clients SET ci=?1 WHERE id=?2", params![ci, id])?;
+                }
+                if !address.is_empty() {
+                    conn.execute("UPDATE clients SET address=?1 WHERE id=?2", params![address, id])?;
+                }
             }
             return Ok(id);
         }
-        self.add_client(name, phone, "", "")
+        // 3) Insertar nuevo cliente
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO clients (name, phone, ci, address) VALUES (?1,?2,?3,?4)",
+            params![
+                name,
+                if phone.is_empty() { None } else { Some(phone) },
+                if ci.is_empty() { None } else { Some(ci) },
+                if address.is_empty() { None } else { Some(address) },
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn get_client_services(&self, client_id: i64) -> SqlResult<Vec<Service>> {
@@ -1238,14 +1490,14 @@ impl Database {
     pub fn get_client_sales(&self, client_id: i64) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.* FROM sales s WHERE s.client_id = ?1 ORDER BY s.date DESC"
+            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM sales s WHERE s.client_id = ?1 ORDER BY s.date DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Sale {
                 id: r.get(0)?, date: r.get(1)?, product_id: r.get(2)?,
                 product_name: r.get(3)?, quantity: r.get(4)?, unit_price: r.get(5)?,
                 total: r.get(6)?, payment_method: r.get(7)?, client_name: r.get(8)?,
-                client_id: r.get(9)?, notes: r.get(10)?,
+                notes: r.get(9)?, client_id: r.get(10)?,
                 bank_fee_percent: r.get(11).unwrap_or(0.0),
                 bank_fee_amount: r.get(12).unwrap_or(0.0),
                 net_amount: r.get(13).unwrap_or(0.0),
@@ -1284,13 +1536,15 @@ impl Database {
     pub fn suggest_clients(&self, query: &str, limit: i64) -> SqlResult<Vec<Client>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT c.* FROM clients c WHERE c.name LIKE ?1 OR c.phone LIKE ?1 ORDER BY c.name LIMIT ?2"
+            "SELECT c.* FROM clients c WHERE c.name LIKE ?1 OR c.phone LIKE ?1 OR c.ci LIKE ?1 ORDER BY c.name LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![format!("%{}%", query), limit], |r| {
             Ok(Client {
                 id: r.get(0)?, name: r.get(1)?, phone: r.get(2)?,
                 email: r.get(3)?, notes: r.get(4)?, total_spent: r.get(5)?,
                 last_service: r.get(6)?, last_purchase: r.get(7)?, created_at: r.get(8)?,
+                ci: r.get(9).unwrap_or(None),
+                address: r.get(10).unwrap_or(None),
             })
         })?;
         let mut clients = Vec::new();
@@ -1473,6 +1727,230 @@ impl Database {
                 + t.pago_movil_total + t.transfer_bs_total + t.usd_cash_total;
         }
         Ok(totals)
+    }
+
+    // --- Settings / PIN ---
+    pub fn set_pin(&self, pin: &str) -> SqlResult<()> {
+        if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
+            return Err(day_shift_error("El PIN debe tener exactamente 4 dígitos."));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+            params![pin],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pin_status(&self) -> SqlResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<Option<String>> = conn
+            .query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
+            .optional()?;
+        Ok(value.flatten().map_or(false, |v| !v.is_empty()))
+    }
+
+    pub fn verify_pin(&self, pin: &str) -> SqlResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let stored: Option<Option<String>> = conn
+            .query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
+            .optional()?;
+        Ok(stored.flatten().as_deref() == Some(pin))
+    }
+
+    pub fn remove_pin(&self, pin: &str) -> SqlResult<bool> {
+        if !self.verify_pin(pin)? {
+            return Err(day_shift_error("PIN incorrecto."));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM settings WHERE key='pin'", [])?;
+        Ok(true)
+    }
+
+    // --- Pago Móvil detail del día ---
+    pub fn get_pago_movil_detail(&self, date: &str) -> SqlResult<Vec<PagoMovilDetail>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
+                   WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) = ?1
+                   UNION ALL
+                   SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
+                   FROM service_payments sp
+                   JOIN services s ON s.id = sp.service_id
+                   WHERE (sp.payment_method LIKE '%Móvil%' OR sp.payment_method LIKE '%Movil%') AND date(sp.payment_date) = ?1
+                   ORDER BY date";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![date], |r| {
+            Ok(PagoMovilDetail {
+                reference: r.get(0).unwrap_or(None),
+                amount: r.get(1)?,
+                source: r.get(2)?,
+            })
+        })?;
+        let mut details = Vec::new();
+        for row in rows { details.push(row?); }
+        Ok(details)
+    }
+
+    // --- Exportar reporte diario a CSV (Excel es-VE) ---
+    pub fn export_daily_report(&self, date: &str) -> SqlResult<String> {
+        // Totales ANTES de tomar el lock (get_daily_totals lo toma → mutex no reentrante)
+        let totals = self.get_daily_totals(date, date)?;
+        let t = if totals.is_empty() {
+            DailyTotals {
+                date: date.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+                cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
+                pago_movil_total: 0.0, transfer_bs_total: 0.0,
+                usd_cash_total: 0.0, grand_total: 0.0,
+            }
+        } else { totals[0].clone() };
+
+        let conn = self.conn.lock().unwrap();
+
+        // Tasa BCV del día (daily_closings)
+        let tasa: f64 = conn
+            .query_row(
+                "SELECT tasa_bcv FROM daily_closings WHERE close_date=?1 ORDER BY id DESC LIMIT 1",
+                params![date],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0.0);
+
+        // Ventas del día
+        let mut sales_rows: Vec<(Option<String>, Option<String>, i64, f64, f64, Option<String>, Option<String>, Option<String>)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT date, product_name, quantity, unit_price, total, payment_method, zelle_reference, client_name
+                 FROM sales WHERE date(date) = ?1 ORDER BY date ASC"
+            )?;
+            let rows = stmt.query_map(params![date], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
+                    r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })?;
+            for row in rows { sales_rows.push(row?); }
+        }
+
+        // Pagos de servicios del día (join services)
+        let mut payment_rows: Vec<(Option<String>, Option<String>, Option<String>, Option<String>, f64, Option<String>, Option<String>)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT sp.payment_date, s.order_num, s.client, s.model, sp.amount, sp.payment_method, sp.zelle_reference
+                 FROM service_payments sp JOIN services s ON s.id = sp.service_id
+                 WHERE date(sp.payment_date) = ?1 ORDER BY sp.payment_date ASC"
+            )?;
+            let rows = stmt.query_map(params![date], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?,
+                    r.get::<_, f64>(4)?, r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            for row in rows { payment_rows.push(row?); }
+        }
+
+        // Pago móvil del día (query inline, mismo lock)
+        let mut pm_rows: Vec<(Option<String>, f64, String)> = Vec::new();
+        {
+            let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
+                       WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) = ?1
+                       UNION ALL
+                       SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
+                       FROM service_payments sp
+                       JOIN services s ON s.id = sp.service_id
+                       WHERE (sp.payment_method LIKE '%Móvil%' OR sp.payment_method LIKE '%Movil%') AND date(sp.payment_date) = ?1
+                       ORDER BY date";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![date], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0).unwrap_or(None),
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows { pm_rows.push(row?); }
+        }
+
+        let mut csv = String::new();
+        csv.push('\u{FEFF}');
+        let tasa_str = if tasa > 0.0 { fmt_num(tasa) } else { String::new() };
+        csv.push_str(&format!("REPORTE DIARIO;Fecha;{};Tasa BCV;{}\n", csv_field(date), csv_field(&tasa_str)));
+
+        csv.push('\n');
+        csv.push_str("VENTAS\n");
+        csv.push_str("Fecha;Producto;Cant;Precio Unit;Total;Metodo;Referencia;Cliente\n");
+        for (d, name, qty, unit, total, method, ref_, client) in &sales_rows {
+            csv.push_str(&format!(
+                "{};{};{};{};{};{};{};{}\n",
+                csv_field(d.as_deref().unwrap_or("")),
+                csv_field(name.as_deref().unwrap_or("")),
+                qty,
+                csv_field(&fmt_num(*unit)),
+                csv_field(&fmt_num(*total)),
+                csv_field(method.as_deref().unwrap_or("")),
+                csv_field(ref_.as_deref().unwrap_or("")),
+                csv_field(client.as_deref().unwrap_or("")),
+            ));
+        }
+
+        csv.push('\n');
+        csv.push_str("PAGOS DE SERVICIOS\n");
+        csv.push_str("Fecha;Orden;Cliente;Equipo;Monto;Metodo;Referencia\n");
+        for (d, order, client, model, amount, method, ref_) in &payment_rows {
+            csv.push_str(&format!(
+                "{};{};{};{};{};{};{}\n",
+                csv_field(d.as_deref().unwrap_or("")),
+                csv_field(order.as_deref().unwrap_or("")),
+                csv_field(client.as_deref().unwrap_or("")),
+                csv_field(model.as_deref().unwrap_or("")),
+                csv_field(&fmt_num(*amount)),
+                csv_field(method.as_deref().unwrap_or("")),
+                csv_field(ref_.as_deref().unwrap_or("")),
+            ));
+        }
+
+        csv.push('\n');
+        csv.push_str("PAGO MOVIL DEL DIA\n");
+        csv.push_str("Referencia;Monto;Origen\n");
+        for (ref_, amount, source) in &pm_rows {
+            csv.push_str(&format!(
+                "{};{};{}\n",
+                csv_field(ref_.as_deref().unwrap_or("")),
+                csv_field(&fmt_num(*amount)),
+                csv_field(source),
+            ));
+        }
+
+        csv.push('\n');
+        csv.push_str("TOTALES\n");
+        csv.push_str(&format!("Punto Cargado;{}\n", fmt_num(t.pos_charged)));
+        csv.push_str(&format!("Comision;{}\n", fmt_num(t.pos_fees)));
+        csv.push_str(&format!("Neto Punto;{}\n", fmt_num(t.pos_net)));
+        csv.push_str(&format!("Efectivo USD;{}\n", fmt_num(t.cash_usd)));
+        csv.push_str(&format!("Efectivo Bs;{}\n", fmt_num(t.cash_bs)));
+        csv.push_str(&format!("Zelle;{}\n", fmt_num(t.zelle_total)));
+        csv.push_str(&format!("Pago Movil;{}\n", fmt_num(t.pago_movil_total)));
+        csv.push_str(&format!("Transf Bs;{}\n", fmt_num(t.transfer_bs_total)));
+        csv.push_str(&format!("Total General;{}\n", fmt_num(t.grand_total)));
+
+        let mut dir = std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        dir.push("Documents");
+        dir.push("Registro");
+        std::fs::create_dir_all(&dir).map_err(|e| day_shift_error(&format!("No se pudo crear el directorio: {}", e)))?;
+        let path = dir.join(format!("reporte_{}.csv", date));
+        std::fs::write(&path, csv.as_bytes()).map_err(|e| day_shift_error(&format!("No se pudo escribir el archivo: {}", e)))?;
+
+        let path_str = path.to_string_lossy().to_string();
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path_str])
+            .spawn();
+        Ok(path_str)
     }
 
     pub fn get_daily_closings(&self) -> SqlResult<Vec<DailyClosing>> {
@@ -1726,6 +2204,36 @@ fn day_shift_error(msg: &str) -> rusqlite::Error {
     )
 }
 
+// Métodos de pago en bolívares (la moneda SIEMPRE se deriva del método, no del servicio)
+const BS_METHODS: [&str; 5] = ["Efectivo Bs", "Pago Móvil", "Pago Movil", "Transferencia Bs", "Punto de Venta (Bs)"];
+
+fn is_bs_method(method: &str) -> bool {
+    BS_METHODS.iter().any(|m| method.trim() == *m)
+}
+
+// Devuelve la moneda correcta para el método; si el método no es reconocido, conserva la pasada.
+fn normalize_payment_currency<'a>(method: &str, currency: &'a str) -> &'a str {
+    if is_bs_method(method) { return "VES"; }
+    if method.trim() == "Divisas (USD Cash)" || method.trim() == "Transferencia Zelle" || method.trim() == "Punto de Venta ($)" {
+        return "USD";
+    }
+    if currency.is_empty() { "USD" } else { currency }
+}
+
+// Escapa un campo CSV: si contiene ';' o '"' o salto de línea → comillas dobles con comillas internas duplicadas
+fn csv_field(s: &str) -> String {
+    if s.contains(';') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+// Número con decimal coma (es-VE), sin separador de miles: 1234.50 → "1234,50"
+fn fmt_num(v: f64) -> String {
+    format!("{:.2}", v).replace('.', ",")
+}
+
 // Normaliza un modelo para matching: minúsculas, sin acentos, sin espacios extra
 fn norm_model(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1933,23 +2441,27 @@ mod tests {
         assert_eq!(client_services.len(), 1, "servicio vinculado al cliente via client_id");
         assert_eq!(client_services[0].order_num.as_deref(), Some("ORD-TEST-1"));
 
-        // Service payments (abonos): add $10 abono + $15 final
+        // Service payments (abonos): abono en Bs (Efectivo Bs → SIEMPRE VES) + $15 en USD
         let pid1 = db.add_service_payment(sid, 10.0, "Efectivo Bs", 0.0, "", "USD", "Abono inicial").unwrap();
         assert!(pid1 > 0);
         let payments = db.get_service_payments(sid).unwrap();
         assert_eq!(payments.len(), 1);
         assert_eq!(payments[0].amount, 10.0);
+        // La moneda se deriva del método: Efectivo Bs → VES aunque el frontend mande 'USD'
+        assert_eq!(payments[0].currency.as_deref(), Some("VES"), "moneda derivada del método Bs");
+        // paid_amount convierte Bs→USD con la tasa del día (40.5) => 10/40.5 ≈ 0.2469
+        let expected_bs: f64 = 10.0 / 40.5;
         let paid: f64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap()
         });
-        assert_eq!(paid, 10.0, "paid_amount = suma de abonos");
+        assert!((paid - expected_bs).abs() < 1e-9, "paid_amount convierte Bs→USD con tasa del día: {paid}");
         db.add_service_payment(sid, 15.0, "Divisas (USD Cash)", 0.0, "", "USD", "Saldo final").unwrap();
         let paid2: f64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap()
         });
-        assert_eq!(paid2, 25.0, "paid_amount = 10+15");
+        assert!((paid2 - (15.0 + expected_bs)).abs() < 1e-9, "paid_amount = 15 + 10/40.5, got {paid2}");
         // Eliminar un abono recalcula
         db.delete_service_payment(pid1).unwrap();
         let paid3: f64 = conn_query(|| {
@@ -2026,6 +2538,192 @@ mod tests {
         assert!(db.get_active_day().unwrap().is_some());
 
         // Clean up
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_client_ci_and_address() {
+        let test_path = PathBuf::from("test_client_ci.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Insertar cliente con ci, llamar de nuevo con el mismo ci → mismo id
+        let id1 = db.add_or_find_client("Ana", "0412-111", "V-100", "Av 1").unwrap();
+        let id2 = db.add_or_find_client("Ana", "0412-222", "V-100", "Av 2").unwrap();
+        assert_eq!(id1, id2, "mismo ci → mismo cliente");
+        // Los datos se actualizan al re-llamar
+        let found = db.find_client_by_ci("V-100").unwrap().expect("cliente por ci");
+        assert_eq!(found.phone.as_deref(), Some("0412-222"));
+        assert_eq!(found.address.as_deref(), Some("Av 2"));
+
+        // Ci nuevo (nombre distinto) → id distinto
+        let id3 = db.add_or_find_client("Carlos", "", "V-200", "").unwrap();
+        assert_ne!(id1, id3, "ci nuevo → otro cliente");
+
+        // find_client_by_ci: encuentra y None para inexistente
+        let found = db.find_client_by_ci("V-200").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Carlos");
+        assert!(db.find_client_by_ci("V-999").unwrap().is_none());
+
+        // suggest_clients busca por ci
+        let suggestions = db.suggest_clients("V-100", 5).unwrap();
+        assert!(!suggestions.is_empty());
+        assert_eq!(suggestions[0].ci.as_deref(), Some("V-100"));
+        assert_eq!(suggestions[0].address.as_deref(), Some("Av 2"));
+
+        // get_clients busca por ci y lo incluye en el resumen
+        let list = db.get_clients("V-200").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].ci.as_deref(), Some("V-200"));
+
+        // Sin ci: sigue funcionando por nombre
+        let id4 = db.add_or_find_client("Pedro", "0414-000", "", "").unwrap();
+        let id5 = db.add_or_find_client("Pedro", "", "", "").unwrap();
+        assert_eq!(id4, id5, "mismo nombre → mismo cliente");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_pin_settings() {
+        let test_path = PathBuf::from("test_pin.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Sin pin por defecto
+        assert!(!db.get_pin_status().unwrap(), "sin pin al inicio");
+
+        // Pines inválidos rechazados
+        assert!(db.set_pin("12").is_err(), "2 dígitos inválido");
+        assert!(db.set_pin("abcd").is_err(), "letras inválido");
+        assert!(db.set_pin("12345").is_err(), "5 dígitos inválido");
+        assert!(!db.get_pin_status().unwrap(), "sigue sin pin tras intentos inválidos");
+
+        // Set + verify
+        db.set_pin("1234").unwrap();
+        assert!(db.get_pin_status().unwrap(), "status true tras set_pin");
+        assert!(db.verify_pin("1234").unwrap(), "verify correcto");
+        assert!(!db.verify_pin("9999").unwrap(), "verify incorrecto");
+
+        // Remove con pin incorrecto falla; con el correcto elimina
+        assert!(db.remove_pin("9999").is_err(), "remove con pin incorrecto falla");
+        assert!(db.get_pin_status().unwrap(), "el pin sigue tras fallo");
+        assert!(db.remove_pin("1234").unwrap(), "remove con pin correcto");
+        assert!(!db.get_pin_status().unwrap(), "pin eliminado");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_pago_movil_detail() {
+        let test_path = PathBuf::from("test_pm.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 0.0, 0.0).unwrap();
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Cliente PM", None, "", 0.0, "REF-1234", "Bs").unwrap();
+
+        let detail = db.get_pago_movil_detail(&today).unwrap();
+        assert_eq!(detail.len(), 1, "una fila de pago móvil hoy");
+        assert_eq!(detail[0].reference.as_deref(), Some("REF-1234"));
+        assert_eq!(detail[0].amount, 15.0);
+        assert_eq!(detail[0].source, "Venta");
+
+        // Otro día → vacío
+        assert!(db.get_pago_movil_detail("2020-01-01").unwrap().is_empty());
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_sales_legacy_physical_order() {
+        // Regresión: en DBs reales, client_id se agregó por ALTER TABLE → queda
+        // DESPUÉS de notes en el orden físico. get_sales/get_client_sales deben
+        // usar lista de columnas explícita (nunca SELECT * con mapping posicional).
+        let test_path = PathBuf::from("test_sales_legacy.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute("DROP TABLE sales", []).unwrap();
+        conn.execute(
+            "CREATE TABLE sales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                product_id INTEGER,
+                product_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                unit_price REAL NOT NULL,
+                total REAL NOT NULL,
+                payment_method TEXT NOT NULL,
+                client_name TEXT,
+                notes TEXT,
+                client_id INTEGER REFERENCES clients(id),
+                bank_fee_percent REAL DEFAULT 0,
+                bank_fee_amount REAL DEFAULT 0,
+                net_amount REAL,
+                zelle_reference TEXT,
+                currency TEXT
+            )",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        db.open_day(0.0, 0.0, 0.0).unwrap();
+        let cid = db.add_or_find_client("Ana", "0412-111", "V-100", "Av 1").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Ana", Some(cid), "nota de prueba", 0.0, "REF-99", "Bs").unwrap();
+
+        let sales = db.get_sales("", None, "", "").unwrap();
+        assert_eq!(sales.len(), 1, "get_sales con orden físico legacy");
+        assert_eq!(sales[0].client_id, Some(cid));
+        assert_eq!(sales[0].notes.as_deref(), Some("nota de prueba"));
+        assert_eq!(sales[0].zelle_reference.as_deref(), Some("REF-99"));
+
+        let client_sales = db.get_client_sales(cid).unwrap();
+        assert_eq!(client_sales.len(), 1, "get_client_sales con orden físico legacy");
+        assert_eq!(client_sales[0].payment_method.as_deref(), Some("Pago Móvil"));
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_dashboard_analytics() {
+        let test_path = PathBuf::from("test_dash_analytics.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 0.0, 0.0).unwrap();
+
+        // Producto con categoría Pantalla
+        let pid = db.add_product("Pantalla Samsung A15", Some(1), "Samsung", "A15 A155",
+            "Incell", "[\"A15 A155\"]", 14.0, 17.5, 10, 2).unwrap();
+        db.add_sale(Some(pid), "Pantalla Samsung A15", 2, 17.5, 35.0, "Divisas (USD Cash)", "Ana", None, "", 0.0, "", "USD").unwrap();
+        db.add_sale(Some(pid), "Pantalla Samsung A15", 1, 17.5, 17.5, "Pago Móvil", "Ana", None, "", 0.0, "REF-1", "Bs").unwrap();
+
+        let a = db.get_dashboard_analytics().unwrap();
+        assert_eq!(a.today_usd, 35.0, "venta USD de hoy");
+        assert_eq!(a.today_bs, 17.5, "venta Bs de hoy");
+        assert!(a.week_usd >= 35.0 && a.week_bs >= 17.5);
+        assert_eq!(a.week_units, 3);
+        assert_eq!(a.week_count, 2);
+        assert_eq!(a.category_stats.len(), 1);
+        assert_eq!(a.category_stats[0].category_name.as_deref(), Some("Pantalla"));
+        assert_eq!(a.category_stats[0].units, 3);
+        assert_eq!(a.category_stats[0].total_usd, 35.0);
+        assert_eq!(a.category_stats[0].total_bs, 17.5);
+        assert_eq!(a.top_models.len(), 1);
+        assert_eq!(a.top_models[0].product_name.as_deref(), Some("Pantalla Samsung A15"));
+        assert_eq!(a.top_models[0].units, 3);
+        assert!(a.product_count >= 1 && a.sale_count >= 2 && a.client_count >= 0);
+        assert!(a.last_sale.is_some());
+        assert!(a.last_activity.is_some());
+
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

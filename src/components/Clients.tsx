@@ -42,7 +42,7 @@ export default function Clients() {
 
       <div className="relative max-w-sm">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <Input placeholder="Buscar por nombre o teléfono..." className="pl-9"
+        <Input placeholder="Buscar por nombre, teléfono o cédula..." className="pl-9"
           value={search} onChange={e => setSearch(e.target.value)} />
       </div>
 
@@ -53,6 +53,7 @@ export default function Clients() {
               <TableRow>
                 <TableHead>Nombre</TableHead>
                 <TableHead>Teléfono</TableHead>
+                <TableHead>Cédula</TableHead>
                 <TableHead className="text-right">Servicios</TableHead>
                 <TableHead className="text-right">Compras</TableHead>
                 <TableHead className="text-right">Total Gastado</TableHead>
@@ -63,7 +64,7 @@ export default function Clients() {
             <TableBody>
               {clients.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                     {search ? 'No se encontraron clientes' : 'No hay clientes registrados'}
                   </TableCell>
                 </TableRow>
@@ -73,6 +74,7 @@ export default function Clients() {
                     onClick={() => openHistory(c)}>
                     <TableCell className="font-medium">{c.name}</TableCell>
                     <TableCell>{c.phone ?? '-'}</TableCell>
+                    <TableCell>{c.ci ?? '-'}</TableCell>
                     <TableCell className="text-right">{c.service_count}</TableCell>
                     <TableCell className="text-right">{c.sale_count}</TableCell>
                     <TableCell className="text-right font-bold">${c.total_spent.toFixed(2)}</TableCell>
@@ -97,6 +99,9 @@ export default function Clients() {
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
                   {selected.name}
+                  {selected.ci && (
+                    <span className="text-xs font-normal text-muted-foreground">{selected.ci}</span>
+                  )}
                   {selected.phone && (
                     <span className="text-sm font-normal text-muted-foreground">
                       <Phone className="inline size-3 mr-1" />

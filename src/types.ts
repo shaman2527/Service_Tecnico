@@ -14,6 +14,8 @@ export interface Client {
   last_service: string | null;
   last_purchase: string | null;
   created_at: string | null;
+  ci?: string | null;
+  address?: string | null;
 }
 
 export interface ClientSummary {
@@ -24,6 +26,13 @@ export interface ClientSummary {
   service_count: number;
   sale_count: number;
   last_date: string | null;
+  ci?: string | null;
+}
+
+export interface PagoMovilDetail {
+  reference: string | null;
+  amount: number;
+  source: string;
 }
 
 export interface Product {
@@ -203,6 +212,41 @@ export interface StatusStat {
   status: string | null;
   count: number;
   total: number;
+}
+
+export interface CategoryStat {
+  category_name: string | null;
+  units: number;
+  total_usd: number;
+  total_bs: number;
+}
+
+export interface ModelStat {
+  product_name: string | null;
+  model: string | null;
+  brand: string | null;
+  units: number;
+  total_usd: number;
+  total_bs: number;
+}
+
+export interface DashboardAnalytics {
+  today_usd: number;
+  today_bs: number;
+  week_usd: number;
+  week_bs: number;
+  week_units: number;
+  week_count: number;
+  category_stats: CategoryStat[];
+  top_models: ModelStat[];
+  product_count: number;
+  sale_count: number;
+  service_count: number;
+  client_count: number;
+  last_sale: string | null;
+  last_service: string | null;
+  last_movement: string | null;
+  last_activity: string | null;
 }
 
 export interface InventoryMovement {

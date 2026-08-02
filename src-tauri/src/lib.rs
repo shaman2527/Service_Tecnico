@@ -33,7 +33,9 @@ pub fn run() {
             commands::update_service,
             commands::delete_service,
             commands::get_services,
+            commands::get_service,
             commands::get_service_dashboard,
+            commands::get_dashboard_analytics,
             commands::get_service_payments,
             commands::add_service_payment,
             commands::delete_service_payment,
@@ -46,6 +48,7 @@ pub fn run() {
             commands::add_client,
             commands::add_or_find_client,
             commands::find_client,
+            commands::find_client_by_ci,
             commands::get_client_services,
             commands::get_client_sales,
             commands::suggest_clients,
@@ -62,6 +65,12 @@ pub fn run() {
             commands::close_day,
             commands::reopen_day,
             commands::update_daily_closing_settlement,
+            commands::set_pin,
+            commands::get_pin_status,
+            commands::verify_pin,
+            commands::remove_pin,
+            commands::get_pago_movil_detail,
+            commands::export_daily_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -135,3 +144,5 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 8
 // force rebuild 9
 // force rebuild 10
+// force rebuild 2026-08-02: moneda por método en ventas+abonos
+// force rebuild 2026-08-02: centro de ayuda completo

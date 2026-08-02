@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -12,8 +12,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
-import { cn } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product } from '../types';
+import { cn, methodCurrency, currencySymbol } from '@/lib/utils';
+import type { Service, ServicePayment, ServiceStatus, Product, Client } from '../types';
 
 const CHECKLIST_ITEMS: { key: string; label: string }[] = [
   { key: 'chip_sim', label: 'Chip (SIM) presente' },
@@ -27,6 +27,10 @@ const CHECKLIST_ITEMS: { key: string; label: string }[] = [
   { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente' },
   { key: 'accesorios', label: 'Accesorios entregados (funda, protector)' },
 ];
+
+function isMovilOrZelle(m: string | null | undefined): boolean {
+  return !!m && (m.includes('Móvil') || m.includes('Movil') || m.includes('Zelle'));
+}
 
 export function parseChecklist(json: string | null | undefined): Record<string, string> {
   if (!json) return {};
@@ -199,7 +203,12 @@ export default function Services() {
                         )}
                       </div>
                       <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
-                        <span className="truncate">{s.payment_method ?? '-'}</span>
+                        <span className="truncate">
+                          {s.payment_method ?? '-'}
+                          {isMovilOrZelle(s.payment_method) && s.zelle_reference && (
+                            <span className="text-[11px] text-muted-foreground"> · ref ····{s.zelle_reference.slice(-4)}</span>
+                          )}
+                        </span>
                         {s.paid_amount > 0 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
                       </div>
                     </div>
@@ -313,20 +322,33 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [modelSuggestions, setModelSuggestions] = useState<{ model: string; product: Product }[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
   const [clientOpen, setClientOpen] = useState(false);
-  const [clientSugs, setClientSugs] = useState<{ id: number; name: string; phone: string | null }[]>([]);
+  const [clientSugs, setClientSugs] = useState<Client[]>([]);
   const [clientId, setClientId] = useState<number | null>(null);
+  const [ciSearch, setCiSearch] = useState('');
+  const [ciLookup, setCiLookup] = useState<Client | null>(null);
+  const [ciSearched, setCiSearched] = useState(false);
+  const [clientHistory, setClientHistory] = useState<Service[]>([]);
+  const [ciError, setCiError] = useState<string | null>(null);
+  const modelPicked = useRef(false);
+  const clientPicked = useRef(false);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [payAmount, setPayAmount] = useState(0);
   const [payMethod, setPayMethod] = useState('Divisas (USD Cash)');
+  const [payCurrency, setPayCurrency] = useState<'USD' | 'VES'>('USD');
   const [payFee, setPayFee] = useState(0);
   const [payZelle, setPayZelle] = useState('');
   const [payNotes, setPayNotes] = useState('');
   const [payError, setPayError] = useState<string | null>(null);
   const [savingPay, setSavingPay] = useState(false);
+  const [tasaBcv, setTasaBcv] = useState(0);
+  const [svc, setSvc] = useState<Service | null>(service);
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
+  const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
+  const payIsPagoMovil = payMethod.includes('Móvil') || payMethod.includes('Movil');
+  const payIsBs = payCurrency === 'VES';
 
   useEffect(() => {
     api.getProducts('', null).then(setCatalog);
@@ -365,7 +387,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     if (client.trim().length > 0) {
       api.suggestClients(client.trim(), 8).then(sugs => {
         setClientSugs(sugs.filter(s => s.name !== client.trim()));
-        setClientOpen(true);
+        setClientOpen(sugs.length > 0 && !clientPicked.current);
       });
     } else {
       setClientSugs([]);
@@ -373,17 +395,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     }
   }, [client]);
 
-  const selectClient = (c: { id: number; name: string; phone: string | null }) => {
+  useEffect(() => {
+    if (clientId != null) {
+      api.getClientServices(clientId).then(setClientHistory).catch(() => setClientHistory([]));
+    }
+  }, [clientId]);
+
+  const selectClient = (c: Client) => {
+    clientPicked.current = true;
     setClient(c.name);
     setClientId(c.id);
     if (c.phone && !phone) setPhone(c.phone);
+    if (c.ci && !clientCi) setClientCi(c.ci);
+    if (c.address && !clientAddress) setClientAddress(c.address);
     setClientOpen(false);
-    api.suggestClients(c.name, 1).then(sugs => {
-      if (sugs.length > 0) {
-        const full = sugs[0];
-        if (full.phone && !phone) setPhone(full.phone);
-      }
-    });
   };
 
   useEffect(() => {
@@ -406,7 +431,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         if (filtered.length >= 12) break;
       }
       setModelSuggestions(filtered);
-      setModelOpen(filtered.length > 0);
+      setModelOpen(filtered.length > 0 && !modelPicked.current);
     } else {
       setModelSuggestions([]);
       setModelOpen(false);
@@ -414,10 +439,43 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   }, [model, catalog]);
 
   const selectModel = (sugg: { model: string; product: Product }) => {
+    modelPicked.current = true;
     setModel(sugg.model);
     setAmount(sugg.product.price_sale);
     setModelOpen(false);
   };
+
+  const lookupByCi = async () => {
+    const q = ciSearch.trim();
+    if (!q) return;
+    setCiError(null);
+    try {
+      const result = await api.findClientByCi(q);
+      setCiLookup(result);
+      setCiSearched(true);
+    } catch (e) {
+      setCiError(e instanceof Error ? e.message : String(e));
+      setCiSearched(false);
+      setCiLookup(null);
+    }
+  };
+
+  const useCiClient = () => {
+    if (!ciLookup) return;
+    const c = ciLookup;
+    setClient(c.name);
+    setPhone(c.phone ?? '');
+    setClientCi(c.ci ?? '');
+    setClientAddress(c.address ?? '');
+    if (clientId !== c.id) {
+      setClientHistory([]);
+      setClientId(c.id);
+    }
+    setCiSearched(false);
+    setCiLookup(null);
+  };
+
+  const needCi = !service && !clientId;
 
   const save = async () => {
     if (!client || !model || !fault) return;
@@ -426,7 +484,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       const checklistJson = JSON.stringify(checklist);
       let cid = clientId;
       if (client && !cid) {
-        cid = await api.addOrFindClient(client, phone);
+        cid = await api.addOrFindClient(client, phone, clientCi, clientAddress);
       }
       if (service) {
         await api.updateService(service.id, client, phone, model, fault, serviceType, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
@@ -439,15 +497,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     }
   };
 
-  const balance = amount - (payments.reduce((a, p) => a + p.amount, 0));
+  // Abonado total del servicio en $ (el backend convierte pagos en Bs con la tasa del día del pago)
+  const abonadoUsd = svc?.paid_amount ?? 0;
+  const saldoUsd = Math.max(0, amount - abonadoUsd);
+  const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+
+  useEffect(() => {
+    if (!svc) return;
+    let alive = true;
+    api.getActiveDay().then(d => {
+      if (alive) setTasaBcv(d?.tasa_bcv ?? 0);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [svc?.id]);
 
   const openPayDialog = () => {
-    setPayAmount(balance > 0 ? Math.min(balance, amount) : amount);
     setPayMethod(payment);
+    setPayCurrency(methodCurrency(payment));
     setPayFee(payment.includes('Punto') ? 3.5 : 0);
     setPayZelle('');
     setPayNotes('');
     setPayError(null);
+    setPayAmount(saldoUsd > 0 ? Math.min(saldoUsd, amount) : amount);
     setShowPayDialog(true);
   };
 
@@ -456,10 +527,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     setSavingPay(true);
     setPayError(null);
     try {
-      await api.addServicePayment(service.id, payAmount, payMethod, payFee, payZelle, currency, payNotes);
+      await api.addServicePayment(service.id, payAmount, payMethod, payFee, payZelle, payCurrency, payNotes);
       setShowPayDialog(false);
-      const [p] = await Promise.all([api.getServicePayments(service.id)]);
+      const p = await api.getServicePayments(service.id);
       setPayments(p);
+      const s = await api.getService(service.id).catch(() => service);
+      setSvc(s);
       onSaved();
     } catch (e) {
       setPayError(e instanceof Error ? e.message : String(e));
@@ -470,7 +543,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   const doDeletePayment = async (pid: number) => {
     await api.deleteServicePayment(pid);
-    setPayments(await api.getServicePayments(service!.id));
+    const p = await api.getServicePayments(service!.id);
+    setPayments(p);
+    const s = await api.getService(service!.id).catch(() => service);
+    setSvc(s);
     onSaved();
   };
 
@@ -485,11 +561,47 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             Orden: <strong>{orderNum}</strong>
           </div>
 
+          {!service && (
+            <div className="rounded-lg border border-border/70 bg-muted/30 p-4 space-y-3">
+              <p className="text-sm font-semibold">1. ¿Cliente nuevo o existente?</p>
+              <div className="flex gap-2">
+                <Input value={ciSearch}
+                  onChange={e => { setCiSearch(e.target.value); setCiSearched(false); setCiLookup(null); setCiError(null); }}
+                  onKeyDown={e => e.key === 'Enter' && lookupByCi()}
+                  placeholder="V-12345678" />
+                <Button variant="outline" onClick={lookupByCi}>
+                  <Search className="size-4" /> Buscar
+                </Button>
+              </div>
+              {ciError && <p className="text-sm text-danger">{ciError}</p>}
+              {ciSearched && ciLookup && (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-2">
+                  <p className="text-sm font-semibold text-emerald-700 flex items-center gap-1.5">
+                    <CheckCircle2 className="size-4" /> Cliente existente
+                  </p>
+                  <div className="text-sm">
+                    <p className="font-medium">{ciLookup.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {[ciLookup.phone, ciLookup.ci].filter(Boolean).join(' · ') || '—'}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={useCiClient}>
+                    Usar este cliente
+                  </Button>
+                </div>
+              )}
+              {ciSearched && !ciLookup && (
+                <p className="text-sm bg-amber-500/10 border border-amber-500/30 text-amber-700 rounded-md px-3 py-2">
+                  Cliente nuevo — completa sus datos abajo (la cédula es obligatoria)
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente *</label>
-              <Input value={client} onChange={e => { setClient(e.target.value); setClientId(null); }}
-                onFocus={() => client.trim().length > 0 && setClientOpen(true)}
+              <Input value={client} onChange={e => { clientPicked.current = false; setClient(e.target.value); setClientId(null); }}
                 placeholder="Buscar o escribir nombre..." />
               {clientOpen && clientSugs.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">
@@ -513,12 +625,44 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Cédula</label>
               <Input value={clientCi} onChange={e => setClientCi(e.target.value)} placeholder="V-12345678" />
+              {needCi && !clientCi.trim() && (
+                <p className="text-xs text-danger">Obligatoria para cliente nuevo</p>
+              )}
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Dirección</label>
               <Input value={clientAddress} onChange={e => setClientAddress(e.target.value)} placeholder="Opcional" />
             </div>
           </div>
+
+          {clientHistory.length > 0 && (
+            <div className="rounded-lg border border-border/70 p-3 space-y-2">
+              <p className="text-sm font-semibold flex items-center gap-2">
+                <Wrench className="size-4" /> Historial del cliente
+              </p>
+              <div className="divide-y divide-border/60">
+                {clientHistory.slice(0, 6).map(h => (
+                  <div key={h.id} className="py-2 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {h.service_type && <Badge variant="outline" className="text-[11px] shrink-0">{h.service_type}</Badge>}
+                        <span className="text-sm font-medium truncate">{h.model ?? '-'}</span>
+                      </div>
+                      <span className="text-xs font-semibold shrink-0">${h.amount.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-muted-foreground">{h.date_in ? h.date_in.slice(0, 10) : '-'}</span>
+                      <Badge variant="outline" className="text-[11px] shrink-0">{h.status}</Badge>
+                    </div>
+                    {h.fault && <p className="text-xs text-muted-foreground line-clamp-1">{h.fault}</p>}
+                  </div>
+                ))}
+              </div>
+              {clientHistory.length > 6 && (
+                <p className="text-xs text-muted-foreground">+{clientHistory.length - 6} más</p>
+              )}
+            </div>
+          )}
 
           {service && (
             <div className="rounded-lg border border-border/70 p-4 space-y-3">
@@ -537,12 +681,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 </div>
                 <div className="rounded-md bg-muted/60 px-3 py-2">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Abonado</p>
-                  <p className="font-bold text-emerald-600">${(amount - balance).toFixed(2)}</p>
+                  <p className="font-bold text-emerald-600">
+                    ${abonadoUsd.toFixed(2)}
+                    {totalAbonadoBs > 0 && <span className="text-foreground font-medium"> + Bs. {totalAbonadoBs.toFixed(2)}</span>}
+                  </p>
                 </div>
                 <div className="rounded-md px-3 py-2 border">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
-                  <p className={`font-bold ${balance <= 0.005 ? 'text-success' : 'text-danger'}`}>
-                    {balance <= 0.005 ? 'Cancelado' : `$${balance.toFixed(2)} pendiente`}
+                  <p className={`font-bold ${saldoUsd <= 0.005 ? 'text-success' : 'text-danger'}`}>
+                    {saldoUsd <= 0.005 ? 'Cancelado' : `$${saldoUsd.toFixed(2)} pendiente`}
                   </p>
                 </div>
               </div>
@@ -562,9 +709,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                       <TableRow key={p.id}>
                         <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
                         <TableCell className="text-right font-medium">
-                          {p.currency === 'VES' ? 'Bs.' : '$'}{p.amount.toFixed(2)}
+                          {currencySymbol(p.currency)}{p.amount.toFixed(2)}
                         </TableCell>
-                        <TableCell className="text-xs">{p.payment_method ?? '-'}</TableCell>
+                        <TableCell className="text-xs">
+                          {p.payment_method ?? '-'}
+                          {isMovilOrZelle(p.payment_method) && p.zelle_reference && (
+                            <span className="block text-xs text-muted-foreground">····{p.zelle_reference.slice(-4)}</span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-xs text-muted-foreground max-w-[140px] truncate">{p.notes ?? '-'}</TableCell>
                         <TableCell>
                           <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
@@ -583,8 +735,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Modelo *</label>
-              <Input value={model} onChange={e => setModel(e.target.value)}
-                onFocus={() => catalog.length > 0 && model.length >= 1 && setModelOpen(true)}
+              <Input value={model} onChange={e => { modelPicked.current = false; setModel(e.target.value); }}
                 placeholder="Buscar modelo de equipo o pantalla..." />
               {modelOpen && modelSuggestions.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
@@ -734,11 +885,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           )}
 
-          {isZelle && (
+          {(isZelle || isPagoMovil) && (
             <div className="space-y-2">
-              <label className="text-sm font-medium">Referencia Zelle</label>
+              <label className="text-sm font-medium">Referencia</label>
               <Input value={zelleReference} onChange={e => setZelleReference(e.target.value)}
-                placeholder="Número de referencia..." />
+                placeholder="Número de referencia (últimos 4 dígitos)..." />
             </div>
           )}
 
@@ -757,7 +908,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving || dayOpen === false || !client || !model || !fault}>
+          <Button onClick={save} disabled={saving || dayOpen === false || !client || !model || !fault || (needCi && !clientCi.trim())}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : 'Guardar Servicio')}
           </Button>
         </DialogFooter>
@@ -771,17 +922,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           <div className="space-y-4">
             <div className="text-sm space-y-1 rounded-md bg-muted/60 px-3 py-2">
               <p>Total: <strong>${amount.toFixed(2)}</strong></p>
-              <p>Saldo pendiente: <strong className={balance <= 0.005 ? 'text-success' : 'text-danger'}>${Math.max(balance, 0).toFixed(2)}</strong></p>
+              <p>Saldo pendiente: <strong className={saldoUsd <= 0.005 ? 'text-success' : 'text-danger'}>${saldoUsd.toFixed(2)}</strong></p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Monto ($)</label>
-              <Input type="number" step={0.01} min={0.01} value={payAmount}
+              <label className="text-sm font-medium">{payIsBs ? 'Monto (Bs.)' : 'Monto ($)'}</label>
+              <Input type="number" step={payIsBs ? 1 : 0.01} min={0.01} value={payAmount}
                 onChange={e => setPayAmount(Number(e.target.value))} />
+              {payIsBs && tasaBcv > 0 && payAmount > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  ≈ ${(payAmount / tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})
+                </p>
+              )}
+              {!payIsBs && payAmount > 0 && tasaBcv > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  ≈ Bs. {(payAmount * tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Método de Pago</label>
               <Select value={payMethod} onValueChange={v => {
                 setPayMethod(v);
+                setPayCurrency(methodCurrency(v));
                 if (v.includes('Punto')) setPayFee(3.5);
               }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -791,6 +953,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                   ))}
                 </SelectContent>
               </Select>
+              {payIsBs && (
+                <p className="text-xs text-amber-600">
+                  Este método es en bolívares: el abono se registra en Bs. y se convierte a $ con la tasa BCV del día al calcular el saldo.
+                </p>
+              )}
             </div>
             {payMethod.includes('Punto') && (
               <div className="space-y-2">
@@ -798,15 +965,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 <Input type="number" step={0.1} min={0} max={100} value={payFee}
                   onChange={e => setPayFee(Number(e.target.value))} />
                 <p className="text-xs text-muted-foreground">
-                  Comisión: ${((payAmount * payFee) / 100).toFixed(2)} · Neto: ${(payAmount - (payAmount * payFee) / 100).toFixed(2)}
+                  Comisión: {currencySymbol(payCurrency)}{((payAmount * payFee) / 100).toFixed(2)} · Neto: {currencySymbol(payCurrency)}{(payAmount - (payAmount * payFee) / 100).toFixed(2)}
                 </p>
               </div>
             )}
-            {payMethod.includes('Zelle') && (
+            {(payMethod.includes('Zelle') || payIsPagoMovil) && (
               <div className="space-y-2">
-                <label className="text-sm font-medium">Referencia Zelle</label>
+                <label className="text-sm font-medium">Referencia</label>
                 <Input value={payZelle} onChange={e => setPayZelle(e.target.value)}
-                  placeholder="Número de referencia..." />
+                  placeholder="Número de referencia (últimos 4 dígitos)..." />
               </div>
             )}
             <div className="space-y-2">
