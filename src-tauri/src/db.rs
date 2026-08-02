@@ -624,6 +624,27 @@ impl Database {
             );
         }
         // Recalcular totales históricos de cierres con la moneda real (idempotente; tasa del propio cierre)
+        // Primero: cierres con tasa 0 heredan la del último cierre anterior con tasa > 0
+        // (bug: abrir/cerrar el día sin tasa dejaba equivalentes USD rotos)
+        let zero_tasa_dates: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT close_date FROM daily_closings WHERE is_closed=1 AND (tasa_bcv IS NULL OR tasa_bcv <= 0) ORDER BY close_date ASC")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for r in rows { v.push(r?); }
+            v
+        };
+        for d in &zero_tasa_dates {
+            let prev_tasa: Option<f64> = conn.query_row(
+                "SELECT tasa_bcv FROM daily_closings WHERE close_date < ?1 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+                params![d], |r| r.get(0),
+            ).optional()?;
+            if let Some(t) = prev_tasa {
+                let _ = conn.execute(
+                    "UPDATE daily_closings SET tasa_bcv=?1 WHERE close_date=?2 AND is_closed=1",
+                    params![t, d],
+                );
+            }
+        }
         let closed_dates: Vec<String> = {
             let mut stmt = conn.prepare("SELECT close_date FROM daily_closings WHERE is_closed=1")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -1831,6 +1852,15 @@ impl Database {
             "SELECT tasa_bcv FROM daily_closings WHERE is_closed=0 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
             [], |r| r.get(0),
         ).optional()?.unwrap_or(0.0);
+        // Si no hay día abierto con tasa, usar el último cierre que sí tenga tasa (el equivalente USD nunca queda en 0)
+        let fallback_tasa: f64 = if fallback_tasa > 0.0 {
+            fallback_tasa
+        } else {
+            conn.query_row(
+                "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+                [], |r| r.get(0),
+            ).optional()?.unwrap_or(0.0)
+        };
         let mut daily_map: std::collections::HashMap<String, DailyTotals> = std::collections::HashMap::new();
         for row in rows {
             let (d, method, total, bank_fee, net, currency) = row?;
@@ -2251,16 +2281,25 @@ impl Database {
         let actual_bs = actual_cash_bs + actual_pago_movil + actual_transfer_bs;
         let diff_usd = actual_usd - expected_usd;
         let diff_bs = actual_bs - expected_bs;
-        let difference = if tasa_bcv > 0.0 { diff_usd + diff_bs / tasa_bcv } else { diff_usd };
+        // Tasa del cierre: si viene 0 (día abierto sin tasa), heredar la del último cierre con tasa
+        let effective_tasa = if tasa_bcv > 0.0 {
+            tasa_bcv
+        } else {
+            conn.query_row(
+                "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+                [], |r| r.get(0),
+            ).optional()?.unwrap_or(0.0)
+        };
+        let difference = if effective_tasa > 0.0 { diff_usd + diff_bs / effective_tasa } else { diff_usd };
         // Total General en USD equivalente: USD + Bs convertidos con la tasa del cierre (nunca sumar Bs como USD)
-        let grand_total = t.grand_usd + if tasa_bcv > 0.0 { t.grand_bs / tasa_bcv } else { 0.0 };
+        let grand_total = t.grand_usd + if effective_tasa > 0.0 { t.grand_bs / effective_tasa } else { 0.0 };
 
         let changes = conn.execute(
             "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25
              WHERE close_date=?1 AND is_closed=0",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
                     t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, grand_total, notes,
-                    tasa_bcv, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
+                    effective_tasa, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
                     actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs],
         )?;
         if changes == 0 {

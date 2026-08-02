@@ -109,6 +109,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [pinConfirm, setPinConfirm] = useState('');
   const [pinCurrent, setPinCurrent] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
+  const [lastTasa, setLastTasa] = useState(0);
 
   const effectiveTab = isOwner ? tab : 'diario';
   const effectiveStart = isOwner ? startDate : today;
@@ -133,6 +134,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner]);
   useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
   useEffect(() => { refreshActiveDay(); }, []);
+  // Al volver a la ventana (tras facturar/registrar) la tabla diaria se recarga sola
+  useEffect(() => {
+    const onFocus = () => { if (tab === 'diario') loadTotals(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [tab, effectiveStart, effectiveEnd]);
+  // Última tasa BCV registrada (para el hint del dialog de apertura)
+  useEffect(() => {
+    api.getDailyClosings().then(cs => {
+      const c = cs.find(x => x.tasa_bcv > 0);
+      if (c) setLastTasa(c.tasa_bcv);
+    }).catch(() => {});
+  }, []);
   useEffect(() => {
     api.getPinStatus().then(setPinStatus).catch(() => setPinStatus(false));
   }, []);
@@ -621,6 +635,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   <RefreshCw className="size-4" /> Auto BCV
                 </Button>
               </div>
+              {lastTasa > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Última tasa registrada: <strong>{lastTasa.toFixed(2)}</strong> — verifica que sea la del día
+                </p>
+              )}
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Tasa Bs/EUR</label>
