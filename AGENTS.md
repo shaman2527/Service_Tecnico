@@ -217,6 +217,7 @@ Antes de hacer commit:
 | 2026-08-02 | **Saldo con `Math.max(0, ...)` ocultaba sobrepagos**: cualquier cobro > monto mostraba "Cancelado" verde; un servicio con monto 0 y abonos mostraba "Cancelado" en vez de excedente. | Saldo honesto en ServiceForm y Clients.tsx: `saldoUsd = amount - paid` → >0.005 "pendiente" rojo, <-0.005 "Excedente $X" ámbar (+hint en dialog de pago), |saldo|≤0.005 "Cancelado" verde. |
 | 2026-08-02 | **Campo "Moneda" editable contradecía al método**: con "Punto de Venta (Bs)" el Select podía mostrar/guardar "USD $" (harness: moneda SIEMPRE del método; backend normaliza pero la UI mentía). | Select eliminado → etiqueta informativa `Moneda: Bs. — Bolívares (según método)` derivada de `methodCurrency(payment)`; `useEffect` auto-sincroniza el estado interno (reemplaza el hack del caso Zelle). |
 | 2026-08-02 | **Buscar cédula no encontraba al cliente**: `find_client_by_ci` usaba match EXACTO (`c.ci = ?1`) — "V-24906999" vs "24906999" (o espacios) = no encontrado → el usuario veía "Cliente nuevo" y nada de historial. Además el historial solo se mostraba si había servicios (sin aviso de vacío) y en edición incluía el propio servicio (parecía duplicado). | Backend: búsqueda tolerante a formato con variantes (crudo, solo dígitos vía `norm_ci_digits`, "V-"+dígitos, "E-"+dígitos). Frontend: `normCi()` al buscar; aviso "Sin historial previo de servicios" cuando clientId existe sin servicios; historial excluye el servicio en edición (`filter(s => s.id !== service?.id)`). Verificado vía CDP: findClientByCi con "V-24906999"/"24906999"/"v 24906999" → mismo cliente; nuevo servicio con cédula V- → historial completo. |
+| 2026-08-02 | **Entregados no se distinguían en pantalla + sin base para garantía**: las cards eran todas iguales (solo badge de estado) y `date_out` era manual — al entregar sin poner fecha no existía la fecha de entrega. | Cards: `status='Entregado'` → `border-emerald-500/40 bg-emerald-500/5` (verde clarito) + `CheckCircle2` verde + badge `bg-success`. Garantía 7 días corridos desde `date_out`: backend `update_service` auto-setea `date_out=hoy` al entregar sin fecha y lo LIMPIA al reabrir (la nueva entrega reinicia la garantía); helpers `warrantyEnd`/`warrantyStatus` en utils.ts; badge "Garantía hasta {+7d}" (verde) o "Garantía vencida" (gris) en la card; banner al editar un entregado ("En garantía — vence el X" ámbar / "Garantía vencida" gris). Test `test_service_warranty_dates` (8/8). Verificado vía CDP: ORD-1003 (entregado 01-08) → card verde + "Garantía hasta 2026-08-08" + banner en edición. |
 
 ## Feedback Loops
 
@@ -233,9 +234,9 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (npm 6.23s / release 4m40s)**
-- **Registro.exe MD5:** A50CF8F74B830B9680845259F40A9DBC
-- **Tests:** 7/7 (incl. test_daily_totals_currency)
+- **Build: ✅ PASS (npm 5.58s / release 3m28s)**
+- **Registro.exe MD5:** C70A6BCB3C7093555EAD1B07CEA30CB9
+- **Tests:** 8/8 (incl. test_service_warranty_dates, test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0
 

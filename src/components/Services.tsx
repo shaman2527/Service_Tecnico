@@ -12,7 +12,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
-import { cn, methodCurrency, currencySymbol } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client } from '../types';
 
 const CHECKLIST_ITEMS: { key: string; label: string }[] = [
@@ -174,14 +174,20 @@ export default function Services() {
             const balance = s.amount - s.paid_amount;
             const checklist = parseChecklist(s.device_checklist);
             const hasChecklist = Object.keys(checklist).length > 0;
+            const entregado = s.status === 'Entregado';
+            const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
             return (
-              <Card key={s.id} className="overflow-hidden transition-shadow hover:shadow-md">
+              <Card key={s.id} className={cn(
+                'overflow-hidden transition-shadow hover:shadow-md',
+                entregado && 'border-emerald-500/40 bg-emerald-500/5'
+              )}>
                 <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold">{s.order_num}</span>
+                    {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
                     <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
                   </div>
-                  <Badge variant={statusBadgeVariant(s.status)}>{s.status}</Badge>
+                  <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
                 </CardHeader>
                 <CardContent className="px-4 pb-4 pt-0">
                   <div className="flex flex-col gap-3">
@@ -230,6 +236,16 @@ export default function Services() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex flex-wrap gap-1.5">
                         {s.service_type && <Badge variant="outline" className="text-xs">{s.service_type}</Badge>}
+                        {warr === 'activa' && (
+                          <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10">
+                            Garantía hasta {warrantyEnd(s.date_out)}
+                          </Badge>
+                        )}
+                        {warr === 'vencida' && (
+                          <Badge variant="outline" className="text-xs text-muted-foreground">
+                            Garantía vencida
+                          </Badge>
+                        )}
                         {s.date_out && (
                           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
                             <CalendarDays className="size-3" /> {s.date_out.slice(0, 10)}
@@ -585,6 +601,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         <DialogHeader>
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
         </DialogHeader>
+        {service?.status === 'Entregado' && service.date_out && warrantyStatus(service.date_out) === 'activa' && (
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">
+            <ShieldCheck className="size-4 shrink-0" />
+            <span>
+              <strong>En garantía</strong> — vence el {warrantyEnd(service.date_out)}. Si es un reclamo, reábrelo (cambia el estado) y al entregarlo la garantía reinicia sus 7 días.
+            </span>
+          </div>
+        )}
+        {service?.status === 'Entregado' && service.date_out && warrantyStatus(service.date_out) === 'vencida' && (
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+            <ShieldCheck className="size-4 shrink-0" />
+            <span>Garantía vencida el {warrantyEnd(service.date_out)}</span>
+          </div>
+        )}
         <div className="space-y-4">
           <div className="text-sm text-muted-foreground">
             Orden: <strong>{orderNum}</strong>

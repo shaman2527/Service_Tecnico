@@ -942,7 +942,7 @@ impl Database {
         let prev_status: Option<String> = conn
             .query_row("SELECT status FROM services WHERE id=?1", params![id], |r| r.get(0))
             .optional()?;
-        if let Some(prev) = prev_status {
+        if let Some(prev) = prev_status.as_deref() {
             if prev != status {
                 if status == "Entregado" {
                     self.apply_service_stock(&conn, model, -1)?;
@@ -952,9 +952,23 @@ impl Database {
             }
         }
 
+        // Garantía: la fecha de entrega SIEMPRE es la del día de la entrega.
+        // Al entregar sin fecha → hoy; al reabrir un entregado → se limpia (la nueva entrega reinicia la garantía de 7 días).
+        let effective_date_out: String = if status == "Entregado" {
+            if date_out.trim().is_empty() {
+                chrono::Local::now().format("%Y-%m-%d").to_string()
+            } else {
+                date_out.to_string()
+            }
+        } else if prev_status.as_deref() == Some("Entregado") {
+            String::new()
+        } else {
+            date_out.to_string()
+        };
+
         conn.execute(
             "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19 WHERE id=?10",
-            params![client, phone, model, fault, amount, payment_method, date_out, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
+            params![client, phone, model, fault, amount, payment_method, if effective_date_out.is_empty() { None } else { Some(effective_date_out.as_str()) }, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
         )?;
         Ok(())
     }
@@ -2943,6 +2957,47 @@ mod tests {
         assert_eq!(c.total_usd, 50.0, "cierre guarda total_usd");
         assert_eq!(c.total_bs, 200.0, "cierre guarda total_bs");
         assert!((c.grand_total - (50.0 + 200.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv, got {}", c.grand_total);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_service_warranty_dates() {
+        // Garantía: al entregar sin fecha → date_out = hoy; al reabrir → se limpia;
+        // al re-entregar → nueva fecha (garantía de 7 días reinicia).
+        let test_path = PathBuf::from("test_warranty.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let sid = db.add_service("ORD-WARR-1", "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
+            25.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "", None).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // 1) Entregar sin fecha → se asigna hoy
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "date_out auto = hoy al entregar");
+
+        // 2) Reabrir (garantía / reclamo) → date_out se limpia
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
+            25.0, "Efectivo Bs", "2026-07-30", "Recibido", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert!(svc.date_out.is_none(), "date_out limpio al reabrir, got {:?}", svc.date_out);
+
+        // 3) Re-entregar sin fecha → nueva fecha de hoy
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "nueva entrega → fecha nueva");
+
+        // 4) Editar sin cambiar de Entregado → conserva la fecha
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
+            30.0, "Efectivo Bs", "", "Entregado", "nota", 0.0, "", "USD", "V-100", "", "").unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "sigue entregado → conserva fecha");
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
