@@ -222,6 +222,7 @@ Antes de hacer commit:
 | 2026-08-02 | **Card "Total General del período" genérico** (Libro Diario): 3 textos planos (USD/Bs/Equivalente) sin jerarquía visual. | Rediseño split-card con componentes existentes (sin tocar ui/): header con `CardTitle`+`CardDescription` y `Badge` del equivalente (≈ $X USD); cuerpo grid 3 celdas con divisores (`divide-x/y`), cada una con chip de icono semántico (DollarSign emerald / Banknote ámbar / ArrowRightLeft primary) + número `text-2xl tabular-nums`; footer `Separator` + "N día(s) con movimientos" + tasa BCV del día abierto. Verificado vía CDP: Dólares $150.00 · Bolívares Bs.36.386,25 · Equivalente $198.59 · Tasa BCV 748.79. |
 | 2026-08-02 | **Columna Punto de la tabla diaria sin moneda — "$35000" confuso**: `pos_charged/pos_fees/pos_net` suman el punto crudo (Bs y USD mezclados) y la UI los mostraba con símbolo $ fijo → un cobro de Punto (Bs) de Bs 35.000 aparecía como "$35.000,00". | Backend: `DailyTotals` gana `pos_charged_usd/bs` + `pos_net_usd/bs` (clasificación por moneda derivada del método en `compute_daily_totals`); helper `fmtMix(usd, bs)` en DailyLedger ("$X + Bs. Y" omitiendo ceros). Tabla rediseñada: columnas "Punto Cargado/Comisión/Neto Punto" → UNA columna "Punto de Venta" con el neto en su moneda real + detalle debajo ("Cargado Bs.35.000,00 · Comisión -Bs.700,00"); KPI Neto Punto y dialog de cierre con desglose por moneda. Test `test_daily_totals_currency` verifica punto Bs 35.000 (neto Bs 34.300) + punto USD 100. Verificado vía CDP: fila 02-08 → "Bs.34.300,00 | Cargado Bs.35.000,00 · Comisión -Bs.700,00 | Total $150.00 + Bs.34.310,00". |
 | 2026-08-02 | **Comisión y ceros confusos en la tabla diaria**: el detalle "Cargado X · Comisión -Y" no se entendía y las celdas sin movimiento mostraban "$0.00"/"Bs.0,00" que "no decían nada". | Quitado el subdetalle de comisión (celda Punto y dialog de cierre muestran SOLO el neto en su moneda — la comisión sigue calculándose internamente en backend para el cierre); celdas sin movimiento → "—" (helper `dash`); KPI "Neto Punto" → "Punto de Venta"; columna Punto condicional (`hasPos`). Verificado vía CDP: 01-08 → "Punto — · Divisas —", 02-08 → "Punto Bs.34.300,00", la palabra "Comisión" ya no aparece en el Libro Diario. |
+| 2026-08-02 | **Registrar pagos exigía entrar a Editar y no había entrega rápida**: el dialog de pagos vivía dentro de ServiceForm (líneas ~982-1064) y no había botón "Entregar" en la card. | Componente nuevo `PaymentDialog.tsx` (dialog de pagos extraído, reutilizable): carga methods/tasa BCV/saldo honesto internamente, historial de pagos con borrar, `onSaved` refresca al padre. Card de la lista: botón **"Pago / Abono"** azul (`bg-primary`) en TODAS las cards → abre el dialog sin editar; botón **"Entregar"** (solo estados activos) → entrega directa con `updateService` (status Entregado, date_out '' → backend pone hoy, stock/garantía automáticos); si hay **saldo pendiente** (>0.005) → AlertDialog "Entregar con saldo pendiente" (muestra el monto exacto adeudado) con [Cancelar / Entregar con saldo]. Verificado vía CDP: ORD-1035 reabierto → botones visibles, click Entregar → alerta "$799.99 pendientes", confirmar → Entregado; Pago/Abono → dialog "Registrar Pago / Abono · ORD-1035". |
 
 ## Feedback Loops
 
@@ -238,8 +239,8 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (npm 2.61s / release 3m56s)**
-- **Registro.exe MD5:** 9DFA1AD3D7EF02C8D0208E938C270AE2
+- **Build: ✅ PASS (npm 2.72s / release 3m09s)**
+- **Registro.exe MD5:** ED7C96DD440EBC7E6F86ABA9C38E2915
 - **Tests:** 8/8 (incl. test_service_warranty_dates, test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0

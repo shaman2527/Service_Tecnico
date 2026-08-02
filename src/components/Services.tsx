@@ -12,6 +12,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
+import PaymentDialog from './PaymentDialog';
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client } from '../types';
 
@@ -76,6 +77,9 @@ export default function Services() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
+  const [payFor, setPayFor] = useState<Service | null>(null);
+  const [delivering, setDelivering] = useState<Service | null>(null);
+  const [confirmDeliver, setConfirmDeliver] = useState<Service | null>(null);
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
 
   const load = async () => {
@@ -102,6 +106,24 @@ export default function Services() {
     await api.deleteService(s.id);
     setDeleting(null);
     load();
+  };
+
+  // Entrega directa: status Entregado + date_out vacío (el backend pone la fecha de hoy y descuenta stock)
+  const deliver = async (s: Service) => {
+    setDelivering(s);
+    try {
+      await api.updateService(
+        s.id, s.client ?? '', s.phone ?? '', s.model ?? '', s.fault ?? '',
+        s.service_type ?? 'Cambio pantalla', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
+        '', 'Entregado', s.observations ?? '', s.bank_fee_percent ?? 0,
+        s.zelle_reference ?? '', s.currency ?? 'USD', s.client_ci ?? '',
+        s.client_address ?? '', s.device_checklist ?? ''
+      );
+    } finally {
+      setDelivering(null);
+      setConfirmDeliver(null);
+      load();
+    }
   };
 
   const totalAmount = services.reduce((a, s) => a + s.amount, 0);
@@ -288,6 +310,21 @@ export default function Services() {
                         )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        {ACTIVE_STATUSES.includes(s.status ?? '') && (
+                          <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
+                            disabled={delivering?.id === s.id}
+                            onClick={() => {
+                              // Confirmar solo si el cliente no pagó la totalidad
+                              if (s.amount - s.paid_amount > 0.005) setConfirmDeliver(s);
+                              else deliver(s);
+                            }}>
+                            <CheckCircle2 className="size-3.5" /> {delivering?.id === s.id ? 'Entregando...' : 'Entregar'}
+                          </Button>
+                        )}
+                        <Button size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90"
+                          onClick={() => setPayFor(s)}>
+                          <Banknote className="size-3.5" /> Pago / Abono
+                        </Button>
                         {hasChecklist && (
                           <TooltipProvider delayDuration={100}>
                             <Tooltip>
@@ -337,6 +374,14 @@ export default function Services() {
         />
       )}
 
+      <PaymentDialog
+        service={payFor}
+        open={!!payFor}
+        onOpenChange={(o) => { if (!o) setPayFor(null); }}
+        dayOpen={dayOpen}
+        onSaved={load}
+      />
+
       <AlertDialog open={!!deleting} onOpenChange={() => setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -349,6 +394,31 @@ export default function Services() {
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
             <AlertDialogAction onClick={() => deleting && handleDelete(deleting)}>
               Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!confirmDeliver} onOpenChange={() => setConfirmDeliver(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Entregar con saldo pendiente</AlertDialogTitle>
+            <AlertDialogDescription>
+              <div className="flex flex-col gap-2">
+                <p>
+                  La orden <strong>{confirmDeliver?.order_num}</strong> de {confirmDeliver?.client} aún tiene{' '}
+                  <strong className="text-danger">${((confirmDeliver?.amount ?? 0) - (confirmDeliver?.paid_amount ?? 0)).toFixed(2)} pendientes</strong>.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  El cliente no ha pagado la totalidad del monto. Puedes cobrar el saldo con el botón "Pago / Abono" antes de entregar.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={() => confirmDeliver && deliver(confirmDeliver)}>
+              Entregar con saldo pendiente
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -399,22 +469,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const amountTouched = useRef(false);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
-  const [payAmount, setPayAmount] = useState(0);
-  const [payMethod, setPayMethod] = useState('Divisas (USD Cash)');
-  const [payCurrency, setPayCurrency] = useState<'USD' | 'VES'>('USD');
-  const [payFee, setPayFee] = useState(0);
-  const [payZelle, setPayZelle] = useState('');
-  const [payNotes, setPayNotes] = useState('');
-  const [payError, setPayError] = useState<string | null>(null);
-  const [savingPay, setSavingPay] = useState(false);
-  const [tasaBcv, setTasaBcv] = useState(0);
   const [svc, setSvc] = useState<Service | null>(service);
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
   const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
-  const payIsPagoMovil = payMethod.includes('Móvil') || payMethod.includes('Movil');
-  const payIsBs = payCurrency === 'VES';
 
   useEffect(() => {
     api.getProducts('', null).then(setCatalog);
@@ -582,45 +641,6 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     setCurrency(methodCurrency(payment));
   }, [payment]);
 
-  useEffect(() => {
-    if (!svc) return;
-    let alive = true;
-    api.getActiveDay().then(d => {
-      if (alive) setTasaBcv(d?.tasa_bcv ?? 0);
-    }).catch(() => {});
-    return () => { alive = false; };
-  }, [svc?.id]);
-
-  const openPayDialog = () => {
-    setPayMethod(payment);
-    setPayCurrency(methodCurrency(payment));
-    setPayFee(payment.includes('Punto') ? 3.5 : 0);
-    setPayZelle('');
-    setPayNotes('');
-    setPayError(null);
-    setPayAmount(saldoUsd > 0 ? Math.min(saldoUsd, amount) : amount);
-    setShowPayDialog(true);
-  };
-
-  const doAddPayment = async () => {
-    if (!service || payAmount <= 0) return;
-    setSavingPay(true);
-    setPayError(null);
-    try {
-      await api.addServicePayment(service.id, payAmount, payMethod, payFee, payZelle, payCurrency, payNotes);
-      setShowPayDialog(false);
-      const p = await api.getServicePayments(service.id);
-      setPayments(p);
-      const s = await api.getService(service.id).catch(() => service);
-      setSvc(s);
-      onSaved();
-    } catch (e) {
-      setPayError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingPay(false);
-    }
-  };
-
   const doDeletePayment = async (pid: number) => {
     await api.deleteServicePayment(pid);
     const p = await api.getServicePayments(service!.id);
@@ -770,7 +790,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 <p className="text-sm font-semibold flex items-center gap-2">
                   <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
                 </p>
-                <Button variant="outline" size="sm" onClick={openPayDialog} disabled={dayOpen === false}>
+                <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false}>
                   <Plus className="size-3.5" /> Registrar Pago / Abono
                 </Button>
               </div>
@@ -1026,89 +1046,18 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </DialogFooter>
       </DialogContent>
 
-      <Dialog open={showPayDialog} onOpenChange={setShowPayDialog}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Registrar Pago / Abono</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="text-sm space-y-1 rounded-md bg-muted/60 px-3 py-2">
-              <p>Total: <strong>${amount.toFixed(2)}</strong></p>
-              {saldoUsd > 0.005 ? (
-                <p>Saldo pendiente: <strong className="text-danger">${saldoUsd.toFixed(2)}</strong></p>
-              ) : saldoUsd < -0.005 ? (
-                <p>Excedente: <strong className="text-warning">${excedenteUsd.toFixed(2)}</strong> (se cobró más que el monto del servicio)</p>
-              ) : (
-                <p>Saldo: <strong className="text-success">Cancelado</strong></p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">{payIsBs ? 'Monto (Bs.)' : 'Monto ($)'}</label>
-              <Input type="number" step={payIsBs ? 1 : 0.01} min={0.01} value={payAmount}
-                onChange={e => setPayAmount(Number(e.target.value))} />
-              {payIsBs && tasaBcv > 0 && payAmount > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  ≈ ${(payAmount / tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})
-                </p>
-              )}
-              {!payIsBs && payAmount > 0 && tasaBcv > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  ≈ Bs. {(payAmount * tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})
-                </p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Método de Pago</label>
-              <Select value={payMethod} onValueChange={v => {
-                setPayMethod(v);
-                setPayCurrency(methodCurrency(v));
-                if (v.includes('Punto')) setPayFee(3.5);
-              }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {methods.map(m => (
-                    <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {payIsBs && (
-                <p className="text-xs text-amber-600">
-                  Este método es en bolívares: el abono se registra en Bs. y se convierte a $ con la tasa BCV del día al calcular el saldo.
-                </p>
-              )}
-            </div>
-            {payMethod.includes('Punto') && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Comisión Punto (%)</label>
-                <Input type="number" step={0.1} min={0} max={100} value={payFee}
-                  onChange={e => setPayFee(Number(e.target.value))} />
-                <p className="text-xs text-muted-foreground">
-                  Comisión: {currencySymbol(payCurrency)}{((payAmount * payFee) / 100).toFixed(2)} · Neto: {currencySymbol(payCurrency)}{(payAmount - (payAmount * payFee) / 100).toFixed(2)}
-                </p>
-              </div>
-            )}
-            {(payMethod.includes('Zelle') || payIsPagoMovil) && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Referencia</label>
-                <Input value={payZelle} onChange={e => setPayZelle(e.target.value)}
-                  placeholder="Número de referencia (últimos 4 dígitos)..." />
-              </div>
-            )}
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Notas (opcional)</label>
-              <Input value={payNotes} onChange={e => setPayNotes(e.target.value)}
-                placeholder="Ej: Abono inicial / Saldo al entregar..." />
-            </div>
-            {payError && <p className="text-sm text-danger">{payError}</p>}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowPayDialog(false)}>Cancelar</Button>
-            <Button onClick={doAddPayment} disabled={savingPay || payAmount <= 0 || dayOpen === false}>
-              {savingPay ? 'Guardando...' : 'Guardar Pago'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <PaymentDialog
+        service={svc}
+        open={showPayDialog}
+        onOpenChange={setShowPayDialog}
+        dayOpen={dayOpen}
+        onSaved={() => {
+          if (!svc) return;
+          api.getServicePayments(svc.id).then(setPayments).catch(() => setPayments([]));
+          api.getService(svc.id).then(setSvc).catch(() => {});
+          onSaved();
+        }}
+      />
     </Dialog>
   );
 }
