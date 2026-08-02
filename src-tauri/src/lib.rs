@@ -24,6 +24,7 @@ pub fn run() {
             commands::delete_product,
             commands::get_products,
             commands::get_low_stock_products,
+            commands::get_reorder_suggestions,
             commands::suggest_products,
             commands::add_sale,
             commands::get_sales,
@@ -36,6 +37,11 @@ pub fn run() {
             commands::get_service_payments,
             commands::add_service_payment,
             commands::delete_service_payment,
+            commands::add_purchase_order,
+            commands::get_purchase_orders,
+            commands::get_purchase_order_items,
+            commands::mark_purchase_order_received,
+            commands::delete_purchase_order,
             commands::get_clients,
             commands::add_client,
             commands::add_or_find_client,
@@ -124,3 +130,8 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 3
 // force rebuild 4
 // force rebuild 5
+// force rebuild 6
+// force rebuild 7
+// force rebuild 8
+// force rebuild 9
+// force rebuild 10

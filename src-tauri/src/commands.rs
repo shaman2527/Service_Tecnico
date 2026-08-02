@@ -55,6 +55,11 @@ pub fn get_low_stock_products(db: State<Database>) -> Result<Vec<crate::db::Prod
 }
 
 #[tauri::command]
+pub fn get_reorder_suggestions(db: State<Database>) -> Result<Vec<crate::db::Product>, String> {
+    db.get_reorder_suggestions().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn suggest_products(db: State<Database>, query: String, limit: i64) -> Result<Vec<crate::db::Product>, String> {
     db.suggest_products(&query, limit).map_err(|e| e.to_string())
 }
@@ -132,6 +137,31 @@ pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, pa
 #[tauri::command]
 pub fn delete_service_payment(db: State<Database>, id: i64) -> Result<(), String> {
     db.delete_service_payment(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_purchase_order(db: State<Database>, supplier: String, notes: String, items_json: String) -> Result<i64, String> {
+    db.add_purchase_order(&supplier, &notes, &items_json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_purchase_orders(db: State<Database>) -> Result<Vec<crate::db::PurchaseOrder>, String> {
+    db.get_purchase_orders().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_purchase_order_items(db: State<Database>, order_id: i64) -> Result<Vec<crate::db::PurchaseOrderItem>, String> {
+    db.get_purchase_order_items(order_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn mark_purchase_order_received(db: State<Database>, order_id: i64) -> Result<(), String> {
+    db.mark_purchase_order_received(order_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_purchase_order(db: State<Database>, order_id: i64) -> Result<(), String> {
+    db.delete_purchase_order(order_id).map_err(|e| e.to_string())
 }
 
 // --- Clients ---

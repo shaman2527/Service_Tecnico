@@ -1,7 +1,7 @@
 import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, InventoryMovement, PaymentMethod, ServiceStatus,
-  DailyTotals, DailyClosing, BCVRate
+  DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem
 } from './types';
 
 const isTauri = typeof window !== 'undefined' &&
@@ -49,6 +49,8 @@ export const api = {
 
   getLowStockProducts: () => tauriInvoke<Product[]>('get_low_stock_products').catch(() =>
     mock<Product[]>([])),
+  getReorderSuggestions: () => tauriInvoke<Product[]>('get_reorder_suggestions').catch(() =>
+    mock<Product[]>([])),
   suggestProducts: (query: string, limit: number = 10) =>
     tauriInvoke<Product[]>('suggest_products', { query, limit }),
 
@@ -94,6 +96,20 @@ export const api = {
 
   deleteServicePayment: (id: number) =>
     tauriInvoke<void>('delete_service_payment', { id }),
+
+  addPurchaseOrder: (supplier: string, notes: string, itemsJson: string) =>
+    tauriInvoke<number>('add_purchase_order', { supplier, notes, itemsJson }),
+
+  getPurchaseOrders: () => tauriInvoke<PurchaseOrder[]>('get_purchase_orders'),
+
+  getPurchaseOrderItems: (orderId: number) =>
+    tauriInvoke<PurchaseOrderItem[]>('get_purchase_order_items', { orderId }),
+
+  markPurchaseOrderReceived: (orderId: number) =>
+    tauriInvoke<void>('mark_purchase_order_received', { orderId }),
+
+  deletePurchaseOrder: (orderId: number) =>
+    tauriInvoke<void>('delete_purchase_order', { orderId }),
 
   getServiceDashboard: () => tauriInvoke<ServiceDashboard>('get_service_dashboard').catch(() =>
     mock<ServiceDashboard>({

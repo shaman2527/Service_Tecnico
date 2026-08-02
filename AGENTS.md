@@ -131,8 +131,15 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Iconos: User (cliente), Smartphone (equipo), CalendarDays (salida), ShieldCheck (checklist con tooltip), Trash2 (eliminar).
 - Regla: la falla NO se trunca en tarjetas (line-clamp-2); la información completa siempre visible — evita tablas de 13 columnas que aprietan.
 
+### Pedidos a Proveedor (purchase_orders)
+- **Tablas:** `purchase_orders` (id, order_date, supplier, status 'Pendiente'|'Recibido', notes) + `purchase_order_items` (order_id FK, product_id FK, product_name, quantity, unit_price).
+- **Comandos:** `add_purchase_order(supplier, notes, items_json)` (items = JSON array `[{productId, productName, quantity, unitPrice}]`, requiere día abierto), `get_purchase_orders` (con item_count/total_quantity/total_cost via LEFT JOIN), `get_purchase_order_items(orderId)`, `mark_purchase_order_received(orderId)` → **suma stock + movimiento entrada "Pedido Recibido"** (query inline, sin deadlock; rechaza recibir dos veces), `delete_purchase_order`.
+- **Sugerencias de reposición:** `get_reorder_suggestions` — productos con stock < 0, o min_stock > 0 y stock ≤ min_stock, o con salidas en inventory_movements y stock ≤ 0 (NO todo el catálogo: evita 944 filas de productos nunca vendidos).
+- UI: Pedidos.tsx en sidebar (icono ShoppingBag) — cards agotados/stock bajo/pendientes, tabla "Por reponer" con botón "Pedir N" (sugerido = min*2 - stock), dialog Nuevo Pedido con buscador del catálogo completo + carrito editable, lista de pedidos con "Ver" (detalle) + "Recibido" + eliminar.
+- Regla deadlock: `mark_purchase_order_received` NO llama `get_purchase_order_items` con el lock tomado — query inline (patrón Entropy Registry).
+
 ### Commands Tauri (Rust)
-- 33 comandos registrados en lib.rs (+3: get_service_payments, add_service_payment, delete_service_payment)
+- 38 comandos registrados en lib.rs (+5: add_purchase_order, get_purchase_orders, get_purchase_order_items, mark_purchase_order_received, delete_purchase_order, get_reorder_suggestions)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
 - Tests: `cd src-tauri && cargo test`
 
@@ -189,8 +196,12 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-01
-- **Build: ✅ PASS (10.4s)**
+- **Date:** 2026-08-02
+- **Build: ✅ PASS (11.6s)**
 - **Errors:** 0
 - **Warnings:** 0
+- **Inventario real:** 44 productos con stock (232 unidades pantallas, lista usuario 194+57 cargada)
+- **Centro de Ayuda:** Help.tsx en sidebar (quick actions + accordion radix, 8 secciones + abonos + métodos de pago)
+- **Abonos:** service_payments con historial, saldo por orden/cliente, Libro Diario por fecha de pago
+- **Pedidos:** purchase_orders + sugerencias de reposición (get_reorder_suggestions), recibir suma stock
 

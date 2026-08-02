@@ -124,6 +124,28 @@ pub struct ServicePayment {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PurchaseOrder {
+    pub id: i64,
+    pub order_date: Option<String>,
+    pub supplier: Option<String>,
+    pub status: Option<String>,
+    pub notes: Option<String>,
+    pub item_count: i64,
+    pub total_quantity: i64,
+    pub total_cost: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PurchaseOrderItem {
+    pub id: i64,
+    pub order_id: i64,
+    pub product_id: Option<i64>,
+    pub product_name: Option<String>,
+    pub quantity: i64,
+    pub unit_price: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServiceDashboard {
     pub total: i64,
     pub entregados: i64,
@@ -320,6 +342,21 @@ impl Database {
                 payment_date TEXT DEFAULT (datetime('now','localtime')),
                 notes TEXT
             );
+            CREATE TABLE IF NOT EXISTS purchase_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_date TEXT DEFAULT (datetime('now','localtime')),
+                supplier TEXT,
+                status TEXT DEFAULT 'Pendiente',
+                notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS purchase_order_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER REFERENCES purchase_orders(id),
+                product_id INTEGER REFERENCES products(id),
+                product_name TEXT,
+                quantity INTEGER DEFAULT 1,
+                unit_price REAL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS service_statuses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE
@@ -445,6 +482,27 @@ impl Database {
         if !has_paid_amount {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN paid_amount REAL DEFAULT 0;");
         }
+        // Migration: purchase orders (pedidos a proveedor)
+        let has_purchase_orders: bool = conn.prepare("SELECT id FROM purchase_orders LIMIT 1").is_ok();
+        if !has_purchase_orders {
+            let _ = conn.execute_batch("
+                CREATE TABLE IF NOT EXISTS purchase_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_date TEXT DEFAULT (datetime('now','localtime')),
+                    supplier TEXT,
+                    status TEXT DEFAULT 'Pendiente',
+                    notes TEXT
+                );
+                CREATE TABLE IF NOT EXISTS purchase_order_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER REFERENCES purchase_orders(id),
+                    product_id INTEGER REFERENCES products(id),
+                    product_name TEXT,
+                    quantity INTEGER DEFAULT 1,
+                    unit_price REAL DEFAULT 0
+                );
+            ");
+        }
 
         let defaults = [
             ("INSERT OR IGNORE INTO categories (name) VALUES ('Pantalla')",),
@@ -558,6 +616,32 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.stock <= p.min_stock ORDER BY p.stock ASC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Product {
+                id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?,
+                brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
+                compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
+                stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
+                updated_at: r.get(12)?, category_name: r.get(13)?,
+            })
+        })?;
+        let mut products = Vec::new();
+        for row in rows { products.push(row?); }
+        Ok(products)
+    }
+
+    // Sugerencias de reposición: productos que se venden/usan y están bajos
+    // (stock negativo, min_stock definido y bajo, o que han tenido salidas en inventory_movements)
+    pub fn get_reorder_suggestions(&self) -> SqlResult<Vec<Product>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.*, c.name as category_name FROM products p
+             LEFT JOIN categories c ON p.category_id = c.id
+             WHERE p.stock < 0
+                OR (p.min_stock > 0 AND p.stock <= p.min_stock)
+                OR EXISTS (SELECT 1 FROM inventory_movements m WHERE m.product_id = p.id AND m.type = 'salida' AND p.stock <= 0)
+             ORDER BY p.stock ASC"
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Product {
@@ -846,6 +930,109 @@ impl Database {
             "UPDATE services SET paid_amount = (SELECT COALESCE(SUM(amount),0) FROM service_payments WHERE service_id=?1) WHERE id=?1",
             params![service_id],
         )?;
+        Ok(())
+    }
+
+    // --- Purchase Orders (pedidos a proveedor) ---
+    pub fn add_purchase_order(&self, supplier: &str, notes: &str, items_json: &str) -> SqlResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        self.require_open_day(&conn)?;
+        let items: Vec<serde_json::Value> = serde_json::from_str(items_json).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+        })?;
+        if items.is_empty() {
+            return Err(day_shift_error("El pedido debe tener al menos un producto."));
+        }
+        conn.execute(
+            "INSERT INTO purchase_orders (supplier, notes) VALUES (?1, ?2)",
+            params![if supplier.is_empty() { None } else { Some(supplier) }, if notes.is_empty() { None } else { Some(notes) }],
+        )?;
+        let order_id = conn.last_insert_rowid();
+        for item in &items {
+            let product_id = item["productId"].as_i64();
+            let product_name = item["productName"].as_str().unwrap_or("").to_string();
+            let quantity = item["quantity"].as_i64().unwrap_or(1);
+            let unit_price = item["unitPrice"].as_f64().unwrap_or(0.0);
+            conn.execute(
+                "INSERT INTO purchase_order_items (order_id, product_id, product_name, quantity, unit_price) VALUES (?1,?2,?3,?4,?5)",
+                params![order_id, product_id, product_name, quantity, unit_price],
+            )?;
+        }
+        Ok(order_id)
+    }
+
+    pub fn get_purchase_orders(&self) -> SqlResult<Vec<PurchaseOrder>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT po.id, po.order_date, po.supplier, po.status, po.notes,
+                    COUNT(poi.id) as item_count,
+                    COALESCE(SUM(poi.quantity),0) as total_quantity,
+                    COALESCE(SUM(poi.quantity * poi.unit_price),0) as total_cost
+             FROM purchase_orders po
+             LEFT JOIN purchase_order_items poi ON poi.order_id = po.id
+             GROUP BY po.id ORDER BY po.id DESC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PurchaseOrder {
+                id: r.get(0)?, order_date: r.get(1)?, supplier: r.get(2)?,
+                status: r.get(3)?, notes: r.get(4)?,
+                item_count: r.get(5)?, total_quantity: r.get(6)?, total_cost: r.get(7)?,
+            })
+        })?;
+        let mut orders = Vec::new();
+        for row in rows { orders.push(row?); }
+        Ok(orders)
+    }
+
+    pub fn get_purchase_order_items(&self, order_id: i64) -> SqlResult<Vec<PurchaseOrderItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, order_id, product_id, product_name, quantity, unit_price FROM purchase_order_items WHERE order_id = ?1 ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map(params![order_id], |r| {
+            Ok(PurchaseOrderItem {
+                id: r.get(0)?, order_id: r.get(1)?, product_id: r.get(2)?,
+                product_name: r.get(3)?, quantity: r.get(4)?, unit_price: r.get(5)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows { items.push(row?); }
+        Ok(items)
+    }
+
+    pub fn mark_purchase_order_received(&self, order_id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let status: Option<String> = conn
+            .query_row("SELECT status FROM purchase_orders WHERE id=?1", params![order_id], |r| r.get(0))
+            .optional()?;
+        if status.as_deref() == Some("Recibido") {
+            return Err(day_shift_error("Este pedido ya fue recibido."));
+        }
+        // Query inline (sin re-tomar el lock)
+        let mut stmt = conn.prepare(
+            "SELECT product_id, quantity FROM purchase_order_items WHERE order_id = ?1"
+        )?;
+        let rows = stmt.query_map(params![order_id], |r| {
+            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (pid, qty) = row?;
+            if let Some(pid) = pid {
+                conn.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![qty, pid])?;
+                conn.execute(
+                    "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, 'entrada', ?2, 'Pedido Recibido', ?3)",
+                    params![pid, qty, format!("Pedido #{}", order_id)],
+                )?;
+            }
+        }
+        conn.execute("UPDATE purchase_orders SET status='Recibido' WHERE id=?1", params![order_id])?;
+        Ok(())
+    }
+
+    pub fn delete_purchase_order(&self, order_id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM purchase_order_items WHERE order_id=?", params![order_id])?;
+        conn.execute("DELETE FROM purchase_orders WHERE id=?", params![order_id])?;
         Ok(())
     }
 
@@ -1777,6 +1964,33 @@ mod tests {
         assert!(!totals_today.is_empty(), "daily totals con pagos");
         let t0 = &totals_today[0];
         assert!(t0.usd_cash_total > 0.0 || t0.cash_bs > 0.0 || t0.grand_total > 0.0, "pagos suman en el día");
+
+        // Purchase orders: create order for A32 product, receive → stock increases
+        let a32_stock_before: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
+        });
+        let items_json = format!(r#"[{{"productId":{},"productName":"Pantalla Samsung A32","quantity":5,"unitPrice":12.0}}]"#, a32_pid);
+        let poid = db.add_purchase_order("Proveedor Test", "Reposición", &items_json).unwrap();
+        assert!(poid > 0);
+        let orders = db.get_purchase_orders().unwrap();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].status.as_deref(), Some("Pendiente"));
+        assert_eq!(orders[0].total_quantity, 5);
+        let po_items = db.get_purchase_order_items(poid).unwrap();
+        assert_eq!(po_items.len(), 1);
+        assert_eq!(po_items[0].product_name.as_deref(), Some("Pantalla Samsung A32"));
+        // Receive → stock +5 y movimiento entrada
+        db.mark_purchase_order_received(poid).unwrap();
+        let a32_stock_after: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(a32_stock_after, a32_stock_before + 5, "recibir pedido suma stock");
+        assert!(db.mark_purchase_order_received(poid).is_err(), "no se puede recibir dos veces");
+        // Delete order
+        db.delete_purchase_order(poid).unwrap();
+        assert!(db.get_purchase_orders().unwrap().is_empty());
 
         // Delete service
         db.delete_service(sid).unwrap();

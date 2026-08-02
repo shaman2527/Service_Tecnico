@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
-  PanelLeftClose, PanelLeftOpen, LifeBuoy,
+  PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import Sales from './components/Sales';
@@ -11,10 +11,11 @@ import Clients from './components/Clients';
 import DailyLedger from './components/DailyLedger';
 import Catalog from './components/Catalog';
 import Help from './components/Help';
+import Pedidos from './components/Pedidos';
 import { cn } from './lib/utils';
 import './index.css';
 
-type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas' | 'ayuda';
+type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas' | 'pedidos' | 'ayuda';
 
 const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -22,6 +23,7 @@ const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'servicios', label: 'Servicio Técnico', icon: Wrench },
   { key: 'inventario', label: 'Inventario', icon: Package },
   { key: 'pantallas', label: 'Pantallas', icon: Smartphone },
+  { key: 'pedidos', label: 'Pedidos', icon: ShoppingBag },
   { key: 'clientes', label: 'Clientes', icon: Users },
   { key: 'libro', label: 'Libro Diario', icon: BookOpen },
   { key: 'ayuda', label: 'Ayuda', icon: LifeBuoy },
@@ -111,6 +113,7 @@ function App() {
           {tab === 'servicios' && <Services />}
           {tab === 'inventario' && <Inventory />}
           {tab === 'pantallas' && <Catalog />}
+          {tab === 'pedidos' && <Pedidos />}
           {tab === 'clientes' && <Clients />}
           {tab === 'libro' && <DailyLedger />}
           {tab === 'ayuda' && <Help />}

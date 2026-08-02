@@ -102,6 +102,26 @@ export interface ServicePayment {
   notes: string | null;
 }
 
+export interface PurchaseOrder {
+  id: number;
+  order_date: string | null;
+  supplier: string | null;
+  status: string | null;
+  notes: string | null;
+  item_count: number;
+  total_quantity: number;
+  total_cost: number;
+}
+
+export interface PurchaseOrderItem {
+  id: number;
+  order_id: number;
+  product_id: number | null;
+  product_name: string | null;
+  quantity: number;
+  unit_price: number;
+}
+
 export interface DeviceChecklist {
   [key: string]: 'si' | 'no' | '';
 }
