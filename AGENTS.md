@@ -221,6 +221,7 @@ Antes de hacer commit:
 | 2026-08-02 | **Sin distinción de "Por entregar" ni filtro por tipo de trabajo**: el técnico no podía responder "¿cuántas pantallas tengo por hacer?" — el filtro solo era por estado. | Cards `status='Por entregar'` → `border-amber-500/40 bg-amber-500/5` (amarillo claro) + icono `Clock` ámbar (verde=entregado, amarillo=por entregar, sin color=en taller). Chips contadores por `service_type` (`SERVICE_TYPES` + `ACTIVE_STATUSES` en Services.tsx): "Todos N" + un chip por tipo con conteo de equipos en taller (Recibido→Por entregar, excluye Entregado/Cancelado); click filtra la lista client-side (`visibleServices`, combinable con búsqueda y Select de estado), chip activo resaltado. Verificado vía CDP: chips "Todos 3 · Cambio batería 1 · Cambio conector / puerto 1 · Software / Formateo 1"; click en "Cambio conector / puerto" → 1 card (ORD-1033). |
 | 2026-08-02 | **Card "Total General del período" genérico** (Libro Diario): 3 textos planos (USD/Bs/Equivalente) sin jerarquía visual. | Rediseño split-card con componentes existentes (sin tocar ui/): header con `CardTitle`+`CardDescription` y `Badge` del equivalente (≈ $X USD); cuerpo grid 3 celdas con divisores (`divide-x/y`), cada una con chip de icono semántico (DollarSign emerald / Banknote ámbar / ArrowRightLeft primary) + número `text-2xl tabular-nums`; footer `Separator` + "N día(s) con movimientos" + tasa BCV del día abierto. Verificado vía CDP: Dólares $150.00 · Bolívares Bs.36.386,25 · Equivalente $198.59 · Tasa BCV 748.79. |
 | 2026-08-02 | **Columna Punto de la tabla diaria sin moneda — "$35000" confuso**: `pos_charged/pos_fees/pos_net` suman el punto crudo (Bs y USD mezclados) y la UI los mostraba con símbolo $ fijo → un cobro de Punto (Bs) de Bs 35.000 aparecía como "$35.000,00". | Backend: `DailyTotals` gana `pos_charged_usd/bs` + `pos_net_usd/bs` (clasificación por moneda derivada del método en `compute_daily_totals`); helper `fmtMix(usd, bs)` en DailyLedger ("$X + Bs. Y" omitiendo ceros). Tabla rediseñada: columnas "Punto Cargado/Comisión/Neto Punto" → UNA columna "Punto de Venta" con el neto en su moneda real + detalle debajo ("Cargado Bs.35.000,00 · Comisión -Bs.700,00"); KPI Neto Punto y dialog de cierre con desglose por moneda. Test `test_daily_totals_currency` verifica punto Bs 35.000 (neto Bs 34.300) + punto USD 100. Verificado vía CDP: fila 02-08 → "Bs.34.300,00 | Cargado Bs.35.000,00 · Comisión -Bs.700,00 | Total $150.00 + Bs.34.310,00". |
+| 2026-08-02 | **Comisión y ceros confusos en la tabla diaria**: el detalle "Cargado X · Comisión -Y" no se entendía y las celdas sin movimiento mostraban "$0.00"/"Bs.0,00" que "no decían nada". | Quitado el subdetalle de comisión (celda Punto y dialog de cierre muestran SOLO el neto en su moneda — la comisión sigue calculándose internamente en backend para el cierre); celdas sin movimiento → "—" (helper `dash`); KPI "Neto Punto" → "Punto de Venta"; columna Punto condicional (`hasPos`). Verificado vía CDP: 01-08 → "Punto — · Divisas —", 02-08 → "Punto Bs.34.300,00", la palabra "Comisión" ya no aparece en el Libro Diario. |
 
 ## Feedback Loops
 
@@ -237,8 +238,8 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-02
-- **Build: ✅ PASS (npm 2.93s / release 3m15s)**
-- **Registro.exe MD5:** 28AE7F5804CFB31092821B030CCE24DA
+- **Build: ✅ PASS (npm 2.61s / release 3m56s)**
+- **Registro.exe MD5:** 9DFA1AD3D7EF02C8D0208E938C270AE2
 - **Tests:** 8/8 (incl. test_service_warranty_dates, test_daily_totals_currency)
 - **Errors:** 0
 - **Warnings:** 0

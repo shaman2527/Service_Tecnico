@@ -154,3 +154,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-02: chips tipo trabajo + card amarilla por entregar
 // force rebuild 2026-08-02: rediseno Total General (split card)
 // force rebuild 2026-08-02: tabla diaria punto con moneda real + detalle
+// force rebuild 2026-08-02: tabla diaria sin comision, ceros a guion

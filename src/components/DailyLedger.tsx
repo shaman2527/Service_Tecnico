@@ -283,9 +283,15 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     grand_total: a.grand_total + t.grand_total,
   }), { pos_charged: 0, pos_fees: 0, pos_net: 0, pos_net_usd: 0, pos_net_bs: 0, pos_charged_usd: 0, pos_charged_bs: 0, pago_movil: 0, cash_bs: 0, usd: 0, zelle: 0, trans_bs: 0, grand_usd: 0, grand_bs: 0, grand_total: 0 }), [totals]);
 
-  const hasZelle = totals.some(t => t.zelle_total > 0);
-  const hasTransf = totals.some(t => t.transfer_bs_total > 0);
-  const tableCols = 7 + (hasZelle ? 1 : 0) + (hasTransf ? 1 : 0);
+  const hasPos = totals.some(t => t.pos_net_usd > 0.005 || t.pos_net_bs > 0.005);
+  const hasPM = totals.some(t => t.pago_movil_total > 0.005);
+  const hasCashBs = totals.some(t => t.cash_bs > 0.005);
+  const hasUsd = totals.some(t => t.usd_cash_total + t.cash_usd > 0.005);
+  const hasZelle = totals.some(t => t.zelle_total > 0.005);
+  const hasTransf = totals.some(t => t.transfer_bs_total > 0.005);
+  const condCols = [hasPos, hasPM, hasCashBs, hasUsd, hasZelle, hasTransf].filter(Boolean).length;
+  const tableCols = 3 + condCols;
+  const dash = (n: number, fmt: (x: number) => string) => (n > 0.005 ? fmt(n) : '—');
   const diasConMovimientos = totals.filter(t => t.grand_usd > 0.005 || t.grand_bs > 0.005).length;
 
   const diffBs = expected ? cashCounted - expected.cash_bs : 0;
@@ -385,7 +391,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       {effectiveTab === 'diario' && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Kpi icon={<CreditCard className="size-3.5" />} label="Neto Punto" value={fmtMix(sums.pos_net_usd, sums.pos_net_bs)}
+            <Kpi icon={<CreditCard className="size-3.5" />} label="Punto de Venta" value={fmtMix(sums.pos_net_usd, sums.pos_net_bs)}
               accent="bg-primary/10 text-primary" />
             <Kpi icon={<Smartphone className="size-3.5" />} label="Pago Móvil" value={fmtBs(sums.pago_movil)}
               accent="bg-warning/10 text-warning" className="text-warning" />
@@ -455,10 +461,10 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <TableHeader>
                   <TableRow>
                     <TableHead>Fecha</TableHead>
-                    <TableHead className="text-right">Punto de Venta</TableHead>
-                    <TableHead className="text-right">Pago Móvil</TableHead>
-                    <TableHead className="text-right">Efectivo Bs</TableHead>
-                    <TableHead className="text-right">Divisas $</TableHead>
+                    {hasPos && <TableHead className="text-right">Punto de Venta</TableHead>}
+                    {hasPM && <TableHead className="text-right">Pago Móvil</TableHead>}
+                    {hasCashBs && <TableHead className="text-right">Efectivo Bs</TableHead>}
+                    {hasUsd && <TableHead className="text-right">Divisas $</TableHead>}
                     {hasZelle && <TableHead className="text-right">Zelle</TableHead>}
                     {hasTransf && <TableHead className="text-right">Transf Bs</TableHead>}
                     <TableHead className="text-right">Tasa BCV</TableHead>
@@ -476,22 +482,16 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     totals.map(t => (
                       <TableRow key={t.date}>
                         <TableCell className="font-medium">{t.date}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="font-semibold tabular-nums">{fmtMix(t.pos_net_usd, t.pos_net_bs)}</div>
-                          {(t.pos_charged_usd > 0.005 || t.pos_charged_bs > 0.005) && (
-                            <div className="text-[11px] text-muted-foreground tabular-nums">
-                              Cargado {fmtMix(t.pos_charged_usd, t.pos_charged_bs)}
-                              {(t.pos_charged_usd - t.pos_net_usd > 0.005 || t.pos_charged_bs - t.pos_net_bs > 0.005) && (
-                                <> · Comisión -{fmtMix(t.pos_charged_usd - t.pos_net_usd, t.pos_charged_bs - t.pos_net_bs)}</>
-                              )}
-                            </div>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.pago_movil_total)}</TableCell>
-                        <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.cash_bs)}</TableCell>
-                        <TableCell className="text-right tabular-nums text-success">{fmtUsd(t.usd_cash_total + t.cash_usd)}</TableCell>
-                        {hasZelle && <TableCell className="text-right tabular-nums text-success">{fmtUsd(t.zelle_total)}</TableCell>}
-                        {hasTransf && <TableCell className="text-right tabular-nums text-warning">{fmtBs(t.transfer_bs_total)}</TableCell>}
+                        {hasPos && (
+                          <TableCell className="text-right tabular-nums">
+                            {t.pos_net_usd > 0.005 || t.pos_net_bs > 0.005 ? fmtMix(t.pos_net_usd, t.pos_net_bs) : '—'}
+                          </TableCell>
+                        )}
+                        <TableCell className="text-right tabular-nums text-warning">{dash(t.pago_movil_total, fmtBs)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-warning">{dash(t.cash_bs, fmtBs)}</TableCell>
+                        <TableCell className="text-right tabular-nums text-success">{dash(t.usd_cash_total + t.cash_usd, fmtUsd)}</TableCell>
+                        {hasZelle && <TableCell className="text-right tabular-nums text-success">{dash(t.zelle_total, fmtUsd)}</TableCell>}
+                        {hasTransf && <TableCell className="text-right tabular-nums text-warning">{dash(t.transfer_bs_total, fmtBs)}</TableCell>}
                         <TableCell className="text-right tabular-nums text-muted-foreground">
                           {t.tasa_bcv > 0 ? t.tasa_bcv.toFixed(2) : '—'}
                         </TableCell>
@@ -502,7 +502,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   {totals.length > 0 && (
                     <TableRow className="bg-muted/50">
                       <TableCell className="font-semibold">Total</TableCell>
-                      <TableCell className="text-right font-semibold tabular-nums">{fmtMix(sums.pos_net_usd, sums.pos_net_bs)}</TableCell>
+                      {hasPos && <TableCell className="text-right font-semibold tabular-nums">{fmtMix(sums.pos_net_usd, sums.pos_net_bs)}</TableCell>}
                       <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtBs(sums.pago_movil)}</TableCell>
                       <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtBs(sums.cash_bs)}</TableCell>
                       <TableCell className="text-right font-semibold tabular-nums text-success">{fmtUsd(sums.usd)}</TableCell>
@@ -657,7 +657,6 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   detail="Bolívares en caja — se cuenta abajo" value={fmtBs(expected?.cash_bs ?? 0)}
                   valueClass="text-warning" />
                 <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta ($ + Bs)"
-                  detail={`Cobrado ${fmtMix(expected?.pos_charged_usd ?? 0, expected?.pos_charged_bs ?? 0)} · Comisión -${fmtMix((expected?.pos_charged_usd ?? 0) - (expected?.pos_net_usd ?? 0), (expected?.pos_charged_bs ?? 0) - (expected?.pos_net_bs ?? 0))} → Neto ${fmtMix(expected?.pos_net_usd ?? 0, expected?.pos_net_bs ?? 0)}`}
                   value={fmtMix(expected?.pos_net_usd ?? 0, expected?.pos_net_bs ?? 0)} valueClass="text-success" />
                 <MethodRow icon={<Smartphone className="size-3.5" />} label="Pago Móvil"
                   detail={`${pagoMovilList.length} pago(s) por referencia`}
