@@ -209,6 +209,11 @@ pub struct DailyTotals {
     pub pos_charged: f64,
     pub pos_fees: f64,
     pub pos_net: f64,
+    /// Punto de Venta desglosado por moneda (para no mostrar Bs con símbolo $)
+    pub pos_charged_usd: f64,
+    pub pos_charged_bs: f64,
+    pub pos_net_usd: f64,
+    pub pos_net_bs: f64,
     pub cash_usd: f64,
     pub cash_bs: f64,
     pub zelle_total: f64,
@@ -1831,6 +1836,7 @@ impl Database {
             let (d, method, total, bank_fee, net, currency) = row?;
             let entry = daily_map.entry(d.clone()).or_insert(DailyTotals {
                 date: d.clone(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+                pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
@@ -1845,6 +1851,14 @@ impl Database {
                 entry.pos_charged += total;
                 entry.pos_fees += bank_fee;
                 entry.pos_net += net;
+                // Desglose del punto por moneda (el cobro puede ser en $ o en Bs)
+                if cur == "USD" {
+                    entry.pos_charged_usd += total;
+                    entry.pos_net_usd += net;
+                } else {
+                    entry.pos_charged_bs += total;
+                    entry.pos_net_bs += net;
+                }
             } else if is_zelle {
                 entry.zelle_total += total;
             } else {
@@ -1948,6 +1962,7 @@ impl Database {
         let t = if totals.is_empty() {
             DailyTotals {
                 date: date.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+                pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
@@ -2218,6 +2233,7 @@ impl Database {
         let t = if totals.is_empty() {
             DailyTotals {
                 date: close_date.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+                pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
                 cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
                 pago_movil_total: 0.0, transfer_bs_total: 0.0,
                 usd_cash_total: 0.0, grand_total: 0.0,
@@ -2932,6 +2948,10 @@ mod tests {
 
         // Venta en Bs (Pago Móvil) — el frontend guarda total en Bs con currency 'VES'
         db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Pago Móvil", "Cliente", None, "", 0.0, "", "VES").unwrap();
+        // Punto de Venta en Bs (cobro real de Bs 35.000 con comisión 2%) → neto Bs 34.300
+        db.add_sale(None, "Venta Punto Bs", 1, 35000.0, 35000.0, "Punto de Venta (Bs)", "Cliente", None, "", 2.0, "", "VES").unwrap();
+        // Punto de Venta en USD (cobro real de $100) → neto $100
+        db.add_sale(None, "Venta Punto USD", 1, 100.0, 100.0, "Punto de Venta ($)", "Cliente", None, "", 0.0, "", "USD").unwrap();
         // Abono en Bs (Efectivo Bs) + abono en USD (Divisas)
         let sid = db.add_service("ORD-TEST-LEDGER", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla",
             50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None).unwrap();
@@ -2941,22 +2961,26 @@ mod tests {
         let totals = db.get_daily_totals(&today, &today).unwrap();
         assert_eq!(totals.len(), 1, "un día con movimientos");
         let t = &totals[0];
-        assert_eq!(t.grand_usd, 50.0, "desglose USD (solo divisas)");
-        assert_eq!(t.grand_bs, 200.0, "desglose Bs (venta 100 PM + abono 100 Efectivo Bs)");
+        assert_eq!(t.pos_net_usd, 100.0, "neto del punto en USD");
+        assert_eq!(t.pos_net_bs, 34300.0, "neto del punto en Bs (35.000 - 2%)");
+        assert_eq!(t.pos_charged_bs, 35000.0, "cargado del punto en Bs");
+        assert_eq!(t.pos_charged_usd, 100.0, "cargado del punto en USD");
+        assert_eq!(t.grand_usd, 150.0, "desglose USD (punto $100 + divisas 50)");
+        assert_eq!(t.grand_bs, 34500.0, "desglose Bs (PM 100 + punto Bs 34.300 + abono 100)");
         assert_eq!(t.pago_movil_total, 100.0);
         assert_eq!(t.cash_bs, 100.0);
         assert_eq!(t.usd_cash_total, 50.0);
         assert_eq!(t.tasa_bcv, 40.5, "tasa del día abierto");
-        assert!((t.grand_total - (50.0 + 200.0 / 40.5)).abs() < 1e-9, "grand_total en USD equivalente, got {}", t.grand_total);
+        assert!((t.grand_total - (150.0 + 34500.0 / 40.5)).abs() < 1e-9, "grand_total en USD equivalente, got {}", t.grand_total);
 
         // Cierre: guarda desglose + grand_total correcto
         db.close_day(&today, "cierre moneda", 10.0, 40.5, 45.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
         let closings = db.get_daily_closings().unwrap();
         let c = closings.iter().find(|x| x.close_date == today).unwrap();
-        assert_eq!(c.total_usd, 50.0, "cierre guarda total_usd");
-        assert_eq!(c.total_bs, 200.0, "cierre guarda total_bs");
-        assert!((c.grand_total - (50.0 + 200.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv, got {}", c.grand_total);
+        assert_eq!(c.total_usd, 150.0, "cierre guarda total_usd");
+        assert_eq!(c.total_bs, 34500.0, "cierre guarda total_bs");
+        assert!((c.grand_total - (150.0 + 34500.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv, got {}", c.grand_total);
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);

@@ -140,6 +140,11 @@ export interface DailyTotals {
   pos_charged: number;
   pos_fees: number;
   pos_net: number;
+  /** Punto de Venta desglosado por moneda (el cobro puede ser $ o Bs) */
+  pos_charged_usd: number;
+  pos_charged_bs: number;
+  pos_net_usd: number;
+  pos_net_bs: number;
   cash_usd: number;
   cash_bs: number;
   zelle_total: number;
