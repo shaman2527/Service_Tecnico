@@ -160,6 +160,8 @@ export default function Clients() {
                           <TableCell className="text-right">
                             {s.amount - s.paid_amount > 0.005 ? (
                               <span className="text-danger text-xs font-semibold">${(s.amount - s.paid_amount).toFixed(2)}</span>
+                            ) : s.paid_amount - s.amount > 0.005 ? (
+                              <span className="text-warning text-xs font-semibold">Excedente ${(s.paid_amount - s.amount).toFixed(2)}</span>
                             ) : (
                               <Badge variant="outline" className="text-emerald-600">Cancelado</Badge>
                             )}

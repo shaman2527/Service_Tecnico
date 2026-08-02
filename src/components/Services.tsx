@@ -345,6 +345,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [ciError, setCiError] = useState<string | null>(null);
   const modelPicked = useRef(false);
   const clientPicked = useRef(false);
+  const amountTouched = useRef(false);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [payAmount, setPayAmount] = useState(0);
@@ -380,6 +381,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setFault(service.fault ?? '');
       setServiceType(service.service_type ?? 'Cambio pantalla');
       setAmount(service.amount);
+      amountTouched.current = true;
       setPayment(service.payment_method ?? 'Divisas (USD Cash)');
       setDateOut(service.date_out ?? '');
       setStatus(service.status ?? 'Por entregar');
@@ -411,9 +413,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   useEffect(() => {
     if (clientId != null) {
-      api.getClientServices(clientId).then(setClientHistory).catch(() => setClientHistory([]));
+      api.getClientServices(clientId)
+        .then(list => setClientHistory(list.filter(s => s.id !== service?.id)))
+        .catch(() => setClientHistory([]));
     }
-  }, [clientId]);
+  }, [clientId, service?.id]);
 
   const selectClient = (c: Client) => {
     clientPicked.current = true;
@@ -455,12 +459,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const selectModel = (sugg: { model: string; product: Product }) => {
     modelPicked.current = true;
     setModel(sugg.model);
-    setAmount(sugg.product.price_sale);
+    // Auto-precio SOLO si el usuario no tocó el monto a mano (y nunca en edición: amountTouched se marca al cargar)
+    if (!amountTouched.current) setAmount(sugg.product.price_sale);
     setModelOpen(false);
   };
 
+  // Normaliza una cédula para buscar: quita prefijo V-/E-, espacios y guiones
+  const normCi = (s: string) => s.trim().replace(/^[VvEe]-?\s*/, '').replace(/\D/g, '');
+
   const lookupByCi = async () => {
-    const q = ciSearch.trim();
+    const q = normCi(ciSearch);
     if (!q) return;
     setCiError(null);
     try {
@@ -513,8 +521,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   // Abonado total del servicio en $ (el backend convierte pagos en Bs con la tasa del día del pago)
   const abonadoUsd = svc?.paid_amount ?? 0;
-  const saldoUsd = Math.max(0, amount - abonadoUsd);
+  // Saldo honesto: positivo = pendiente, negativo = excedente (se cobró de más)
+  const saldoUsd = amount - abonadoUsd;
+  const excedenteUsd = -Math.min(0, saldoUsd);
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+
+  // Moneda SIEMPRE derivada del método de pago (harness): nunca editable
+  useEffect(() => {
+    setCurrency(methodCurrency(payment));
+  }, [payment]);
 
   useEffect(() => {
     if (!svc) return;
@@ -650,6 +665,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          {clientId != null && clientHistory.length === 0 && (
+            <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
+              Sin historial previo de servicios para este cliente
+            </p>
+          )}
           {clientHistory.length > 0 && (
             <div className="rounded-lg border border-border/70 p-3 space-y-2">
               <p className="text-sm font-semibold flex items-center gap-2">
@@ -703,9 +723,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 </div>
                 <div className="rounded-md px-3 py-2 border">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
-                  <p className={`font-bold ${saldoUsd <= 0.005 ? 'text-success' : 'text-danger'}`}>
-                    {saldoUsd <= 0.005 ? 'Cancelado' : `$${saldoUsd.toFixed(2)} pendiente`}
-                  </p>
+                  {saldoUsd > 0.005 ? (
+                    <p className="font-bold text-danger">${saldoUsd.toFixed(2)} pendiente</p>
+                  ) : saldoUsd < -0.005 ? (
+                    <p className="font-bold text-warning">Excedente ${excedenteUsd.toFixed(2)}</p>
+                  ) : (
+                    <p className="font-bold text-success">Cancelado</p>
+                  )}
                 </div>
               </div>
               {payments.length > 0 && (
@@ -787,7 +811,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Monto ($)</label>
               <Input type="number" step={0.01} min={0} value={amount}
-                onChange={e => setAmount(Number(e.target.value))} />
+                onChange={e => { amountTouched.current = true; setAmount(Number(e.target.value)); }} />
             </div>
           </div>
 
@@ -861,7 +885,6 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <Select value={payment} onValueChange={v => {
                 setPayment(v);
                 if (v.includes('Punto')) setBankFeePercent(3.5);
-                if (v.includes('Zelle')) setCurrency('USD');
               }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -898,13 +921,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Moneda</label>
-                <Select value={currency} onValueChange={setCurrency}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="USD">USD $</SelectItem>
-                    <SelectItem value="VES">Bs.</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
+                  <span className="font-semibold">{currencySymbol(methodCurrency(payment))}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {methodCurrency(payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -947,7 +969,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           <div className="space-y-4">
             <div className="text-sm space-y-1 rounded-md bg-muted/60 px-3 py-2">
               <p>Total: <strong>${amount.toFixed(2)}</strong></p>
-              <p>Saldo pendiente: <strong className={saldoUsd <= 0.005 ? 'text-success' : 'text-danger'}>${saldoUsd.toFixed(2)}</strong></p>
+              {saldoUsd > 0.005 ? (
+                <p>Saldo pendiente: <strong className="text-danger">${saldoUsd.toFixed(2)}</strong></p>
+              ) : saldoUsd < -0.005 ? (
+                <p>Excedente: <strong className="text-warning">${excedenteUsd.toFixed(2)}</strong> (se cobró más que el monto del servicio)</p>
+              ) : (
+                <p>Saldo: <strong className="text-success">Cancelado</strong></p>
+              )}
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">{payIsBs ? 'Monto (Bs.)' : 'Monto ($)'}</label>

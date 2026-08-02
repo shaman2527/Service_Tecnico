@@ -1460,9 +1460,15 @@ impl Database {
 
     pub fn find_client_by_ci(&self, ci: &str) -> SqlResult<Option<Client>> {
         let conn = self.conn.lock().unwrap();
+        // Búsqueda tolerante a formato: la DB puede tener "24906999" o "V-24906999".
+        // Se compara contra el texto crudo y sus variantes normalizadas (solo dígitos, con/sin prefijo V-/E-).
+        let raw = ci.trim();
+        let digits = norm_ci_digits(raw);
+        let with_v = if digits.is_empty() { raw.to_string() } else { format!("V-{}", digits) };
+        let with_e = if digits.is_empty() { raw.to_string() } else { format!("E-{}", digits) };
         let result = conn.query_row(
-            "SELECT c.* FROM clients c WHERE c.ci = ?1 LIMIT 1",
-            params![ci],
+            "SELECT c.* FROM clients c WHERE c.ci IN (?1, ?2, ?3, ?4) LIMIT 1",
+            params![raw, digits, with_v, with_e],
             |r| {
                 Ok(Client {
                     id: r.get(0)?, name: r.get(1)?, phone: r.get(2)?,
@@ -2397,6 +2403,11 @@ fn csv_field(s: &str) -> String {
 // Número con decimal coma (es-VE), sin separador de miles: 1234.50 → "1234,50"
 fn fmt_num(v: f64) -> String {
     format!("{:.2}", v).replace('.', ",")
+}
+
+// Normaliza una cédula a solo dígitos ("V-24906999" → "24906999")
+fn norm_ci_digits(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
 // Normaliza un modelo para matching: minúsculas, sin acentos, sin espacios extra

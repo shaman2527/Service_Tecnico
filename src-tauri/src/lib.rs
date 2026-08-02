@@ -148,3 +148,5 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-02: centro de ayuda completo
 // force rebuild 2026-08-02: perf+UX audit fixes
 // force rebuild 2026-08-02: Libro Diario rediseño (moneda por método, desglose, tasa)
+// force rebuild 2026-08-02: ServiceForm fixes (monto/ci/saldo/moneda)
+// force rebuild 2026-08-02: ServiceForm fixes (monto/ci/saldo/moneda)
