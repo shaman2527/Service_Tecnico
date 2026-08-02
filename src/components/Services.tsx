@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -32,6 +32,16 @@ function isMovilOrZelle(m: string | null | undefined): boolean {
   return !!m && (m.includes('Móvil') || m.includes('Movil') || m.includes('Zelle'));
 }
 
+// Tipos de trabajo (mismos del formulario) — usados por los chips de filtro
+const SERVICE_TYPES = [
+  'Cambio pantalla', 'Cambio batería', 'Cambio flex', 'Cambio conector / puerto',
+  'Reparación (placa)', 'Limpieza / Mantenimiento', 'Software / Formateo',
+  'Cambio cámara', 'Cambio parlante / micrófono', 'Otro',
+];
+
+// Estados "en taller": el equipo aún no se entrega
+const ACTIVE_STATUSES = ['Recibido', 'En reparación', 'Esperando repuesto', 'Reparado / Pendiente Pago', 'Por entregar'];
+
 export function parseChecklist(json: string | null | undefined): Record<string, string> {
   if (!json) return {};
   try {
@@ -62,6 +72,7 @@ export default function Services() {
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
@@ -94,6 +105,14 @@ export default function Services() {
   };
 
   const totalAmount = services.reduce((a, s) => a + s.amount, 0);
+
+  // Chips: equipos en taller por tipo de trabajo (Recibido → Por entregar, sin entregados/cancelados)
+  const enTaller = services.filter(s => ACTIVE_STATUSES.includes(s.status ?? ''));
+  const typeCounts = SERVICE_TYPES
+    .map(t => ({ type: t, count: enTaller.filter(s => s.service_type === t).length }))
+    .filter(x => x.count > 0);
+  // Lista visible: la cargada por backend (búsqueda + estado) filtrada por tipo client-side
+  const visibleServices = typeFilter ? services.filter(s => s.service_type === typeFilter) : services;
 
   const statusBadgeVariant = (status: string | null) => {
     switch (status) {
@@ -162,29 +181,45 @@ export default function Services() {
         </Select>
       </div>
 
-      {services.length === 0 ? (
+      <div className="flex flex-wrap gap-2">
+        <Button variant={typeFilter === '' ? 'default' : 'outline'} size="sm"
+          onClick={() => setTypeFilter('')}>
+          Todos <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{enTaller.length}</span>
+        </Button>
+        {typeCounts.map(tc => (
+          <Button key={tc.type} variant={typeFilter === tc.type ? 'default' : 'outline'} size="sm"
+            onClick={() => setTypeFilter(typeFilter === tc.type ? '' : tc.type)}>
+            {tc.type} <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{tc.count}</span>
+          </Button>
+        ))}
+      </div>
+
+      {visibleServices.length === 0 ? (
         <Card>
           <CardContent className="p-8 text-center text-muted-foreground">
-            Sin servicios registrados
+            {services.length === 0 ? 'Sin servicios registrados' : 'Sin servicios de este tipo de trabajo'}
           </CardContent>
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-4">
-          {services.map(s => {
+          {visibleServices.map(s => {
             const balance = s.amount - s.paid_amount;
             const checklist = parseChecklist(s.device_checklist);
             const hasChecklist = Object.keys(checklist).length > 0;
             const entregado = s.status === 'Entregado';
+            const porEntregar = s.status === 'Por entregar';
             const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
             return (
               <Card key={s.id} className={cn(
                 'overflow-hidden transition-shadow hover:shadow-md',
-                entregado && 'border-emerald-500/40 bg-emerald-500/5'
+                entregado && 'border-emerald-500/40 bg-emerald-500/5',
+                porEntregar && 'border-amber-500/40 bg-amber-500/5'
               )}>
                 <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold">{s.order_num}</span>
                     {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
+                    {porEntregar && <Clock className="size-4 text-amber-500" />}
                     <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
                   </div>
                   <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
