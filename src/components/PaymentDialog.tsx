@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,6 +27,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const [savingPay, setSavingPay] = useState(false);
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [tasaBcv, setTasaBcv] = useState(0);
+  // Si el usuario tecleó el monto a mano, no se re-sugiere
+  const payTouched = useRef(false);
 
   const payIsBs = payCurrency === 'VES';
   const payIsPagoMovil = payMethod.includes('Móvil') || payMethod.includes('Movil');
@@ -35,23 +37,41 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
     api.getPaymentMethods().then(setMethods).catch(() => {});
   }, []);
 
+  // Monto sugerido en la MONEDA del método: si es Bs, convierte el saldo USD × tasa BCV
+  // (nunca sugerir el valor USD crudo como si fueran bolívares)
+  const suggestAmount = useCallback(() => {
+    if (!service) return 0;
+    const saldo = service.amount - (service.paid_amount ?? 0);
+    if (saldo <= 0.005) return 0;
+    const bruto = Math.min(saldo, service.amount);
+    if (methodCurrency(payMethod) === 'VES') {
+      if (tasaBcv <= 0) return 0; // sin tasa no hay conversión segura
+      return Math.round(bruto * tasaBcv); // Bs: entero
+    }
+    return Math.round(bruto * 100) / 100; // USD: 2 decimales
+  }, [service, payMethod, tasaBcv]);
+
   // Cargar pagos + tasa al abrir con un servicio
   useEffect(() => {
     if (!open || !service) return;
     let alive = true;
     api.getServicePayments(service.id).then(p => { if (alive) setPayments(p); }).catch(() => {});
     api.getActiveDay().then(d => { if (alive) setTasaBcv(d?.tasa_bcv ?? 0); }).catch(() => {});
-    // Inicializar el form con el método del servicio y el saldo sugerido
+    // Inicializar el form con el método del servicio
     setPayMethod(service.payment_method ?? 'Divisas (USD Cash)');
     setPayCurrency(methodCurrency(service.payment_method));
     setPayFee(service.payment_method?.includes('Punto') ? 3.5 : 0);
     setPayZelle('');
     setPayNotes('');
     setPayError(null);
-    const saldo = service.amount - (service.paid_amount ?? 0);
-    setPayAmount(saldo > 0.005 ? Math.min(saldo, service.amount) : 0);
+    payTouched.current = false;
     return () => { alive = false; };
   }, [open, service]);
+
+  // Re-sugerir el monto cuando cambia el método, la tasa o se abre (solo si no se tocó a mano)
+  useEffect(() => {
+    if (open && !payTouched.current) setPayAmount(suggestAmount());
+  }, [open, service, payMethod, tasaBcv, suggestAmount]);
 
   const refresh = async () => {
     if (!service) return;
@@ -112,7 +132,12 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">{payIsBs ? 'Monto (Bs.)' : 'Monto ($)'}</label>
             <Input type="number" step={payIsBs ? 1 : 0.01} min={0.01} value={payAmount}
-              onChange={e => setPayAmount(Number(e.target.value))} />
+              onChange={e => { payTouched.current = true; setPayAmount(Number(e.target.value)); }} />
+            {payIsBs && saldoUsd > 0.005 && tasaBcv > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Saldo pendiente ≈ <strong>Bs. {Math.round(saldoUsd * tasaBcv).toLocaleString('es-VE')}</strong> (tasa BCV {tasaBcv.toFixed(2)})
+              </p>
+            )}
             {payIsBs && tasaBcv > 0 && payAmount > 0 && (
               <p className="text-xs text-muted-foreground">
                 ≈ ${(payAmount / tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})

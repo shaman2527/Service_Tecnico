@@ -157,3 +157,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-02: tabla diaria sin comision, ceros a guion
 // force rebuild 2026-08-02: botones card Entregar + Pago/Abono (PaymentDialog)
 // force rebuild 2026-08-02: fallback tasa BCV + refresh por foco
+// force rebuild 2026-08-02: PaymentDialog monto sugerido convertido a la moneda del metodo
