@@ -6,8 +6,11 @@ import {
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
+import UpdateDialog from './components/UpdateDialog';
 import { api } from './db';
+import { checkForUpdate, dismissedVersion, rememberDismissed } from './lib/update';
 import { cn } from './lib/utils';
+import { toast } from 'sonner';
 import './index.css';
 
 // Lazy: cada pantalla es un chunk separado → arranque más rápido en PCs de bajos recursos
@@ -43,6 +46,11 @@ function App() {
   const [role, setRole] = useState<Role>('loading');
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState('');
+  // Actualización pendiente de instalar (dialog) — visible para owner Y cajera
+  const [pendingUpdate, setPendingUpdate] = useState<import('@tauri-apps/plugin-updater').Update | null>(null);
+  const [showUpdate, setShowUpdate] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
 
   useEffect(() => {
     // Fail-closed: si el IPC falla al arrancar (race en frío), se pide el PIN igual.
@@ -56,6 +64,69 @@ function App() {
   useEffect(() => {
     if (role === 'cashier' && tab === 'dashboard') setTab('ventas');
   }, [role, tab]);
+
+  // Versión real del paquete (reemplaza el texto hardcodeado "v0.2")
+  useEffect(() => {
+    import('@tauri-apps/api/app')
+      .then(m => m.getVersion().then(v => setAppVersion(`v${v}`)).catch(() => {}))
+      .catch(() => {});
+  }, []);
+
+  // 1) Chequeo de salud post-actualización: solo cuando hay un estado "pending"
+  // (primer arranque tras una actualización). Si algo crítico falla → rollback
+  // automático a la versión anterior + relanzar. Si pasa → marca ok.
+  useEffect(() => {
+    if (role === 'loading') return;
+    let cancelled = false;
+    (async () => {
+      const state = await api.getUpdateState().catch(() => null);
+      if (cancelled || !state || state.status !== 'pending') return;
+      const report = await api.runHealthCheck().catch(() => ({ ok: false, issues: ['run_health_check no disponible'] }));
+      if (report.ok) {
+        await api.markUpdateOk().catch(() => {});
+        if (!cancelled) setUpdateNotice(`Actualizado a la versión ${state.new_version} · todo verificado ✓`);
+      } else {
+        try {
+          await api.rollbackUpdate();
+          if (!cancelled) setUpdateNotice('La actualización falló la verificación — se restauró la versión anterior. Tus datos están intactos.');
+          const { relaunch } = await import('@tauri-apps/plugin-process');
+          await relaunch();
+        } catch { /* sin versión anterior: seguir con la actual */}
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [role]);
+
+  // 2) Buscar actualización al arrancar (5s máx; sin internet = silencio).
+  // No preguntar por la versión que el usuario ya descartó ("Recordar después").
+  useEffect(() => {
+    if (role === 'loading') return;
+    let cancelled = false;
+    (async () => {
+      const update = await checkForUpdate();
+      if (cancelled || !update) return;
+      if (update.version === dismissedVersion()) return;
+      setPendingUpdate(update);
+      setShowUpdate(true);
+    })();
+    return () => { cancelled = true; };
+  }, [role]);
+
+  // 3) Check manual desde el Centro de Ayuda ("Revisar actualizaciones")
+  useEffect(() => {
+    const onCheck = () => {
+      checkForUpdate().then(update => {
+        if (update && update.version !== dismissedVersion()) {
+          setPendingUpdate(update);
+          setShowUpdate(true);
+        } else {
+          toast.info('Ya tienes la última versión');
+        }
+      });
+    };
+    window.addEventListener('registro:check-update', onCheck);
+    return () => window.removeEventListener('registro:check-update', onCheck);
+  }, []);
 
   const enterPin = async () => {
     setPinError(null);
@@ -171,12 +242,19 @@ function App() {
             {!collapsed && (
               <>
                 <span className="text-xs text-sidebar-foreground">Local</span>
-                <span className="text-xs text-sidebar-foreground/50">v0.2</span>
+                <span className="text-xs text-sidebar-foreground/50">{appVersion || 'v0.1.1'}</span>
               </>
             )}
           </div>
         </div>
       </aside>
+
+      {updateNotice && (
+        <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 shadow-lg">
+          {updateNotice}
+          <button className="ml-2 text-xs underline" onClick={() => setUpdateNotice(null)}>OK</button>
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto bg-background">
         <div className="max-w-7xl mx-auto px-10 py-8">
@@ -193,6 +271,15 @@ function App() {
           </Suspense>
         </div>
       </main>
+
+      <UpdateDialog
+        update={pendingUpdate}
+        open={showUpdate}
+        onOpenChange={o => {
+          setShowUpdate(o);
+          if (!o && pendingUpdate) rememberDismissed(pendingUpdate.version);
+        }}
+      />
     </div>
   );
 }

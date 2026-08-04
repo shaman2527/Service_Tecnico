@@ -29,6 +29,9 @@ target
 
 # Binarios de la app
 Registro.exe
+instaladores/*.exe
+instaladores/*.sig
+instaladores/latest.json
 
 # Datos locales (NO subir: datos de negocio del usuario)
 registro.db

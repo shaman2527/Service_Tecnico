@@ -131,5 +131,12 @@
     "description": "Verificación E2E en sandbox aislado con tasa BCV 748.79: ventas USD/Bs, abonos $20 + Bs 22.463,70, paid_amount=50 exacto, grand_total=$85 (=45+29.951,60/748.79), cierre con diferencia 0, apertura aparte. UI verificada (Libro Diario/Ventas/Cierres). PRD.md con reglas R-1..R-17, diagramas Mermaid, modelo de datos y QA; README.md actualizado.",
     "status": "done",
     "priority": "medium"
+  },
+  {
+    "id": 20,
+    "title": "Actualizaciones automáticas con rollback (F8)",
+    "description": "tauri-plugin-updater + process con firma (llaves ~/.tauri/registro.key, pubkey en tauri.conf.json, createUpdaterArtifacts). Endpoint GitHub Releases (latest.json estático). updates.rs: backup_before_update (exe prev + DB checkpoint + estado + watchdog.ps1 90s), run_health_check (integridad DB + next_order_num + día + totales + BCV warning), mark_update_ok, rollback_update, has_previous_version. UpdateDialog (notas + progreso + Recordar después en localStorage), check al arranque (5s, silencio offline), botones en Ayuda (Revisar/Restaurar), versión dinámica getVersion(). tools/release.ps1 (bump + build firmado + latest.json + gh release). Icono nuevo (smartphone degradado). E2E verificado: flujo feliz (dialog→kit→instalación→relanzamiento→health ok, DB intacta) + update roto (watchdog restaura exe 16.4MB y relanza) + BCV vivo 752.09 + venta Bs 7520.943→grand_total 35. 5 tests updates, suite 25/25, reviewer 0 hallazgos. Carpeta instaladores/ con setup + INSTALACION.md.",
+    "status": "done",
+    "priority": "high"
   }
 ]

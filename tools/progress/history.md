@@ -96,3 +96,16 @@ Y se verificó TODO en vivo vía CDP (remote-debugging) en la app desplegada rea
 - UI verificada: Libro Diario (Bs.29.951,60 / .00 / aprox .00), Ventas (2 filas con moneda correcta), Cierres (+.00 Cerrado). pm_detail con REF-PM-1/2 y fuentes Venta/Abono DEV-0001.
 - Checks: cargo test 20/20, npm run build OK (CSS vars OK), governance PASS (16.1s).
 - Docs: PRD.md nuevo (reglas R-1..R-17, mermaid flows, modelo de datos, QA, puesta en marcha), README.md actualizado (funcionalidades, flujos, estructura 64 comandos, impresora, PIN, instalador).
+
+## 2026-08-04 - F8 Sistema de actualizaciones con rollback + instaladores
+- Plugin oficial updater+process, firma (registro.key en ~/.tauri, pubkey en config, createUpdaterArtifacts).
+- updates.rs: backup_before_update (exe prev + DB checkpoint + estado pending + watchdog), run_health_check (DB/ordenes/dia/totales + BCV warning), rollback, estado roundtrip. 5 tests (suite 25/25).
+- UI: UpdateDialog (notas+progreso+Recordar despues localStorage), check arranque 5s silencioso, botones Ayuda (Revisar/Restaurar), version dinamica getVersion.
+- tools/release.ps1: bump version + build firmado + latest.json + gh release.
+- Icono nuevo: smartphone blanco sobre degradado azul->violeta (PIL, 32/128/256/ico).
+- E2E feliz (servidor local 8901, build prueba): dialog->kit->descarga->instalacion NSIS->relanzamiento auto->PIN->health check->ok+aviso, DB intacta 282624.
+- E2E roto: exe basura 39 bytes -> watchdog (con Try-Launch) restaura 16,448,000 bytes y relanza. Lesson: Start-Process de exe roto mataba al watchdog (fix try/catch).
+- Lesson: el relanzamiento post-instalacion lo hace el instalador NSIS (no el JS relaunch); watchdog solo lanza si nadie lo hizo.
+- Regresion final: BCV vivo 752.0943, venta Bs 7520.943 -> grand_total 35 exacto, cierre diff 0, health ok:true issues[].
+- Reviewer 0 hallazgos, lint sin nuevos warnings, governance PASS.
+- Carpeta instaladores/ (setup 5.69MB + INSTALACION.md) lista para pendrive. Pendiente en tienda: gh auth login para publicar releases.

@@ -1,7 +1,14 @@
-import { BookOpen, CalendarCheck, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { BookOpen, CalendarCheck, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { toast } from 'sonner';
+import { api } from '../db';
+import { checkForUpdate } from '@/lib/update';
+import { isTauri } from '../db';
 
 const sections = [
   {
@@ -274,6 +281,46 @@ const quickActions = [
 ];
 
 export default function Help() {
+  const [appVersion, setAppVersion] = useState('');
+  const [hasPrev, setHasPrev] = useState(false);
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    import('@tauri-apps/api/app')
+      .then(m => m.getVersion().then(v => setAppVersion(`v${v}`)).catch(() => {}))
+      .catch(() => {});
+    api.hasPreviousVersion().then(setHasPrev).catch(() => {});
+  }, []);
+
+  const checkUpdates = async () => {
+    if (!isTauri) {
+      toast.info('Solo disponible en la app instalada');
+      return;
+    }
+    setChecking(true);
+    try {
+      const update = await checkForUpdate();
+      if (update) {
+        window.dispatchEvent(new CustomEvent('registro:check-update'));
+      } else {
+        toast.success('Ya tienes la última versión');
+      }
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const doRollback = async () => {
+    try {
+      await api.rollbackUpdate();
+      toast.info('Restaurando versión anterior… la app se reiniciará');
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -281,9 +328,40 @@ export default function Help() {
           <h1 className="text-2xl font-bold tracking-tight">Centro de Ayuda</h1>
           <p className="text-sm text-muted-foreground mt-1">Todo lo que necesitas para usar la aplicación</p>
         </div>
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <LifeBuoy className="size-5" />
-          <span className="text-sm">v0.6</span>
+        <div className="flex items-center gap-3">
+          {isTauri && (
+            <>
+              {hasPrev && (
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button variant="outline" size="sm">
+                      <RotateCcw className="size-4" /> Restaurar versión anterior
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>¿Restaurar la versión anterior?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        La app volverá a la versión anterior instalada. Tus datos (registro.db)
+                        y el PIN no se tocan. Se reiniciará automáticamente.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                      <AlertDialogAction onClick={doRollback}>Restaurar</AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              )}
+              <Button variant="outline" size="sm" onClick={checkUpdates} disabled={checking}>
+                <RefreshCw className={`size-4 ${checking ? 'animate-spin' : ''}`} /> Revisar actualizaciones
+              </Button>
+            </>
+          )}
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <LifeBuoy className="size-5" />
+            <span className="text-sm">{appVersion || 'v0.1.1'}</span>
+          </div>
         </div>
       </div>
 

@@ -1,6 +1,7 @@
 pub mod bcv;
 pub mod db;
 pub mod printer;
+pub mod updates;
 mod commands;
 
 use std::path::PathBuf;
@@ -14,6 +15,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            Ok(())
+        })
         .manage(database)
         .invoke_handler(tauri::generate_handler![
             commands::get_categories,
@@ -80,6 +88,12 @@ pub fn run() {
             commands::print_receipt,
             commands::get_printer_settings,
             commands::set_printer_settings,
+            commands::backup_before_update,
+            commands::run_health_check,
+            commands::mark_update_ok,
+            commands::get_update_state,
+            commands::rollback_update,
+            commands::has_previous_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

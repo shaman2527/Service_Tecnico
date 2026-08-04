@@ -2,10 +2,10 @@ import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
-  Technician, ComPort, PrinterSettings
+  Technician, ComPort, PrinterSettings, UpdateState, HealthReport
 } from './types';
 
-const isTauri = typeof window !== 'undefined' &&
+export const isTauri = typeof window !== 'undefined' &&
   ((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ !== undefined ||
     (window as unknown as Record<string, unknown>).__TAURI__ !== undefined);
 
@@ -284,4 +284,28 @@ export const api = {
   setPrinterSettings: (port: string, baud: number, width: number) =>
     tauriInvoke<void>('set_printer_settings', { port, baud, width }).catch(() =>
       mock<void>(undefined)),
+
+  // --- Actualizaciones (respaldo / rollback / chequeo de salud) ---
+  backupBeforeUpdate: (newVersion: string, previousVersion: string) =>
+    tauriInvoke<void>('backup_before_update', { newVersion, previousVersion }).catch(() =>
+      mock<void>(undefined)),
+
+  runHealthCheck: () =>
+    tauriInvoke<HealthReport>('run_health_check').catch(() =>
+      Promise.reject(new Error('run_health_check no disponible'))),
+
+  markUpdateOk: () =>
+    tauriInvoke<void>('mark_update_ok').catch(() => mock<void>(undefined)),
+
+  getUpdateState: () =>
+    tauriInvoke<UpdateState | null>('get_update_state').catch(() =>
+      mock<UpdateState | null>(null)),
+
+  rollbackUpdate: () =>
+    tauriInvoke<void>('rollback_update').catch(() =>
+      Promise.reject(new Error('No hay versión anterior guardada para restaurar.'))),
+
+  hasPreviousVersion: () =>
+    tauriInvoke<boolean>('has_previous_version').catch(() =>
+      mock<boolean>(false)),
 };

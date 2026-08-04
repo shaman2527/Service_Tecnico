@@ -362,6 +362,48 @@ pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width:
     db.set_printer_settings(&port, baud, width).map_err(|e| e.to_string())
 }
 
+// --- Updates (respaldo / rollback / salud — módulo updates.rs) ---
+
+#[tauri::command]
+pub fn backup_before_update(db: State<Database>, new_version: String, previous_version: String) -> Result<(), String> {
+    // Checkpoint WAL para que la copia de la DB quede consistente antes de copiarla
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| e.to_string())?;
+    }
+    let dir = crate::updates::install_dir();
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    crate::updates::backup_before_update(&dir, &exe, &crate::get_db_path(), &previous_version, &new_version)?;
+    crate::updates::spawn_watchdog(&dir);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn run_health_check(db: State<Database>) -> Result<crate::updates::HealthReport, String> {
+    Ok(crate::updates::run_health_check(&db, true))
+}
+
+#[tauri::command]
+pub fn mark_update_ok() -> Result<(), String> {
+    crate::updates::set_status(&crate::updates::install_dir(), "ok")
+}
+
+#[tauri::command]
+pub fn get_update_state() -> Result<Option<crate::updates::UpdateState>, String> {
+    Ok(crate::updates::read_state(&crate::updates::install_dir()))
+}
+
+#[tauri::command]
+pub fn rollback_update() -> Result<(), String> {
+    crate::updates::rollback_update(&crate::updates::install_dir())
+}
+
+#[tauri::command]
+pub fn has_previous_version() -> Result<bool, String> {
+    Ok(crate::updates::has_previous_version(&crate::updates::install_dir()))
+}
+
 // --- Reportes ---
 
 #[tauri::command]

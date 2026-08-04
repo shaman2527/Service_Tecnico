@@ -54,6 +54,7 @@ git clone https://github.com/shaman2527/Service_Tecnico.git
   persistidas (puerto/baudios/58-80mm), preview de factura antes de imprimir, botones
   "Impresora" y "Factura" en cada orden y en el dialog de pago.
 - **PIN de acceso:** owner/cajera con gate **fail-closed** (nunca abre sin PIN).
+- **Actualizaciones automáticas:** al arrancar revisa GitHub Releases (5s, sin molestar offline); aviso con changelog → **respaldo automático** (exe anterior + copia de la DB) → instalación pasiva → **chequeo de salud** (DB, órdenes, libro diario, BCV) → si falla, **vuelve sola a la versión anterior** (watchdog + rollback). Botón "Restaurar versión anterior" en Ayuda.
 - **Dashboard:** KPIs (ventas hoy/7 días, equipos en taller, ingresos), diagrama de flujo
   del workflow, top modelos, stock bajo, indicador "Sincronizado".
 - **Pantallas / Inventario:** catálogo con compatibilidad en chips, movimientos de stock.
@@ -183,13 +184,16 @@ registro/
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 64 comandos
+│   │   ├── lib.rs             # Tauri builder + 70 comandos
 │   │   ├── db.rs              # SQLite CRUD + turno + abonos + auto-inventario + settings
+│   │   ├── updates.rs         # Updater: respaldo, rollback, health-check, watchdog
 │   │   ├── printer.rs         # ESC/POS: list_com_ports, cp850, print_receipt
 │   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
 │   │   └── commands.rs        # Comandos Tauri
-│   └── tauri.conf.json        # NSIS + resources registro.db + WebView2 embebido
+│   └── tauri.conf.json        # NSIS + resources registro.db + WebView2 embebido + updater
 ├── run.ps1                    # Script de ejecución
+├── tools/release.ps1          # Publicar versión: bump + build firmado + latest.json + gh release
+├── instaladores/              # Setup + guía para copiar a pendrive
 ├── PRD.md                     # Documento de producto (reglas, flujos, QA)
 ├── AGENTS.md                  # HARNESS: sistema de registro + Entropy Registry
 └── README.md
@@ -207,11 +211,23 @@ registro/
 
 ### Instalación en la tienda
 
-1. Ejecutar `Registro Servicio Tecnico_0.1.0_x64-setup.exe` (SmartScreen → "Ejecutar de todos modos").
-2. Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe
+1. Copiar la carpeta `instaladores\` (setup + guía) a un pendrive.
+2. Ejecutar `Registro Servicio Tecnico_0.1.1_x64-setup.exe` (SmartScreen → "Más información → Ejecutar de todos modos"). **WebView2 embebido**: no necesita drivers ni internet.
+3. Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe
    (no sobreescribe una DB existente).
-3. PIN inicial `1234` → cambiarlo en Libro Diario → PIN.
-4. Abrir el día (efectivo inicial + Auto BCV) y configurar la impresora (Servicio Técnico → Impresora → Detectar).
+4. PIN inicial `1234` → cambiarlo en Libro Diario → PIN.
+5. Abrir el día (efectivo inicial + Auto BCV) y configurar la impresora (Servicio Técnico → Impresora → Detectar).
+
+### Publicar una actualización
+
+```powershell
+gh auth login                                    # una sola vez
+.\tools\release.ps1 -Version 0.1.2 -Notes "Fix X, mejora Y"
+```
+
+El script corre tests, sube la versión, hace el build firmado, genera `latest.json`
+con la firma y crea la GitHub Release. La app de la tienda avisa sola al arrancar
+(con respaldo automático y rollback si fallara algo).
 
 ## Verificación en vivo (CDP)
 
@@ -235,9 +251,10 @@ await window.__TAURI_INTERNALS__.invoke('get_products', { search: '', categoryId
 ## Pruebas
 
 ```bash
-cd src-tauri && cargo test    # 20/20 (conversión de moneda, arqueo, garantía, técnicos, PRAGMAs...)
+cd src-tauri && cargo test    # 25/25 (conversión de moneda, arqueo, garantía, técnicos, PRAGMAs, updater...)
 npm run build                 # TypeScript + Vite
 npx tsx tools/governance/run.ts --build-only   # harness governance
+npx tsx tools/governance/run.ts --security     # harness seguridad
 ```
 
 ## Lecciones clave (resumen)

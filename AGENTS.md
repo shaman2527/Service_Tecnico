@@ -33,8 +33,9 @@ registro/
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 64 comandos
+│   │   ├── lib.rs             # Tauri builder + 70 comandos
 │   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario + settings
+│   │   ├── updates.rs         # Updater: respaldo pre-update, rollback, health-check, watchdog
 │   │   ├── printer.rs         # Impresora térmica: list_com_ports, ESC/POS CP850, print_receipt
 │   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
 │   │   └── commands.rs        # Comandos Tauri
@@ -194,6 +195,19 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Verificación en vivo: arranque en frío del instalado → gate visible; PIN 1234 → owner; 9999 → rechazado; `get_pin_status` via CDP = true.
 - "Entrar como cajera" salta a Ventas sin Dashboard (role cashier).
 
+### Actualizaciones automáticas (updater + rollback) — F8 2026-08-04
+- **Plugin oficial:** `tauri-plugin-updater` + `tauri-plugin-process` (relaunch) + permisos `updater:default`/`process:default`. Firma obligatoria: llaves en `~/.tauri/registro.key` (privada, NO se commitea) + pubkey en `tauri.conf.json` (`plugins.updater.pubkey`). Build: `createUpdaterArtifacts: true` → genera `setup.exe.sig`; requiere `$env:TAURI_SIGNING_PRIVATE_KEY` (ruta o contenido). `installMode: "passive"`.
+- **Servidor:** GitHub Releases con `latest.json` estático (endpoint `https://github.com/shaman2527/Service_Tecnico/releases/latest/download/latest.json`). `tools/release.ps1 -Version X.Y.Z -Notes "..."` → tests → bump versión → build firmado → latest.json (version/notes/pub_date/signature/url) → `gh release create` (requiere `gh auth login`).
+- **Flujo (módulo `updates.rs`):**
+  1. `backup_before_update` (JS antes de instalar): checkpoint WAL + copia exe → `updates/prev/`, DB → `updates/registro.backup_pre_vX.db`, estado `pending` en `update-state.json` + genera y LANZA `watchdog.ps1` (proceso aparte, 90s).
+  2. El updater instala (la app se cierra sola en Windows; el instalador NSIS la relanza — verificado) y la versión nueva corre `run_health_check` al primer arranque (tras PIN): integridad DB + `next_order_num` + `get_active_day` + `get_daily_totals` (+ `get_bcv_rate` como WARNING: el scrape externo puede fallar sin que la app esté rota; la entrada manual es el fallback oficial).
+  3. OK → `mark_update_ok` (estado ok) + aviso "Actualizado a vX ✓". FALLA → `rollback_update` restaura `prev/registro.exe` + relanza (estado rolled_back).
+  4. **Watchdog** (si la app nueva no arrancó/confirmó en 90s): detecta exe reemplazado + sin proceso corriendo → lanza la app nueva; timeout sin confirmación → restaura prev y lanza. `Try-Launch` con try/catch (un exe roto NO debe matar al watchdog — lesson E2E).
+- **UI:** `UpdateDialog.tsx` (dialog con notas + progreso + "Recordar después" persistido en `localStorage('update_dismissed_v')`), check al arranque (5s timeout, silencio sin internet — offline-first), botón "Revisar actualizaciones" + "Restaurar versión anterior" en Ayuda (via evento `registro:check-update`), versión dinámica con `getVersion()`.
+- **La DB del usuario NUNCA se sobreescribe** (el instalador NSIS solo escribe `registro.db` si no existe); el respaldo DB es último recurso manual.
+- Tests: `updates::tests` (5: kit backup, rollback restaura, rollback sin prev, health check DB fresca, estado roundtrip). Suite 25/25.
+- **E2E verificado en vivo (servidor local + build de prueba):** dialog → kit → descarga → instalación → relanzamiento → PIN → health check → ok + aviso; DB preservada. Update ROTO: exe basura + watchdog → restaura + relanza (2 veces). Regresión final: BCV en vivo 752.09, venta Bs 7520.943 → grand_total 35 exacto, cierre diferencia 0.
+
 ## Constraint Checks (Pre-Push / CI)
 
 Antes de hacer commit:
@@ -268,6 +282,9 @@ Antes de hacer commit:
 | 2026-08-04 | **Gate PIN en arranque en frío = bypass (fail-open)**: el PRIMER invoke() de WebView2 recién lanzado puede rechazar → db.ts traga el error (`getPinStatus` resolvía `false` → App.tsx abría como owner SIN PIN; `verifyPin` resolvía `true` → cualquier PIN pasaba). Detección en vivo: primer arranque mostraba sidebar directo; tras `location.reload()` el gate aparecía (IPC caliente). App.tsx catch a 'loading' no bastaba (el catch estaba en db.ts). | db.ts: `getPinStatus`/`verifyPin` reintentan el invoke 3 veces (400ms) en Tauri mode; si fallan de verdad, RECHAZAN (App.tsx manda al gate — fail-closed). Browser mode sigue con mock. Verificado en vivo: desinstalar→instalar→arranque en frío del instalado → gate "Acceso restringido" visible; PIN 1234 → owner (982 productos); `next_order_num` OK. |
 | 2026-08-04 | **`next_order_num` crasheaba con tabla de servicios VACÍA** (recaída del bug de 2026-08-03): con 0 filas, `MAX(expr)` devuelve NULL en UNA fila (no "no rows") → `r.get::<i64>(0)` lanza InvalidColumnType que `.optional()` NO captura (solo captura QueryReturnedNoRows). El PRIMER servicio de la tienda (DB recién puesta en marcha) fallaba. | `SELECT COALESCE(MAX(...), 0)` + `.get(0)` directo (sin `.optional()`): MAX nunca NULL → sin InvalidColumnType. Test `test_next_order_num_empty_table` (tabla vacía → DEV-0001, luego DEV-0002 monotónico). Suite 20/20. Verificado en vivo en el instalado: `next_order_num` → DEV-0001. |
 | 2026-08-04 | **Instalador no existía para la tienda** (solo exe suelto + DB aparte): riesgo de DB perdida/mezclada y sin WebView2 en PC sin internet. | F7: `tauri.conf.json` → `bundle.targets=["nsis"]` + `bundle.resources={"../registro.db":"registro.db"}` (DB limpia viaja en el setup; no sobreescribe la instalada) + `webviewInstallMode=embedBootstrapper`. Build: `npx tauri build` (~7 min LTO, descarga NSIS+bootstrapper la primera vez) → `src-tauri/target/release/bundle/nsis/Registro Servicio Tecnico_0.1.0_x64-setup.exe` (4.7 MB). Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con registro.db junto al exe. Verificado en vivo: setup /S → DB limpia instalada, arranque en frío con gate PIN, 982 productos, uninstall /S limpio. |
+| 2026-08-04 | **Watchdog muere al lanzar un exe roto**: `Start-Process` de un archivo no ejecutable lanza error TERMINAL en PowerShell → el script salía ANTES de la rama de restauración (update roto = sin rollback). Detectado en E2E: exe basura de 39 bytes + watchdog → tras 90s seguía la basura. | `Try-Launch` (función con `try { Start-Process $curExe -ErrorAction Stop } catch {}`) para TODOS los lanzamientos; la restauración con `Copy-Item -ErrorAction SilentlyContinue`. Verificado en vivo: exe roto → watchdog restaura (16,448,000 bytes) y relanza la app. |
+| 2026-08-04 | **El relanzamiento tras actualizar NO lo hace el JS**: `downloadAndInstall` mata el proceso en Windows antes de que `relaunch()` corra (el instalador NSIS de Tauri relanza la app por su cuenta — verificado). El `relaunch()` JS solo aplica en rollback (proceso vivo). | Diseño por capas: el instalador relanza en el flujo normal; el watchdog lanza la app nueva si detecta instalación (exe con mtime > respaldo) y nadie la corrió; timeout → restaura prev. E2E: flujo completo llegó a health check + ok sin intervención. |
+| 2026-08-04 | **`localStorage('update_dismissed_v')` persistía entre E2E**: la versión descartada en una prueba bloqueaba el dialog en la siguiente instalación (silencio confuso). | Comportamiento por diseño (no molestar con la versión que el usuario descartó); para pruebas limpias borrar la clave o reinstalar limpio. Documentado en esta entrada. |
 
 ## Feedback Loops
 
@@ -284,7 +301,7 @@ Antes de hacer commit:
 
 ## Build Status
 - **Date:** 2026-08-04
-- **Build: ✅ PASS (16.1s)**
+- **Build: ✅ PASS (11.1s)**
 - **Errors:** 0
 - **Warnings:** 0
 

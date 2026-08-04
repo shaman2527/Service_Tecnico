@@ -305,3 +305,15 @@ export interface PrinterSettings {
   baud: number;
   width: number;
 }
+
+export interface UpdateState {
+  previous_version: string;
+  new_version: string;
+  status: 'pending' | 'ok' | 'rolled_back';
+  installed_at: string;
+}
+
+export interface HealthReport {
+  ok: boolean;
+  issues: string[];
+}

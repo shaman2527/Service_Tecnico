@@ -133,7 +133,17 @@ PIN). Gate **fail-closed**: si la consulta de PIN falla en arranque, se pide el 
 - `get_pin_status`/`verify_pin`/`set_pin`; gate fail-closed con reintentos (3×400ms).
 - "Entrar como cajera" → rol cashier (solo Ventas).
 
-### 4.11 Centro de Ayuda
+### 4.12 Sistema de actualizaciones (launcher automático)
+- Al arrancar (tras PIN), `check()` contra GitHub Releases (5s máximo; **sin internet = silencio**, la app offline-first nunca se bloquea). Aviso en pantalla "Nueva versión vX disponible" con el changelog, visible para owner y cajera.
+- **Respaldo previo obligatorio:** exe actual → `updates\prev\`, DB (con checkpoint WAL) → `updates\registro.backup_pre_vX.db`, estado en `update-state.json`, y lanzamiento de `watchdog.ps1` (proceso aparte, 90s).
+- Instalación pasiva (NSIS) → la app se cierra sola y el instalador la relanza.
+- **Chequeo de salud post-update:** integridad DB + `next_order_num` + día activo + totales diarios (BCV como warning con fallback manual). OK → aviso "Actualizado ✓". FALLA → **rollback automático** a la versión anterior + relanzamiento (la tienda sigue operando mientras se corrige).
+- **Watchdog:** si la versión nueva no arranca ni confirma en 90s, restaura el exe anterior y lo lanza.
+- Botón "Revisar actualizaciones" + "Restaurar versión anterior" en el Centro de Ayuda.
+- Publicación: `tools\release.ps1 -Version X.Y.Z -Notes "..."` (tests → bump → build firmado → `latest.json` con firma → GitHub Release). Requiere `gh auth login` y la llave privada `~\.tauri\registro.key` (si se pierde, no hay más updates).
+- Verificación E2E completa (2026-08-04): flujo feliz con servidor local (dialog → kit → descarga → instalación → relanzamiento → health check → ok, DB intacta) y update roto (watchdog restaura y relanza).
+
+### 4.13 Centro de Ayuda
 - Guía en-app: accesos rápidos + accordion por módulo + métodos de pago.
 
 ---
