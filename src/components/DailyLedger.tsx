@@ -102,6 +102,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showSettle, setShowSettle] = useState<DailyClosing | null>(null);
   const [settleAmount, setSettleAmount] = useState(0);
+  const [settleAmountBs, setSettleAmountBs] = useState(0);
+  const [settleChargedUsd, setSettleChargedUsd] = useState(0);
+  const [settleChargedBs, setSettleChargedBs] = useState(0);
+  const [posSettledUsd, setPosSettledUsd] = useState(0);
+  const [posSettledBs, setPosSettledBs] = useState(0);
   const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [pinStatus, setPinStatus] = useState(false);
   const [showPinDialog, setShowPinDialog] = useState(false);
@@ -186,11 +191,16 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       const t = dayTotals[0] ?? null;
       setExpected(t);
       setCashCounted(t?.cash_bs ?? 0);
+      // Monto impreso del Punto: prellenado con lo que el sistema espera (regla: debe dar el mismo)
+      setPosSettledUsd(t?.pos_charged_usd ?? 0);
+      setPosSettledBs(t?.pos_charged_bs ?? 0);
       const pms = await api.getPagoMovilDetail(activeDay.close_date);
       setPagoMovilList(pms);
     } catch {
       setExpected(null);
       setCashCounted(0);
+      setPosSettledUsd(0);
+      setPosSettledBs(0);
     }
   };
 
@@ -205,7 +215,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
         expected?.pos_charged ?? 0, 0,
         expected?.zelle_total ?? 0,
         expected?.pago_movil_total ?? 0,
-        expected?.transfer_bs_total ?? 0
+        expected?.transfer_bs_total ?? 0,
+        posSettledUsd, posSettledBs
       );
       setShowClose(false);
       refreshActiveDay();
@@ -218,7 +229,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
 
   const doSettle = async () => {
     if (!showSettle || !isOwner) return;
-    await api.updateDailyClosingSettlement(showSettle.id, settleAmount);
+    await api.updateDailyClosingSettlement(showSettle.id, settleAmount, settleAmountBs);
     setShowSettle(null);
     loadClosings();
   };
@@ -226,9 +237,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const doExport = async () => {
     setExportMsg(null);
     try {
-      const date = activeDay?.close_date ?? today;
-      const path = await api.exportDailyReport(date);
-      setExportMsg({ ok: true, text: `Reporte exportado: ${path}` });
+      const path = await api.exportDailyReport(effectiveStart, effectiveEnd);
+      setExportMsg({ ok: true, text: `Reporte exportado (${effectiveStart} → ${effectiveEnd}): ${path}` });
     } catch (e) {
       setExportMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     }
@@ -363,7 +373,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             </span>
             <div>
               <p className="font-semibold text-emerald-700">Día ABIERTO — {activeDay.close_date}</p>
-              <p className="text-sm text-emerald-700/80">Tasa Bs {activeDay.tasa_bcv.toFixed(2)} · Apertura ${activeDay.initial_cash_usd.toFixed(2)}</p>
+              <p className="text-sm text-emerald-700/80">Tasa Bs {activeDay.tasa_bcv.toFixed(2)} · Apertura ${activeDay.initial_cash_usd.toFixed(2)} (se guarda, no es venta del día)</p>
             </div>
           </div>
           <Button variant="default" onClick={openCloseDialog}>
@@ -565,8 +575,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                       <TableCell className="font-medium">{c.close_date}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtUsd(c.pos_net)}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {c.pos_settled > 0
-                          ? <span className="font-medium">{fmtUsd(c.pos_settled)}</span>
+                        {c.pos_settled > 0 || c.pos_settled_bs > 0
+                          ? <span className="font-medium">{fmtMix(c.pos_settled, c.pos_settled_bs)}</span>
                           : <span className="text-muted-foreground">—</span>
                         }
                       </TableCell>
@@ -602,7 +612,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                             </Button>
                           )}
                           <Button variant="outline" size="sm"
-                            onClick={() => { setShowSettle(c); setSettleAmount(c.pos_settled); }}>
+                            onClick={() => {
+                              setShowSettle(c);
+                              setSettleAmount(c.pos_settled);
+                              setSettleAmountBs(c.pos_settled_bs);
+                              api.getDailyTotals(c.close_date, c.close_date).then(ts => {
+                                const t = ts[0];
+                                setSettleChargedUsd(t?.pos_charged_usd ?? 0);
+                                setSettleChargedBs(t?.pos_charged_bs ?? 0);
+                              }).catch(() => {
+                                setSettleChargedUsd(0);
+                                setSettleChargedBs(0);
+                              });
+                            }}>
                             <DollarSign className="size-3" /> Liquidar
                           </Button>
                         </div>
@@ -702,6 +724,47 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               </div>
             </div>
             <div className="flex flex-col gap-2">
+              <p className="text-sm font-semibold">Punto de Venta — monto impreso</p>
+              <p className="text-xs text-muted-foreground">
+                El sistema cobró <strong>{fmtMix(expected?.pos_charged_usd ?? 0, expected?.pos_charged_bs ?? 0)}</strong>.
+                Escribe el monto total que imprimió la máquina del Punto al cerrarla — debe dar el mismo.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {(expected?.pos_charged_usd ?? 0) > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium">Monto impreso ($)</label>
+                    <MoneyInput value={posSettledUsd} onChange={setPosSettledUsd} />
+                  </div>
+                )}
+                {(expected?.pos_charged_bs ?? 0) > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium">Monto impreso (Bs.)</label>
+                    <MoneyInput value={posSettledBs} onChange={setPosSettledBs} />
+                  </div>
+                )}
+              </div>
+              {(expected?.pos_charged_usd ?? 0) > 0 && (
+                <div className="flex items-center gap-3 text-sm">
+                  <span>Diferencia ($):{' '}
+                    <span className={`font-bold ${Math.abs(posSettledUsd - (expected?.pos_charged_usd ?? 0)) < 0.5 ? 'text-success' : 'text-danger'}`}>
+                      {posSettledUsd >= (expected?.pos_charged_usd ?? 0) ? '+' : ''}{fmtUsd(posSettledUsd - (expected?.pos_charged_usd ?? 0))}
+                    </span>
+                  </span>
+                  {Math.abs(posSettledUsd - (expected?.pos_charged_usd ?? 0)) < 0.5 && <span className="text-success font-medium">Cuadrado ✅</span>}
+                </div>
+              )}
+              {(expected?.pos_charged_bs ?? 0) > 0 && (
+                <div className="flex items-center gap-3 text-sm">
+                  <span>Diferencia (Bs.):{' '}
+                    <span className={`font-bold ${Math.abs(posSettledBs - (expected?.pos_charged_bs ?? 0)) < 0.5 ? 'text-success' : 'text-danger'}`}>
+                      {posSettledBs >= (expected?.pos_charged_bs ?? 0) ? '+' : ''}{fmtBs(posSettledBs - (expected?.pos_charged_bs ?? 0))}
+                    </span>
+                  </span>
+                  {Math.abs(posSettledBs - (expected?.pos_charged_bs ?? 0)) < 0.5 && <span className="text-success font-medium">Cuadrado ✅</span>}
+                </div>
+              )}
+            </div>
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
               <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
               <div className="flex items-center gap-3 text-sm">
@@ -746,7 +809,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </div>
               )}
             </div>
-            <p className="text-xs text-muted-foreground">Los métodos digitales (Punto, Zelle, Pago Móvil, Transf Bs) se registran con los valores esperados del sistema.</p>
+            <p className="text-xs text-muted-foreground">Zelle, Pago Móvil y Transf Bs se registran con los valores esperados del sistema.</p>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Notas</label>
               <Input value={closeNotes} onChange={e => setCloseNotes(e.target.value)}
@@ -770,17 +833,30 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           </DialogHeader>
           <div className="flex flex-col gap-4">
             <div className="text-sm flex flex-col gap-1">
-              <p>Neto esperado: <strong>${(showSettle?.pos_net ?? 0).toFixed(2)}</strong></p>
-              <p className="text-muted-foreground">Registra el monto real liquidado por el banco.</p>
+              <p>Cargado esperado (sistema): <strong>{fmtMix(settleChargedUsd, settleChargedBs)}</strong></p>
+              <p className="text-muted-foreground">Registra el monto total impreso por la máquina del Punto — debe dar el mismo.</p>
             </div>
             <div className="flex flex-col gap-2">
-              <label className="text-sm font-medium">Monto Liquidado ($)</label>
+              <label className="text-sm font-medium">Monto impreso ($)</label>
               <MoneyInput value={settleAmount} onChange={setSettleAmount} />
             </div>
-            {showSettle && settleAmount > 0 && (
+            {settleChargedBs > 0 && (
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Monto impreso (Bs.)</label>
+                <MoneyInput value={settleAmountBs} onChange={setSettleAmountBs} />
+              </div>
+            )}
+            {settleChargedUsd > 0 && (
               <div className="text-sm">
-                Diferencia: <span className={Math.abs(settleAmount - showSettle.pos_net) < 0.5 ? 'text-success' : 'text-danger'}>
-                  {settleAmount >= showSettle.pos_net ? '+' : ''}${(settleAmount - showSettle.pos_net).toFixed(2)}
+                Diferencia ($): <span className={Math.abs(settleAmount - settleChargedUsd) < 0.5 ? 'text-success' : 'text-danger'}>
+                  {settleAmount >= settleChargedUsd ? '+' : ''}${(settleAmount - settleChargedUsd).toFixed(2)}
+                </span>
+              </div>
+            )}
+            {settleChargedBs > 0 && (
+              <div className="text-sm">
+                Diferencia (Bs.): <span className={Math.abs(settleAmountBs - settleChargedBs) < 0.5 ? 'text-success' : 'text-danger'}>
+                  {settleAmountBs >= settleChargedBs ? '+' : ''}{fmtBs(settleAmountBs - settleChargedBs)}
                 </span>
               </div>
             )}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, Phone, Wrench, ShoppingCart } from 'lucide-react';
+import { Search, Phone, Wrench, ShoppingCart, ChevronDown, ChevronRight, Smartphone, ShieldCheck, CalendarDays, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -7,7 +7,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import type { ClientSummary, Service, Sale } from '../types';
+import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import type { ClientSummary, Service, Sale, ServicePayment, Technician } from '../types';
 
 export default function Clients() {
   const [clients, setClients] = useState<ClientSummary[]>([]);
@@ -15,9 +17,13 @@ export default function Clients() {
   const [selected, setSelected] = useState<ClientSummary | null>(null);
   const [clientServices, setClientServices] = useState<Service[]>([]);
   const [clientSales, setClientSales] = useState<Sale[]>([]);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [servicePayments, setServicePayments] = useState<Record<number, ServicePayment[]>>({});
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
 
   const load = async () => {
     setClients(await api.getClients(search));
+    api.getTechnicians().then(setTechnicians).catch(() => {});
   };
 
   useEffect(() => { load(); }, []);
@@ -25,12 +31,23 @@ export default function Clients() {
 
   const openHistory = async (c: ClientSummary) => {
     setSelected(c);
+    setExpandedId(null);
+    setServicePayments({});
     const [services, sales] = await Promise.all([
       api.getClientServices(c.id),
       api.getClientSales(c.id),
     ]);
     setClientServices(services);
     setClientSales(sales);
+  };
+
+  const toggleExpand = async (s: Service) => {
+    if (expandedId === s.id) { setExpandedId(null); return; }
+    setExpandedId(s.id);
+    if (!servicePayments[s.id]) {
+      const pays = await api.getServicePayments(s.id).catch(() => [] as ServicePayment[]);
+      setServicePayments(prev => ({ ...prev, [s.id]: pays }));
+    }
   };
 
   return (
@@ -93,11 +110,11 @@ export default function Clients() {
       </Card>
 
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
           {selected && (
             <>
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
+              <DialogHeader className="shrink-0">
+                <DialogTitle className="flex items-center gap-2 flex-wrap">
                   {selected.name}
                   {selected.ci && (
                     <span className="text-xs font-normal text-muted-foreground">{selected.ci}</span>
@@ -111,110 +128,301 @@ export default function Clients() {
                 </DialogTitle>
               </DialogHeader>
 
-              <div className="grid grid-cols-3 gap-3 mb-4">
-                <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Total Gastado</CardTitle></CardHeader>
-                  <CardContent><div className="text-lg font-bold text-success">${selected.total_spent.toFixed(2)}</div></CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Servicios</CardTitle></CardHeader>
-                  <CardContent><div className="text-lg font-bold">{selected.service_count}</div></CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Compras</CardTitle></CardHeader>
-                  <CardContent><div className="text-lg font-bold">{selected.sale_count}</div></CardContent>
-                </Card>
+              <div className="min-h-0 flex-1 overflow-y-auto px-6">
+                <div className="grid grid-cols-3 gap-3 mb-4">
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Total Gastado</CardTitle></CardHeader>
+                    <CardContent><div className="text-lg font-bold text-success">${selected.total_spent.toFixed(2)}</div></CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Servicios</CardTitle></CardHeader>
+                    <CardContent><div className="text-lg font-bold">{selected.service_count}</div></CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Compras</CardTitle></CardHeader>
+                    <CardContent><div className="text-lg font-bold">{selected.sale_count}</div></CardContent>
+                  </Card>
+                </div>
+
+                {clientServices.length > 0 && (
+                  <div className="mb-4">
+                    <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                      <Wrench className="size-4" /> Servicios Técnicos
+                    </h3>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-8"></TableHead>
+                          <TableHead>Orden</TableHead>
+                          <TableHead>Fecha</TableHead>
+                          <TableHead>Modelo</TableHead>
+                          <TableHead>Falla</TableHead>
+                          <TableHead className="text-right">Monto</TableHead>
+                          <TableHead className="text-right">Abonado</TableHead>
+                          <TableHead className="text-right">Saldo</TableHead>
+                          <TableHead>Estado</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {clientServices.map(s => (
+                          <ServiceRow key={s.id} s={s}
+                            expanded={expandedId === s.id}
+                            payments={servicePayments[s.id] ?? null}
+                            techs={technicians}
+                            onToggle={() => toggleExpand(s)} />
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+
+                {clientSales.length > 0 && (
+                  <div className="mb-4">
+                    <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                      <ShoppingCart className="size-4" /> Compras
+                    </h3>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Fecha</TableHead>
+                          <TableHead>Producto</TableHead>
+                          <TableHead className="text-right">Cant</TableHead>
+                          <TableHead className="text-right">Total</TableHead>
+                          <TableHead>Pago</TableHead>
+                          <TableHead>Cliente</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {clientSales.map(s => (
+                          <TableRow key={s.id}>
+                            <TableCell>{s.date ?? '-'}</TableCell>
+                            <TableCell className="font-medium">{s.product_name ?? '-'}</TableCell>
+                            <TableCell className="text-right">{s.quantity}</TableCell>
+                            <TableCell className="text-right">${s.total.toFixed(2)}</TableCell>
+                            <TableCell><Badge variant="outline">{s.payment_method ?? '-'}</Badge></TableCell>
+                            <TableCell>
+                              {s.client_name ?? '-'}
+                              {s.client_ci && <div className="text-[11px] text-muted-foreground">{s.client_ci}</div>}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+
+                {clientServices.length === 0 && clientSales.length === 0 && (
+                  <p className="text-sm text-muted-foreground text-center py-4">Sin actividad registrada</p>
+                )}
               </div>
 
-              {clientServices.length > 0 && (
-                <div className="mb-4">
-                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
-                    <Wrench className="size-4" /> Servicios Técnicos
-                  </h3>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Orden</TableHead>
-                        <TableHead>Fecha</TableHead>
-                        <TableHead>Modelo</TableHead>
-                        <TableHead>Falla</TableHead>
-                        <TableHead className="text-right">Monto</TableHead>
-                        <TableHead className="text-right">Abonado</TableHead>
-                        <TableHead className="text-right">Saldo</TableHead>
-                        <TableHead>Estado</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {clientServices.map(s => (
-                        <TableRow key={s.id}>
-                          <TableCell className="font-medium">{s.order_num}</TableCell>
-                          <TableCell>{s.date_in ?? '-'}</TableCell>
-                          <TableCell>{s.model ?? '-'}</TableCell>
-                          <TableCell className="max-w-[120px] truncate">{s.fault ?? '-'}</TableCell>
-                          <TableCell className="text-right">${s.amount.toFixed(2)}</TableCell>
-                          <TableCell className="text-right">
-                            {s.paid_amount > 0 && (
-                              <span className="text-xs text-emerald-600">${s.paid_amount.toFixed(2)}</span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {s.amount - s.paid_amount > 0.005 ? (
-                              <span className="text-danger text-xs font-semibold">${(s.amount - s.paid_amount).toFixed(2)}</span>
-                            ) : s.paid_amount - s.amount > 0.005 ? (
-                              <span className="text-warning text-xs font-semibold">Excedente ${(s.paid_amount - s.amount).toFixed(2)}</span>
-                            ) : (
-                              <Badge variant="outline" className="text-emerald-600">Cancelado</Badge>
-                            )}
-                          </TableCell>
-                          <TableCell><Badge variant="outline">{s.status}</Badge></TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-
-              {clientSales.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
-                    <ShoppingCart className="size-4" /> Compras
-                  </h3>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Fecha</TableHead>
-                        <TableHead>Producto</TableHead>
-                        <TableHead className="text-right">Cant</TableHead>
-                        <TableHead className="text-right">Total</TableHead>
-                        <TableHead>Pago</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {clientSales.map(s => (
-                        <TableRow key={s.id}>
-                          <TableCell>{s.date ?? '-'}</TableCell>
-                          <TableCell className="font-medium">{s.product_name ?? '-'}</TableCell>
-                          <TableCell className="text-right">{s.quantity}</TableCell>
-                          <TableCell className="text-right">${s.total.toFixed(2)}</TableCell>
-                          <TableCell><Badge variant="outline">{s.payment_method ?? '-'}</Badge></TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-
-              {clientServices.length === 0 && clientSales.length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-4">Sin actividad registrada</p>
-              )}
-
-              <DialogFooter>
+              <DialogFooter className="shrink-0">
                 <Button onClick={() => setSelected(null)}>Cerrar</Button>
               </DialogFooter>
             </>
           )}
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function ServiceRow({ s, expanded, payments, techs, onToggle }: {
+  s: Service;
+  expanded: boolean;
+  payments: ServicePayment[] | null;
+  techs: Technician[];
+  onToggle: () => void;
+}) {
+  const wStatus = warrantyStatus(s.date_out);
+  const wEnd = warrantyEnd(s.date_out);
+  const tech = techs.find(t => t.id === s.technician_id);
+
+  return (
+    <>
+      <TableRow className="cursor-pointer hover:bg-muted/50" onClick={onToggle}>
+        <TableCell className="w-8">
+          {expanded ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
+        </TableCell>
+        <TableCell className="font-medium">{s.order_num}</TableCell>
+        <TableCell>{s.date_in ?? '-'}</TableCell>
+        <TableCell>
+          <span className="flex items-center gap-1.5">
+            {tech ? (
+              <span title={`${tech.name} — técnico`}
+                className={cn('flex size-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white', tech.color)}>
+                {tech.initials}
+              </span>
+            ) : s.technician ? (
+              <span title={`${s.technician} — técnico`}
+                className="flex size-4 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[9px] font-bold text-white">
+                {(s.technician.trim().split(/\s+/)[0]?.[0] ?? '?').toUpperCase()}
+              </span>
+            ) : null}
+            <span>{s.model ?? '-'}</span>
+          </span>
+        </TableCell>
+        <TableCell className="max-w-[220px]">{s.fault ?? '-'}</TableCell>
+        <TableCell className="text-right">${s.amount.toFixed(2)}</TableCell>
+        <TableCell className="text-right">
+          {s.paid_amount > 0 && (
+            <span className="text-xs text-emerald-600">${s.paid_amount.toFixed(2)}</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right">
+          {s.amount - s.paid_amount > 0.005 ? (
+            <span className="text-danger text-xs font-semibold">${(s.amount - s.paid_amount).toFixed(2)}</span>
+          ) : s.paid_amount - s.amount > 0.005 ? (
+            <span className="text-warning text-xs font-semibold">Excedente ${(s.paid_amount - s.amount).toFixed(2)}</span>
+          ) : (
+            <Badge variant="outline" className="text-emerald-600">Cancelado</Badge>
+          )}
+        </TableCell>
+        <TableCell><Badge variant="outline">{s.status}</Badge></TableCell>
+      </TableRow>
+      {expanded && (
+        <TableRow className="bg-muted/30">
+          <TableCell colSpan={9} className="p-4">
+            <ServiceDetail s={s} payments={payments} techs={techs} warranty={{ status: wStatus, end: wEnd }} />
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+function ServiceDetail({ s, payments, techs, warranty }: {
+  s: Service;
+  payments: ServicePayment[] | null;
+  techs: Technician[];
+  warranty: { status: 'sin' | 'activa' | 'vencida'; end: string | null };
+}) {
+  const checklist = parseChecklist(s.device_checklist);
+  const items = Object.entries(checklist);
+  const totalBs = (payments ?? []).reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+  const tech = techs.find(t => t.id === s.technician_id);
+
+  return (
+    <div className="flex flex-col gap-4 text-sm">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="rounded-md border bg-background p-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
+            <Smartphone className="size-3.5" /> Equipo y diagnóstico
+          </p>
+          <div className="flex flex-wrap items-center gap-2 mb-1.5">
+            {tech && (
+              <span title={`${tech.name} — técnico`}
+                className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', tech.color)}>
+                {tech.initials}
+              </span>
+            )}
+            <span className="font-semibold">{s.model ?? 'Sin modelo'}</span>
+            {parseServiceTypes(s).map(t => <Badge key={t} variant="outline">{t}</Badge>)}
+          </div>
+          <p className="text-muted-foreground mb-2">
+            <strong className="text-foreground">Falla:</strong> {s.fault ?? '—'}
+          </p>
+          {s.observations && (
+            <p className="text-muted-foreground flex items-start gap-1.5">
+              <FileText className="size-3.5 mt-0.5 shrink-0" />
+              {s.observations}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Entrada: {s.date_in ?? '—'}</span>
+            <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Salida: {s.date_out ?? '—'}</span>
+            {s.date_out && (
+              warranty.status === 'activa' ? (
+                <span className="text-emerald-600 font-medium">Garantía hasta {warranty.end}</span>
+              ) : (
+                <span className="text-muted-foreground">Garantía vencida</span>
+              )
+            )}
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1"><Phone className="size-3" /> {s.phone ?? 'Sin teléfono'}</span>
+            {s.client_ci && <span>Cédula: {s.client_ci}</span>}
+            {s.client_address && <span>Dirección: {s.client_address}</span>}
+          </div>
+        </div>
+        <div className="rounded-md border bg-background p-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
+            <ShieldCheck className="size-3.5" /> Blindaje del equipo
+          </p>
+          <p className="text-xs text-muted-foreground mb-2">{checklistSummary(s.device_checklist)}</p>
+          {items.length > 0 ? (
+            <div className="grid grid-cols-1 gap-1">
+              {items.map(([k, v]) => {
+                const label = CHECKLIST_ITEMS.find(i => i.key === k)?.label ?? k.replace(/_/g, ' ');
+                return (
+                  <div key={k} className="flex items-center gap-2 text-xs">
+                    <span className={`inline-block size-2 rounded-full shrink-0 ${v === 'si' ? 'bg-emerald-500' : 'bg-destructive'}`} />
+                    <span className="text-muted-foreground">{label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">Sin revisión registrada</p>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-md border bg-background p-3">
+        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+          Pagos y abonos
+        </p>
+        {payments === null ? (
+          <p className="text-xs text-muted-foreground">Cargando pagos...</p>
+        ) : payments.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Sin pagos registrados</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Fecha</TableHead>
+                  <TableHead>Método</TableHead>
+                  <TableHead className="text-right">Monto</TableHead>
+                  <TableHead className="text-right">Neto</TableHead>
+                  <TableHead>Referencia</TableHead>
+                  <TableHead>Notas</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {payments.map(p => (
+                  <TableRow key={p.id}>
+                    <TableCell className="text-xs whitespace-nowrap">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
+                    <TableCell className="text-xs">
+                      <Badge variant="outline">{p.payment_method ?? '-'}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right font-medium whitespace-nowrap">
+                      {currencySymbol(p.currency)}{p.amount.toFixed(2)}
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-muted-foreground whitespace-nowrap">
+                      {p.bank_fee_percent > 0 ? (
+                        <>
+                          {currencySymbol(p.currency)}{p.net_amount.toFixed(2)}
+                          <div className="text-[11px]">comisión {p.bank_fee_percent}%</div>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs">{p.zelle_reference ?? '—'}</TableCell>
+                    <TableCell className="text-xs max-w-[140px] truncate">{p.notes ?? '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        {(payments ?? []).length > 0 && (
+          <p className="text-xs text-muted-foreground mt-2">
+            Abonado en Bs.: <strong>Bs. {totalBs.toFixed(2)}</strong> · Abonado en $: <strong>${s.paid_amount.toFixed(2)}</strong> (equivalente)
+          </p>
+        )}
+      </div>
     </div>
   );
 }

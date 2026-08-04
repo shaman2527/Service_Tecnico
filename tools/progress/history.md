@@ -78,3 +78,21 @@ Y se verificó TODO en vivo vía CDP (remote-debugging) en la app desplegada rea
 - Build: ✅ PASS (51.2s frontend / 2m40s release), 0 errores, 0 warnings
 - cargo test: ✅ 1/1; governance: ✅ PASS
 - App desplegada corriendo con datos reales (970 productos, 921 pantallas)
+
+## 2026-08-04 - Puesta en marcha + impresora + instalador NSIS (F1-F8)
+- F1-F3: backup + limpieza total (982 productos conservados, 0 movimientos) + PIN 1234 verificado via CDP.
+- F4: PRAGMA synchronous=FULL + test_durability_pragmas (robustez ante apagon).
+- F5: LTO thin + strip + codegen-units=1 -> Registro.exe 13.1MB.
+- F6: Impresora termica por COM (printer.rs ESC/POS CP850, list_com_ports, print_receipt, settings persistidas, PrintReceiptDialog + PrinterSettingsDialog, botones Impresora/Factura). 3 tests. Verificado en vivo (sin hardware: list_com_ports=[], error amigable COM9).
+- F7: tauri.conf.json -> targets nsis + resources ../registro.db + webviewInstallMode embedBootstrapper. Setup 4.7MB (Registro Servicio Tecnico_0.1.0_x64-setup.exe). Instalado silenciosamente: DB limpia junto al exe, gate PIN, 982 productos, uninstall limpio.
+- FIX gate PIN fail-open: el primer invoke en frio fallaba -> db.ts resolvia false (owner sin PIN). Ahora retry 3x400ms + rechaza (fail-closed). Verificado: arranque en frio del instalado muestra gate.
+- FIX next_order_num tabla vacia: MAX(NULL) con .optional() no capturaba (InvalidColumnType). COALESCE(...,0) + test_next_order_num_empty_table. 20/20 tests.
+- Governance: PASS (13.4s). AGENTS.md actualizado (64 comandos, secciones impresora/instalador/PIN, Entropy Registry +3).
+
+## 2026-08-04 - QA E2E conversiones (sandbox aislado) + PRD + README
+- Sandbox: copia de Registro.exe + registro.db limpia en temp (DB path: junto al exe). CDP + invokes reales.
+- Escenario tasa BCV 748.79: venta USD 25 (Divisas) + venta Bs 7.487,90 (Pago Movil, 10x748.79) + servicio 50 con abonos 20 USD y 22.463,70 Bs (=30).
+- Resultados: paid_amount=50.00 exacto (20+22463.70/748.79), grand_usd=45, grand_bs=29.951,60, grand_total=85.00 (=45+29951.60/748.79), cierre diferencia 0.00, apertura 50 aparte, active_day null.
+- UI verificada: Libro Diario (Bs.29.951,60 / .00 / aprox .00), Ventas (2 filas con moneda correcta), Cierres (+.00 Cerrado). pm_detail con REF-PM-1/2 y fuentes Venta/Abono DEV-0001.
+- Checks: cargo test 20/20, npm run build OK (CSS vars OK), governance PASS (16.1s).
+- Docs: PRD.md nuevo (reglas R-1..R-17, mermaid flows, modelo de datos, QA, puesta en marcha), README.md actualizado (funcionalidades, flujos, estructura 64 comandos, impresora, PIN, instalador).

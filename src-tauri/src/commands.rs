@@ -89,20 +89,21 @@ pub fn get_sales_stats(db: State<Database>, days: i64) -> Result<Vec<crate::db::
 
 #[tauri::command]
 pub fn add_service(db: State<Database>, order_num: String, client: String, phone: String, model: String,
-                   fault: String, service_type: String, amount: f64, payment_method: String, observations: String,
+                   fault: String, service_type: String, service_types: String, amount: f64, payment_method: String, observations: String,
                    bank_fee_percent: f64, zelle_reference: String, currency: String,
                    client_ci: String, client_address: String, device_checklist: String,
-                   client_id: Option<i64>) -> Result<i64, String> {
-    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id)
+                   client_id: Option<i64>, technician: String, technician_id: Option<i64>) -> Result<i64, String> {
+    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id, &technician, technician_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_service(db: State<Database>, id: i64, client: String, phone: String, model: String, fault: String,
-                      service_type: String, amount: f64, payment_method: String, date_out: String, status: String, observations: String,
+                      service_type: String, service_types: String, amount: f64, payment_method: String, date_out: String, status: String, observations: String,
                       bank_fee_percent: f64, zelle_reference: String, currency: String,
-                      client_ci: String, client_address: String, device_checklist: String) -> Result<(), String> {
-    db.update_service(id, &client, &phone, &model, &fault, &service_type, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist)
+                      client_ci: String, client_address: String, device_checklist: String,
+                      technician: String, technician_id: Option<i64>) -> Result<(), String> {
+    db.update_service(id, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, &technician, technician_id)
         .map_err(|e| e.to_string())
 }
 
@@ -112,8 +113,8 @@ pub fn delete_service(db: State<Database>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_services(db: State<Database>, search: String, status: String) -> Result<Vec<crate::db::Service>, String> {
-    db.get_services(&search, &status).map_err(|e| e.to_string())
+pub fn get_services(db: State<Database>, search: String, status: String, start_date: String, end_date: String) -> Result<Vec<crate::db::Service>, String> {
+    db.get_services(&search, &status, &start_date, &end_date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -126,6 +127,28 @@ pub fn get_service(db: State<Database>, id: i64) -> Result<crate::db::Service, S
 #[tauri::command]
 pub fn get_service_dashboard(db: State<Database>) -> Result<crate::db::ServiceDashboard, String> {
     db.get_service_dashboard().map_err(|e| e.to_string())
+}
+
+// --- Technicians ---
+
+#[tauri::command]
+pub fn get_technicians(db: State<Database>) -> Result<Vec<crate::db::Technician>, String> {
+    db.get_technicians().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_technician(db: State<Database>, name: String, initials: String, color: String) -> Result<i64, String> {
+    db.add_technician(&name, &initials, &color).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_technician(db: State<Database>, id: i64, name: String, initials: String, color: String) -> Result<(), String> {
+    db.update_technician(id, &name, &initials, &color).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_technician(db: State<Database>, id: i64) -> Result<(), String> {
+    db.delete_technician(id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -277,10 +300,11 @@ pub fn get_active_day(db: State<Database>) -> Result<Option<crate::db::DailyClos
 #[tauri::command]
 pub fn close_day(db: State<Database>, close_date: String, notes: String, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
                  actual_cash_usd: f64, actual_cash_bs: f64, actual_punto_usd: f64, actual_punto_bs: f64,
-                 actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64) -> Result<i64, String> {
+                 actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64,
+                 pos_settled: f64, pos_settled_bs: f64) -> Result<i64, String> {
     db.close_day(&close_date, &notes, initial_cash_usd, tasa_bcv, tasa_eur,
                  actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
-                 actual_zelle, actual_pago_movil, actual_transfer_bs)
+                 actual_zelle, actual_pago_movil, actual_transfer_bs, pos_settled, pos_settled_bs)
         .map_err(|e| e.to_string())
 }
 
@@ -290,8 +314,8 @@ pub fn reopen_day(db: State<Database>, close_date: String) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn update_daily_closing_settlement(db: State<Database>, id: i64, pos_settled: f64) -> Result<(), String> {
-    db.update_daily_closing_settlement(id, pos_settled).map_err(|e| e.to_string())
+pub fn update_daily_closing_settlement(db: State<Database>, id: i64, pos_settled: f64, pos_settled_bs: f64) -> Result<(), String> {
+    db.update_daily_closing_settlement(id, pos_settled, pos_settled_bs).map_err(|e| e.to_string())
 }
 
 // --- Settings / PIN ---
@@ -316,6 +340,28 @@ pub fn remove_pin(db: State<Database>, pin: String) -> Result<bool, String> {
     db.remove_pin(&pin).map_err(|e| e.to_string())
 }
 
+// --- Impresora térmica (tickets / facturas de servicio) ---
+
+#[tauri::command]
+pub fn list_com_ports() -> Result<Vec<crate::printer::ComPortInfo>, String> {
+    crate::printer::list_com_ports()
+}
+
+#[tauri::command]
+pub fn print_receipt(port: String, baud: u32, text: String) -> Result<(), String> {
+    crate::printer::print_receipt(&port, baud, &text)
+}
+
+#[tauri::command]
+pub fn get_printer_settings(db: State<Database>) -> Result<crate::db::PrinterSettings, String> {
+    db.get_printer_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32) -> Result<(), String> {
+    db.set_printer_settings(&port, baud, width).map_err(|e| e.to_string())
+}
+
 // --- Reportes ---
 
 #[tauri::command]
@@ -324,6 +370,6 @@ pub fn get_pago_movil_detail(db: State<Database>, date: String) -> Result<Vec<cr
 }
 
 #[tauri::command]
-pub fn export_daily_report(db: State<Database>, date: String) -> Result<String, String> {
-    db.export_daily_report(&date).map_err(|e| e.to_string())
+pub fn export_daily_report(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
+    db.export_daily_report(&start_date, &end_date).map_err(|e| e.to_string())
 }

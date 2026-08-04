@@ -61,9 +61,12 @@ const sections = [
         <ol className="list-decimal list-inside space-y-1">
           <li>Ve a <Badge variant="outline">Ventas</Badge> y pulsa <Badge variant="outline">Nueva Venta</Badge>.</li>
           <li>Busca el producto por nombre o modelo — verás el <span className="font-medium text-foreground">precio y el stock disponible</span> (en rojo si está agotado).</li>
-          <li>Indica cantidad, método de pago y cliente (si escribes su nombre se registra solo).</li>
+          <li>Indica cantidad, método de pago y cliente: escribe su nombre o <span className="font-medium text-foreground">selecciónalo de las sugerencias</span> — su cédula se rellena sola (también puedes escribirla a mano).</li>
           <li>Pulsa <Badge variant="outline">Guardar Venta</Badge> — el stock se descuenta automáticamente.</li>
         </ol>
+        <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
+          <span className="font-semibold">Buscar ventas:</span> el buscador encuentra por producto, cliente o <span className="font-medium">cédula</span>. Para ver "qué vendí ese día", usa los campos <Badge variant="outline">Desde / Hasta</Badge> (fecha a fecha, p. ej. 01-08 a 01-08) — o los períodos rápidos 7 días / 30 días / Este mes.
+        </div>
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
           <span className="font-semibold">Moneda por método:</span> si el cliente paga en bolívares (Pago Móvil, Efectivo Bs, Transferencia Bs), el total se convierte a Bs. con la tasa BCV del día y así se registra en el Libro Diario. El botón de guardar te muestra el monto final en la moneda del método.
         </div>
@@ -81,13 +84,18 @@ const sections = [
       <div className="space-y-2">
         <ol className="list-decimal list-inside space-y-1">
           <li><Badge variant="outline">Nuevo Servicio</Badge> → ¿cliente nuevo o existente? Puedes <span className="font-medium text-foreground">buscar por cédula</span> (V-12345678): si existe, se rellena todo solo y ves su historial de servicios; si no existe, se marca como cliente nuevo (la cédula es obligatoria).</li>
-          <li>Escribe el modelo del equipo — se sugieren los modelos del catálogo con su precio y stock.</li>
-          <li>Indica el tipo de trabajo (cambio de pantalla, batería, flex, reparación de placa…) y la falla.</li>
+          <li>Escribe el modelo del equipo — se sugieren los <span className="font-medium text-foreground">modelos de teléfono</span> del catálogo (una vez cada uno, con sus repuestos y stock debajo).</li>
+          <li>Marca los <span className="font-medium text-foreground">trabajos / fallas</span> que se le harán al equipo (puedes elegir varios: pantalla + conector + ...).
+            La opción <Badge variant="outline">Otro</Badge> permite escribir un trabajo libre (ej: "cambio de pin de carga"). El primer trabajo elegido es el tipo principal de la orden.</li>
           <li>Marca el <span className="font-medium text-foreground">checklist de blindaje</span> (10 ítems Sí/No: chip SIM, tapa trasera, botones, cámara…) — el estado real del equipo al recibirlo te protege de reclamos. Queda visible con el escudo <span className="font-medium text-foreground">ShieldCheck</span> en la orden.</li>
+          <li>En <span className="font-medium text-foreground">Técnico responsable</span> (botón <Badge variant="outline">Técnicos</Badge>) asignas quién reparará el equipo: Aldri, William, o agregas uno con su color e iniciales. La orden queda marcada con el círculo de color + iniciales para saber quién la hizo.</li>
           <li>Guarda el servicio. El estado va: Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago → Por entregar → <Badge variant="default" className="bg-success">Entregado</Badge> (o Cancelado / Devuelto).</li>
         </ol>
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
           <span className="font-semibold">Inventario automático:</span> al marcar <Badge variant="outline">Entregado</Badge> se descuenta 1 de la pantalla correspondiente. Si reabres el servicio, el stock se devuelve. Si el modelo no existe en el catálogo, se crea automáticamente.
+        </div>
+        <div className="rounded-md bg-blue-500/10 border border-blue-500/30 px-3 py-2 text-sm text-blue-700">
+          <span className="font-semibold">Buscar servicios:</span> el buscador encuentra por cliente, cédula, modelo u orden. Los campos <Badge variant="outline">Desde / Hasta</Badge> filtran por el día en que se recibieron los equipos (útil para "¿qué entró el 01-08?"), combinable con el filtro de estado.
         </div>
         <p className="text-sm">Las órdenes se muestran como tarjetas con toda la información: cliente, equipo, falla completa, finanzas (monto, abonado, saldo), tipo de servicio y fecha de salida.</p>
       </div>
@@ -158,6 +166,12 @@ const sections = [
       <div className="space-y-2">
         <p>Gestiona tus clientes con su historial completo: compras, servicios y <span className="font-medium text-foreground">saldos pendientes por servicio</span> (cuánto debe cada cliente y por cuál orden).</p>
         <p>Al registrar una venta o servicio con un nombre/cédula, el cliente se crea o actualiza automáticamente — su historial queda guardado para la próxima visita.</p>
+        <p>Busca por <span className="font-medium text-foreground">nombre, teléfono o cédula</span> y haz clic en el cliente para abrir su historial.</p>
+        <ol className="list-decimal list-inside space-y-1">
+          <li><span className="font-medium text-foreground">Compras:</span> cada venta con fecha, producto, total y método de pago.</li>
+          <li><span className="font-medium text-foreground">Servicios:</span> pulsa la flecha (chevron) de cualquier orden para expandirla y ver TODO el detalle: falla completa, tipo de trabajo, observaciones, fechas de entrada/salida, garantía, teléfono, cédula y dirección del cliente, y el checklist de blindaje del equipo (10 ítems).</li>
+          <li><span className="font-medium text-foreground">Cómo pagó:</span> en cada servicio expandido verás la tabla <span className="font-medium text-foreground">Pagos y abonos</span> — cada abono con su fecha, método (Pago Móvil, Zelle, Divisas…), monto en su moneda real ($ o Bs.), comisión Punto, referencia y notas. Con el badge <Badge variant="outline">Cancelado</Badge> o el saldo pendiente en rojo sabes si el equipo está pago.</li>
+        </ol>
         <p>En <Badge variant="outline">Servicio Técnico</Badge> puedes buscar por cédula (V-XXXXX) y ver los últimos servicios del cliente antes de registrar uno nuevo.</p>
       </div>
     ),
@@ -174,14 +188,16 @@ const sections = [
         <div className="space-y-1.5">
           <p className="font-medium text-foreground">Abrir el día:</p>
           <p>Pulsa <Badge variant="outline">Abrir Día</Badge>, ingresa el efectivo de apertura y la tasa BCV. El botón <Badge variant="outline">Auto BCV</Badge> obtiene la tasa oficial automáticamente (necesita internet); si falla, escríbela a mano. La tasa queda <span className="font-medium text-foreground">congelada</span> para todo el día.</p>
+          <p className="text-xs text-muted-foreground">El efectivo de apertura ($50, $20, etc.) se <span className="font-medium">guarda aparte</span> — nunca se suma a las ventas del día ni a los totales.</p>
         </div>
         <div className="space-y-1.5">
           <p className="font-medium text-foreground">Cerrar el día:</p>
-          <p>Pulsa <Badge variant="outline">Cerrar Día</Badge>. Verás <span className="font-medium text-foreground">"Cobros del día por método"</span>: Divisas $, Efectivo Bs, Punto de Venta ($ y Bs con comisión y neto), Zelle $, Pago Móvil Bs (con cada referencia), Transferencia Bs y el Total General. Solo cuentas el <span className="font-medium text-foreground">efectivo Bs. real</span> de la caja (arqueo); la diferencia se calcula en vivo y queda guardada. Los métodos digitales se ajustan después con <Badge variant="outline">Liquidar Punto</Badge> en la pestaña Cierres.</p>
+          <p>Pulsa <Badge variant="outline">Cerrar Día</Badge>. Verás <span className="font-medium text-foreground">"Cobros del día por método"</span>: Divisas $, Efectivo Bs, Punto de Venta ($ y Bs con comisión y neto), Zelle $, Pago Móvil Bs (con cada referencia), Transferencia Bs y el Total General. Solo cuentas el <span className="font-medium text-foreground">efectivo Bs. real</span> de la caja (arqueo); la diferencia se calcula en vivo y queda guardada.</p>
+          <p><span className="font-medium text-foreground">Punto de Venta:</span> el sistema te muestra cuánto cobraste por Punto ("Monto impreso") y tú escribes el monto total que imprimió la máquina al cerrarla — <span className="font-medium text-foreground">tiene que dar el mismo</span>; si no, se marca la diferencia en rojo. Si luego el banco liquida distinto, corrígelo con <Badge variant="outline">Liquidar</Badge> en la pestaña Cierres.</p>
         </div>
         <div className="space-y-1.5">
-          <p className="font-medium text-foreground">Exportar Excel:</p>
-          <p><Badge variant="outline">Exportar Excel</Badge> genera el reporte del día (CSV compatible con Excel) en tu carpeta <code className="rounded bg-muted px-1.5 py-0.5 text-xs">Documentos\Registro</code>.</p>
+          <p className="font-medium text-foreground">Exportar Excel (día específico o mes completo):</p>
+          <p><Badge variant="outline">Exportar Excel</Badge> genera un reporte (CSV compatible con Excel) en <code className="rounded bg-muted px-1.5 py-0.5 text-xs">Documentos\Registro</code> con el rango <Badge variant="outline">Desde / Hasta</Badge> visible arriba: pon la misma fecha en ambos para un día exacto, o deja el rango del mes para el mes completo. Incluye por día: ventas, pagos de servicios, pago móvil, totales por método y, si el día está cerrado, el cierre completo (apertura, monto impreso del Punto, arqueo real, diferencia y notas) — tu respaldo del libro.</p>
         </div>
       </div>
     ),
@@ -232,6 +248,14 @@ const sections = [
           <p>En <Badge variant="outline">Pantallas</Badge>, en el Dashboard (Stock Bajo) o en Pedidos. Al buscar un producto en una venta también ves el stock en vivo.</p>
         </div>
         <div>
+          <p className="font-medium text-foreground">¿Cómo veo qué vendí o qué entró un día específico?</p>
+          <p>En <Badge variant="outline">Ventas</Badge> o <Badge variant="outline">Servicio Técnico</Badge>, escribe la fecha en los campos <Badge variant="outline">Desde / Hasta</Badge> (ej: 01-08 a 01-08 para ese día) y pulsa <Badge variant="outline">Limpiar</Badge> cuando quieras volver a ver todo.</p>
+        </div>
+        <div>
+          <p className="font-medium text-foreground">¿Cómo sé si un cliente pagó su servicio y con qué método?</p>
+          <p>Ve a <Badge variant="outline">Clientes</Badge>, búscalo por cédula o nombre, y abre su historial. Expande el servicio con la flecha: verás el desglose de cada pago (método, fecha, monto, referencia) y el estado Cancelado o el saldo pendiente en rojo.</p>
+        </div>
+        <div>
           <p className="font-medium text-foreground">¿Puedo tener más de un día abierto?</p>
           <p>No — solo uno. Para corregir errores del día actual puedes reabrirlo desde la pestaña <Badge variant="outline">Cierres</Badge>.</p>
         </div>
@@ -259,7 +283,7 @@ export default function Help() {
         </div>
         <div className="flex items-center gap-2 text-muted-foreground">
           <LifeBuoy className="size-5" />
-          <span className="text-sm">v0.4</span>
+          <span className="text-sm">v0.6</span>
         </div>
       </div>
 

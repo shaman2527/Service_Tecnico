@@ -73,6 +73,7 @@ pub struct Sale {
     pub net_amount: f64,
     pub zelle_reference: Option<String>,
     pub currency: Option<String>,
+    pub client_ci: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -94,6 +95,7 @@ pub struct Service {
     pub model: Option<String>,
     pub fault: Option<String>,
     pub service_type: Option<String>,
+    pub service_types: Option<String>,
     pub amount: f64,
     pub payment_method: Option<String>,
     pub date_out: Option<String>,
@@ -109,6 +111,16 @@ pub struct Service {
     pub device_checklist: Option<String>,
     pub client_id: Option<i64>,
     pub paid_amount: f64,
+    pub technician_id: Option<i64>,
+    pub technician: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Technician {
+    pub id: i64,
+    pub name: String,
+    pub initials: String,
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -204,6 +216,13 @@ pub struct PagoMovilDetail {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PrinterSettings {
+    pub port: String,
+    pub baud: u32,
+    pub width: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DailyTotals {
     pub date: String,
     pub pos_charged: f64,
@@ -236,6 +255,8 @@ pub struct DailyClosing {
     pub pos_fees: f64,
     pub pos_net: f64,
     pub pos_settled: f64,
+    /// Monto impreso por el Punto en Bs (migración 2026-08-02)
+    pub pos_settled_bs: f64,
     pub cash_usd: f64,
     pub cash_bs: f64,
     pub zelle_total: f64,
@@ -493,6 +514,50 @@ impl Database {
         if !has_svc_type {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN service_type TEXT;");
         }
+        // Migration: add service_types (JSON array de todos los trabajos/fallas) a services
+        // Almacena TODOS los tipos del servicio (ej. ["Cambio pantalla","Cambio conector / puerto"]).
+        // service_type queda como el primario (primero elegido) para compatibilidad.
+        let has_svc_types: bool = conn.prepare("SELECT service_types FROM services LIMIT 1").is_ok();
+        if !has_svc_types {
+            let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN service_types TEXT;");
+            // Backfill idempotente: [service_type] o [] en filas existentes
+            let mut st = conn.prepare("SELECT id, service_type FROM services").unwrap();
+            let rows: Vec<(i64, Option<String>)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map(|rows| rows.filter_map(|x| x.ok()).collect())
+                .unwrap_or_default();
+            for (id, primary) in rows {
+                let json = match primary {
+                    Some(t) if !t.trim().is_empty() => serde_json::to_string(&vec![t.trim()]).unwrap_or_else(|_| "[]".to_string()),
+                    _ => "[]".to_string(),
+                };
+                let _ = conn.execute("UPDATE services SET service_types=?1 WHERE id=?2", params![json, id]);
+            }
+        }
+        // Migration: technicians (técnicos) + asignación en services
+        // technicians: nombre único editable + iniciales + color de marca (clase Tailwind bg-*).
+        // services.technician = snapshot del nombre (sobrevive al borrado del técnico),
+        // services.technician_id = ref para resolver color/iniciales (si el técnico se borra,
+        // la marca cae a gris pero el nombre persiste — patrón denormalizado de client/client_id).
+        let has_technicians: bool = conn.prepare("SELECT id FROM technicians LIMIT 1").is_ok();
+        if !has_technicians {
+            let _ = conn.execute_batch("
+                CREATE TABLE IF NOT EXISTS technicians (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    initials TEXT NOT NULL,
+                    color TEXT NOT NULL DEFAULT 'bg-slate-500'
+                );
+                INSERT INTO technicians (name, initials, color) VALUES ('Aldri', 'A', 'bg-purple-500'), ('William', 'W', 'bg-blue-500');
+            ");
+        }
+        let has_tech_col: bool = conn.prepare("SELECT technician FROM services LIMIT 1").is_ok();
+        if !has_tech_col {
+            let _ = conn.execute_batch("
+                ALTER TABLE services ADD COLUMN technician TEXT;
+                ALTER TABLE services ADD COLUMN technician_id INTEGER;
+            ");
+        }
         // Migration: add client data + device checklist to services
         let has_client_ci: bool = conn.prepare("SELECT client_ci FROM services LIMIT 1").is_ok();
         if !has_client_ci {
@@ -612,6 +677,11 @@ impl Database {
                 ALTER TABLE daily_closings ADD COLUMN total_bs REAL DEFAULT 0;
             ");
         }
+        // Migration: monto impreso por el Punto en Bs (pos_settled_bs) — el sistema debe dar el mismo monto que imprime la máquina
+        let has_pos_settled_bs: bool = conn.prepare("SELECT pos_settled_bs FROM daily_closings LIMIT 1").is_ok();
+        if !has_pos_settled_bs {
+            let _ = conn.execute("ALTER TABLE daily_closings ADD COLUMN pos_settled_bs REAL DEFAULT 0", []);
+        }
         // Corrección de moneda histórica: ventas/servicios con método Bs guardados como USD (bug frontend viejo)
         for m in BS_METHODS {
             let _ = conn.execute(
@@ -699,20 +769,46 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_services_client ON services(client_id);
             CREATE INDEX IF NOT EXISTS idx_daily_closings_closed ON daily_closings(is_closed);
         ")?;
-        // PRAGMAs de robustez/rendimiento (idempotentes)
-        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;")?;
+        // PRAGMAs de robustez/rendimiento (idempotentes).
+        // synchronous=FULL con WAL: ante un corte de luz/PC no se pierde el último commit
+        // (acompaña el requisito "si se apaga la PC con un proceso en el momento, los datos
+        // deben quedar guardados"). El coste de escritura es despreciable para esta carga.
+        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;")?;
         let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
         Ok(())
     }
 
     pub fn next_order_num(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        // Monótono: MAX del número existente (borrar servicios no reutiliza números)
-        let max: Option<i64> = conn.query_row(
-            "SELECT MAX(CAST(SUBSTR(order_num,5) AS INTEGER)) FROM services WHERE order_num LIKE 'ORD-%'",
-            [], |r| r.get(0),
-        ).optional()?;
-        Ok(format!("ORD-{}", max.unwrap_or(999) + 1))
+        // Monótono e idempotente: MAX del número existente + 1 (borrar no reutiliza).
+        // El PREFIJO y el ancho se derivan del último número guardado ("DEV-0001" -> "DEV-0002",
+        // "ORD-1023" -> "ORD-1024") — antes estaba fijo a 'ORD-%' y un back con prefijo distinto
+        // hacía MAX=NULL <- error "Invalid column type Null" (r.get(0) se infiere i64, no Option).
+        let last: Option<String> = conn
+            .query_row("SELECT order_num FROM services ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .optional()?;
+        let (prefix, width): (String, usize) = match &last {
+            Some(s) => {
+                let mut parts = s.split('-');
+                let pre = parts.next().unwrap_or("DEV").to_string() + "-";
+                let num = parts.next().unwrap_or("");
+                (pre, (num.len()).max(1))
+            }
+            None => ("DEV-".to_string(), 4),
+        };
+        // Incluye TODOS los números con separador '-' (cualquier prefijo).
+        // COALESCE(...,0): cuando la tabla está VACÍA, MAX(expr) devuelve NULL en una
+        // fila (no "no rows"); recuperar ese NULL como i64 lanza InvalidColumnType que
+        // .optional() NO captura (solo captura QueryReturnedNoRows). FIX 2026-08-04:
+        // el primer servicio después de vaciar la DB (inicio de operación) crasheaba.
+        let max: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(CAST(SUBSTR(order_num, INSTR(order_num, '-') + 1) AS INTEGER)), 0) \
+                 FROM services WHERE INSTR(order_num, '-') > 0",
+                [],
+                |r| r.get(0),
+            )?;
+        Ok(format!("{}{:0width$}", prefix, max + 1, width = width))
     }
 
     // --- Products ---
@@ -878,11 +974,11 @@ impl Database {
 
     pub fn get_sales(&self, search: &str, days: Option<i64>, start_date: &str, end_date: &str) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM sales s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
-            sql.push_str(" AND (s.product_name LIKE ?1 OR s.client_name LIKE ?1)");
+            sql.push_str(" AND (s.product_name LIKE ?1 OR s.client_name LIKE ?1 OR c.ci LIKE ?1)");
             param_values.push(Box::new(format!("%{}%", search)));
         }
         if let Some(d) = days {
@@ -914,6 +1010,7 @@ impl Database {
                 net_amount: r.get(13).unwrap_or(0.0),
                 zelle_reference: r.get(14).unwrap_or(None),
                 currency: r.get(15).unwrap_or(Some("USD".into())),
+                client_ci: r.get(16).unwrap_or(None),
             })
         })?;
         let mut sales = Vec::new();
@@ -941,25 +1038,26 @@ impl Database {
 
     // --- Services ---
     pub fn add_service(&self, order_num: &str, client: &str, phone: &str, model: &str,
-                       fault: &str, service_type: &str, amount: f64, payment_method: &str, observations: &str,
+                       fault: &str, service_type: &str, service_types: &str, amount: f64, payment_method: &str, observations: &str,
                        bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                        client_ci: &str, client_address: &str, device_checklist: &str,
-                       client_id: Option<i64>) -> SqlResult<i64> {
+                       client_id: Option<i64>, technician: &str, technician_id: Option<i64>) -> SqlResult<i64> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         conn.execute(
-            "INSERT INTO services (order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,0)",
-            params![order_num, client, phone, model, fault, service_type, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id],
+            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21)",
+            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id],
         )?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn update_service(&self, id: i64, client: &str, phone: &str, model: &str, fault: &str,
-                          service_type: &str, amount: f64, payment_method: &str, date_out: &str, status: &str, observations: &str,
+                          service_type: &str, service_types: &str, amount: f64, payment_method: &str, date_out: &str, status: &str, observations: &str,
                           bank_fee_percent: f64, zelle_reference: &str, currency: &str,
-                          client_ci: &str, client_address: &str, device_checklist: &str) -> SqlResult<()> {
+                          client_ci: &str, client_address: &str, device_checklist: &str,
+                          technician: &str, technician_id: Option<i64>) -> SqlResult<()> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
@@ -993,8 +1091,8 @@ impl Database {
         };
 
         conn.execute(
-            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19 WHERE id=?10",
-            params![client, phone, model, fault, amount, payment_method, if effective_date_out.is_empty() { None } else { Some(effective_date_out.as_str()) }, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }],
+            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, service_types=?20, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19, technician=?21, technician_id=?22 WHERE id=?10",
+            params![client, phone, model, fault, amount, payment_method, if effective_date_out.is_empty() { None } else { Some(effective_date_out.as_str()) }, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, if service_types.trim().is_empty() { None } else { Some(service_types) }, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id],
         )?;
         Ok(())
     }
@@ -1263,9 +1361,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_services(&self, search: &str, status: &str) -> SqlResult<Vec<Service>> {
+    pub fn get_services(&self, search: &str, status: &str, start_date: &str, end_date: &str) -> SqlResult<Vec<Service>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.client_id, s.paid_amount FROM services s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -1277,6 +1375,16 @@ impl Database {
             sql.push_str(&format!(" AND s.status=?{}", idx));
             params_vec.push(Box::new(status.to_string()));
         }
+        if !start_date.is_empty() {
+            let idx = params_vec.len() + 1;
+            sql.push_str(&format!(" AND date(s.date_in) >= ?{}", idx));
+            params_vec.push(Box::new(start_date.to_string()));
+        }
+        if !end_date.is_empty() {
+            let idx = params_vec.len() + 1;
+            sql.push_str(&format!(" AND date(s.date_in) <= ?{}", idx));
+            params_vec.push(Box::new(end_date.to_string()));
+        }
         sql.push_str(" ORDER BY s.id DESC");
 
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
@@ -1286,6 +1394,7 @@ impl Database {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
                 client: r.get(3)?, phone: r.get(4)?, model: r.get(5)?,
                 fault: r.get(6)?, service_type: r.get(7).unwrap_or(None),
+                service_types: r.get(21).unwrap_or(None),
                 amount: r.get(8)?, payment_method: r.get(9)?,
                 date_out: r.get(10)?, status: r.get(11)?, observations: r.get(12)?,
                 bank_fee_percent: r.get(13).unwrap_or(0.0),
@@ -1296,8 +1405,10 @@ impl Database {
                 client_ci: r.get(18).unwrap_or(None),
                 client_address: r.get(19).unwrap_or(None),
                 device_checklist: r.get(20).unwrap_or(None),
-                client_id: r.get(21).unwrap_or(None),
-                paid_amount: r.get(22).unwrap_or(0.0),
+                client_id: r.get(22).unwrap_or(None),
+                paid_amount: r.get(23).unwrap_or(0.0),
+                technician_id: r.get(24).unwrap_or(None),
+                technician: r.get(25).unwrap_or(None),
             })
         })?;
         let mut services = Vec::new();
@@ -1308,12 +1419,13 @@ impl Database {
     pub fn get_service_by_id(&self, id: i64) -> SqlResult<Option<Service>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.client_id, s.paid_amount FROM services s WHERE s.id=?1",
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.id=?1",
             params![id],
             |r| Ok(Service {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
                 client: r.get(3)?, phone: r.get(4)?, model: r.get(5)?,
                 fault: r.get(6)?, service_type: r.get(7).unwrap_or(None),
+                service_types: r.get(21).unwrap_or(None),
                 amount: r.get(8)?, payment_method: r.get(9)?,
                 date_out: r.get(10)?, status: r.get(11)?, observations: r.get(12)?,
                 bank_fee_percent: r.get(13).unwrap_or(0.0),
@@ -1324,8 +1436,10 @@ impl Database {
                 client_ci: r.get(18).unwrap_or(None),
                 client_address: r.get(19).unwrap_or(None),
                 device_checklist: r.get(20).unwrap_or(None),
-                client_id: r.get(21).unwrap_or(None),
-                paid_amount: r.get(22).unwrap_or(0.0),
+                client_id: r.get(22).unwrap_or(None),
+                paid_amount: r.get(23).unwrap_or(0.0),
+                technician_id: r.get(24).unwrap_or(None),
+                technician: r.get(25).unwrap_or(None),
             }),
         ).optional()?;
         Ok(row)
@@ -1353,6 +1467,68 @@ impl Database {
         })?.collect::<Result<Vec<_>, _>>()?;
 
         Ok(ServiceDashboard { total, entregados, pendientes, total_ingresos, method_stats, status_stats })
+    }
+
+    // --- Technicians (técnicos) ---
+    pub fn get_technicians(&self) -> SqlResult<Vec<Technician>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, name, initials, color FROM technicians ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Technician { id: r.get(0)?, name: r.get(1)?, initials: r.get(2)?, color: r.get(3)? })
+        })?;
+        let mut out = Vec::new();
+        for row in rows { out.push(row?); }
+        Ok(out)
+    }
+
+    pub fn add_technician(&self, name: &str, initials: &str, color: &str) -> SqlResult<i64> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(day_shift_error("El nombre del técnico es obligatorio."));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO technicians (name, initials, color) VALUES (?1,?2,?3)",
+            params![name, initials, color],
+        ).map_err(|e| {
+            if let rusqlite::Error::SqliteFailure(f, _) = &e {
+                if f.code == rusqlite::ErrorCode::ConstraintViolation {
+                    return day_shift_error(&format!("Ya existe un técnico llamado '{}'.", name));
+                }
+            }
+            e
+        })?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn update_technician(&self, id: i64, name: &str, initials: &str, color: &str) -> SqlResult<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(day_shift_error("El nombre del técnico es obligatorio."));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE technicians SET name=?1, initials=?2, color=?3 WHERE id=?4",
+            params![name, initials, color, id],
+        ).map_err(|e| {
+            if let rusqlite::Error::SqliteFailure(f, _) = &e {
+                if f.code == rusqlite::ErrorCode::ConstraintViolation {
+                    return day_shift_error(&format!("Ya existe un técnico llamado '{}'.", name));
+                }
+            }
+            e
+        })?;
+        Ok(())
+    }
+
+    pub fn delete_technician(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        // Los servicios conservan el snapshot del nombre; solo se limpia la referencia al color
+        let _ = tx.execute("UPDATE services SET technician_id=NULL WHERE technician_id=?1", params![id]);
+        tx.execute("DELETE FROM technicians WHERE id=?1", params![id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     // --- Dashboard Analytics (ventas, categorías, modelos, sync) ---
@@ -1577,13 +1753,14 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Try by client_id first, fallback to name match
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.client_id, s.paid_amount FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Service {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
                 client: r.get(3)?, phone: r.get(4)?, model: r.get(5)?,
                 fault: r.get(6)?, service_type: r.get(7).unwrap_or(None),
+                service_types: r.get(21).unwrap_or(None),
                 amount: r.get(8)?, payment_method: r.get(9)?,
                 date_out: r.get(10)?, status: r.get(11)?, observations: r.get(12)?,
                 bank_fee_percent: r.get(13).unwrap_or(0.0),
@@ -1594,8 +1771,10 @@ impl Database {
                 client_ci: r.get(18).unwrap_or(None),
                 client_address: r.get(19).unwrap_or(None),
                 device_checklist: r.get(20).unwrap_or(None),
-                client_id: r.get(21).unwrap_or(None),
-                paid_amount: r.get(22).unwrap_or(0.0),
+                client_id: r.get(22).unwrap_or(None),
+                paid_amount: r.get(23).unwrap_or(0.0),
+                technician_id: r.get(24).unwrap_or(None),
+                technician: r.get(25).unwrap_or(None),
             })
         })?;
         let mut services = Vec::new();
@@ -1609,13 +1788,14 @@ impl Database {
         ).ok();
         if let Some(ref name) = client_name {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.client_id, s.paid_amount FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
+                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
             )?;
             let rows = stmt.query_map(params![name], |r| {
                 Ok(Service {
                     id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
                     client: r.get(3)?, phone: r.get(4)?, model: r.get(5)?,
                     fault: r.get(6)?, service_type: r.get(7).unwrap_or(None),
+                    service_types: r.get(21).unwrap_or(None),
                     amount: r.get(8)?, payment_method: r.get(9)?,
                     date_out: r.get(10)?, status: r.get(11)?, observations: r.get(12)?,
                     bank_fee_percent: r.get(13).unwrap_or(0.0),
@@ -1626,10 +1806,12 @@ impl Database {
                     client_ci: r.get(18).unwrap_or(None),
                     client_address: r.get(19).unwrap_or(None),
                     device_checklist: r.get(20).unwrap_or(None),
-                    client_id: r.get(21).unwrap_or(None),
-                    paid_amount: r.get(22).unwrap_or(0.0),
-                })
-            })?;
+                client_id: r.get(22).unwrap_or(None),
+                paid_amount: r.get(23).unwrap_or(0.0),
+                technician_id: r.get(24).unwrap_or(None),
+                technician: r.get(25).unwrap_or(None),
+            })
+        })?;
             let mut services = Vec::new();
             for row in rows { services.push(row?); }
             return Ok(services);
@@ -1640,7 +1822,7 @@ impl Database {
     pub fn get_client_sales(&self, client_id: i64) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency FROM sales s WHERE s.client_id = ?1 ORDER BY s.date DESC"
+            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE s.client_id = ?1 ORDER BY s.date DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Sale {
@@ -1653,6 +1835,7 @@ impl Database {
                 net_amount: r.get(13).unwrap_or(0.0),
                 zelle_reference: r.get(14).unwrap_or(None),
                 currency: r.get(15).unwrap_or(Some("USD".into())),
+                client_ci: r.get(16).unwrap_or(None),
             })
         })?;
         let mut sales = Vec::new();
@@ -1961,6 +2144,47 @@ impl Database {
         Ok(true)
     }
 
+    // --- Configuración genérica (tabla settings key/value) ---
+    pub fn get_setting(&self, key: &str) -> SqlResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let v: Option<Option<String>> = conn
+            .query_row("SELECT value FROM settings WHERE key=?1", params![key], |r| r.get(0))
+            .optional()?;
+        Ok(v.flatten())
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // --- Impresora térmica (puerto COM persiste en settings) ---
+    pub fn get_printer_settings(&self) -> SqlResult<PrinterSettings> {
+        let default = PrinterSettings { port: String::new(), baud: 9600, width: 58 };
+        Ok(PrinterSettings {
+            port: self.get_setting("printer_port")?.unwrap_or_default(),
+            baud: match self.get_setting("printer_baud")? {
+                Some(b) => b.parse::<u32>().unwrap_or(default.baud),
+                None => default.baud,
+            },
+            width: match self.get_setting("printer_width")? {
+                Some(w) => w.parse::<u32>().unwrap_or(default.width),
+                None => default.width,
+            },
+        })
+    }
+
+    pub fn set_printer_settings(&self, port: &str, baud: u32, width: u32) -> SqlResult<()> {
+        self.set_setting("printer_port", port)?;
+        self.set_setting("printer_baud", &baud.to_string())?;
+        self.set_setting("printer_width", &width.to_string())?;
+        Ok(())
+    }
+
     // --- Pago Móvil detail del día ---
     pub fn get_pago_movil_detail(&self, date: &str) -> SqlResult<Vec<PagoMovilDetail>> {
         let conn = self.conn.lock().unwrap();
@@ -1986,40 +2210,33 @@ impl Database {
     }
 
     // --- Exportar reporte diario a CSV (Excel es-VE) ---
-    pub fn export_daily_report(&self, date: &str) -> SqlResult<String> {
-        // Totales ANTES de tomar el lock (get_daily_totals lo toma → mutex no reentrante)
-        let totals = self.get_daily_totals(date, date)?;
-        let t = if totals.is_empty() {
-            DailyTotals {
-                date: date.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
-                pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
-                cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
-                pago_movil_total: 0.0, transfer_bs_total: 0.0,
-                usd_cash_total: 0.0, grand_total: 0.0,
-                grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
-            }
-        } else { totals[0].clone() };
+    pub fn export_daily_report(&self, start_date: &str, end_date: &str) -> SqlResult<String> {
+        // Totales y cierres ANTES de tomar el lock (ambos lo toman → mutex no reentrante)
+        let totals = self.get_daily_totals(start_date, end_date)?;
+        let all_closings = self.get_daily_closings()?;
+        let closings: Vec<&DailyClosing> = all_closings.iter()
+            .filter(|c| c.close_date.as_str() >= start_date && c.close_date.as_str() <= end_date)
+            .collect();
+        let zero = DailyTotals {
+            date: String::new(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+            pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
+            cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
+            pago_movil_total: 0.0, transfer_bs_total: 0.0,
+            usd_cash_total: 0.0, grand_total: 0.0,
+            grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
+        };
+        let t_of = |d: &str| totals.iter().find(|x| x.date == d).unwrap_or(&zero);
 
         let conn = self.conn.lock().unwrap();
 
-        // Tasa BCV del día (daily_closings)
-        let tasa: f64 = conn
-            .query_row(
-                "SELECT tasa_bcv FROM daily_closings WHERE close_date=?1 ORDER BY id DESC LIMIT 1",
-                params![date],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0.0);
-
-        // Ventas del día
+        // Ventas del rango
         let mut sales_rows: Vec<(Option<String>, Option<String>, i64, f64, f64, Option<String>, Option<String>, Option<String>)> = Vec::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT date, product_name, quantity, unit_price, total, payment_method, zelle_reference, client_name
-                 FROM sales WHERE date(date) = ?1 ORDER BY date ASC"
+                 FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2 ORDER BY date ASC"
             )?;
-            let rows = stmt.query_map(params![date], |r| {
+            let rows = stmt.query_map(params![start_date, end_date], |r| {
                 Ok((
                     r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
                     r.get::<_, i64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
@@ -2030,15 +2247,15 @@ impl Database {
             for row in rows { sales_rows.push(row?); }
         }
 
-        // Pagos de servicios del día (join services)
+        // Pagos de servicios del rango (join services)
         let mut payment_rows: Vec<(Option<String>, Option<String>, Option<String>, Option<String>, f64, Option<String>, Option<String>)> = Vec::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT sp.payment_date, s.order_num, s.client, s.model, sp.amount, sp.payment_method, sp.zelle_reference
                  FROM service_payments sp JOIN services s ON s.id = sp.service_id
-                 WHERE date(sp.payment_date) = ?1 ORDER BY sp.payment_date ASC"
+                 WHERE date(sp.payment_date) >= ?1 AND date(sp.payment_date) <= ?2 ORDER BY sp.payment_date ASC"
             )?;
-            let rows = stmt.query_map(params![date], |r| {
+            let rows = stmt.query_map(params![start_date, end_date], |r| {
                 Ok((
                     r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?,
@@ -2049,91 +2266,136 @@ impl Database {
             for row in rows { payment_rows.push(row?); }
         }
 
-        // Pago móvil del día (query inline, mismo lock)
-        let mut pm_rows: Vec<(Option<String>, f64, String)> = Vec::new();
+        // Pago móvil del rango (query inline, mismo lock)
+        let mut pm_rows: Vec<(Option<String>, f64, String, String)> = Vec::new();
         {
             let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
-                       WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) = ?1
+                       WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) >= ?1 AND date(date) <= ?2
                        UNION ALL
                        SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
                        FROM service_payments sp
                        JOIN services s ON s.id = sp.service_id
-                       WHERE (sp.payment_method LIKE '%Móvil%' OR sp.payment_method LIKE '%Movil%') AND date(sp.payment_date) = ?1
+                       WHERE (sp.payment_method LIKE '%Móvil%' OR sp.payment_method LIKE '%Movil%') AND date(sp.payment_date) >= ?1 AND date(sp.payment_date) <= ?2
                        ORDER BY date";
             let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map(params![date], |r| {
+            let rows = stmt.query_map(params![start_date, end_date], |r| {
                 Ok((
                     r.get::<_, Option<String>>(0).unwrap_or(None),
                     r.get::<_, f64>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?;
             for row in rows { pm_rows.push(row?); }
         }
 
+        // Días del rango: unión de fechas con movimientos + fechas con cierre
+        let mut day_dates: Vec<String> = totals.iter().map(|t| t.date.clone()).collect();
+        for c in &closings {
+            if !day_dates.contains(&c.close_date) { day_dates.push(c.close_date.clone()); }
+        }
+        day_dates.sort();
+
         let mut csv = String::new();
         csv.push('\u{FEFF}');
-        let tasa_str = if tasa > 0.0 { fmt_num(tasa) } else { String::new() };
-        csv.push_str(&format!("REPORTE DIARIO;Fecha;{};Tasa BCV;{}\n", csv_field(date), csv_field(&tasa_str)));
+        csv.push_str(&format!(
+            "REPORTE LIBRO DIARIO;Desde;{};Hasta;{}\n",
+            csv_field(start_date), csv_field(end_date)
+        ));
 
-        csv.push('\n');
-        csv.push_str("VENTAS\n");
-        csv.push_str("Fecha;Producto;Cant;Precio Unit;Total;Metodo;Referencia;Cliente\n");
-        for (d, name, qty, unit, total, method, ref_, client) in &sales_rows {
-            csv.push_str(&format!(
-                "{};{};{};{};{};{};{};{}\n",
-                csv_field(d.as_deref().unwrap_or("")),
-                csv_field(name.as_deref().unwrap_or("")),
-                qty,
-                csv_field(&fmt_num(*unit)),
-                csv_field(&fmt_num(*total)),
-                csv_field(method.as_deref().unwrap_or("")),
-                csv_field(ref_.as_deref().unwrap_or("")),
-                csv_field(client.as_deref().unwrap_or("")),
-            ));
+        for day in &day_dates {
+            let t = t_of(day);
+            let closing = closings.iter().find(|c| c.close_date == *day);
+            csv.push_str(&format!("\n===== {} =====\n", day));
+
+            // VENTAS del día
+            csv.push_str("VENTAS\n");
+            csv.push_str("Fecha;Producto;Cant;Precio Unit;Total;Metodo;Referencia;Cliente\n");
+            for (d, name, qty, unit, total, method, ref_, client) in &sales_rows {
+                if d.as_deref().map(|x| &x[..10]) != Some(day.as_str()) { continue; }
+                csv.push_str(&format!(
+                    "{};{};{};{};{};{};{};{}\n",
+                    csv_field(d.as_deref().unwrap_or("")),
+                    csv_field(name.as_deref().unwrap_or("")),
+                    qty,
+                    csv_field(&fmt_num(*unit)),
+                    csv_field(&fmt_num(*total)),
+                    csv_field(method.as_deref().unwrap_or("")),
+                    csv_field(ref_.as_deref().unwrap_or("")),
+                    csv_field(client.as_deref().unwrap_or("")),
+                ));
+            }
+
+            // PAGOS DE SERVICIOS del día
+            csv.push_str("\nPAGOS DE SERVICIOS\n");
+            csv.push_str("Fecha;Orden;Cliente;Equipo;Monto;Metodo;Referencia\n");
+            for (d, order, client, model, amount, method, ref_) in &payment_rows {
+                if d.as_deref().map(|x| &x[..10]) != Some(day.as_str()) { continue; }
+                csv.push_str(&format!(
+                    "{};{};{};{};{};{};{}\n",
+                    csv_field(d.as_deref().unwrap_or("")),
+                    csv_field(order.as_deref().unwrap_or("")),
+                    csv_field(client.as_deref().unwrap_or("")),
+                    csv_field(model.as_deref().unwrap_or("")),
+                    csv_field(&fmt_num(*amount)),
+                    csv_field(method.as_deref().unwrap_or("")),
+                    csv_field(ref_.as_deref().unwrap_or("")),
+                ));
+            }
+
+            // PAGO MÓVIL del día
+            csv.push_str("\nPAGO MOVIL DEL DIA\n");
+            csv.push_str("Referencia;Monto;Origen\n");
+            for (ref_, amount, source, d) in &pm_rows {
+                if d.len() >= 10 && &d[..10] != day.as_str() { continue; }
+                csv.push_str(&format!(
+                    "{};{};{}\n",
+                    csv_field(ref_.as_deref().unwrap_or("")),
+                    csv_field(&fmt_num(*amount)),
+                    csv_field(source),
+                ));
+            }
+
+            // TOTALES del día (sistema)
+            csv.push_str("\nTOTALES DEL DIA\n");
+            csv.push_str(&format!("Punto Cargado;{}\n", fmt_num(t.pos_charged)));
+            csv.push_str(&format!("Comision;{}\n", fmt_num(t.pos_fees)));
+            csv.push_str(&format!("Neto Punto;{}\n", fmt_num(t.pos_net)));
+            csv.push_str(&format!("Efectivo USD;{}\n", fmt_num(t.cash_usd)));
+            csv.push_str(&format!("Efectivo Bs;{}\n", fmt_num(t.cash_bs)));
+            csv.push_str(&format!("Zelle;{}\n", fmt_num(t.zelle_total)));
+            csv.push_str(&format!("Pago Movil;{}\n", fmt_num(t.pago_movil_total)));
+            csv.push_str(&format!("Transf Bs;{}\n", fmt_num(t.transfer_bs_total)));
+            csv.push_str(&format!("Total General USD;{}\n", fmt_num(t.grand_usd)));
+            csv.push_str(&format!("Total General Bs;{}\n", fmt_num(t.grand_bs)));
+            csv.push_str(&format!("Total General (USD equiv);{}\n", fmt_num(t.grand_total)));
+            if t.tasa_bcv > 0.0 {
+                csv.push_str(&format!("Tasa BCV;{}\n", fmt_num(t.tasa_bcv)));
+            }
+
+            // CIERRE del día (solo días cerrados — "venta cerrada completa")
+            if let Some(c) = closing {
+                if c.is_closed {
+                    csv.push_str("\nCIERRE DEL DIA\n");
+                    csv.push_str(&format!("Apertura (no es venta);{}\n", fmt_num(c.initial_cash_usd)));
+                    csv.push_str(&format!("Monto impreso Punto USD;{}\n", fmt_num(c.pos_settled)));
+                    csv.push_str(&format!("Monto impreso Punto Bs;{}\n", fmt_num(c.pos_settled_bs)));
+                    csv.push_str(&format!("Arqueo Divisas USD;{}\n", fmt_num(c.actual_cash_usd)));
+                    csv.push_str(&format!("Arqueo Efectivo Bs;{}\n", fmt_num(c.actual_cash_bs)));
+                    csv.push_str(&format!("Arqueo Punto USD;{}\n", fmt_num(c.actual_punto_usd)));
+                    csv.push_str(&format!("Arqueo Punto Bs;{}\n", fmt_num(c.actual_punto_bs)));
+                    csv.push_str(&format!("Arqueo Zelle;{}\n", fmt_num(c.actual_zelle)));
+                    csv.push_str(&format!("Arqueo Pago Movil;{}\n", fmt_num(c.actual_pago_movil)));
+                    csv.push_str(&format!("Arqueo Transf Bs;{}\n", fmt_num(c.actual_transfer_bs)));
+                    csv.push_str(&format!("Diferencia (USD equiv);{}\n", fmt_num(c.difference)));
+                    if let Some(n) = &c.notes {
+                        if !n.is_empty() {
+                            csv.push_str(&format!("Notas;{}\n", csv_field(n)));
+                        }
+                    }
+                }
+            }
         }
-
-        csv.push('\n');
-        csv.push_str("PAGOS DE SERVICIOS\n");
-        csv.push_str("Fecha;Orden;Cliente;Equipo;Monto;Metodo;Referencia\n");
-        for (d, order, client, model, amount, method, ref_) in &payment_rows {
-            csv.push_str(&format!(
-                "{};{};{};{};{};{};{}\n",
-                csv_field(d.as_deref().unwrap_or("")),
-                csv_field(order.as_deref().unwrap_or("")),
-                csv_field(client.as_deref().unwrap_or("")),
-                csv_field(model.as_deref().unwrap_or("")),
-                csv_field(&fmt_num(*amount)),
-                csv_field(method.as_deref().unwrap_or("")),
-                csv_field(ref_.as_deref().unwrap_or("")),
-            ));
-        }
-
-        csv.push('\n');
-        csv.push_str("PAGO MOVIL DEL DIA\n");
-        csv.push_str("Referencia;Monto;Origen\n");
-        for (ref_, amount, source) in &pm_rows {
-            csv.push_str(&format!(
-                "{};{};{}\n",
-                csv_field(ref_.as_deref().unwrap_or("")),
-                csv_field(&fmt_num(*amount)),
-                csv_field(source),
-            ));
-        }
-
-        csv.push('\n');
-        csv.push_str("TOTALES\n");
-        csv.push_str(&format!("Punto Cargado;{}\n", fmt_num(t.pos_charged)));
-        csv.push_str(&format!("Comision;{}\n", fmt_num(t.pos_fees)));
-        csv.push_str(&format!("Neto Punto;{}\n", fmt_num(t.pos_net)));
-        csv.push_str(&format!("Efectivo USD;{}\n", fmt_num(t.cash_usd)));
-        csv.push_str(&format!("Efectivo Bs;{}\n", fmt_num(t.cash_bs)));
-        csv.push_str(&format!("Zelle;{}\n", fmt_num(t.zelle_total)));
-        csv.push_str(&format!("Pago Movil;{}\n", fmt_num(t.pago_movil_total)));
-        csv.push_str(&format!("Transf Bs;{}\n", fmt_num(t.transfer_bs_total)));
-        csv.push_str(&format!("Total General USD;{}\n", fmt_num(t.grand_usd)));
-        csv.push_str(&format!("Total General Bs;{}\n", fmt_num(t.grand_bs)));
-        csv.push_str(&format!("Total General (USD equiv);{}\n", fmt_num(t.grand_total)));
 
         let mut dir = std::env::var("USERPROFILE")
             .map(PathBuf::from)
@@ -2141,7 +2403,7 @@ impl Database {
         dir.push("Documents");
         dir.push("Registro");
         std::fs::create_dir_all(&dir).map_err(|e| day_shift_error(&format!("No se pudo crear el directorio: {}", e)))?;
-        let path = dir.join(format!("reporte_{}.csv", date));
+        let path = dir.join(format!("reporte_{}_{}.csv", start_date, end_date));
         std::fs::write(&path, csv.as_bytes()).map_err(|e| day_shift_error(&format!("No se pudo escribir el archivo: {}", e)))?;
 
         let path_str = path.to_string_lossy().to_string();
@@ -2153,7 +2415,7 @@ impl Database {
 
     pub fn get_daily_closings(&self) -> SqlResult<Vec<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs FROM daily_closings ORDER BY close_date DESC";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs FROM daily_closings ORDER BY close_date DESC";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -2180,6 +2442,7 @@ impl Database {
                 difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
                 total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
                 total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
+                pos_settled_bs: r.get::<_, Option<f64>>(30)?.unwrap_or(0.0),
             })
         })?;
         let mut closings = Vec::new();
@@ -2189,7 +2452,7 @@ impl Database {
 
     pub fn get_active_day(&self) -> SqlResult<Option<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -2216,6 +2479,7 @@ impl Database {
                 difference: r.get::<_, Option<f64>>(27)?.unwrap_or(0.0),
                 total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
                 total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
+                pos_settled_bs: r.get::<_, Option<f64>>(30)?.unwrap_or(0.0),
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -2257,7 +2521,8 @@ impl Database {
 
     pub fn close_day(&self, close_date: &str, notes: &str, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
                      actual_cash_usd: f64, actual_cash_bs: f64, actual_punto_usd: f64, actual_punto_bs: f64,
-                     actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64) -> SqlResult<i64> {
+                     actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64,
+                     pos_settled: f64, pos_settled_bs: f64) -> SqlResult<i64> {
         // Calculate totals for this date from sales + services (sin lock: get_daily_totals lo toma)
         let totals = self.get_daily_totals(close_date, close_date)?;
         let t = if totals.is_empty() {
@@ -2295,12 +2560,13 @@ impl Database {
         let grand_total = t.grand_usd + if effective_tasa > 0.0 { t.grand_bs / effective_tasa } else { 0.0 };
 
         let changes = conn.execute(
-            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25
+            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25, pos_settled=?26, pos_settled_bs=?27
              WHERE close_date=?1 AND is_closed=0",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
                     t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, grand_total, notes,
                     effective_tasa, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
-                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs],
+                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs,
+                    pos_settled, pos_settled_bs],
         )?;
         if changes == 0 {
             return Err(day_shift_error("No hay un día abierto con esa fecha para cerrar."));
@@ -2317,16 +2583,16 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_daily_closing_settlement(&self, id: i64, pos_settled: f64) -> SqlResult<()> {
+    pub fn update_daily_closing_settlement(&self, id: i64, pos_settled: f64, pos_settled_bs: f64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE daily_closings SET pos_settled=?1 WHERE id=?2", params![pos_settled, id])?;
+        conn.execute("UPDATE daily_closings SET pos_settled=?1, pos_settled_bs=?2 WHERE id=?3", params![pos_settled, pos_settled_bs, id])?;
         Ok(())
     }
 
     // --- Export/Import ---
     pub fn export_data(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians"];
         let mut map = serde_json::Map::new();
         for table in &tables {
             let sql = format!("SELECT * FROM {}", table);
@@ -2357,7 +2623,7 @@ impl Database {
             rusqlite::Error::ToSqlConversionFailure(Box::new(e))
         })?;
         // Orden respeta las FK: catálogos → productos → clientes → ventas/servicios → pagos → movimientos → pedidos → cierres
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians"];
 
         // Validar columnas del JSON contra el schema real (anti inyección SQL por nombre de columna)
         let valid_columns: std::collections::HashMap<String, Vec<String>> = tables.iter().map(|t| {
@@ -2585,8 +2851,8 @@ mod tests {
 
         // Add service (linked to client id)
         let sid = db.add_service("ORD-TEST-1", "Juan Perez", "0412-1234567",
-            "Samsung A32", "No enciende", "Cambio batería", 25.0, "Efectivo Bs", "", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#, Some(cid)).unwrap();
+            "Samsung A32", "No enciende", "Cambio batería", "[\"Cambio batería\"]", 25.0, "Efectivo Bs", "", 0.0, "", "USD",
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#, Some(cid), "", None).unwrap();
         assert!(sid > 0);
 
         // Auto-inventory: create Samsung A32 screen product (stock 2) before delivering
@@ -2594,9 +2860,9 @@ mod tests {
             "", "[\"Samsung A32\"]", 12.0, 15.0, 2, 0).unwrap();
 
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
-            "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
+            "No enciende - reparado", "Cambio batería", "[\"Cambio batería\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Entregado", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None).unwrap();
 
         let stock_before: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -2605,9 +2871,9 @@ mod tests {
         assert_eq!(stock_before, 1, "stock debe bajar de 2 a 1 al entregar servicio");
         // Reopening returns stock
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
-            "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
+            "No enciende - reparado", "Cambio batería", "[\"Cambio batería\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Por entregar", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None).unwrap();
         let stock_back: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
@@ -2615,23 +2881,23 @@ mod tests {
         assert_eq!(stock_back, 2, "stock debe volver a 2 al reabrir");
         // Entregar de nuevo y borrar el servicio → stock vuelve
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
-            "No enciende - reparado", "Cambio batería", 25.0, "Efectivo Bs", "2026-07-30",
+            "No enciende - reparado", "Cambio batería", "[\"Cambio batería\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Entregado", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None).unwrap();
 
         // Auto-create: model not in catalog gets created on delivery
         db.add_service("ORD-TEST-2", "Maria Lopez", "0412-7654321",
-            "Pantalla Inexistente XYZ", "Rota", "Cambio pantalla", 20.0, "Efectivo Bs", "", 0.0, "", "USD",
-            "V-99999999", "", "", None).unwrap();
-        let sid2 = db.get_services("", "").unwrap().iter().find(|s| s.order_num.as_deref() == Some("ORD-TEST-2")).unwrap().id;
+            "Pantalla Inexistente XYZ", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]", 20.0, "Efectivo Bs", "", 0.0, "", "USD",
+            "V-99999999", "", "", None, "", None).unwrap();
+        let sid2 = db.get_services("", "", "", "").unwrap().iter().find(|s| s.order_num.as_deref() == Some("ORD-TEST-2")).unwrap().id;
         let new_prod: Option<i64> = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT id FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).ok()
         });
         assert!(new_prod.is_none(), "producto no existe antes de entregar");
         db.update_service(sid2, "Maria Lopez", "0412-7654321", "Pantalla Inexistente XYZ",
-            "Rota", "Cambio pantalla", 20.0, "Efectivo Bs", "2026-07-30", "Entregado", "", 0.0, "", "USD",
-            "V-99999999", "", "").unwrap();
+            "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]", 20.0, "Efectivo Bs", "2026-07-30", "Entregado", "", 0.0, "", "USD",
+            "V-99999999", "", "", "", None).unwrap();
         let new_prod_stock: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).unwrap()
@@ -2644,7 +2910,7 @@ mod tests {
         });
         assert_eq!(new_prod_stock2, 0, "borrar servicio entregado devuelve stock");
 
-        let services = db.get_services("", "").unwrap();
+        let services = db.get_services("", "", "", "").unwrap();
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].client_ci.as_deref(), Some("V-12345678"));
         assert_eq!(services[0].client_address.as_deref(), Some("Av. Principal"));
@@ -2751,7 +3017,7 @@ mod tests {
 
         // Delete service
         db.delete_service(sid).unwrap();
-        let services_after = db.get_services("", "").unwrap();
+        let services_after = db.get_services("", "", "", "").unwrap();
         assert_eq!(services_after.len(), 0); // was deleted
 
         // Import price list
@@ -2762,7 +3028,7 @@ mod tests {
         // Close day with arqueo (actual counts) and verify persistence
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let closing_id = db.close_day(&today, "cierre test", 10.0, 40.5, 45.0,
-            15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+            15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
         assert!(closing_id > 0);
         let closings = db.get_daily_closings().unwrap();
         assert!(!closings.is_empty());
@@ -2939,6 +3205,50 @@ mod tests {
     }
 
     #[test]
+    fn test_sales_search_by_ci_and_range() {
+        // Feature 2026-08-02: ventas buscables por cédula (JOIN clients.ci) y
+        // ventas/servicios filtrables por rango de fechas.
+        let test_path = PathBuf::from("test_sales_ci_range.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        db.open_day(0.0, 0.0, 0.0).unwrap();
+        let cid = db.add_or_find_client("Roberto", "0414-222", "V-24906999", "Av 2").unwrap();
+        db.add_sale(None, "Pantalla Samsung A15", 1, 15.0, 15.0, "Divisas (USD Cash)", "Roberto", Some(cid), "", 0.0, "", "USD").unwrap();
+        db.add_sale(None, "Funda iPhone", 1, 5.0, 5.0, "Pago Móvil", "Cliente Suelto", None, "", 0.0, "", "Bs").unwrap();
+
+        // Búsqueda por cédula (con y sin formato) → encuentra la venta vinculada
+        assert_eq!(db.get_sales("24906999", None, "", "").unwrap().len(), 1, "venta por cédula sin formato");
+        assert_eq!(db.get_sales("V-24906999", None, "", "").unwrap().len(), 1, "venta por cédula formateada");
+        assert!(db.get_sales("999999999", None, "", "").unwrap().is_empty(), "cédula inexistente");
+        // client_ci viaja en la venta (JOIN)
+        let venta = db.get_sales("24906999", None, "", "").unwrap();
+        assert_eq!(venta[0].client_ci.as_deref(), Some("V-24906999"));
+        assert_eq!(db.get_sales("Funda iPhone", None, "", "").unwrap()[0].client_ci, None, "venta sin cliente → sin cédula");
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let tomorrow = chrono::Local::now().checked_add_days(chrono::Days::new(1)).unwrap().format("%Y-%m-%d").to_string();
+        let yesterday = chrono::Local::now().checked_sub_days(chrono::Days::new(1)).unwrap().format("%Y-%m-%d").to_string();
+
+        // Rango de fechas en ventas
+        assert_eq!(db.get_sales("", None, &today, &today).unwrap().len(), 2, "rango hoy → 2 ventas");
+        assert_eq!(db.get_sales("", None, &yesterday, &yesterday).unwrap().len(), 0, "rango ayer → 0 ventas");
+        assert_eq!(db.get_sales("", None, &today, &tomorrow).unwrap().len(), 2, "rango hoy→mañana → 2 ventas");
+
+        // Rango de fechas en servicios (date_in)
+        let sid = db.add_service("ORD-2001", "Roberto", "0414-222", "Samsung A15 A155", "Pantalla rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            20.0, "Efectivo Bs", "", 0.0, "", "Bs", "V-24906999", "", "{}", Some(cid), "", None).unwrap();
+        assert_eq!(db.get_services("", "", &today, &today).unwrap().len(), 1, "servicio de hoy en rango");
+        assert_eq!(db.get_services("", "", &yesterday, &yesterday).unwrap().len(), 0, "servicio no aparece ayer");
+        assert_eq!(db.get_services("24906999", "", "", "").unwrap().len(), 1, "servicio por cédula");
+        assert_eq!(db.get_services("", "Por entregar", &today, &today).unwrap().len(), 1, "servicio por estado + rango");
+        assert!(sid > 0);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
     fn test_dashboard_analytics() {
         let test_path = PathBuf::from("test_dash_analytics.db");
         let _ = std::fs::remove_file(&test_path);
@@ -2992,8 +3302,8 @@ mod tests {
         // Punto de Venta en USD (cobro real de $100) → neto $100
         db.add_sale(None, "Venta Punto USD", 1, 100.0, 100.0, "Punto de Venta ($)", "Cliente", None, "", 0.0, "", "USD").unwrap();
         // Abono en Bs (Efectivo Bs) + abono en USD (Divisas)
-        let sid = db.add_service("ORD-TEST-LEDGER", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla",
-            50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None).unwrap();
+        let sid = db.add_service("ORD-TEST-LEDGER", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None, "", None).unwrap();
         db.add_service_payment(sid, 100.0, "Efectivo Bs", 0.0, "", "USD", "abono bs").unwrap();
         db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono usd").unwrap();
 
@@ -3014,7 +3324,7 @@ mod tests {
 
         // Cierre: guarda desglose + grand_total correcto
         db.close_day(&today, "cierre moneda", 10.0, 40.5, 45.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
         let closings = db.get_daily_closings().unwrap();
         let c = closings.iter().find(|x| x.close_date == today).unwrap();
         assert_eq!(c.total_usd, 150.0, "cierre guarda total_usd");
@@ -3034,35 +3344,323 @@ mod tests {
         let db = Database::new(&test_path).expect("Failed to create test DB");
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
-        let sid = db.add_service("ORD-WARR-1", "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
-            25.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "", None).unwrap();
+        let sid = db.add_service("ORD-WARR-1", "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            25.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "", None, "", None).unwrap();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // 1) Entregar sin fecha → se asigna hoy
-        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
-            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "date_out auto = hoy al entregar");
 
         // 2) Reabrir (garantía / reclamo) → date_out se limpia
-        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
-            25.0, "Efectivo Bs", "2026-07-30", "Recibido", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            25.0, "Efectivo Bs", "2026-07-30", "Recibido", "", 0.0, "", "USD", "V-100", "", "", "", None).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert!(svc.date_out.is_none(), "date_out limpio al reabrir, got {:?}", svc.date_out);
 
         // 3) Re-entregar sin fecha → nueva fecha de hoy
-        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
-            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "").unwrap();
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "nueva entrega → fecha nueva");
 
         // 4) Editar sin cambiar de Entregado → conserva la fecha
-        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla",
-            30.0, "Efectivo Bs", "", "Entregado", "nota", 0.0, "", "USD", "V-100", "", "").unwrap();
+        db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            30.0, "Efectivo Bs", "", "Entregado", "nota", 0.0, "", "USD", "V-100", "", "", "", None).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "sigue entregado → conserva fecha");
 
         drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_initial_cash_not_in_totals() {
+        // Regresión (2026-08-02): la apertura ($50) es efectivo semilla — se guarda en el cierre
+        // pero NUNCA debe sumarse a las ventas del día ni al Dashboard ni a los totales.
+        let test_path = PathBuf::from("test_initial_cash.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(50.0, 40.5, 45.0).unwrap();
+
+        // Venta real de $30
+        db.add_sale(None, "Pantalla Test", 1, 30.0, 30.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD").unwrap();
+
+        // Totales del día = SOLO la venta, la apertura no cuenta
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        let t = totals.iter().find(|x| x.date == today).unwrap();
+        assert_eq!(t.usd_cash_total, 30.0, "Divisas del día = solo ventas (sin apertura)");
+        assert_eq!(t.grand_usd, 30.0, "grand_usd sin apertura");
+
+        // Dashboard: Ventas Hoy sin apertura
+        let a = db.get_dashboard_analytics().unwrap();
+        assert_eq!(a.today_usd, 30.0, "dashboard no suma apertura");
+
+        // Cierre: apertura guardada pero NO en totales
+        let closing_id = db.close_day(&today, "cierre test", 50.0, 40.5, 45.0,
+            30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        assert!(closing_id > 0);
+        let closings = db.get_daily_closings().unwrap();
+        let c = closings.iter().find(|x| x.close_date == today).unwrap();
+        assert_eq!(c.initial_cash_usd, 50.0, "apertura guardada");
+        assert_eq!(c.total_usd, 30.0, "cierre total_usd = ventas sin apertura");
+        assert_eq!(c.usd_cash_total, 30.0, "cierre divisas sin apertura");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_close_day_pos_settled() {
+        // (2026-08-02): al cerrar el día se registra el monto que imprimió el Punto
+        // (regla: el sistema debe dar el mismo monto) en USD y Bs; se puede corregir luego.
+        let test_path = PathBuf::from("test_pos_settled.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Punto de Venta (Bs)", "Cliente", None, "", 0.0, "", "VES").unwrap();
+
+        let closing_id = db.close_day(&today, "cierre", 0.0, 40.5, 45.0,
+            0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 100.0, 35000.0).unwrap();
+        assert!(closing_id > 0);
+        let closings = db.get_daily_closings().unwrap();
+        let c = closings.iter().find(|x| x.close_date == today).unwrap();
+        assert_eq!(c.pos_settled, 100.0, "monto impreso Punto USD guardado");
+        assert_eq!(c.pos_settled_bs, 35000.0, "monto impreso Punto Bs guardado");
+
+        // Liquidación posterior (corrección) en ambas monedas
+        db.update_daily_closing_settlement(closing_id, 98.0, 34900.0).unwrap();
+        let closings = db.get_daily_closings().unwrap();
+        let c = closings.iter().find(|x| x.close_date == today).unwrap();
+        assert_eq!(c.pos_settled, 98.0, "liquidación USD corregida");
+        assert_eq!(c.pos_settled_bs, 34900.0, "liquidación Bs corregida");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_service_multi_types() {
+        // (2026-08-03): un servicio puede tener VARIOS trabajos/fallas (service_types JSON array).
+        // service_type queda como el primario; service_types guarda todos.
+        let test_path = PathBuf::from("test_multi_types.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let sid = db.add_service("ORD-MULTI-1", "Luis", "0412-1", "Tecno SPARK 10 PRO",
+            "Pantalla rota y puerto de carga flojo", "Cambio pantalla",
+            r#"["Cambio pantalla","Cambio conector / puerto"]"#,
+            45.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "{}", None, "", None).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.service_type.as_deref(), Some("Cambio pantalla"), "primario = primer tipo");
+        assert_eq!(svc.service_types.as_deref(), Some(r#"["Cambio pantalla","Cambio conector / puerto"]"#), "guarda TODOS los tipos");
+
+        // update_service reemplaza la lista completa
+        db.update_service(sid, "Luis", "0932-000", "Tecno SPARK 10 PRO",
+            "Parlante muerto", "Cambio parlante / micrófono",
+            r#"["Cambio parlante / micrófono","Cambio batería"]"#,
+            30.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "V-100", "", "{}", "", None).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.service_types.as_deref(), Some(r#"["Cambio parlante / micrófono","Cambio batería"]"#));
+
+        // get_services / get_client_services también devuelven service_types
+        let all = db.get_services("", "", "", "").unwrap();
+        let s = all.iter().find(|x| x.id == sid).unwrap();
+        assert_eq!(s.service_types.as_deref(), Some(r#"["Cambio parlante / micrófono","Cambio batería"]"#));
+
+        // NULL si no se manda lista
+        let sid2 = db.add_service("ORD-MULTI-2", "Ana", "0933-000", "Samsung A32", "Rota", "Cambio pantalla",
+            "", 15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        let svc2 = db.get_service_by_id(sid2).unwrap().unwrap();
+        assert!(svc2.service_types.is_none(), "service_types NULL si la lista va vacía");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_service_types_legacy_backfill() {
+        // (2026-08-03): DB legacy sin columna service_types → migración agrega y
+        // hace backfill idempotente desde service_type ([tipo] o []).
+        let test_path = PathBuf::from("test_service_types_mig.db");
+        let _ = std::fs::remove_file(&test_path);
+        {
+            let legacy = rusqlite::Connection::open(&test_path).unwrap();
+            legacy.execute_batch("
+                CREATE TABLE services (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_num TEXT UNIQUE,
+                    date_in TEXT DEFAULT (datetime('now','localtime')),
+                    client TEXT, phone TEXT, model TEXT, fault TEXT,
+                    amount REAL DEFAULT 0, payment_method TEXT,
+                    date_out TEXT, status TEXT DEFAULT 'Por entregar', observations TEXT,
+                    bank_fee_percent REAL DEFAULT 0, bank_fee_amount REAL DEFAULT 0,
+                    net_amount REAL, zelle_reference TEXT, currency TEXT DEFAULT 'USD',
+                    service_type TEXT
+                );
+            ").unwrap();
+            legacy.execute("INSERT INTO services (order_num, client, model, fault, service_type) VALUES ('LEGACY-1','Pedro','Xiaomi Red 10','Rota','Cambio pantalla')", []).unwrap();
+            legacy.execute("INSERT INTO services (order_num, client, model, fault, service_type) VALUES ('LEGACY-2','Marta','Samsung A06','NA','')", []).unwrap();
+        }
+
+        let db = Database::new(&test_path).expect("Failed to open legacy DB");
+        let all = db.get_services("", "", "", "").unwrap();
+        let s1 = all.iter().find(|x| x.order_num.as_deref() == Some("LEGACY-1")).unwrap();
+        assert_eq!(s1.service_types.as_deref(), Some(r#"["Cambio pantalla"]"#), "backfill desde service_type");
+        let s2 = all.iter().find(|x| x.order_num.as_deref() == Some("LEGACY-2")).unwrap();
+        assert_eq!(s2.service_types.as_deref(), Some("[]"), "backfill vacío para NULL/vacío");
+        assert_eq!(s2.service_type.as_deref(), Some(""), "service_type conservado");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_technicians_crud() {
+        let test_path = PathBuf::from("test_technicians.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Seed inicial: Aldri (morado) + William (azul)
+        let techs = db.get_technicians().unwrap();
+        assert_eq!(techs.len(), 2, "sembrados en migración");
+        let aldri = techs.iter().find(|t| t.name == "Aldri").unwrap();
+        assert_eq!(aldri.initials, "A");
+        assert_eq!(aldri.color, "bg-purple-500");
+        let will = techs.iter().find(|t| t.name == "William").unwrap();
+        assert_eq!(will.color, "bg-blue-500");
+
+        // Añadir más → UNIQUE por nombre
+        let luis_id = db.add_technician("Luis", "L", "bg-green-600").unwrap();
+        assert!(luis_id > 0);
+        assert_eq!(db.get_technicians().unwrap().len(), 3);
+        let dup = db.add_technician("Luis", "X", "bg-red-500");
+        assert!(dup.is_err(), "nombre duplicado no debe guardarse");
+
+        // Renombrar / cambiar color / iniciales (corrige errores de tipeo)
+        db.update_technician(luis_id, "Luis Felipe", "LF", "bg-amber-500").unwrap();
+        let after = db.get_technicians().unwrap().into_iter().find(|t| t.id == luis_id).unwrap();
+        assert_eq!(after.name, "Luis Felipe");
+        assert_eq!(after.initials, "LF");
+        assert_eq!(after.color, "bg-amber-500");
+
+        // Borrar → se limpia technician_id de los servicios pero el nombre persiste
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let sid = db.add_service("ORD-TECH-1", "Cliente", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id)).unwrap();
+        db.delete_technician(aldri.id).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.technician.as_deref(), Some("Aldri"), "nombre snapshot persiste tras borrar técnico");
+        assert!(svc.technician_id.is_none(), "technician_id se limpia al borrar técnico");
+        assert_eq!(db.get_technicians().unwrap().len(), 2, "William + Luis Felipe");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_service_technician() {
+        let test_path = PathBuf::from("test_service_technician.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let techs = db.get_technicians().unwrap();
+        let aldri = techs.iter().find(|t| t.name == "Aldri").unwrap();
+
+        // Crear servicio asignado a Aldri
+        let sid = db.add_service("ORD-TEC-1", "Cliente", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "1", "", "", None, "Aldri", Some(aldri.id)).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.technician.as_deref(), Some("Aldri"));
+        assert_eq!(svc.technician_id, Some(aldri.id));
+
+        // get_services devuelve el técnico (mapeo de columna 24/25 del SELECT explícito)
+        let all = db.get_services("", "", "", "").unwrap();
+        let s = all.iter().find(|x| x.id == sid).unwrap();
+        assert_eq!(s.technician.as_deref(), Some("Aldri"));
+        assert_eq!(s.technician_id, Some(aldri.id));
+
+        // Cambiar de técnico con update_service (limpiar → otra persona)
+        let will = techs.iter().find(|t| t.name == "William").unwrap();
+        db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "William", Some(will.id)).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.technician.as_deref(), Some("William"));
+        assert_eq!(svc.technician_id, Some(will.id));
+
+        // Sin técnico asignado → ambos NULL
+        db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "", None).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert!(svc.technician.is_none() && svc.technician_id.is_none());
+
+        // get_client_services también lo devuelve
+        let cid = db.add_or_find_client("Cliente", "0412-1", "1", "").unwrap();
+        db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "Aldri", Some(aldri.id)).unwrap();
+        let cs = db.get_client_services(cid).unwrap();
+        let s = cs.iter().find(|x| x.id == sid).unwrap();
+        assert_eq!(s.technician.as_deref(), Some("Aldri"));
+        assert_eq!(s.technician_id, Some(aldri.id));
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_next_order_num_empty_table() {
+        // FIX 2026-08-04: con la tabla de servicios VACÍA (inicio de operación tras
+        // limpiar la DB), MAX(...) devuelve NULL y .optional() no lo capturaba ->
+        // "Invalid column type Null". COALESCE lo resuelve.
+        let test_path = PathBuf::from("test_next_order_empty.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let n = db.next_order_num().unwrap();
+        assert_eq!(n, "DEV-0001", "Sin servicios debe generar DEV-0001 (no crashear)");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let sid = db.add_service("DEV-0001", "Cliente", "", "Samsung A1", "Rota", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        assert!(sid > 0);
+        let n2 = db.next_order_num().unwrap();
+        assert_eq!(n2, "DEV-0002", "Debe continuar monotónicamente");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_durability_pragmas() {
+        let test_path = PathBuf::from("test_durability_pragmas.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // synchronous=FULL: ante un corte de luz no se pierde el último commit (durabilidad).
+        let conn = db.conn.lock().unwrap();
+        let sync: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        assert_eq!(sync, 2, "synchronous debe ser FULL (2) para no perder el último registro en un apagón");
+        let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(journal.to_lowercase(), "wal", "journal_mode debe ser WAL");
+        let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert_eq!(busy, 5000, "busy_timeout debe ser 5000ms");
+        drop(conn);
+
+        // Con FULL, una escritura persiste y es legible con una conexión nueva (fsync real)
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let sid = db.add_service("ORD-DUR-1", "Cliente", "", "Samsung A1", "Rota", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        drop(db);
+
+        let db2 = Database::new(&test_path).expect("Failed to reopen test DB");
+        let svc = db2.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.order_num.as_deref(), Some("ORD-DUR-1"), "El registro debe persistir tras fsync FULL");
+        drop(db2);
         let _ = std::fs::remove_file(&test_path);
     }
 }

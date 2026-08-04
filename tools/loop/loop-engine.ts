@@ -7,8 +7,9 @@ import type { GoalConfig, LoopState, IterationRecord, LoopResult, PhaseResult } 
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROGRESS_DIR = path.resolve(__dirname, "..", config.paths.progressDir);
-const ARTIFACTS_DIR = path.resolve(__dirname, "..", config.paths.artifactsDir);
+const PROJECT_ROOT = path.resolve(__dirname, "../..");
+const PROGRESS_DIR = path.resolve(PROJECT_ROOT, config.paths.progressDir);
+const ARTIFACTS_DIR = path.resolve(PROJECT_ROOT, config.paths.artifactsDir);
 const LOOPS_DIR = path.join(PROGRESS_DIR, "loops");
 
 function ensureDir(dir: string): void {
@@ -399,6 +400,8 @@ async function phaseDeployReadiness(verbose: boolean): Promise<PhaseResult> {
       const output = execSync("git diff --name-only HEAD", { cwd: projectRoot, encoding: "utf-8", timeout: 5000 });
       const changedFiles = output.split("\n").filter(Boolean);
       for (const file of changedFiles) {
+        // tools/ es el código del propio harness (CLI con console.log de diseño)
+        if (file.startsWith("tools/")) continue;
         if (!file.endsWith(".ts") && !file.endsWith(".tsx") && !file.endsWith(".astro")) continue;
         try {
           const content = fs.readFileSync(path.join(projectRoot, file), "utf-8");

@@ -1,7 +1,8 @@
 import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
-  DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail
+  DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
+  Technician, ComPort, PrinterSettings
 } from './types';
 
 const isTauri = typeof window !== 'undefined' &&
@@ -92,22 +93,23 @@ export const api = {
   getSalesStats: (days: number) => tauriInvoke<SaleStat[]>('get_sales_stats', { days }),
 
   addService: (orderNum: string, client: string, phone: string, model: string,
-    fault: string, serviceType: string, amount: number, paymentMethod: string, observations: string,
+    fault: string, serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
-    clientId: number | null = null) =>
-    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId }),
+    clientId: number | null = null, technician: string = '', technicianId: number | null = null) =>
+    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId }),
 
   updateService: (id: number, client: string, phone: string, model: string, fault: string,
-    serviceType: string, amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
+    serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
-    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '') =>
-    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist }),
+    clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
+    technician: string = '', technicianId: number | null = null) =>
+    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, technician, technicianId }),
 
   deleteService: (id: number) => tauriInvoke<void>('delete_service', { id }),
 
-  getServices: (search: string = '', status: string = '') =>
-    tauriInvoke<Service[]>('get_services', { search, status }),
+  getServices: (search: string = '', status: string = '', startDate: string = '', endDate: string = '') =>
+    tauriInvoke<Service[]>('get_services', { search, status, startDate, endDate }),
 
   getServicePayments: (serviceId: number) =>
     tauriInvoke<ServicePayment[]>('get_service_payments', { serviceId }),
@@ -119,6 +121,17 @@ export const api = {
 
   deleteServicePayment: (id: number) =>
     tauriInvoke<void>('delete_service_payment', { id }),
+
+  getTechnicians: () => tauriInvoke<Technician[]>('get_technicians'),
+
+  addTechnician: (name: string, initials: string, color: string) =>
+    tauriInvoke<number>('add_technician', { name, initials, color }),
+
+  updateTechnician: (id: number, name: string, initials: string, color: string) =>
+    tauriInvoke<void>('update_technician', { id, name, initials, color }),
+
+  deleteTechnician: (id: number) =>
+    tauriInvoke<void>('delete_technician', { id }),
 
   addPurchaseOrder: (supplier: string, notes: string, itemsJson: string) =>
     tauriInvoke<number>('add_purchase_order', { supplier, notes, itemsJson }),
@@ -201,30 +214,47 @@ export const api = {
 
   closeDay: (closeDate: string, notes: string = '', initialCashUsd: number = 0, tasaBcv: number = 0, tasaEur: number = 0,
              actualCashUsd: number = 0, actualCashBs: number = 0, actualPuntoUsd: number = 0, actualPuntoBs: number = 0,
-             actualZelle: number = 0, actualPagoMovil: number = 0, actualTransferBs: number = 0) =>
+             actualZelle: number = 0, actualPagoMovil: number = 0, actualTransferBs: number = 0,
+             posSettled: number = 0, posSettledBs: number = 0) =>
     tauriInvoke<number>('close_day', {
       closeDate, notes, initialCashUsd, tasaBcv, tasaEur,
       actualCashUsd, actualCashBs, actualPuntoUsd, actualPuntoBs,
-      actualZelle, actualPagoMovil, actualTransferBs
+      actualZelle, actualPagoMovil, actualTransferBs, posSettled, posSettledBs
     }),
 
   reopenDay: (closeDate: string) =>
     tauriInvoke<void>('reopen_day', { closeDate }),
 
-  updateDailyClosingSettlement: (id: number, posSettled: number) =>
-    tauriInvoke<void>('update_daily_closing_settlement', { id, posSettled }),
+  updateDailyClosingSettlement: (id: number, posSettled: number, posSettledBs: number = 0) =>
+    tauriInvoke<void>('update_daily_closing_settlement', { id, posSettled, posSettledBs }),
 
   setPin: (pin: string) =>
     tauriInvoke<void>('set_pin', { pin }).catch(() =>
       mock<void>(undefined)),
 
-  getPinStatus: () =>
-    tauriInvoke<boolean>('get_pin_status').catch(() =>
-      mock<boolean>(false)),
+  // FIX 2026-08-04: en arranque en frío el primer invoke() puede rechazar (WebView2
+  // aún no completa el bridge) — el catch anterior resolvía false → la app ENTRABA
+  // sin PIN (fail-open). Ahora: reintenta y si falla de verdad, rechaza (App.tsx
+  // muestra el gate igual — fail-closed). En browser mode sigue mock(false).
+  getPinStatus: () => {
+    if (!isTauri) return mock<boolean>(false);
+    const attempt = (n: number): Promise<boolean> =>
+      tauriInvoke<boolean>('get_pin_status').catch(err => {
+        if (n < 3) return new Promise(res => setTimeout(() => res(attempt(n + 1)), 400));
+        return Promise.reject(err);
+      });
+    return attempt(0);
+  },
 
-  verifyPin: (pin: string) =>
-    tauriInvoke<boolean>('verify_pin', { pin }).catch(() =>
-      mock<boolean>(true)),
+  verifyPin: (pin: string) => {
+    if (!isTauri) return mock<boolean>(true);
+    const attempt = (n: number): Promise<boolean> =>
+      tauriInvoke<boolean>('verify_pin', { pin }).catch(err => {
+        if (n < 3) return new Promise(res => setTimeout(() => res(attempt(n + 1)), 400));
+        return Promise.reject(err);
+      });
+    return attempt(0);
+  },
 
   removePin: (pin: string) =>
     tauriInvoke<boolean>('remove_pin', { pin }).catch(() =>
@@ -234,7 +264,24 @@ export const api = {
     tauriInvoke<PagoMovilDetail[]>('get_pago_movil_detail', { date }).catch(() =>
       mock<PagoMovilDetail[]>([])),
 
-  exportDailyReport: (date: string) =>
-    tauriInvoke<string>('export_daily_report', { date }).catch(() =>
+  exportDailyReport: (startDate: string, endDate: string) =>
+    tauriInvoke<string>('export_daily_report', { startDate, endDate }).catch(() =>
       mock<string>('mock/report.csv')),
+
+  // --- Impresora térmica (facturas de servicio por puerto COM) ---
+  listComPorts: () =>
+    tauriInvoke<ComPort[]>('list_com_ports').catch(() =>
+      mock<ComPort[]>([{ name: 'COM3', description: 'Impresora térmica (simulada en browser mode)' }])),
+
+  printReceipt: (port: string, baud: number, text: string) =>
+    tauriInvoke<void>('print_receipt', { port, baud, text }).catch(() =>
+      mock<void>(undefined)),
+
+  getPrinterSettings: () =>
+    tauriInvoke<PrinterSettings>('get_printer_settings').catch(() =>
+      mock<PrinterSettings>({ port: '', baud: 9600, width: 58 })),
+
+  setPrinterSettings: (port: string, baud: number, width: number) =>
+    tauriInvoke<void>('set_printer_settings', { port, baud, width }).catch(() =>
+      mock<void>(undefined)),
 };

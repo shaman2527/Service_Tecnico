@@ -20,7 +20,9 @@ registro/
 │   │   ├── Dashboard.tsx      # Métricas, stats, stock bajo
 │   │   ├── Help.tsx           # Centro de Ayuda (quick actions + accordion radix)
 │   │   ├── Sales.tsx          # Registrar ventas, stats, top productos
-│   │   ├── Services.tsx       # Órdenes de reparación + abonos/pagos + checklist
+│   │   ├── Services.tsx        # Órdenes de reparación + abonos/pagos + checklist
+│   │   ├── PrintReceiptDialog.tsx  # Factura de servicio: preview + imprimir (ESC/POS)
+│   │   ├── PrinterSettingsDialog.tsx # Config impresora: puerto COM, baudios, 58/80mm
 │   │   ├── Inventory.tsx      # Productos, compatibilidad, movimientos
 │   │   ├── Clients.tsx        # Clientes con historial y saldos por servicio
 │   │   ├── DailyLedger.tsx    # Libro Diario: turno de caja, tasa BCV, arqueo
@@ -31,11 +33,12 @@ registro/
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 33 comandos
-│   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario
+│   │   ├── lib.rs             # Tauri builder + 64 comandos
+│   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario + settings
+│   │   ├── printer.rs         # Impresora térmica: list_com_ports, ESC/POS CP850, print_receipt
 │   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
 │   │   └── commands.rs        # Comandos Tauri
-│   └── tauri.conf.json        # frontendDist: ../dist, devUrl: localhost:5173
+│   └── tauri.conf.json        # frontendDist: ../dist, NSIS, resources registro.db, WebView2 embebido
 ├── run.ps1                    # Script de ejecución
 ├── migrate_data.py            # Migración desde Excel
 └── AGENTS.md                  # ← HARNESS: sistema de registro
@@ -97,10 +100,16 @@ registro/
 Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago → Por entregar → Entregado / Cancelado / Devuelto
 
 ### Tipo de Servicio (service_type)
-- Columna `service_type TEXT` en tabla services — registra qué se le hizo al equipo
+- Columna `service_type TEXT` en tabla services — registra qué se le hizo al equipo (tipo PRIMARIO = el primero elegido).
+- **Multi-trabajo (service_types):** columna `service_types TEXT` (JSON array) para elegir VARIOS trabajos por orden (pantalla + conector + …). El frontend guarda el array en `service_types` y el primario en `service_type` (compatibilidad con filtros, auto-inventario y datos antiguos). Migración idempotente en db.rs `init()`: ALTER TABLE + backfill `service_type` → `[type]` o `[]`. `parseServiceTypes` en utils.ts. Servicios viejos sin la columna siguen funcionando (parseServiceTypes cae a `service_type`).
+- UI: ToggleGroup "Trabajos / Fallas" multi-selección en ServiceForm (chips), chips contadores por tipo en la lista, badges por trabajo en cada card y en historial del cliente. "Otro" permite un trabajo libre (se guarda como badge propio).
 - Opciones: Cambio pantalla, Cambio batería, Cambio flex, Cambio conector / puerto, Reparación (placa), Limpieza / Mantenimiento, Software / Formateo, Cambio cámara, Cambio parlante / micrófono, Otro
 - **Regla:** la migración usa ALTER TABLE → `service_type` queda al FINAL del orden físico de columnas. NUNCA usar `SELECT s.*` con mapping posicional; usar lista de columnas explícita (lesson: InvalidColumnType).
-- UI: selector en ServiceForm (default "Cambio pantalla"), columna "Tipo" con Badge outline en la tabla
+
+### Modelos de teléfono (lista maestra de sugerencias)
+- La lista maestra se DERIVA del catálogo (sin tabla nueva): cada teléfono una vez, con sus repuestos compatible y stock debajo.
+- **Fuente = compatibility** (lista curada por producto), NO model/name: el campo `model`/`name` duplica el teléfono sin marca (compat "Tecno SPARK 10 PRO" + model "SPARK 10 PRO" → 2 teléfonos) o con la variante del repuesto (ej. "(INCELL)"). Fallback solo si compat vacía → model → nombre.
+- Utilidades en utils.ts: `normPhoneModel()` (minúsculas, sin acentos, solo alnum — consistente con norm_model del backend), `PhoneModelEntry {label, norm, products}`, `buildPhoneModels(catalog)`, `partLabel(p)`.
 
 ### Blindaje del Servicio (client_ci, client_address, device_checklist)
 - Columnas en `services`: `client_ci TEXT`, `client_address TEXT`, `device_checklist TEXT` (JSON `{"key":"si"|"no"}`)
@@ -131,6 +140,14 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - **Clientes:** ServiceForm sugiere clientes existentes (suggestClients) y autocompleta teléfono al seleccionar; al guardar usa `addOrFindClient` → client_id vinculado (nunca duplica). `get_client_services` busca por client_id primero, fallback por nombre.
 - UI: panel "Pagos y Abonos" en ServiceForm (edición) con resumen Total/Abonado/Saldo + historial + dialog de registro con comisión Punto y referencia Zelle; en la lista de servicios se muestra abonado/saldo en la tarjeta (badge "Cancelado" o "$X pendiente" — en USD equivalente); Clients.tsx muestra Abonado/Saldo por servicio.
 
+### Técnicos (marca de quién reparó el equipo)
+- **Tabla `technicians`:** id, name (UNIQUE), initials, color (clase Tailwind `bg-*`). Seed en migración: Aldri (`bg-purple-500`, "A") + William (`bg-blue-500`, "W"). Paleta fija `TECH_COLORS` (8 colores) compartida en Services.tsx con helper `colorLabel()`.
+- **`services` columnas (migración idempotente tipo ALTER):** `technician TEXT` (snapshot del nombre — sobrevive al borrado del técnico, patrón denormalizado client/client_id) + `technician_id INTEGER` (ref para resolver color/iniciales). Al borrar un técnico → `delete_technician` limpia technician_id (transacción) pero conserva el nombre en las órdenes (badge gris con iniciales derivadas de `initialsOf()`).
+- **Mapeo posicional:** los SELECTs de services (get_services, get_client_services x2, get_service_by_id) apendan `s.technician_id, s.technician` al FINAL (posiciones 24/25) — NUNCA cambiar el orden de columnas existentes (lección InvalidColumnType).
+- **add_service/update_service:** 2 params al final (`technician: &str`, `technician_id: Option<i64>`); INSERT/UPDATE con ?20/?21 y ?21/?22 respectivamente. Tests que llaman add_service/update_service actualizados con `"", None`.
+- **Export/import:** `technicians` agregada a las listas de tablas (sin FK, orden irrelevante; services.technician_id NO tiene REFERENCES para no romper importación).
+- **UI (Services.tsx):** ServiceForm Sección 1 → fila "Técnico responsable" (Select con punto de color + "Sin asignar" + botón "Técnicos"); `TechniciansDialog` (gestión: renombrar corrige tipeos, iniciales max 3, color por Select, añadir/eliminar — guarda onBlur/onValueChange con error amigable para UNIQUE). Card de la lista + historial de Clients.tsx muestran círculo con iniciales en el color del técnico (fallback gris si fue borrado). Prefill al crear con `localStorage('last_technician')`. Sin filtro ni estadísticas por técnico (pendiente: Dashboard stats como fase 2).
+
 ### Lista de Servicios (vista de tarjetas)
 - **NO es tabla** — grid de tarjetas responsive (`grid-cols-1 lg:2 2xl:3`): cada orden es un Card con header (orden + fecha + badge estado), cliente (nombre + teléfono·cédula juntos), equipo (modelo + falla completa sin truncar), finanzas (monto + badge saldo/Cancelado + método + abonado), footer (badge tipo + fecha salida + acciones Editar/Eliminar/Shield).
 - Iconos: User (cliente), Smartphone (equipo), CalendarDays (salida), ShieldCheck (checklist con tooltip), Trash2 (eliminar).
@@ -155,9 +172,27 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Métodos digitales siempre con valores esperados del sistema (locked, se ajustan con Liquidar Punto después).
 
 ### Commands Tauri (Rust)
-- 39 comandos registrados en lib.rs (+1: get_dashboard_analytics)
+- 64 comandos registrados en lib.rs (incl. get_dashboard_analytics, list_com_ports/print_receipt, get/set_printer_settings)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
-- Tests: `cd src-tauri && cargo test`
+- Tests: `cd src-tauri && cargo test` (20/20, incl. printer 3 + next_order_num vacío)
+
+### Impresora Térmica (factura de servicio por COM)
+- **Módulo `printer.rs`** (sin deps extra de red): `list_com_ports` (enumera puertos COM con VID/PID descriptivo), `cp850_encode` (tabla OEM 858/CP850 para caracteres españoles), `build_escpos` (ESC @ init, texto normal + CR LF, ESC d 5 avance 5 líneas, GS V B corte), `print_receipt(port, baud, text)` con `serialport = "4"`, `test_ticket` (ticket de prueba). 3 tests unitarios.
+- **Settings persistidos** en tabla settings (claves `printer_port`/`printer_baud`/`printer_width`): `get_printer_settings`/`set_printer_settings` (default port='', 9600 baud, 58mm).
+- **Frontend:** `buildServiceReceipt` en lib/utils.ts (PURA — recibo a texto de 32/48 chars vía `printerWidthChars`, con wrap de falla, garantía 7 días y abonos) + `PrintReceiptDialog` (preview papel blanco font-mono + Imprimir + acceso a settings) + `PrinterSettingsDialog` (Select puerto + Detectar, baudios, ToggleGroup 58/80, Imprimir prueba). Botones: "Impresora" (toolbar Services) y "Factura" (card de cada orden + PaymentDialog).
+- Error amigable si el puerto no existe: "No se pudo abrir COM9: ... Revisa que la impresora esté conectada."
+- Test de hardware: la PC no tiene impresora conectada; verificado list_com_ports=[] + round-trip settings + error COM en vivo.
+
+### Instalador (producción / NSIS)
+- `tauri.conf.json`: `bundle.targets=["nsis"]`, `bundle.resources={"../registro.db":"registro.db"}` (la DB limpia viaja EN el instalador → primer arranque ya tiene catálogo y PIN), `bundle.windows.webviewInstallMode.type="embedBootstrapper"` (WebView2 embebido, funciona offline — PC moderna).
+- Build: `npx tauri build` (~7 min con LTO; descarga NSIS + bootstrapper WebView2 la primera vez) → `src-tauri/target/release/bundle/nsis/Registro Servicio Tecnico_0.1.0_x64-setup.exe` (~4.7 MB). Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe (la DB que escribe es la instalada, no la del proyecto).
+- Instalación silenciosa: `<setup>.exe /S`; desinstalar: `uninstall.exe /S`.
+- **Regla puesta en marcha:** el instalador se generó con la DB LIMPIA (982 productos, 0 servicios/ventas/cierres, PIN 1234 inicial, sin día abierto). Si se re-instala sobre una instalación con datos, el instalador NO borra la DB existente (solo escribe si no existe). Para cambiar el PIN inicial: abrir Libro Diario → botón PIN.
+
+### PIN de acceso (owner / cajera)
+- **Gate fail-closed (FIX 2026-08-04):** si `get_pin_status`/`verify_pin` fallan por IPC en arranque en frío, la app PIDE el PIN igual (nunca abre sin PIN). db.ts reintenta el invoke 3 veces (400ms) antes de rechazar; el catch de App.tsx manda a la pantalla de PIN. Antes: el catch resolvía false → la app abría como owner sin PIN (bypass para cajeras) — detectado en vivo: primer arranque en frío mostraba sidebar directo; tras reload (IPC caliente) el gate aparecía.
+- Verificación en vivo: arranque en frío del instalado → gate visible; PIN 1234 → owner; 9999 → rechazado; `get_pin_status` via CDP = true.
+- "Entrar como cajera" salta a Ventas sin Dashboard (role cashier).
 
 ## Constraint Checks (Pre-Push / CI)
 
@@ -225,6 +260,14 @@ Antes de hacer commit:
 | 2026-08-02 | **Registrar pagos exigía entrar a Editar y no había entrega rápida**: el dialog de pagos vivía dentro de ServiceForm (líneas ~982-1064) y no había botón "Entregar" en la card. | Componente nuevo `PaymentDialog.tsx` (dialog de pagos extraído, reutilizable): carga methods/tasa BCV/saldo honesto internamente, historial de pagos con borrar, `onSaved` refresca al padre. Card de la lista: botón **"Pago / Abono"** azul (`bg-primary`) en TODAS las cards → abre el dialog sin editar; botón **"Entregar"** (solo estados activos) → entrega directa con `updateService` (status Entregado, date_out '' → backend pone hoy, stock/garantía automáticos); si hay **saldo pendiente** (>0.005) → AlertDialog "Entregar con saldo pendiente" (muestra el monto exacto adeudado) con [Cancelar / Entregar con saldo]. Verificado vía CDP: ORD-1035 reabierto → botones visibles, click Entregar → alerta "$799.99 pendientes", confirmar → Entregado; Pago/Abono → dialog "Registrar Pago / Abono · ORD-1035". |
 | 2026-08-02 | **Día cerrado/abierto sin tasa BCV → equivalentes USD rotos**: el usuario abrió/cerró el día con tasa 0 (o mal puesta, ej. 375 en vez de 748.79) → `get_daily_totals` devolvía `tasa_bcv=0` y `grand_total` NO convertía los Bs (dialog de cierre mostraba "≈ $160.00 USD" cuando el real era ~$210.87); además la tabla diaria no se refrescaba al volver tras facturar (el usuario creía que "no se registró" el $10 — sí estaba en la fila del día). | Backend: `compute_daily_totals` fallback de tasa → día abierto → **último cierre con tasa>0** (el equivalente nunca queda en 0); `close_day` hereda la tasa del último cierre si recibe 0; migración init() corrige cierres con tasa 0 heredando la anterior (idempotente). Frontend: `window focus` → `loadTotals` (la tabla diaria se recarga al volver a la ventana); dialog de apertura muestra "Última tasa registrada: X — verifica que sea la del día" (previene 375 vs 748). Verificado vía CDP: cierre 02-08 corregido (tasa 748.79, gt 160 → 210.87), tabla 02-08 "Bs.38.081,36 | $160.00 | Tasa 748.79 | $160.00 + Bs.38.091,36", Total General ≈ $213.64, hint visible. |
 | 2026-08-02 | **PaymentDialog sugería el saldo USD crudo como Bs — error de 743x**: `setPayAmount(saldo)` ponía el saldo en dólares (ej. 37.33) como monto cuando el método era Pago Móvil/Punto (Bs) → el campo "Monto (Bs.)" mostraba "37,32901131751325" (≈ $0.05) en vez de Bs 27.951. Además exponía precisión flotante. | `suggestAmount()` en PaymentDialog: convierte el saldo a la MONEDA del método (Bs → `Math.round(saldo × tasaBCV)` entero; USD → 2 decimales); sin tasa (día cerrado) NO sugiere (queda 0, el gate de día abierto ya bloquea guardar); ref `payTouched` para no pisar si el usuario tecleó; re-sugiere al cambiar de método o al cargar la tasa; hint "Saldo pendiente ≈ Bs. X (tasa BCV Y)" cuando el método es Bs. Verificado vía CDP (día abierto): Pago Móvil → monto sugerido "35429" (47.32×748.79) + hint "≈ Bs. 35.429"; cambiar a Divisas → "47.32" con etiqueta "$". |
+| 2026-08-02 | **No se podía buscar por día ni por cédula en ventas; historial del cliente sin desglose de pagos**: el usuario (técnico) necesitaba: ventas por día específico ("¿qué vendí el 01-08?"), servicios por día, ventas por cédula, y al abrir un cliente ver CÓMO pagó (métodos, fechas, referencias) y TODA la info del teléfono reparado (falla completa, checklist, observaciones, garantía). | **Búsquedas:** `get_services` gana `start_date`/`end_date` (filtro `date(s.date_in)`, patrón de get_sales); UI con 2 `Input type=date` (Desde/Hasta + botón Limpiar, prioridad sobre períodos) en Sales.tsx y Services.tsx; búsqueda de ventas incluye `c.ci` vía `LEFT JOIN clients` y el struct `Sale` gana `client_ci` (SELECT con lista explícita + JOIN también en get_client_sales); form Nueva Venta con campo Cédula que se auto-llena al elegir cliente existente (pasa a `addOrFindClient(name,'',ci)`); tabla de ventas y compras del cliente muestran la cédula. **Historial (Clients.tsx):** filas de servicio expandibles (chevron, `toggleExpand` carga pagos lazy con cache `servicePayments`), panel "Equipo y diagnóstico" (modelo, tipo de trabajo, falla COMPLETA sin truncar, observaciones, fechas entrada/salida, garantía, teléfono/cédula/dirección), panel "Blindaje del equipo" (10 ítems checklist con labels), panel "Pagos y abonos" (tabla Fecha | Método badge | Monto en su moneda $/Bs. | Neto + comisión Punto | Referencia Zelle | Notas + totales Bs/$). Refactor anti-duplicación: `CHECKLIST_ITEMS`/`parseChecklist`/`checklistSummary` movidos de Services.tsx a lib/utils.ts (fuente única). Test `test_sales_search_by_ci_and_range` (9/9). Verificado vía CDP en la app real: get_sales("24906999") → 1 venta con client_ci; rango fecha → 2 ventas del 01-08; cliente "roberth silva" buscado por cédula → dialog con compras y cédula; servicio de prueba ORD-TEST-EXP ($50, 2 pagos: $20 Divisas + Bs 22.464 PM ref 1234) → expansión con falla completa, dirección, checklist, "Cancelado", paid_amount $50.0005 (conversión Bs→USD correcta). Datos de prueba borrados al final. |
+| 2026-08-02 | **tools/loop escribía estado en `tools/tools/progress/`** (ruta duplicada): `PROGRESS_DIR = path.resolve(__dirname, "..", config.paths.progressDir)` con `progressDir="tools/progress"` → herramientas externas fallaban y el loop leía artefactos vacíos ("No governance result" / "No truth result file") aunque build/truth reales pasaran. Además deploy-readiness reportaba falso positivo: el escaneo NO_DEBUG_ARTIFACTS incluía `tools/loop/loop-engine.ts` (CLI con console.log de diseño). | Fix en tools/loop/loop-engine.ts: `PROJECT_ROOT = path.resolve(__dirname, "../..")` + `path.resolve(PROJECT_ROOT, config.paths.progressDir)` (ídem artifacts) + skip de `tools/` en el scan de debug. Verificado: `npx tsx tools/loop/run.ts --goal truth-pass --tests` → GOAL MET con **9/9 fases** (learning, context, governance, security, build, reviewer, truth, deploy-readiness, close-feature), 0 errores, 1 iteración. |
+| 2026-08-02 | **Apertura ($50) confusa y export limitado a hoy**: el efectivo de apertura se guardaba pero la UI no decía que "no es venta"; `export_daily_report(date)` solo exportaba el día activo/hoy (no un día pasado ni el mes) y el CSV no incluía el cierre (arqueo, diferencia, liquidación Punto, notas); el monto del Punto se registraba en 2º paso ("Liquidar" vs Neto) en vez de al cerrar. | **Apertura:** banner "Apertura $X (se guarda, no es venta del día)" + test `test_initial_cash_not_in_totals` (apertura 50 + venta 30 → totals/dashboard/cierre = 30, apertura guardada aparte). **Export por rango:** `export_daily_report(start,end)` → CSV con sección por día (VENTAS/PAGOS DE SERVICIOS/PAGO MÓVIL/TOTALES DEL DIA) + **CIERRE DEL DIA** en días cerrados (apertura, monto impreso Punto USD/Bs, arqueo real, diferencia, notas); botón usa el rango Desde/Hasta visible (misma fecha en ambos = día exacto; default 30 días = mes); archivo `reporte_{start}_{end}.csv`. **Punto al cerrar:** columna `pos_settled_bs` (migración), `close_day` recibe `pos_settled/pos_settled_bs`; dialog de cierre con "Monto impreso ($/Bs.)" prellenado con lo esperado (Cargado) + diferencia en vivo + Cuadrado ✅ (regla: el sistema debe dar el mismo monto que imprime la máquina); "Liquidar" corrige después en ambas monedas (compara vs Cargado). Tests 11/11 (nuevos: test_initial_cash_not_in_totals, test_close_day_pos_settled). |
+| 2026-08-03 | **`next_order_num` crasheaba con prefijos no-ORD y NO se podía guardar ningún servicio (UNIQUE conflict)**: el query usaba `WHERE order_num LIKE 'ORD-%'` (harness de la era ORD) pero la instalación real numera `DEV-0001…` → `MAX(CAST(SUBSTR(...,5)…))` devolvía NULL → `row.get(0)` (infiere `i64`, no Option) → error "Invalid column type Null". El frontend caía al fallback 'DEV-0001' → colisión UNIQUE en services.order_num → Guardar fallaba en silencio ("Uncaught (in promise)"). Detectado al verificar multi-trabajos en vivo. | `next_order_num` en db.rs deriva PREFIJO y ANCHO del último número guardado (`DEV-0002` tras `DEV-0001`) y el MAX se calcula con `INSTR(order_num,'-')>0` (cualquier prefijo; cola no numérica castea 0 → nunca NULL; sin filas → '.optional()' → None). Mantiene monotonicidad (borrar no reutiliza). Verificado vía CDP en la app real: dialog mostró DEV-0002, guardado OK (service_types `["Cambio pantalla","Cambio conector / puerto"]`), card con 2 badges, dato de prueba eliminado. |
+| 2026-08-03 | **Sin marca de quién reparó cada equipo**: el usuario necesita saber a primera vista quién hizo cada orden (Aldri y William trabajan juntos). No existía campo de técnico ni gestión de técnicos. | Feature Técnicos: tabla `technicians` (seed Aldri `bg-purple-500`/A + William `bg-blue-500`/W), columnas `services.technician` (snapshot) + `services.technician_id` (color/iniciales; sin REFERENCES para no romper import), SELECTs apendan `s.technician_id, s.technician` al final (posiciones 24/25, patrón InvalidColumnType), add/update_service con 2 params al final (`"", None` en tests). UI: Select "Técnico responsable" + botón "Técnicos" en Sección 1 del form, `TechniciansDialog` (renombrar/iniciales/color/añadir/eliminar, onBlur+error UNIQUE amigable), círculo de color+iniciales en card de la lista y en Clients.tsx (fallback gris si el técnico fue borrado), prefill `localStorage('last_technician')`. Tests 15/15 (2 nuevos: test_technicians_crud, test_service_technician). Verificado vía CDP en la app real: get_technicians → Aldri+William sembrados, add_service con Aldri → get_services devuelve tech/techId, delete OK, update_technician OK, form muestra "Técnico responsable" + dialog con Aldri/William, datos de prueba borrados. |
+| 2026-08-04 | **Gate PIN en arranque en frío = bypass (fail-open)**: el PRIMER invoke() de WebView2 recién lanzado puede rechazar → db.ts traga el error (`getPinStatus` resolvía `false` → App.tsx abría como owner SIN PIN; `verifyPin` resolvía `true` → cualquier PIN pasaba). Detección en vivo: primer arranque mostraba sidebar directo; tras `location.reload()` el gate aparecía (IPC caliente). App.tsx catch a 'loading' no bastaba (el catch estaba en db.ts). | db.ts: `getPinStatus`/`verifyPin` reintentan el invoke 3 veces (400ms) en Tauri mode; si fallan de verdad, RECHAZAN (App.tsx manda al gate — fail-closed). Browser mode sigue con mock. Verificado en vivo: desinstalar→instalar→arranque en frío del instalado → gate "Acceso restringido" visible; PIN 1234 → owner (982 productos); `next_order_num` OK. |
+| 2026-08-04 | **`next_order_num` crasheaba con tabla de servicios VACÍA** (recaída del bug de 2026-08-03): con 0 filas, `MAX(expr)` devuelve NULL en UNA fila (no "no rows") → `r.get::<i64>(0)` lanza InvalidColumnType que `.optional()` NO captura (solo captura QueryReturnedNoRows). El PRIMER servicio de la tienda (DB recién puesta en marcha) fallaba. | `SELECT COALESCE(MAX(...), 0)` + `.get(0)` directo (sin `.optional()`): MAX nunca NULL → sin InvalidColumnType. Test `test_next_order_num_empty_table` (tabla vacía → DEV-0001, luego DEV-0002 monotónico). Suite 20/20. Verificado en vivo en el instalado: `next_order_num` → DEV-0001. |
+| 2026-08-04 | **Instalador no existía para la tienda** (solo exe suelto + DB aparte): riesgo de DB perdida/mezclada y sin WebView2 en PC sin internet. | F7: `tauri.conf.json` → `bundle.targets=["nsis"]` + `bundle.resources={"../registro.db":"registro.db"}` (DB limpia viaja en el setup; no sobreescribe la instalada) + `webviewInstallMode=embedBootstrapper`. Build: `npx tauri build` (~7 min LTO, descarga NSIS+bootstrapper la primera vez) → `src-tauri/target/release/bundle/nsis/Registro Servicio Tecnico_0.1.0_x64-setup.exe` (4.7 MB). Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con registro.db junto al exe. Verificado en vivo: setup /S → DB limpia instalada, arranque en frío con gate PIN, 982 productos, uninstall /S limpio. |
 
 ## Feedback Loops
 
@@ -240,10 +283,8 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-02
-- **Build: ✅ PASS (16.4s)**
-- **Registro.exe MD5:** 030FC66E7D33702B6FE1A7D9AB186FF2
-- **Tests:** 8/8 (incl. test_service_warranty_dates, test_daily_totals_currency)
+- **Date:** 2026-08-04
+- **Build: ✅ PASS (16.1s)**
 - **Errors:** 0
 - **Warnings:** 0
 

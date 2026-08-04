@@ -18,6 +18,8 @@ export default function Sales() {
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [search, setSearch] = useState('');
   const [period, setPeriod] = useState('todo');
+  const [dateStart, setDateStart] = useState('');
+  const [dateEnd, setDateEnd] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [stats, setStats] = useState<SaleStat[]>([]);
@@ -27,7 +29,10 @@ export default function Sales() {
   const load = async () => {
     let days: number | null = null;
     let start = '', end = '';
-    if (period === '7d') days = 7;
+    if (dateStart || dateEnd) {
+      start = dateStart;
+      end = dateEnd;
+    } else if (period === '7d') days = 7;
     else if (period === '30d') days = 30;
     else if (period === 'mes') {
       const now = new Date();
@@ -47,7 +52,7 @@ export default function Sales() {
   useEffect(() => {
     const t = setTimeout(load, 350);
     return () => clearTimeout(t);
-  }, [period, search]);
+  }, [period, search, dateStart, dateEnd]);
 
   useEffect(() => {
     api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
@@ -105,11 +110,26 @@ export default function Sales() {
         </Card>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <Input placeholder="Buscar producto o cliente..." className="pl-9"
+          <Input placeholder="Buscar producto, cliente o cédula..." className="pl-9"
             value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+        <div className="flex items-center gap-2">
+          <Input type="date" className="w-36" value={dateStart}
+            onChange={e => { setDateStart(e.target.value); if (!e.target.value) setDateEnd(''); }}
+            title="Desde" />
+          <span className="text-xs text-muted-foreground">a</span>
+          <Input type="date" className="w-36" value={dateEnd}
+            min={dateStart || undefined}
+            onChange={e => setDateEnd(e.target.value)}
+            title="Hasta" />
+          {(dateStart || dateEnd) && (
+            <Button variant="ghost" size="sm" onClick={() => { setDateStart(''); setDateEnd(''); }}>
+              Limpiar
+            </Button>
+          )}
         </div>
         <Select value={period} onValueChange={setPeriod}>
           <SelectTrigger className="w-32">
@@ -164,7 +184,12 @@ export default function Sales() {
                         <div className="text-[11px] text-muted-foreground">ref ····{s.zelle_reference.slice(-4)}</div>
                       )}
                     </TableCell>
-                    <TableCell>{s.client_name ?? '-'}</TableCell>
+                    <TableCell>
+                      {s.client_name ?? '-'}
+                      {s.client_ci && (
+                        <div className="text-[11px] text-muted-foreground">{s.client_ci}</div>
+                      )}
+                    </TableCell>
                   </TableRow>
                 ))
               )}
@@ -209,10 +234,11 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const [price, setPrice] = useState(0);
   const [method, setMethod] = useState(methods[0]?.name ?? '');
   const [clientName, setClientName] = useState('');
+  const [clientCi, setClientCi] = useState('');
   const [clientId, setClientId] = useState<number | null>(null);
   const [notes, setNotes] = useState('');
   const [suggestions, setSuggestions] = useState<Product[]>([]);
-  const [clientSugs, setClientSugs] = useState<{ id: number; name: string; phone: string | null }[]>([]);
+  const [clientSugs, setClientSugs] = useState<{ id: number; name: string; phone: string | null; ci?: string | null }[]>([]);
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState<Product[]>([]);
   const [reference, setReference] = useState('');
@@ -260,10 +286,11 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
     setProductOpen(false);
   };
 
-  const selectClient = (c: { id: number; name: string }) => {
+  const selectClient = (c: { id: number; name: string; ci?: string | null }) => {
     clientPicked.current = true;
     setClientId(c.id);
     setClientName(c.name);
+    setClientCi(c.ci ?? '');
     setClientQuery(c.name);
     setClientOpen(false);
   };
@@ -286,7 +313,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
     try {
       let cid = clientId;
       if (clientName && !cid) {
-        cid = await api.addOrFindClient(clientName, '');
+        cid = await api.addOrFindClient(clientName, '', clientCi);
       }
       const total = quantity * price;
       await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, clientName, cid, notes, 0, reference, saleCurrency);
@@ -380,11 +407,14 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
                     <button key={c.id} className="w-full text-left px-3 py-2 text-sm hover:bg-accent border-b last:border-0"
                       onClick={() => selectClient(c)}>
                       <span className="font-medium">{c.name}</span>
+                      {c.ci && <span className="text-muted-foreground ml-2 text-xs">{c.ci}</span>}
                       {c.phone && <span className="text-muted-foreground ml-2">{c.phone}</span>}
                     </button>
                   ))}
                 </div>
               )}
+              <Input placeholder="Cédula (opcional)" value={clientCi}
+                onChange={e => setClientCi(e.target.value)} />
             </div>
           </div>
 

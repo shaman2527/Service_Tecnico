@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Printer } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
 import { methodCurrency, currencySymbol } from '@/lib/utils';
+import PrintReceiptDialog from './PrintReceiptDialog';
 import type { Service, ServicePayment } from '../types';
 
 export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
@@ -29,6 +30,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const [tasaBcv, setTasaBcv] = useState(0);
   // Si el usuario tecleó el monto a mano, no se re-sugiere
   const payTouched = useRef(false);
+  const [printOpen, setPrintOpen] = useState(false);
 
   const payIsBs = payCurrency === 'VES';
   const payIsPagoMovil = payMethod.includes('Móvil') || payMethod.includes('Movil');
@@ -108,7 +110,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Registrar Pago / Abono {service ? `· ${service.order_num}` : ''}</DialogTitle>
@@ -230,11 +233,23 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
+          {service && (
+            <Button variant="outline" onClick={() => setPrintOpen(true)} title="Imprimir factura del servicio">
+              <Printer className="size-4" /> Imprimir factura
+            </Button>
+          )}
           <Button onClick={doAddPayment} disabled={savingPay || payAmount <= 0 || dayOpen === false}>
             {savingPay ? 'Guardando...' : 'Guardar Pago'}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <PrintReceiptDialog
+      serviceId={service?.id ?? null}
+      open={printOpen}
+      onOpenChange={setPrintOpen}
+    />
+    </>
   );
 }

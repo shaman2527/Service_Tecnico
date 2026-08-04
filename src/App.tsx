@@ -45,9 +45,12 @@ function App() {
   const [pinError, setPinError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Fail-closed: si el IPC falla al arrancar (race en frío), se pide el PIN igual.
+    // Verificado 2026-08-04: al primer arranque el invoke podía fallar y el catch
+    // anterior abría la app sin PIN (bypass para cajeras) — cambio a pedir PIN.
     api.getPinStatus()
       .then(hasPin => setRole(hasPin ? 'loading' : 'owner'))
-      .catch(() => setRole('owner'));
+      .catch(() => setRole('loading'));
   }, []);
 
   useEffect(() => {

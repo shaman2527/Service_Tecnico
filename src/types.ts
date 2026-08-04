@@ -69,6 +69,7 @@ export interface Sale {
   net_amount: number;
   zelle_reference: string | null;
   currency: string | null;
+  client_ci: string | null;
 }
 
 export interface Service {
@@ -80,6 +81,7 @@ export interface Service {
   model: string | null;
   fault: string | null;
   service_type: string | null;
+  service_types: string | null;
   amount: number;
   payment_method: string | null;
   date_out: string | null;
@@ -95,6 +97,15 @@ export interface Service {
   device_checklist: string | null;
   client_id: number | null;
   paid_amount: number;
+  technician_id: number | null;
+  technician: string | null;
+}
+
+export interface Technician {
+  id: number;
+  name: string;
+  initials: string;
+  color: string;
 }
 
 export interface ServicePayment {
@@ -166,6 +177,7 @@ export interface DailyClosing {
   pos_fees: number;
   pos_net: number;
   pos_settled: number;
+  pos_settled_bs: number;
   cash_usd: number;
   cash_bs: number;
   zelle_total: number;
@@ -281,4 +293,15 @@ export interface PaymentMethod {
 export interface ServiceStatus {
   id: number;
   name: string;
+}
+
+export interface ComPort {
+  name: string;
+  description: string;
+}
+
+export interface PrinterSettings {
+  port: string;
+  baud: number;
+  width: number;
 }

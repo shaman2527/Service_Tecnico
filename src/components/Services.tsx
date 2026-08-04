@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,50 +13,37 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client } from '../types';
+import PrintReceiptDialog from './PrintReceiptDialog';
+import PrinterSettingsDialog from './PrinterSettingsDialog';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel } from '@/lib/utils';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician } from '../types';
+import type { PhoneModelEntry } from '@/lib/utils';
 
-const CHECKLIST_ITEMS: { key: string; label: string }[] = [
-  { key: 'chip_sim', label: 'Chip (SIM) presente' },
-  { key: 'tapa_trasera', label: 'Tapa trasera en buen estado' },
-  { key: 'bandeja_sim', label: 'Bandeja SIM presente' },
-  { key: 'botones', label: 'Botones (volumen/encendido) funcionan' },
-  { key: 'boton_home', label: 'Botón home/navegación (si aplica)' },
-  { key: 'camara', label: 'Cámara (lente) sin daños' },
-  { key: 'puerto_carga', label: 'Puerto de carga funciona' },
-  { key: 'parlante', label: 'Parlante/micrófono funcionan' },
-  { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente' },
-  { key: 'accesorios', label: 'Accesorios entregados (funda, protector)' },
-];
+// Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
+const TECH_COLORS = ['bg-purple-500', 'bg-blue-500', 'bg-green-600', 'bg-amber-500', 'bg-pink-500', 'bg-cyan-500', 'bg-red-500', 'bg-orange-500'];
+
+function colorLabel(c: string): string {
+  const map: Record<string, string> = {
+    'bg-purple-500': 'Morado', 'bg-blue-500': 'Azul', 'bg-green-600': 'Verde',
+    'bg-amber-500': 'Ámbar', 'bg-pink-500': 'Rosa', 'bg-cyan-500': 'Cian',
+    'bg-red-500': 'Rojo', 'bg-orange-500': 'Naranja', 'bg-slate-500': 'Gris'
+  };
+  return map[c] ?? c;
+}
+
+// Iniciales de un nombre ("Luis Felipe" → "LF"); fallback cuando el técnico fue borrado
+function initialsOf(name: string | null | undefined): string {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return parts.slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?';
+}
 
 function isMovilOrZelle(m: string | null | undefined): boolean {
   return !!m && (m.includes('Móvil') || m.includes('Movil') || m.includes('Zelle'));
 }
 
-// Tipos de trabajo (mismos del formulario) — usados por los chips de filtro
-const SERVICE_TYPES = [
-  'Cambio pantalla', 'Cambio batería', 'Cambio flex', 'Cambio conector / puerto',
-  'Reparación (placa)', 'Limpieza / Mantenimiento', 'Software / Formateo',
-  'Cambio cámara', 'Cambio parlante / micrófono', 'Otro',
-];
-
 // Estados "en taller": el equipo aún no se entrega
 const ACTIVE_STATUSES = ['Recibido', 'En reparación', 'Esperando repuesto', 'Reparado / Pendiente Pago', 'Por entregar'];
-
-export function parseChecklist(json: string | null | undefined): Record<string, string> {
-  if (!json) return {};
-  try {
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch { return {}; }
-}
-
-export function checklistSummary(json: string | null | undefined): string {
-  const parsed = parseChecklist(json);
-  const total = Object.keys(parsed).length;
-  if (total === 0) return 'Sin revisión registrada';
-  return `${total} de ${CHECKLIST_ITEMS.length} ítems revisados`;
-}
 
 function SectionTitle({ step, title }: { step: number; title: string }) {
   return (
@@ -68,27 +55,172 @@ function SectionTitle({ step, title }: { step: number; title: string }) {
   );
 }
 
+function TechniciansDialog({ open, technicians, onOpenChange, onChanged }: {
+  open: boolean;
+  technicians: Technician[];
+  onOpenChange: (v: boolean) => void;
+  onChanged: () => void;
+}) {
+  const [rows, setRows] = useState<Technician[]>([]);
+  const [newName, setNewName] = useState('');
+  const [newInitials, setNewInitials] = useState('');
+  const [newColor, setNewColor] = useState(TECH_COLORS[2]);
+  const [newInitTouched, setNewInitTouched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setRows(technicians);
+      setError(null);
+    }
+  }, [open, technicians]);
+
+  const saveRow = async (t: Technician) => {
+    setSavingId(t.id);
+    setError(null);
+    try {
+      await api.updateTechnician(t.id, t.name.trim(), t.initials.trim(), t.color);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const deleteRow = async (t: Technician) => {
+    setSavingId(t.id);
+    setError(null);
+    try {
+      await api.deleteTechnician(t.id);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const addRow = async () => {
+    const name = newName.trim();
+    if (!name) return;
+    setError(null);
+    try {
+      await api.addTechnician(name, (newInitials.trim() || initialsOf(name)), newColor);
+      setNewName('');
+      setNewInitials('');
+      setNewInitTouched(false);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const patchRow = (id: number, patch: Partial<Technician>) =>
+    setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Users className="size-4" /> Técnicos</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          La marca de color + iniciales identifica quién reparó cada equipo. Los cambios se guardan al salir del campo.
+        </p>
+        <div className="space-y-2">
+          {rows.map(t => (
+            <div key={t.id} className="flex items-center gap-2">
+              <span className={cn('size-4 shrink-0 rounded-full', t.color)} />
+              <Input className="flex-1" value={t.name}
+                disabled={savingId === t.id}
+                onChange={e => patchRow(t.id, { name: e.target.value })}
+                onBlur={() => saveRow(t)} />
+              <Input className="w-14 text-center" value={t.initials} maxLength={3}
+                disabled={savingId === t.id}
+                onChange={e => patchRow(t.id, { initials: e.target.value })}
+                onBlur={() => saveRow(t)} />
+              <Select value={t.color} onValueChange={v => { patchRow(t.id, { color: v }); saveRow({ ...t, color: v }); }}>
+                <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {TECH_COLORS.map(c => (
+                    <SelectItem key={c} value={c}>
+                      <span className="flex items-center gap-2"><span className={cn('inline-block size-3 rounded-full', c)} />{colorLabel(c)}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button variant="ghost" size="icon" disabled={savingId === t.id}
+                title="Eliminar técnico (los servicios conservan el nombre)"
+                onClick={() => deleteRow(t)}>
+                <Trash2 className="size-4 text-muted-foreground" />
+              </Button>
+            </div>
+          ))}
+          <div className="flex items-center gap-2 border-t border-border/70 pt-3">
+            <span className={cn('size-4 shrink-0 rounded-full', newColor)} />
+            <Input className="flex-1" placeholder="Nombre (ej. Luis)" value={newName}
+              onChange={e => {
+                setNewName(e.target.value);
+                if (!newInitTouched) setNewInitials(initialsOf(e.target.value));
+              }} />
+            <Input className="w-14 text-center" placeholder="Ini" value={newInitials} maxLength={3}
+              onChange={e => { setNewInitials(e.target.value); setNewInitTouched(true); }} />
+            <Select value={newColor} onValueChange={setNewColor}>
+              <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {TECH_COLORS.map(c => (
+                  <SelectItem key={c} value={c}>
+                    <span className="flex items-center gap-2"><span className={cn('inline-block size-3 rounded-full', c)} />{colorLabel(c)}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button size="sm" onClick={addRow} disabled={!newName.trim()}>
+              <Plus className="size-4" /> Añadir
+            </Button>
+          </div>
+        </div>
+        {error && <p className="text-sm text-danger">{error}</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Listo</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [dateStart, setDateStart] = useState('');
+  const [dateEnd, setDateEnd] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
   const [payFor, setPayFor] = useState<Service | null>(null);
+  const [printFor, setPrintFor] = useState<Service | null>(null);
+  const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [delivering, setDelivering] = useState<Service | null>(null);
   const [confirmDeliver, setConfirmDeliver] = useState<Service | null>(null);
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
+
+  const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
   const load = async () => {
-    const [s, st] = await Promise.all([
-      api.getServices(search, statusFilter),
+    const [s, st, techs] = await Promise.all([
+      api.getServices(search, statusFilter, dateStart, dateEnd),
       api.getServiceStatuses(),
+      api.getTechnicians().catch(() => [] as Technician[]),
     ]);
     setServices(s);
     setStatuses(st);
+    setTechnicians(techs);
   };
 
   useEffect(() => { load(); }, []);
@@ -96,7 +228,7 @@ export default function Services() {
   useEffect(() => {
     const t = setTimeout(load, 350);
     return () => clearTimeout(t);
-  }, [search, statusFilter]);
+  }, [search, statusFilter, dateStart, dateEnd]);
 
   useEffect(() => {
     api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
@@ -114,10 +246,10 @@ export default function Services() {
     try {
       await api.updateService(
         s.id, s.client ?? '', s.phone ?? '', s.model ?? '', s.fault ?? '',
-        s.service_type ?? 'Cambio pantalla', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
+        s.service_type ?? 'Cambio pantalla', s.service_types ?? '', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
         '', 'Entregado', s.observations ?? '', s.bank_fee_percent ?? 0,
         s.zelle_reference ?? '', s.currency ?? 'USD', s.client_ci ?? '',
-        s.client_address ?? '', s.device_checklist ?? ''
+        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null
       );
     } finally {
       setDelivering(null);
@@ -128,13 +260,14 @@ export default function Services() {
 
   const totalAmount = services.reduce((a, s) => a + s.amount, 0);
 
-  // Chips: equipos en taller por tipo de trabajo (Recibido → Por entregar, sin entregados/cancelados)
+  // Chips: equipos en taller por tipo de trabajo (Recibido → Por entregar, sin entregados/cancelados).
+  // Un servicio con varios tipos cuenta en TODOS sus chips (pertenencia, no igualdad exacta).
   const enTaller = services.filter(s => ACTIVE_STATUSES.includes(s.status ?? ''));
   const typeCounts = SERVICE_TYPES
-    .map(t => ({ type: t, count: enTaller.filter(s => s.service_type === t).length }))
+    .map(t => ({ type: t, count: enTaller.filter(s => parseServiceTypes(s).includes(t)).length }))
     .filter(x => x.count > 0);
   // Lista visible: la cargada por backend (búsqueda + estado) filtrada por tipo client-side
-  const visibleServices = typeFilter ? services.filter(s => s.service_type === typeFilter) : services;
+  const visibleServices = typeFilter ? services.filter(s => parseServiceTypes(s).includes(typeFilter)) : services;
 
   const statusBadgeVariant = (status: string | null) => {
     switch (status) {
@@ -163,6 +296,9 @@ export default function Services() {
               <CheckCircle2 className="size-4" /> Día abierto
             </span>
           )}
+          <Button variant="outline" onClick={() => setShowPrinterSettings(true)} title="Configurar impresora de tickets">
+            <Printer className="size-4" /> Impresora
+          </Button>
           <Button onClick={() => { setEditing(null); setShowForm(true); }}>
             <Plus className="size-4" /> Nuevo Servicio
           </Button>
@@ -184,11 +320,26 @@ export default function Services() {
         </Card>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <Input placeholder="Buscar cliente, modelo, orden..." className="pl-9"
+          <Input placeholder="Buscar cliente, cédula, modelo, orden..." className="pl-9"
             value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+        <div className="flex items-center gap-2">
+          <Input type="date" className="w-36" value={dateStart}
+            onChange={e => { setDateStart(e.target.value); if (!e.target.value) setDateEnd(''); }}
+            title="Recibidos desde" />
+          <span className="text-xs text-muted-foreground">a</span>
+          <Input type="date" className="w-36" value={dateEnd}
+            min={dateStart || undefined}
+            onChange={e => setDateEnd(e.target.value)}
+            title="Recibidos hasta" />
+          {(dateStart || dateEnd) && (
+            <Button variant="ghost" size="sm" onClick={() => { setDateStart(''); setDateEnd(''); }}>
+              Limpiar
+            </Button>
+          )}
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-44">
@@ -243,6 +394,17 @@ export default function Services() {
                     {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
                     {porEntregar && <Clock className="size-4 text-amber-500" />}
                     <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
+                    {techById(s.technician_id) ? (
+                      <span title={`${techById(s.technician_id)!.name} — técnico`}
+                        className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', techById(s.technician_id)!.color)}>
+                        {techById(s.technician_id)!.initials}
+                      </span>
+                    ) : s.technician ? (
+                      <span title={`${s.technician} — técnico`}
+                        className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[10px] font-bold text-white">
+                        {initialsOf(s.technician)}
+                      </span>
+                    ) : null}
                   </div>
                   <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
                 </CardHeader>
@@ -292,7 +454,9 @@ export default function Services() {
 
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex flex-wrap gap-1.5">
-                        {s.service_type && <Badge variant="outline" className="text-xs">{s.service_type}</Badge>}
+                        {parseServiceTypes(s).map(t => (
+                          <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
+                        ))}
                         {warr === 'activa' && (
                           <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10">
                             Garantía hasta {warrantyEnd(s.date_out)}
@@ -347,6 +511,10 @@ export default function Services() {
                             </Tooltip>
                           </TooltipProvider>
                         )}
+                        <Button variant="outline" size="sm" title="Imprimir factura"
+                          onClick={() => setPrintFor(s)}>
+                          <Printer className="size-3.5" /> Factura
+                        </Button>
                         <Button variant="outline" size="sm" onClick={() => { setEditing(s); setShowForm(true); }}>
                           Editar
                         </Button>
@@ -381,6 +549,14 @@ export default function Services() {
         dayOpen={dayOpen}
         onSaved={load}
       />
+
+      <PrintReceiptDialog
+        serviceId={printFor?.id ?? null}
+        open={!!printFor}
+        onOpenChange={(o) => { if (!o) setPrintFor(null); }}
+      />
+
+      <PrinterSettingsDialog open={showPrinterSettings} onOpenChange={setShowPrinterSettings} />
 
       <AlertDialog open={!!deleting} onOpenChange={() => setDeleting(null)}>
         <AlertDialogContent>
@@ -441,7 +617,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [clientAddress, setClientAddress] = useState('');
   const [model, setModel] = useState('');
   const [fault, setFault] = useState('');
-  const [serviceType, setServiceType] = useState('Cambio pantalla');
+  const [serviceTypes, setServiceTypes] = useState<string[]>(['Cambio pantalla']);
+  const [otherFault, setOtherFault] = useState('');
   const [amount, setAmount] = useState(0);
   const [payment, setPayment] = useState('Divisas (USD Cash)');
   const [dateOut, setDateOut] = useState('');
@@ -454,7 +631,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [zelleReference, setZelleReference] = useState('');
   const [currency, setCurrency] = useState('USD');
   const [modelOpen, setModelOpen] = useState(false);
-  const [modelSuggestions, setModelSuggestions] = useState<{ model: string; product: Product }[]>([]);
+  const [modelSuggestions, setModelSuggestions] = useState<PhoneModelEntry[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
   const [clientOpen, setClientOpen] = useState(false);
   const [clientSugs, setClientSugs] = useState<Client[]>([]);
@@ -470,13 +647,35 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [svc, setSvc] = useState<Service | null>(service);
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
+  const [techSel, setTechSel] = useState('');
+  const [showTechDialog, setShowTechDialog] = useState(false);
+
+  // Tipo PRIMARIO = el primero elegido (compatibilidad con service_type y auto-inventario)
+  const serviceType = serviceTypes[0] ?? 'Cambio pantalla';
+  // Lista maestra de modelos de teléfono: una fila por teléfono, deduplicada del catálogo
+  const phoneModels = useMemo(() => buildPhoneModels(catalog), [catalog]);
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
   const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
 
+  const currentTech = technicians.find(t => t.id === Number(techSel));
+
+  const loadTechnicians = async (revalidate = false) => {
+    const list = await api.getTechnicians().catch(() => [] as Technician[]);
+    setTechnicians(list);
+    if (revalidate && techSel && !list.some(t => t.id === Number(techSel))) setTechSel('');
+    // Al crear: prefill con el último técnico usado (queda la marca lista en segundos)
+    if (!service) {
+      const last = localStorage.getItem('last_technician');
+      if (last && list.some(t => t.id === Number(last))) setTechSel(last);
+    }
+  };
+
   useEffect(() => {
     api.getProducts('', null).then(setCatalog);
+    loadTechnicians();
   }, []);
 
   useEffect(() => {
@@ -489,7 +688,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setClientAddress(service.client_address ?? '');
       setModel(service.model ?? '');
       setFault(service.fault ?? '');
-      setServiceType(service.service_type ?? 'Cambio pantalla');
+      const parsedTypes = parseServiceTypes(service);
+      const knownTypes = parsedTypes.filter(t => SERVICE_TYPES.includes(t));
+      const customTypes = parsedTypes.filter(t => !SERVICE_TYPES.includes(t));
+      setServiceTypes(knownTypes.length > 0 ? knownTypes : ['Cambio pantalla']);
+      setOtherFault(customTypes.join(', '));
       setAmount(service.amount);
       amountTouched.current = true;
       setPayment(service.payment_method ?? 'Divisas (USD Cash)');
@@ -501,6 +704,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setZelleReference(service.zelle_reference ?? '');
       setCurrency(service.currency ?? 'USD');
       setClientId(service.client_id ?? null);
+      setTechSel(service.technician_id ? String(service.technician_id) : '');
       api.getServicePayments(service.id).then(setPayments).catch(() => setPayments([]));
     } else {
       api.nextOrderNum().then(setOrderNum);
@@ -540,37 +744,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   };
 
   useEffect(() => {
-    const q = model.trim().toLowerCase();
-    if (q.length >= 1 && catalog.length > 0) {
-      const seen = new Set<string>();
-      const filtered: { model: string; product: Product }[] = [];
-      for (const p of catalog) {
-        const compat = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
-        const models = compat.length > 0
-          ? compat.map((m: string) => m.trim()).filter(Boolean)
-          : [p.name.replace(/^Pantalla\s+/i, '').split('/')[0].trim()];
-        for (const m of models) {
-          const hay = [m, p.brand ?? '', p.model ?? '', p.name].join(' ').toLowerCase();
-          if (hay.includes(q) && !seen.has(m)) {
-            seen.add(m);
-            filtered.push({ model: m, product: p });
-          }
-        }
-        if (filtered.length >= 12) break;
-      }
+    const q = normPhoneModel(model);
+    if (q.length >= 1 && phoneModels.length > 0) {
+      // El teléfono se sugiere como MODELO INDIVIDUAL (una vez), no por pantalla/repuesto
+      const filtered = phoneModels
+        .filter(e => e.norm.includes(q) || e.products.some(p =>
+          normPhoneModel([p.brand ?? '', p.model ?? '', p.name].join(' ')).includes(q)))
+        .slice(0, 10);
       setModelSuggestions(filtered);
       setModelOpen(filtered.length > 0 && !modelPicked.current);
     } else {
       setModelSuggestions([]);
       setModelOpen(false);
     }
-  }, [model, catalog]);
+  }, [model, phoneModels]);
 
-  const selectModel = (sugg: { model: string; product: Product }) => {
+  const selectModel = (sugg: PhoneModelEntry) => {
     modelPicked.current = true;
-    setModel(sugg.model);
-    // Auto-precio SOLO si el usuario no tocó el monto a mano (y nunca en edición: amountTouched se marca al cargar)
-    if (!amountTouched.current) setAmount(sugg.product.price_sale);
+    setModel(sugg.label);
+    // Auto-precio SOLO si el teléfono matchea UN ÚNICO repuesto (o todos al mismo precio);
+    // con varios repuestos de precios distintos NO se inventa el monto.
+    const prices = new Set(sugg.products.map(p => p.price_sale));
+    if (!amountTouched.current && prices.size === 1) setAmount([...prices][0]);
     setModelOpen(false);
   };
 
@@ -610,18 +805,25 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const needCi = !service && !clientId;
 
   const save = async () => {
-    if (!client || !model || !fault) return;
+    if (!client || !model || !fault || serviceTypes.length === 0) return;
     setSaving(true);
     try {
       const checklistJson = JSON.stringify(checklist);
+      // El texto de "Otro" se guarda como trabajo propio (badge propio en la orden)
+      const typesArr = [...serviceTypes];
+      if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
+      const serviceTypesJson = JSON.stringify(typesArr);
       let cid = clientId;
       if (client && !cid) {
         cid = await api.addOrFindClient(client, phone, clientCi, clientAddress);
       }
+      const techName = currentTech?.name ?? '';
+      const techId = currentTech?.id ?? null;
+      if (techId) localStorage.setItem('last_technician', String(techId));
       if (service) {
-        await api.updateService(service.id, client, phone, model, fault, serviceType, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson);
+        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId);
       } else {
-        await api.addService(orderNum, client, phone, model, fault, serviceType, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, cid);
+        await api.addService(orderNum, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, cid, techName, techId);
       }
       onSaved();
     } finally {
@@ -750,6 +952,33 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Técnico responsable</label>
+              <Select value={techSel} onValueChange={setTechSel}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Sin asignar" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">Sin asignar</SelectItem>
+                  {technicians.map(t => (
+                    <SelectItem key={t.id} value={String(t.id)}>
+                      <span className="flex items-center gap-2">
+                        <span className={cn('inline-block size-3 rounded-full', t.color)} />
+                        {t.name}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-end">
+              <Button variant="outline" className="w-full" onClick={() => setShowTechDialog(true)}>
+                <Users className="size-4" /> Técnicos
+              </Button>
+            </div>
+          </div>
+
           {clientId != null && clientHistory.length === 0 && (
             <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
               Sin historial previo de servicios para este cliente
@@ -765,7 +994,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                   <div key={h.id} className="py-2 space-y-1">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        {h.service_type && <Badge variant="outline" className="text-[11px] shrink-0">{h.service_type}</Badge>}
+                        {parseServiceTypes(h).map(t => (
+                          <Badge key={t} variant="outline" className="text-[11px] shrink-0">{t}</Badge>
+                        ))}
                         <span className="text-sm font-medium truncate">{h.model ?? '-'}</span>
                       </div>
                       <span className="text-xs font-semibold shrink-0">${h.amount.toFixed(2)}</span>
@@ -861,35 +1092,35 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Modelo *</label>
               <Input value={model} onChange={e => { modelPicked.current = false; setModel(e.target.value); }}
-                placeholder="Buscar modelo de equipo o pantalla..." />
+                placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)..." />
               {modelOpen && modelSuggestions.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
-                  {modelSuggestions.map(sugg => {
-                    const p = sugg.product;
-                    const compatList = (() => { try { const l = JSON.parse(p.compatibility || '[]'); return Array.isArray(l) ? l : []; } catch { return []; } })();
-                    const outOfStock = p.stock <= 0;
-                    return (
-                      <button key={sugg.model} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
-                        onClick={() => selectModel(sugg)}>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium">{sugg.model}</span>
-                          <span className={outOfStock ? 'text-danger font-semibold text-xs shrink-0' : 'text-muted-foreground text-xs shrink-0'}>
-                            ${p.price_sale.toFixed(2)} · Stock: {p.stock}
-                          </span>
+                  {modelSuggestions.map(sugg => (
+                    <button key={sugg.norm} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
+                      onClick={() => selectModel(sugg)}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{sugg.label}</span>
+                        <span className="text-muted-foreground text-xs shrink-0">
+                          {sugg.products.length} repuesto{sugg.products.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      {sugg.products.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {sugg.products.slice(0, 8).map(p => (
+                            <span key={p.id} className={cn(
+                              'text-[11px] px-1.5 py-0.5 rounded-md',
+                              p.stock <= 0 ? 'bg-danger/10 text-danger' : 'bg-muted text-muted-foreground'
+                            )}>
+                              {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`}
+                            </span>
+                          ))}
+                          {sugg.products.length > 8 && (
+                            <span className="text-[11px] text-muted-foreground">+{sugg.products.length - 8}</span>
+                          )}
                         </div>
-                        {p.brand && <span className="text-muted-foreground text-xs">{p.brand}</span>}
-                        {compatList.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1.5">
-                            {compatList.map(m => (
-                              <span key={m} className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-muted-foreground">
-                                {m}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </button>
-                    );
-                  })}
+                      )}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
@@ -901,22 +1132,34 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Tipo de Servicio</label>
-            <Select value={serviceType} onValueChange={setServiceType}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="Cambio pantalla">Cambio pantalla</SelectItem>
-                <SelectItem value="Cambio batería">Cambio batería</SelectItem>
-                <SelectItem value="Cambio flex">Cambio flex</SelectItem>
-                <SelectItem value="Cambio conector / puerto">Cambio conector / puerto</SelectItem>
-                <SelectItem value="Reparación (placa)">Reparación (placa)</SelectItem>
-                <SelectItem value="Limpieza / Mantenimiento">Limpieza / Mantenimiento</SelectItem>
-                <SelectItem value="Software / Formateo">Software / Formateo</SelectItem>
-                <SelectItem value="Cambio cámara">Cambio cámara</SelectItem>
-                <SelectItem value="Cambio parlante / micrófono">Cambio parlante / micrófono</SelectItem>
-                <SelectItem value="Otro">Otro</SelectItem>
-              </SelectContent>
-            </Select>
+            <label className="text-sm font-medium">
+              Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {SERVICE_TYPES.map(t => {
+                const active = serviceTypes.includes(t);
+                return (
+                  <button key={t} type="button"
+                    className={cn(
+                      'rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+                      active
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'bg-background text-muted-foreground border-border hover:border-primary/50 hover:text-foreground'
+                    )}
+                    onClick={() => setServiceTypes(prev => active ? prev.filter(x => x !== t) : [...prev, t])}>
+                    {active && <Check className="size-3 inline mr-1" />}
+                    {t}
+                  </button>
+                );
+              })}
+            </div>
+            {serviceTypes.length === 0 && (
+              <p className="text-xs text-danger">Elige al menos un trabajo o falla</p>
+            )}
+            {serviceTypes.includes('Otro') && (
+              <Input value={otherFault} onChange={e => setOtherFault(e.target.value)}
+                placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+            )}
           </div>
 
           <div className="space-y-2">
@@ -1057,6 +1300,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           api.getService(svc.id).then(setSvc).catch(() => {});
           onSaved();
         }}
+      />
+
+      <TechniciansDialog
+        open={showTechDialog}
+        technicians={technicians}
+        onOpenChange={setShowTechDialog}
+        onChanged={() => loadTechnicians(true)}
       />
     </Dialog>
   );

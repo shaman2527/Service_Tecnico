@@ -82,5 +82,54 @@
     "description": "ServiceForm, SaleForm y Pantallas precargan todo el catálogo en memoria (api.getProducts('', null) al montar) y filtran client-side por tecla (name+brand+model+compatibility, case-insensitive). Sugerencias inline (sin position absolute dentro de DialogContent — WebView2 no las renderiza) mostrando hasta 12 resultados con compatibilidad completa. Búsqueda funciona desde 1 carácter.",
     "status": "done",
     "priority": "high"
+  },
+  {
+    "id": 13,
+    "title": "Puesta en marcha: limpieza + PIN + durabilidad",
+    "description": "Backup (backup/registro_backup_20260804_000039.db + JSON). Limpieza total de datos operativos (ventas/servicios/clientes/movimientos/cierres/pedidos + técnico RBS) conservando 982 productos, 8 categorías, técnicos Aldri/William y PIN 1234. PRAGMA synchronous=FULL + WAL + busy_timeout=5000 + test_durability_pragmas (robustez ante apagón). Verificado en vivo vía CDP.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 14,
+    "title": "Optimización release (LTO + strip)",
+    "description": "Cargo.toml [profile.release] lto='thin', strip=true, codegen-units=1. Release 13.1MB (antes 13.6MB). Build ~7min con LTO.",
+    "status": "done",
+    "priority": "medium"
+  },
+  {
+    "id": 15,
+    "title": "Impresora térmica (factura por COM)",
+    "description": "printer.rs: list_com_ports (VID/PID descriptivo), cp850_encode (OEM 858/CP850), build_escpos (ESC @, ESC d 5, GS V B), print_receipt (serialport=4), test_ticket. Settings persistidas (printer_port/baud/width, default 9600/58mm). Frontend: buildServiceReceipt pura (32/48 chars, wrap, garantía 7 días, abonos), PrintReceiptDialog (preview + imprimir), PrinterSettingsDialog (Detectar puerto, 58/80mm, prueba), botones Impresora/Factura en Services + PaymentDialog. Error amigable si falta el puerto. 3 tests.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 16,
+    "title": "Instalador NSIS con DB embebida",
+    "description": "tauri.conf.json: targets nsis, resources ../registro.db → registro.db (DB limpia viaja en el setup, no sobreescribe la instalada), webviewInstallMode embedBootstrapper (WebView2 offline). Setup 4.7MB → instala en %LOCALAPPDATA%\\Registro Servicio Tecnico\\ con registro.db junto al exe. Verificado en vivo: instalación silenciosa, gate PIN en frío, 982 productos, uninstall limpio.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 17,
+    "title": "Gate PIN fail-closed",
+    "description": "El primer invoke() en arranque en frío podía fallar y db.ts resolvía false → la app abría como owner SIN PIN (bypass para cajeras). Fix: getPinStatus/verifyPin reintentan 3×400ms en Tauri mode y rechazan de verdad (App.tsx pide PIN — fail-closed). Verificado en vivo en el instalado: arranque en frío muestra el gate.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 18,
+    "title": "Fix next_order_num con tabla vacía",
+    "description": "Con services vacía, MAX(expr) devuelve NULL en una fila → InvalidColumnType que .optional() no captura → el primer servicio de la tienda crasheaba. Fix: COALESCE(MAX(...), 0). Test test_next_order_num_empty_table (DEV-0001 → DEV-0002). 20/20 tests.",
+    "status": "done",
+    "priority": "high"
+  },
+  {
+    "id": 19,
+    "title": "QA E2E de conversiones + documentación (PRD/README)",
+    "description": "Verificación E2E en sandbox aislado con tasa BCV 748.79: ventas USD/Bs, abonos $20 + Bs 22.463,70, paid_amount=50 exacto, grand_total=$85 (=45+29.951,60/748.79), cierre con diferencia 0, apertura aparte. UI verificada (Libro Diario/Ventas/Cierres). PRD.md con reglas R-1..R-17, diagramas Mermaid, modelo de datos y QA; README.md actualizado.",
+    "status": "done",
+    "priority": "medium"
   }
 ]

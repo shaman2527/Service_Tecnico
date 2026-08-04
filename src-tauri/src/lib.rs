@@ -1,5 +1,6 @@
 pub mod bcv;
 pub mod db;
+pub mod printer;
 mod commands;
 
 use std::path::PathBuf;
@@ -35,6 +36,10 @@ pub fn run() {
             commands::get_services,
             commands::get_service,
             commands::get_service_dashboard,
+            commands::get_technicians,
+            commands::add_technician,
+            commands::update_technician,
+            commands::delete_technician,
             commands::get_dashboard_analytics,
             commands::get_service_payments,
             commands::add_service_payment,
@@ -71,6 +76,10 @@ pub fn run() {
             commands::remove_pin,
             commands::get_pago_movil_detail,
             commands::export_daily_report,
+            commands::list_com_ports,
+            commands::print_receipt,
+            commands::get_printer_settings,
+            commands::set_printer_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -134,7 +143,6 @@ fn dirs_next() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     { None }
 }
-// force rebuild
 // force rebuild 2
 // force rebuild 3
 // force rebuild 4
