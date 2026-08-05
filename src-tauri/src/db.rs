@@ -124,6 +124,21 @@ pub struct Technician {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TechnicianStat {
+    pub technician_id: Option<i64>,
+    /// Snapshot del nombre (sobrevive al borrado del técnico); '' = sin asignar
+    pub technician: String,
+    pub initials: String,
+    pub color: String,
+    pub total: i64,
+    /// En taller: estados activos (no Entregado/Cancelado/Devuelto)
+    pub activos: i64,
+    pub entregados: i64,
+    /// Ingresos acumulados de servicios Entregado (USD)
+    pub ingresos: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServicePayment {
     pub id: i64,
     pub service_id: i64,
@@ -1478,6 +1493,40 @@ impl Database {
         })?;
         let mut out = Vec::new();
         for row in rows { out.push(row?); }
+        Ok(out)
+    }
+
+    /// Estadísticas por técnico (fase 2 del Dashboard): totales, en taller,
+    /// entregados e ingresos. Fila "Sin asignar" incluida. El snapshot de nombre
+    /// sobrevive al borrado del técnico (patrón denormalizado).
+    pub fn get_technician_stats(&self) -> SqlResult<Vec<TechnicianStat>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.technician_id, COALESCE(s.technician,''), COALESCE(t.initials,''), COALESCE(t.color,''),
+                    COUNT(*),
+                    SUM(CASE WHEN s.status IN ('Entregado','Cancelado','Devuelto') THEN 0 ELSE 1 END),
+                    SUM(CASE WHEN s.status='Entregado' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN s.status='Entregado' THEN s.amount ELSE 0 END),0)
+             FROM services s LEFT JOIN technicians t ON t.id = s.technician_id
+             GROUP BY s.technician_id, s.technician
+             ORDER BY COUNT(*) DESC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TechnicianStat {
+                technician_id: r.get(0)?,
+                technician: r.get(1)?,
+                initials: r.get(2)?,
+                color: r.get(3)?,
+                total: r.get(4)?,
+                activos: r.get(5)?,
+                entregados: r.get(6)?,
+                ingresos: r.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
         Ok(out)
     }
 
@@ -3610,6 +3659,59 @@ mod tests {
         let s = cs.iter().find(|x| x.id == sid).unwrap();
         assert_eq!(s.technician.as_deref(), Some("Aldri"));
         assert_eq!(s.technician_id, Some(aldri.id));
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_technician_stats() {
+        let test_path = PathBuf::from("test_technician_stats.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let techs = db.get_technicians().unwrap();
+        let aldri = techs.iter().find(|t| t.name == "Aldri").unwrap();
+        let will = techs.iter().find(|t| t.name == "William").unwrap();
+
+        // Aldri: 1 activo (Recibido) + 1 entregado ($50) → ingresos 50
+        let s1 = db.add_service("ORD-STA-1", "C1", "1", "M1", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            50.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id)).unwrap();
+        db.add_service("ORD-STA-2", "C2", "2", "M2", "F", "Cambio batería", "[\"Cambio batería\"]",
+            30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id)).unwrap();
+        db.update_service(s1, "C1", "1", "M1", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            50.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "", "", "", "Aldri", Some(aldri.id)).unwrap();
+
+        // William: 1 cancelado (no cuenta como activo ni ingresos)
+        let s3 = db.add_service("ORD-STA-3", "C3", "3", "M3", "F", "Software / Formateo", "[\"Software / Formateo\"]",
+            20.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "William", Some(will.id)).unwrap();
+        db.update_service(s3, "C3", "3", "M3", "F", "Software / Formateo", "[\"Software / Formateo\"]",
+            20.0, "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "William", Some(will.id)).unwrap();
+
+        // Sin asignar: 1 servicio
+        db.add_service("ORD-STA-4", "C4", "4", "M4", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+
+        let stats = db.get_technician_stats().unwrap();
+        let aldri_s = stats.iter().find(|s| s.technician == "Aldri").unwrap();
+        assert_eq!(aldri_s.total, 2);
+        assert_eq!(aldri_s.activos, 1, "1 Recibido en taller");
+        assert_eq!(aldri_s.entregados, 1);
+        assert_eq!(aldri_s.ingresos, 50.0);
+        let will_s = stats.iter().find(|s| s.technician == "William").unwrap();
+        assert_eq!(will_s.total, 1);
+        assert_eq!(will_s.activos, 0, "Cancelado no cuenta");
+        assert_eq!(will_s.ingresos, 0.0);
+        let sin_s = stats.iter().find(|s| s.technician.is_empty()).unwrap();
+        assert_eq!(sin_s.total, 1);
+
+        // Borrar el técnico conserva el snapshot (patrón denormalizado)
+        db.delete_technician(aldri.id).unwrap();
+        let stats2 = db.get_technician_stats().unwrap();
+        let aldri_s2 = stats2.iter().find(|s| s.technician == "Aldri").unwrap();
+        assert_eq!(aldri_s2.technician_id, None, "id limpio al borrar el técnico");
+        assert_eq!(aldri_s2.total, 2, "las órdenes conservan el nombre snapshot");
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);

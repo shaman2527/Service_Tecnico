@@ -45,6 +45,7 @@ pub fn run() {
             commands::get_service,
             commands::get_service_dashboard,
             commands::get_technicians,
+            commands::get_technician_stats,
             commands::add_technician,
             commands::update_technician,
             commands::delete_technician,

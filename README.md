@@ -185,7 +185,7 @@ registro/
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 70 comandos
+│   │   ├── lib.rs             # Tauri builder + 71 comandos
 │   │   ├── db.rs              # SQLite CRUD + turno + abonos + auto-inventario + settings
 │   │   ├── updates.rs         # Updater: respaldo, rollback, health-check, watchdog
 │   │   ├── printer.rs         # ESC/POS: list_com_ports, cp850, print_receipt

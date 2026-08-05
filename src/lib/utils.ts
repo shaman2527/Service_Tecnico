@@ -6,6 +6,14 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Iniciales de un nombre ("Luis Felipe" → "LF"); fallback cuando no hay nombre.
+ *  Fuente única: usado por Services.tsx, Clients.tsx y Dashboard (stats por técnico). */
+export function initialsOf(name: string | null | undefined): string {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return parts.slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?';
+}
+
 // Métodos de pago en bolívares: Efectivo Bs, Pago Móvil, Transferencia Bs, Punto de Venta (Bs)
 export function isBsMethod(m: string | null | undefined): boolean {
   if (!m) return false;

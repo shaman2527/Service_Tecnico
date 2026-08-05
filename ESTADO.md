@@ -62,11 +62,14 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 ### 2.4 Verificaciones hechas (QA en vivo)
 | Prueba | Resultado |
 |---|---|
-| Suite Rust `cargo test` | **25/25** (5 nuevos de updates) |
+| Suite Rust `cargo test` | **26/26** (5 updates + test_technician_stats) |
 | `npm run build` + CSS vars | ✅ PASS |
 | Governance harness (`--build-only` / `--security`) | ✅ PASS |
+| Loop completo del harness (9 fases) | ✅ **GOAL MET** (61s, 0 errores) |
 | Reviewer bus | **0 hallazgos** (9 categorías) |
 | Lint | solo warnings preexistentes (tools/, exhaustive-deps viejos) |
+| Catálogo | **980 productos, 0 duplicados** (2 Infinix viejos eliminados) |
+| Stats por técnico (vivo) | Aldri: 1 entregado $50 · William: 1 en taller — card "Servicios por Técnico" OK |
 | E2E conversiones (sandbox, tasa 748.79) | venta $25 + Bs 7.487,90 + abonos $20/Bs 22.463,70 → `grand_total $85` exacto, cierre diff 0 |
 | E2E actualización feliz (servidor local) | dialog → kit de rescate → descarga → instalación → relanzamiento → health check → **ok** + aviso; DB intacta |
 | E2E update roto (exe basura 39 bytes) | watchdog **restauró** exe 16.448.000 bytes y relanzó la app |
@@ -83,8 +86,8 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 
 | # | Pendiente | Por qué | Cómo resolverlo |
 |---|---|---|---|
-| 1 | **`gh auth login` en esta PC** | El token de GitHub está **inválido** (HTTP 401) → no se pueden publicar releases → el updater no tiene de dónde bajar. | En la PC de desarrollo: `gh auth login` (elige HTTPS + login con navegador). Una sola vez. |
-| 2 | **Publicar la release v0.1.1** | Sin release en GitHub, el endpoint `latest.json` da 404 (la app lo maneja silencioso, pero no llegan updates). | `.\tools\release.ps1 -Version 0.1.1 -Notes "Primera versión con actualizaciones automáticas"` (tras el paso 1). |
+| 1 | **`gh auth login` en esta PC** | El token de GitHub está **inválido** (HTTP 401). Además **github.com y api.github.com NO responden desde esta PC** (timeout TLS — probable bloqueo del ISP; bcv.org.ve sí funciona). | En esta PC: `gh auth login` cuando el acceso a GitHub funcione (o desde otro punto de red, ej. hotspot del celular). Una sola vez. |
+| 2 | **Publicar la release v0.1.1** | Sin release en GitHub, el endpoint `latest.json` da 404 (la app lo maneja silencioso, pero no llegan updates). | `.\tools\release.ps1 -Version 0.1.1 -Notes "..."` con red que alcance GitHub (paso 1). Alternativa: subir los assets (setup + sig + latest.json) manualmente desde otra red. |
 | 3 | **Guardar copia de la llave privada** | `C:\Users\ROBER\.tauri\registro.key` — **si se pierde, no se pueden publicar más actualizaciones** (los instaladores ya distribuidos quedarían huérfanos). | Copiarla a un USB/carpeta segura. NO subirla a GitHub ni a la nube pública. |
 | 4 | **Instalar v0.1.1 manualmente en la PC de la tienda** | Es la primera versión con updater: se instala una sola vez a mano (pendrive). De ahí en adelante todo automático. | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
 
@@ -101,11 +104,11 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 
 | # | Idea | Nota |
 |---|---|---|
-| 9 | Dashboard: estadísticas por técnico (fase 2 documentada) | Ya existe la marca de técnico en cada orden |
-| 10 | Duplicados del catálogo (Pantalla vs Táctil del mismo modelo) | Verificado con GROUP BY; hay que decidir cuál conservar |
+| 9 | ~~Dashboard: estadísticas por técnico~~ | ✅ **HECHO (2026-08-05):** card "Servicios por Técnico" (en taller/entregados/ingresos) + `get_technician_stats` + test |
+| 10 | ~~Duplicados del catálogo~~ | ✅ **HECHO (2026-08-05):** 982→980 productos, 0 grupos duplicados (2 Infinix viejos sin stock/movimientos eliminados) |
 | 11 | Sincronización multiusuario en la nube | Fuera de alcance v1: el respaldo es copiar `registro.db` |
 | 12 | Notificación de actualización tipo toast de Windows | Hoy es aviso in-app (suficiente); se puede añadir `tauri-plugin-notification` |
-| 13 | Prueba de actualización real contra GitHub | Solo posible tras P1-1 y P1-2 (se haría con una release de prueba v0.1.2) |
+| 13 | Prueba de actualización real contra GitHub | Bloqueada mientras GitHub no sea alcanzable desde esta PC (P1-1/P1-2) |
 
 ---
 

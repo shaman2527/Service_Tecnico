@@ -15,7 +15,7 @@ import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -29,13 +29,6 @@ function colorLabel(c: string): string {
     'bg-red-500': 'Rojo', 'bg-orange-500': 'Naranja', 'bg-slate-500': 'Gris'
   };
   return map[c] ?? c;
-}
-
-// Iniciales de un nombre ("Luis Felipe" → "LF"); fallback cuando el técnico fue borrado
-function initialsOf(name: string | null | undefined): string {
-  if (!name) return '?';
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  return parts.slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?';
 }
 
 function isMovilOrZelle(m: string | null | undefined): boolean {

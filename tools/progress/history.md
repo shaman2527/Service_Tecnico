@@ -113,3 +113,9 @@ Y se verificó TODO en vivo vía CDP (remote-debugging) en la app desplegada rea
 ## 2026-08-04 - Documentacion de estado (ESTADO.md)
 - Creado ESTADO.md: resumen de todo lo completado (base, puesta en marcha, updater F8), QA verificado, y pendientes P1/P2/P3 (gh auth login invalido, publicar release v0.1.1, guardar llave privada, instalar en tienda, probar impresora fisica, verificar icono, cambiar PIN, confirmar internet tienda).
 - README.md enlazado a ESTADO.md.
+
+## 2026-08-05 - P3: stats por tecnico + catalogo sin duplicados + hallazgo GitHub
+- get_technician_stats (TechnicianStat: total/activos/entregados/ingresos; LEFT JOIN technicians, fila 'Sin asignar', snapshot al borrar). Card 'Servicios por Técnico' en Dashboard. initialsOf movido a lib/utils.ts (fuente unica). Test test_technician_stats. Suite 26/26.
+- Verificado en vivo (CDP): Aldri 1 entregado , William 1 en taller, UI con circulos A/W. Datos de prueba limpiados.
+- Catalogo: 2 grupos duplicados (Infinix HOT 30i/60) eliminados (982->980, 0 duplicados) en DB proyecto + instalada; setup e instalador regenerados.
+- Hallazgo: github.com y api.github.com NO responden desde esta PC (timeout TLS; bcv.org.ve si). gh auth login imposible por ahora -> release v0.1.1 pendiente hasta red que alcance GitHub (hotspot celular). Documentado en ESTADO.md P1-1/P1-2.

@@ -2,7 +2,7 @@ import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
-  Technician, ComPort, PrinterSettings, UpdateState, HealthReport
+  Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport
 } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -123,6 +123,7 @@ export const api = {
     tauriInvoke<void>('delete_service_payment', { id }),
 
   getTechnicians: () => tauriInvoke<Technician[]>('get_technicians'),
+  getTechnicianStats: () => tauriInvoke<TechnicianStat[]>('get_technician_stats'),
 
   addTechnician: (name: string, initials: string, color: string) =>
     tauriInvoke<number>('add_technician', { name, initials, color }),

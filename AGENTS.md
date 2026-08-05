@@ -33,7 +33,7 @@ registro/
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 70 comandos
+│   │   ├── lib.rs             # Tauri builder + 71 comandos
 │   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario + settings
 │   │   ├── updates.rs         # Updater: respaldo pre-update, rollback, health-check, watchdog
 │   │   ├── printer.rs         # Impresora térmica: list_com_ports, ESC/POS CP850, print_receipt
@@ -143,11 +143,12 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 
 ### Técnicos (marca de quién reparó el equipo)
 - **Tabla `technicians`:** id, name (UNIQUE), initials, color (clase Tailwind `bg-*`). Seed en migración: Aldri (`bg-purple-500`, "A") + William (`bg-blue-500`, "W"). Paleta fija `TECH_COLORS` (8 colores) compartida en Services.tsx con helper `colorLabel()`.
-- **`services` columnas (migración idempotente tipo ALTER):** `technician TEXT` (snapshot del nombre — sobrevive al borrado del técnico, patrón denormalizado client/client_id) + `technician_id INTEGER` (ref para resolver color/iniciales). Al borrar un técnico → `delete_technician` limpia technician_id (transacción) pero conserva el nombre en las órdenes (badge gris con iniciales derivadas de `initialsOf()`).
+- **`services` columnas (migración idempotente tipo ALTER):** `technician TEXT` (snapshot del nombre — sobrevive al borrado del técnico, patrón denormalizado client/client_id) + `technician_id INTEGER` (ref para resolver color/iniciales). Al borrar un técnico → `delete_technician` limpia technician_id (transacción) pero conserva el nombre en las órdenes (badge gris con iniciales derivadas de `initialsOf()` — helper compartido en `src/lib/utils.ts`, fuente única: Services/Clients/Dashboard).
 - **Mapeo posicional:** los SELECTs de services (get_services, get_client_services x2, get_service_by_id) apendan `s.technician_id, s.technician` al FINAL (posiciones 24/25) — NUNCA cambiar el orden de columnas existentes (lección InvalidColumnType).
 - **add_service/update_service:** 2 params al final (`technician: &str`, `technician_id: Option<i64>`); INSERT/UPDATE con ?20/?21 y ?21/?22 respectivamente. Tests que llaman add_service/update_service actualizados con `"", None`.
 - **Export/import:** `technicians` agregada a las listas de tablas (sin FK, orden irrelevante; services.technician_id NO tiene REFERENCES para no romper importación).
-- **UI (Services.tsx):** ServiceForm Sección 1 → fila "Técnico responsable" (Select con punto de color + "Sin asignar" + botón "Técnicos"); `TechniciansDialog` (gestión: renombrar corrige tipeos, iniciales max 3, color por Select, añadir/eliminar — guarda onBlur/onValueChange con error amigable para UNIQUE). Card de la lista + historial de Clients.tsx muestran círculo con iniciales en el color del técnico (fallback gris si fue borrado). Prefill al crear con `localStorage('last_technician')`. Sin filtro ni estadísticas por técnico (pendiente: Dashboard stats como fase 2).
+- **UI (Services.tsx):** ServiceForm Sección 1 → fila "Técnico responsable" (Select con punto de color + "Sin asignar" + botón "Técnicos"); `TechniciansDialog` (gestión: renombrar corrige tipeos, iniciales max 3, color por Select, añadir/eliminar — guarda onBlur/onValueChange con error amigable para UNIQUE). Card de la lista + historial de Clients.tsx muestran círculo con iniciales en el color del técnico (fallback gris si fue borrado). Prefill al crear con `localStorage('last_technician')`.
+- **Stats por técnico (fase 2, 2026-08-05):** `get_technician_stats` → `TechnicianStat[]` (technician_id, technician snapshot, initials, color, total, activos [no Entregado/Cancelado/Devuelto], entregados, ingresos USD). Query con `LEFT JOIN technicians` y GROUP BY technician_id (incluye fila "Sin asignar"). UI: card "Servicios por Técnico" en Dashboard (círculo de iniciales + en taller/entregados/ingresos). Test `test_technician_stats` (incluye borrado de técnico → snapshot conservado).
 
 ### Lista de Servicios (vista de tarjetas)
 - **NO es tabla** — grid de tarjetas responsive (`grid-cols-1 lg:2 2xl:3`): cada orden es un Card con header (orden + fecha + badge estado), cliente (nombre + teléfono·cédula juntos), equipo (modelo + falla completa sin truncar), finanzas (monto + badge saldo/Cancelado + método + abonado), footer (badge tipo + fecha salida + acciones Editar/Eliminar/Shield).
@@ -173,7 +174,7 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Métodos digitales siempre con valores esperados del sistema (locked, se ajustan con Liquidar Punto después).
 
 ### Commands Tauri (Rust)
-- 64 comandos registrados en lib.rs (incl. get_dashboard_analytics, list_com_ports/print_receipt, get/set_printer_settings)
+- 71 comandos registrados en lib.rs (incl. get_dashboard_analytics, list_com_ports/print_receipt, get/set_printer_settings, updater x6, get_technician_stats)
 - DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
 - Tests: `cd src-tauri && cargo test` (20/20, incl. printer 3 + next_order_num vacío)
 
@@ -300,8 +301,8 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-04
-- **Build: ✅ PASS (11.1s)**
+- **Date:** 2026-08-05
+- **Build: ✅ PASS (16.1s)**
 - **Errors:** 0
 - **Warnings:** 0
 

@@ -108,6 +108,17 @@ export interface Technician {
   color: string;
 }
 
+export interface TechnicianStat {
+  technician_id: number | null;
+  technician: string;
+  initials: string;
+  color: string;
+  total: number;
+  activos: number;
+  entregados: number;
+  ingresos: number;
+}
+
 export interface ServicePayment {
   id: number;
   service_id: number;

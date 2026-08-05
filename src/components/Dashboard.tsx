@@ -10,7 +10,9 @@ import {
   Smartphone, TrendingUp, Wrench, CheckCircle2, Clock,
 } from 'lucide-react';
 import { api } from '../db';
-import type { ServiceDashboard, Product, DashboardAnalytics, StatusStat } from '../types';
+import { initialsOf } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import type { ServiceDashboard, Product, DashboardAnalytics, StatusStat, TechnicianStat } from '../types';
 
 const FLOW_STAGES: { status: string; short: string; dot: string; ring: string }[] = [
   { status: 'Recibido', short: 'Recibido', dot: 'bg-sky-500', ring: 'border-sky-500/40 bg-sky-500/5' },
@@ -39,18 +41,21 @@ export default function Dashboard() {
   const [dash, setDash] = useState<ServiceDashboard | null>(null);
   const [analytics, setAnalytics] = useState<DashboardAnalytics | null>(null);
   const [lowStock, setLowStock] = useState<Product[]>([]);
+  const [techStats, setTechStats] = useState<TechnicianStat[]>([]);
   const [synced, setSynced] = useState<boolean | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [d, a, low] = await Promise.all([
+    const [d, a, low, t] = await Promise.all([
       api.getServiceDashboard(),
       api.getDashboardAnalytics(),
       api.getLowStockProducts(),
+      api.getTechnicianStats().catch(() => []),
     ]);
     setDash(d);
     setAnalytics(a);
     setLowStock(low);
+    setTechStats(t);
     setSynced(true);
     setRefreshedAt(new Date().toLocaleTimeString());
   }, []);
@@ -383,7 +388,52 @@ export default function Dashboard() {
             </TableBody>
           </Table>
         </CardContent>
-      </Card>
-    </div>
+        </Card>
+
+        <Card className="shadow-sm border border-border/50">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold">Servicios por Técnico</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-b border-border/50">
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">Técnico</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">En taller</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Entregados</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Ingresos</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {techStats.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center text-muted-foreground py-10">
+                      Sin servicios registrados
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  techStats.map(t => (
+                    <TableRow key={t.technician_id ?? `sin-${t.technician}`} className="border-b border-border/30 hover:bg-muted/40">
+                      <TableCell className="py-3 px-4">
+                        <span className="flex items-center gap-2">
+                          <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', t.color || 'bg-slate-500')}>
+                            {t.initials || initialsOf(t.technician)}
+                          </span>
+                          <span className="font-medium">{t.technician || 'Sin asignar'}</span>
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-3 px-4 text-right">{t.activos}</TableCell>
+                      <TableCell className="py-3 px-4 text-right">
+                        <span className="text-success font-medium">{t.entregados}</span>
+                      </TableCell>
+                      <TableCell className="py-3 px-4 text-right font-medium">${t.ingresos.toFixed(2)}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </div>
   );
 }

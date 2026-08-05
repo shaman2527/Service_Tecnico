@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes } from '@/lib/utils';
+import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import type { ClientSummary, Service, Sale, ServicePayment, Technician } from '../types';
 
@@ -256,7 +256,7 @@ function ServiceRow({ s, expanded, payments, techs, onToggle }: {
             ) : s.technician ? (
               <span title={`${s.technician} — técnico`}
                 className="flex size-4 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[9px] font-bold text-white">
-                {(s.technician.trim().split(/\s+/)[0]?.[0] ?? '?').toUpperCase()}
+                {initialsOf(s.technician)}
               </span>
             ) : null}
             <span>{s.model ?? '-'}</span>

@@ -137,6 +137,11 @@ pub fn get_technicians(db: State<Database>) -> Result<Vec<crate::db::Technician>
 }
 
 #[tauri::command]
+pub fn get_technician_stats(db: State<Database>) -> Result<Vec<crate::db::TechnicianStat>, String> {
+    db.get_technician_stats().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn add_technician(db: State<Database>, name: String, initials: String, color: String) -> Result<i64, String> {
     db.add_technician(&name, &initials, &color).map_err(|e| e.to_string())
 }
