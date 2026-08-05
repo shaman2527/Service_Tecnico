@@ -109,3 +109,7 @@ Y se verificó TODO en vivo vía CDP (remote-debugging) en la app desplegada rea
 - Regresion final: BCV vivo 752.0943, venta Bs 7520.943 -> grand_total 35 exacto, cierre diff 0, health ok:true issues[].
 - Reviewer 0 hallazgos, lint sin nuevos warnings, governance PASS.
 - Carpeta instaladores/ (setup 5.69MB + INSTALACION.md) lista para pendrive. Pendiente en tienda: gh auth login para publicar releases.
+
+## 2026-08-04 - Documentacion de estado (ESTADO.md)
+- Creado ESTADO.md: resumen de todo lo completado (base, puesta en marcha, updater F8), QA verificado, y pendientes P1/P2/P3 (gh auth login invalido, publicar release v0.1.1, guardar llave privada, instalar en tienda, probar impresora fisica, verificar icono, cambiar PIN, confirmar internet tienda).
+- README.md enlazado a ESTADO.md.

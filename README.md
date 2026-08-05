@@ -7,6 +7,7 @@ y **factura en impresora térmica** (ESC/POS).
 
 > 📄 Documento completo de producto (PRD): [PRD.md](PRD.md) — reglas de negocio,
 > diagramas de flujo, modelo de datos y QA.
+> 📋 Estado del proyecto (hecho + pendientes): [ESTADO.md](ESTADO.md)
 
 ## Repositorio
 
