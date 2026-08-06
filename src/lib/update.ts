@@ -6,20 +6,20 @@
 import type { Update } from '@tauri-apps/plugin-updater';
 import { isTauri } from '../db';
 
-/** Versión descartada por el usuario ("Recordar después") — no volver a preguntar por ella. */
-const DISMISS_KEY = 'update_dismissed_v';
+/** Última versión que el usuario pidió descargar con "Ver más tarde" — se le recuerda al reiniciar. */
+const DOWNLOADED_KEY = 'update_downloaded_v';
 
-export function dismissedVersion(): string {
-  return localStorage.getItem(DISMISS_KEY) ?? '';
+export function downloadedVersion(): string {
+  return localStorage.getItem(DOWNLOADED_KEY) ?? '';
 }
 
-export function rememberDismissed(version: string) {
-  try { localStorage.setItem(DISMISS_KEY, version); } catch { /* sin storage */ }
+export function rememberDownloaded(version: string) {
+  try { localStorage.setItem(DOWNLOADED_KEY, version); } catch { /* sin storage */ }
 }
 
-export function clearDismissed(version: string) {
-  if (dismissedVersion() === version) {
-    try { localStorage.removeItem(DISMISS_KEY); } catch { /* sin storage */ }
+export function clearDownloaded(version: string) {
+  if (downloadedVersion() === version) {
+    try { localStorage.removeItem(DOWNLOADED_KEY); } catch { /* sin storage */ }
   }
 }
 

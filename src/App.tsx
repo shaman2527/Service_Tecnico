@@ -8,7 +8,7 @@ import { Input } from './components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import UpdateDialog from './components/UpdateDialog';
 import { api } from './db';
-import { checkForUpdate, dismissedVersion, rememberDismissed } from './lib/update';
+import { checkForUpdate, downloadedVersion } from './lib/update';
 import { cn } from './lib/utils';
 import { toast } from 'sonner';
 import './index.css';
@@ -98,16 +98,19 @@ function App() {
   }, [role]);
 
   // 2) Buscar actualización al arrancar (5s máx; sin internet = silencio).
-  // No preguntar por la versión que el usuario ya descartó ("Recordar después").
+  // "Ver más tarde" ya NO descarta la versión: si la descargó, al reiniciar
+  // se muestra la nota de que está lista (dialog con la descarga hecha).
   useEffect(() => {
     if (role === 'loading') return;
     let cancelled = false;
     (async () => {
       const update = await checkForUpdate();
       if (cancelled || !update) return;
-      if (update.version === dismissedVersion()) return;
       setPendingUpdate(update);
       setShowUpdate(true);
+      if (update.version === downloadedVersion()) {
+        setUpdateNotice(`Actualización v${update.version} ya descargada — está lista para instalar.`);
+      }
     })();
     return () => { cancelled = true; };
   }, [role]);
@@ -116,7 +119,7 @@ function App() {
   useEffect(() => {
     const onCheck = () => {
       checkForUpdate().then(update => {
-        if (update && update.version !== dismissedVersion()) {
+        if (update) {
           setPendingUpdate(update);
           setShowUpdate(true);
         } else {
@@ -275,10 +278,7 @@ function App() {
       <UpdateDialog
         update={pendingUpdate}
         open={showUpdate}
-        onOpenChange={o => {
-          setShowUpdate(o);
-          if (!o && pendingUpdate) rememberDismissed(pendingUpdate.version);
-        }}
+        onOpenChange={o => setShowUpdate(o)}
       />
     </div>
   );

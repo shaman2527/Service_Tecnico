@@ -71,7 +71,10 @@ $signature = (Get-Content $sig -Raw).Trim()
 # GitHub normaliza espacios -> puntos en los nombres de assets al subir (gh release).
 # La URL del manifesto DEBE usar el nombre normalizado o la descarga da 404.
 $setupLeaf = (Split-Path $setup -Leaf) -replace ' ', '.'
-$setupUrl = "https://github.com/shaman2527/Service_Tecnico/releases/download/v$Version/" + [uri]::EscapeDataString($setupLeaf)
+# Canal de actualizaciones = repo PUBLICO de releases (el repo de código es PRIVADO;
+# GitHub no sirve assets de repos privados sin auth, el updater no lleva token).
+$releaseRepo = "shaman2527/Service_Tecnico-Releases"
+$setupUrl = "https://github.com/$releaseRepo/releases/download/v$Version/" + [uri]::EscapeDataString($setupLeaf)
 $latest = @{
     version  = $Version
     notes    = $Notes
@@ -130,20 +133,21 @@ Copy-Item $setup $instDir -Force
 Copy-Item "src-tauri\target\release\bundle\nsis\latest.json" $instDir -Force
 if (Test-Path "src-tauri\target\release\bundle\nsis\latest_drive.json") { Copy-Item "src-tauri\target\release\bundle\nsis\latest_drive.json" $instDir -Force }
 
-# 9) GitHub Release (solo si gh está autenticado)
-Step "GitHub Release v$Version"
+# 9) GitHub Release (solo si gh está autenticado) — SIEMPRE al repo PUBLICO de releases
+Step "GitHub Release v$Version (repo público $releaseRepo)"
 gh auth status 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) {
     gh release create "v$Version" `
         "$setup" "$sig" "src-tauri\target\release\bundle\nsis\latest.json" `
+        --repo $releaseRepo `
         --title "Registro v$Version" --notes $Notes
     if ($LASTEXITCODE -ne 0) { throw "gh release create falló (intenta: gh auth login)" }
-    Write-Host "Release publicada. El endpoint del updater ya sirve latest.json." -ForegroundColor Green
+    Write-Host "Release publicada en $releaseRepo. El endpoint del updater ya sirve latest.json." -ForegroundColor Green
 } else {
     Write-Host "gh no autenticado — la release NO se publicó." -ForegroundColor Yellow
     Write-Host "Pasos manuales:" -ForegroundColor Yellow
     Write-Host "  1. gh auth login"
-    Write-Host "  2. gh release create v$Version `"$setup`" `"$sig`" src-tauri\target\release\bundle\nsis\latest.json --title `"Registro v$Version`" --notes `"$Notes`""
+    Write-Host "  2. gh release create v$Version `"$setup`" `"$sig`" src-tauri\target\release\bundle\nsis\latest.json --repo $releaseRepo --title `"Registro v$Version`" --notes `"$Notes`""
 }
 
 Write-Host "`nLISTO. Instalador en: instaladores\Registro Servicio Tecnico_${Version}_x64-setup.exe" -ForegroundColor Green
