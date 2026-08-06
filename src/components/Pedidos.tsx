@@ -23,14 +23,22 @@ export default function Pedidos() {
   const [detailOrder, setDetailOrder] = useState<PurchaseOrder | null>(null);
   const [detailItems, setDetailItems] = useState<PurchaseOrderItem[]>([]);
   const [deleting, setDeleting] = useState<PurchaseOrder | null>(null);
+  const [confirmReceive, setConfirmReceive] = useState<PurchaseOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dayOpen, setDayOpen] = useState<boolean | null>(null);
 
   const load = async () => {
-    const [ps, os, cat] = await Promise.all([api.getReorderSuggestions(), api.getPurchaseOrders(), api.getProducts('', null)]);
+    const [ps, os, cat, day] = await Promise.all([
+      api.getReorderSuggestions(),
+      api.getPurchaseOrders(),
+      api.getProducts('', null),
+      api.getActiveDay().catch(() => null),
+    ]);
     setProducts(ps);
     setOrders(os);
     setCatalog(cat);
+    setDayOpen(day != null);
   };
 
   useEffect(() => { load(); }, []);
@@ -96,20 +104,43 @@ export default function Pedidos() {
   };
 
   const receive = async (o: PurchaseOrder) => {
-    await api.markPurchaseOrderReceived(o.id);
-    await load();
+    setConfirmReceive(null);
+    setError(null);
+    try {
+      await api.markPurchaseOrderReceived(o.id);
+      if (detailOrder?.id === o.id) {
+        const fresh = await api.getPurchaseOrders().then(os => os.find(x => x.id === o.id) ?? null);
+        if (fresh) {
+          setDetailOrder(fresh);
+          setDetailItems(await api.getPurchaseOrderItems(o.id));
+        }
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const remove = async (o: PurchaseOrder) => {
-    await api.deletePurchaseOrder(o.id);
-    if (detailOrder?.id === o.id) setDetailOrder(null);
     setDeleting(null);
-    await load();
+    setError(null);
+    try {
+      await api.deletePurchaseOrder(o.id);
+      if (detailOrder?.id === o.id) setDetailOrder(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const openDetail = async (o: PurchaseOrder) => {
-    setDetailOrder(o);
-    setDetailItems(await api.getPurchaseOrderItems(o.id));
+    setError(null);
+    try {
+      setDetailOrder(o);
+      setDetailItems(await api.getPurchaseOrderItems(o.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const totalCart = cart.reduce((a, i) => a + i.qty * i.price, 0);
@@ -126,6 +157,12 @@ export default function Pedidos() {
         </Button>
       </div>
 
+      {error && (
+        <div className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <AlertTriangle className="size-4 shrink-0" /> {error}
+        </div>
+      )}
+
       <div className="grid grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-2">
@@ -134,8 +171,7 @@ export default function Pedidos() {
           <CardContent>
             <div className="text-2xl font-bold text-danger">{outOfStock}</div>
           </CardContent>
-        </Card>
-        <Card>
+        </Card>        <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Stock bajo</CardTitle>
           </CardHeader>
@@ -246,7 +282,7 @@ export default function Pedidos() {
                       <div className="flex gap-1">
                         <Button variant="ghost" size="sm" onClick={() => openDetail(o)}>Ver</Button>
                         {o.status !== 'Recibido' && (
-                          <Button variant="outline" size="sm" className="text-success" onClick={() => receive(o)}>
+                          <Button variant="outline" size="sm" className="text-success" onClick={() => setConfirmReceive(o)}>
                             <Truck className="size-3.5" /> Recibido
                           </Button>
                         )}
@@ -264,11 +300,17 @@ export default function Pedidos() {
       </Card>
 
       <Dialog open={showNew} onOpenChange={setShowNew}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-lg max-h-[88vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Nuevo Pedido</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
+            {dayOpen === false && (
+              <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700">
+                <AlertTriangle className="size-4 shrink-0" />
+                <span>Debes <strong>abrir el día</strong> (Libro Diario) antes de guardar pedidos.</span>
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">Proveedor</label>
               <Input value={supplier} onChange={e => setSupplier(e.target.value)} placeholder="Nombre del proveedor..." />
@@ -333,9 +375,9 @@ export default function Pedidos() {
             </div>
             {error && <p className="text-sm text-danger">{error}</p>}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowNew(false)}>Cancelar</Button>
-            <Button onClick={saveOrder} disabled={saving || cart.length === 0}>
+            <Button onClick={saveOrder} disabled={saving || cart.length === 0 || dayOpen === false}>
               <PackagePlus className="size-4" /> Guardar Pedido
             </Button>
           </DialogFooter>
@@ -343,11 +385,11 @@ export default function Pedidos() {
       </Dialog>
 
       <Dialog open={!!detailOrder} onOpenChange={() => setDetailOrder(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-md max-h-[88vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Pedido #{detailOrder?.id} — {detailOrder?.supplier ?? 'Sin proveedor'}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-3">
             <div className="text-sm text-muted-foreground">
               Fecha: {detailOrder?.order_date?.slice(0, 16) ?? '-'} · Estado:{' '}
               <Badge variant="outline" className={detailOrder?.status === 'Recibido' ? 'text-success' : 'text-warning'}>
@@ -379,13 +421,31 @@ export default function Pedidos() {
               <span>${(detailItems.reduce((a, i) => a + i.quantity * i.unit_price, 0)).toFixed(2)}</span>
             </div>
             {detailOrder?.status !== 'Recibido' && (
-              <Button className="w-full" onClick={() => { receive(detailOrder!); setDetailOrder(null); }}>
+              <Button className="w-full" onClick={() => setConfirmReceive(detailOrder)}>
                 <CheckCircle2 className="size-4" /> Marcar como Recibido (suma al inventario)
               </Button>
             )}
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!confirmReceive} onOpenChange={() => setConfirmReceive(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Marcar como Recibido?</AlertDialogTitle>
+            <AlertDialogDescription>
+              El pedido #{confirmReceive?.id} ({confirmReceive?.item_count ?? 0} artículo(s), {confirmReceive?.total_quantity ?? 0} unidades) sumará stock al inventario y registrará movimientos de entrada. Esta acción no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction className="bg-success text-white hover:bg-success/90"
+              onClick={() => confirmReceive && receive(confirmReceive)}>
+              <Truck className="size-4" /> Marcar Recibido
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!deleting} onOpenChange={() => setDeleting(null)}>
         <AlertDialogContent>

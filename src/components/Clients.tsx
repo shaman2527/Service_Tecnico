@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, Phone, Wrench, ShoppingCart, ChevronDown, ChevronRight, Smartphone, ShieldCheck, CalendarDays, FileText } from 'lucide-react';
+import { Search, Phone, Wrench, ShoppingCart, ChevronDown, ChevronRight, Smartphone, ShieldCheck, CalendarDays, FileText, User, Wallet, CircleDollarSign } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -49,6 +49,8 @@ export default function Clients() {
       setServicePayments(prev => ({ ...prev, [s.id]: pays }));
     }
   };
+
+  const pendienteTotal = clientServices.reduce((a, s) => a + Math.max(0, (s.amount ?? 0) - (s.paid_amount ?? 0)), 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -114,42 +116,93 @@ export default function Clients() {
           {selected && (
             <>
               <DialogHeader className="shrink-0">
-                <DialogTitle className="flex items-center gap-2 flex-wrap">
-                  {selected.name}
-                  {selected.ci && (
-                    <span className="text-xs font-normal text-muted-foreground">{selected.ci}</span>
-                  )}
-                  {selected.phone && (
-                    <span className="text-sm font-normal text-muted-foreground">
-                      <Phone className="inline size-3 mr-1" />
-                      {selected.phone}
+                <DialogTitle className="flex items-start gap-3">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <User className="size-5" />
+                  </span>
+                  <span className="flex flex-col gap-1.5 text-left">
+                    <span className="text-lg font-semibold leading-tight">{selected.name}</span>
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      {selected.ci && (
+                        <Badge variant="outline" className="text-[11px] font-normal gap-1">
+                          <FileText className="size-3" /> {selected.ci}
+                        </Badge>
+                      )}
+                      {selected.phone && (
+                        <Badge variant="outline" className="text-[11px] font-normal gap-1">
+                          <Phone className="size-3" /> {selected.phone}
+                        </Badge>
+                      )}
+                      {selected.last_date && (
+                        <Badge variant="secondary" className="text-[11px] font-normal gap-1">
+                          <CalendarDays className="size-3" /> Última actividad {selected.last_date}
+                        </Badge>
+                      )}
                     </span>
-                  )}
+                  </span>
                 </DialogTitle>
               </DialogHeader>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-6">
-                <div className="grid grid-cols-3 gap-3 mb-4">
-                  <Card>
-                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Total Gastado</CardTitle></CardHeader>
-                    <CardContent><div className="text-lg font-bold text-success">${selected.total_spent.toFixed(2)}</div></CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Servicios</CardTitle></CardHeader>
-                    <CardContent><div className="text-lg font-bold">{selected.service_count}</div></CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Compras</CardTitle></CardHeader>
-                    <CardContent><div className="text-lg font-bold">{selected.sale_count}</div></CardContent>
-                  </Card>
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="rounded-lg border bg-background px-3 py-2.5 flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600">
+                      <Wallet className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Total Gastado</p>
+                      <p className="text-lg font-bold tabular-nums leading-tight">${selected.total_spent.toFixed(2)}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border bg-background px-3 py-2.5 flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Wrench className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Servicios</p>
+                      <p className="text-lg font-bold tabular-nums leading-tight">{selected.service_count}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border bg-background px-3 py-2.5 flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning">
+                      <ShoppingCart className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Compras</p>
+                      <p className="text-lg font-bold tabular-nums leading-tight">{selected.sale_count}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border bg-background px-3 py-2.5 flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-danger/10 text-danger">
+                      <CircleDollarSign className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Por cobrar</p>
+                      <p className="text-lg font-bold tabular-nums leading-tight">
+                        {pendienteTotal > 0.005 ? `$${pendienteTotal.toFixed(2)}` : '—'}
+                      </p>
+                    </div>
+                  </div>
                 </div>
 
                 {clientServices.length > 0 && (
-                  <div className="mb-4">
-                    <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
-                      <Wrench className="size-4" /> Servicios Técnicos
-                    </h3>
-                    <Table>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          <Wrench className="size-3.5" />
+                        </span>
+                        Servicios Técnicos
+                        <Badge variant="secondary" className="text-[11px] tabular-nums">{clientServices.length}</Badge>
+                      </h3>
+                      {pendienteTotal > 0.005 && (
+                        <Badge className="bg-danger/10 text-danger border-danger/30 gap-1">
+                          <CircleDollarSign className="size-3" /> ${pendienteTotal.toFixed(2)} por cobrar
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="rounded-md border overflow-x-auto">
+                      <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-8"></TableHead>
@@ -173,15 +226,21 @@ export default function Clients() {
                         ))}
                       </TableBody>
                     </Table>
+                    </div>
                   </div>
                 )}
 
                 {clientSales.length > 0 && (
-                  <div className="mb-4">
-                    <h3 className="text-sm font-semibold flex items-center gap-2 mb-2">
-                      <ShoppingCart className="size-4" /> Compras
+                  <div className="flex flex-col gap-2">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                      <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-warning/10 text-warning">
+                        <ShoppingCart className="size-3.5" />
+                      </span>
+                      Compras
+                      <Badge variant="secondary" className="text-[11px] tabular-nums">{clientSales.length}</Badge>
                     </h3>
-                    <Table>
+                    <div className="rounded-md border overflow-x-auto">
+                      <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead>Fecha</TableHead>
@@ -208,15 +267,19 @@ export default function Clients() {
                         ))}
                       </TableBody>
                     </Table>
+                    </div>
                   </div>
                 )}
 
                 {clientServices.length === 0 && clientSales.length === 0 && (
-                  <p className="text-sm text-muted-foreground text-center py-4">Sin actividad registrada</p>
+                  <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-10 text-muted-foreground">
+                    <Search className="size-6" />
+                    <p className="text-sm">Sin actividad registrada para este cliente</p>
+                  </div>
                 )}
               </div>
 
-              <DialogFooter className="shrink-0">
+              <DialogFooter className="shrink-0 border-t pt-3">
                 <Button onClick={() => setSelected(null)}>Cerrar</Button>
               </DialogFooter>
             </>
@@ -237,6 +300,13 @@ function ServiceRow({ s, expanded, payments, techs, onToggle }: {
   const wStatus = warrantyStatus(s.date_out);
   const wEnd = warrantyEnd(s.date_out);
   const tech = techs.find(t => t.id === s.technician_id);
+  const statusCls = s.status === 'Entregado'
+    ? 'text-emerald-600 border-emerald-500/40 bg-emerald-500/10'
+    : s.status === 'Cancelado' || s.status === 'Devuelto'
+      ? 'text-destructive border-destructive/40 bg-destructive/10'
+      : s.status === 'Por entregar'
+        ? 'text-amber-600 border-amber-500/40 bg-amber-500/10'
+        : undefined;
 
   return (
     <>
@@ -275,10 +345,10 @@ function ServiceRow({ s, expanded, payments, techs, onToggle }: {
           ) : s.paid_amount - s.amount > 0.005 ? (
             <span className="text-warning text-xs font-semibold">Excedente ${(s.paid_amount - s.amount).toFixed(2)}</span>
           ) : (
-            <Badge variant="outline" className="text-emerald-600">Cancelado</Badge>
+            <Badge variant="outline" className="text-emerald-600 border-emerald-500/40 bg-emerald-500/10">Cancelado</Badge>
           )}
         </TableCell>
-        <TableCell><Badge variant="outline">{s.status}</Badge></TableCell>
+        <TableCell><Badge variant="outline" className={statusCls}>{s.status}</Badge></TableCell>
       </TableRow>
       {expanded && (
         <TableRow className="bg-muted/30">
@@ -303,82 +373,93 @@ function ServiceDetail({ s, payments, techs, warranty }: {
   const tech = techs.find(t => t.id === s.technician_id);
 
   return (
-    <div className="flex flex-col gap-4 text-sm">
+    <div className="flex flex-col gap-3 text-sm">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="rounded-md border bg-background p-3">
-          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
-            <Smartphone className="size-3.5" /> Equipo y diagnóstico
-          </p>
-          <div className="flex flex-wrap items-center gap-2 mb-1.5">
-            {tech && (
-              <span title={`${tech.name} — técnico`}
-                className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', tech.color)}>
-                {tech.initials}
-              </span>
-            )}
-            <span className="font-semibold">{s.model ?? 'Sin modelo'}</span>
-            {parseServiceTypes(s).map(t => <Badge key={t} variant="outline">{t}</Badge>)}
-          </div>
-          <p className="text-muted-foreground mb-2">
-            <strong className="text-foreground">Falla:</strong> {s.fault ?? '—'}
-          </p>
-          {s.observations && (
-            <p className="text-muted-foreground flex items-start gap-1.5">
-              <FileText className="size-3.5 mt-0.5 shrink-0" />
-              {s.observations}
-            </p>
-          )}
-          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Entrada: {s.date_in ?? '—'}</span>
-            <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Salida: {s.date_out ?? '—'}</span>
-            {s.date_out && (
-              warranty.status === 'activa' ? (
-                <span className="text-emerald-600 font-medium">Garantía hasta {warranty.end}</span>
-              ) : (
-                <span className="text-muted-foreground">Garantía vencida</span>
-              )
-            )}
-          </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1"><Phone className="size-3" /> {s.phone ?? 'Sin teléfono'}</span>
-            {s.client_ci && <span>Cédula: {s.client_ci}</span>}
-            {s.client_address && <span>Dirección: {s.client_address}</span>}
-          </div>
-        </div>
-        <div className="rounded-md border bg-background p-3">
-          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
-            <ShieldCheck className="size-3.5" /> Blindaje del equipo
-          </p>
-          <p className="text-xs text-muted-foreground mb-2">{checklistSummary(s.device_checklist)}</p>
-          {items.length > 0 ? (
-            <div className="grid grid-cols-1 gap-1">
-              {items.map(([k, v]) => {
-                const label = CHECKLIST_ITEMS.find(i => i.key === k)?.label ?? k.replace(/_/g, ' ');
-                return (
-                  <div key={k} className="flex items-center gap-2 text-xs">
-                    <span className={`inline-block size-2 rounded-full shrink-0 ${v === 'si' ? 'bg-emerald-500' : 'bg-destructive'}`} />
-                    <span className="text-muted-foreground">{label}</span>
-                  </div>
-                );
-              })}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+              <Smartphone className="size-3.5" /> Equipo y diagnóstico
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {tech && (
+                <span title={`${tech.name} — técnico`}
+                  className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', tech.color)}>
+                  {tech.initials}
+                </span>
+              )}
+              <span className="font-semibold">{s.model ?? 'Sin modelo'}</span>
+              {parseServiceTypes(s).map(t => <Badge key={t} variant="outline" className="whitespace-nowrap">{t}</Badge>)}
             </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">Sin revisión registrada</p>
-          )}
-        </div>
+            <p className="text-muted-foreground">
+              <strong className="text-foreground">Falla:</strong> {s.fault ?? '—'}
+            </p>
+            {s.observations && (
+              <p className="text-muted-foreground flex items-start gap-1.5">
+                <FileText className="size-3.5 mt-0.5 shrink-0" />
+                {s.observations}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Entrada: {s.date_in ?? '—'}</span>
+              <span className="flex items-center gap-1"><CalendarDays className="size-3" /> Salida: {s.date_out ?? '—'}</span>
+              {s.date_out && (
+                warranty.status === 'activa' ? (
+                  <span className="text-emerald-600 font-medium">Garantía hasta {warranty.end}</span>
+                ) : (
+                  <span className="text-muted-foreground">Garantía vencida</span>
+                )
+              )}
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1"><Phone className="size-3" /> {s.phone ?? 'Sin teléfono'}</span>
+              {s.client_ci && <span>Cédula: {s.client_ci}</span>}
+              {s.client_address && <span>Dirección: {s.client_address}</span>}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+              <ShieldCheck className="size-3.5" /> Blindaje del equipo
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <p className="text-xs text-muted-foreground">{checklistSummary(s.device_checklist)}</p>
+            {items.length > 0 ? (
+              <div className="grid grid-cols-1 gap-1">
+                {items.map(([k, v]) => {
+                  const label = CHECKLIST_ITEMS.find(i => i.key === k)?.label ?? k.replace(/_/g, ' ');
+                  return (
+                    <div key={k} className="flex items-center gap-2 text-xs">
+                      <span className={`inline-block size-2 rounded-full shrink-0 ${v === 'si' ? 'bg-emerald-500' : 'bg-destructive'}`} />
+                      <span className="text-muted-foreground">{label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">Sin revisión registrada</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="rounded-md border bg-background p-3">
-        <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-          Pagos y abonos
-        </p>
-        {payments === null ? (
-          <p className="text-xs text-muted-foreground">Cargando pagos...</p>
-        ) : payments.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Sin pagos registrados</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <Table>
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Pagos y abonos
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          {payments === null ? (
+            <p className="text-xs text-muted-foreground">Cargando pagos...</p>
+          ) : payments.length === 0 ? (
+            <p className="text-xs text-muted-foreground">Sin pagos registrados</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Fecha</TableHead>
@@ -416,13 +497,14 @@ function ServiceDetail({ s, payments, techs, warranty }: {
               </TableBody>
             </Table>
           </div>
-        )}
-        {(payments ?? []).length > 0 && (
-          <p className="text-xs text-muted-foreground mt-2">
-            Abonado en Bs.: <strong>Bs. {totalBs.toFixed(2)}</strong> · Abonado en $: <strong>${s.paid_amount.toFixed(2)}</strong> (equivalente)
-          </p>
-        )}
-      </div>
+          )}
+          {(payments ?? []).length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Abonado en Bs.: <strong>Bs. {totalBs.toFixed(2)}</strong> · Abonado en $: <strong>${s.paid_amount.toFixed(2)}</strong> (equivalente)
+            </p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

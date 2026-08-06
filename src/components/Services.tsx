@@ -445,18 +445,18 @@ export default function Services() {
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-col gap-3">
                       <div className="flex flex-wrap gap-1.5">
                         {parseServiceTypes(s).map(t => (
-                          <Badge key={t} variant="outline" className="text-xs">{t}</Badge>
+                          <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
                         ))}
                         {warr === 'activa' && (
-                          <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10">
+                          <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10 whitespace-nowrap">
                             Garantía hasta {warrantyEnd(s.date_out)}
                           </Badge>
                         )}
                         {warr === 'vencida' && (
-                          <Badge variant="outline" className="text-xs text-muted-foreground">
+                          <Badge variant="outline" className="text-xs text-muted-foreground whitespace-nowrap">
                             Garantía vencida
                           </Badge>
                         )}
@@ -466,9 +466,9 @@ export default function Services() {
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex flex-wrap gap-1.5 border-t pt-3">
                         {ACTIVE_STATUSES.includes(s.status ?? '') && (
-                          <Button size="sm" variant="outline" className="text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
+                          <Button size="sm" variant="outline" className="flex-1 text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
                             disabled={delivering?.id === s.id}
                             onClick={() => {
                               // Confirmar solo si el cliente no pagó la totalidad
@@ -478,7 +478,7 @@ export default function Services() {
                             <CheckCircle2 className="size-3.5" /> {delivering?.id === s.id ? 'Entregando...' : 'Entregar'}
                           </Button>
                         )}
-                        <Button size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90"
+                        <Button size="sm" className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
                           onClick={() => setPayFor(s)}>
                           <Banknote className="size-3.5" /> Pago / Abono
                         </Button>
@@ -504,11 +504,11 @@ export default function Services() {
                             </Tooltip>
                           </TooltipProvider>
                         )}
-                        <Button variant="outline" size="sm" title="Imprimir factura"
+                        <Button variant="outline" size="sm" className="flex-1" title="Imprimir factura"
                           onClick={() => setPrintFor(s)}>
                           <Printer className="size-3.5" /> Factura
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => { setEditing(s); setShowForm(true); }}>
+                        <Button variant="outline" size="sm" className="flex-1" onClick={() => { setEditing(s); setShowForm(true); }}>
                           Editar
                         </Button>
                         <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger"
@@ -847,12 +847,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
         </DialogHeader>
         {service?.status === 'Entregado' && service.date_out && warrantyStatus(service.date_out) === 'activa' && (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">
+          <div className="shrink-0 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">
             <ShieldCheck className="size-4 shrink-0" />
             <span>
               <strong>En garantía</strong> — vence el {warrantyEnd(service.date_out)}. Si es un reclamo, reábrelo (cambia el estado) y al entregarlo la garantía reinicia sus 7 días.
@@ -860,12 +860,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
         )}
         {service?.status === 'Entregado' && service.date_out && warrantyStatus(service.date_out) === 'vencida' && (
-          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          <div className="shrink-0 flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
             <ShieldCheck className="size-4 shrink-0" />
             <span>Garantía vencida el {warrantyEnd(service.date_out)}</span>
           </div>
         )}
-        <div className="space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           <div className="text-sm text-muted-foreground">
             Orden: <strong>{orderNum}</strong>
           </div>
@@ -1134,7 +1134,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 return (
                   <button key={t} type="button"
                     className={cn(
-                      'rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+                      'rounded-full border px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors',
                       active
                         ? 'bg-primary text-primary-foreground border-primary'
                         : 'bg-background text-muted-foreground border-border hover:border-primary/50 hover:text-foreground'
@@ -1274,7 +1274,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </>
           )}
         </div>
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
           <Button onClick={save} disabled={saving || dayOpen === false || !client || !model || !fault || (needCi && !clientCi.trim())}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : 'Guardar Servicio')}
