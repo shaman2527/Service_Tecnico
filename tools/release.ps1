@@ -32,10 +32,10 @@ if ($dirty) {
 # 2) Subir versión en tauri.conf.json y Cargo.toml
 Step "Bump versión a $Version"
 $conf = Get-Content "src-tauri\tauri.conf.json" -Raw
-$conf = $conf -replace '"version": "\d+\.\d+\.\d+"', "`"version`: `"$Version`""
+$conf = $conf -replace '"version": "\d+\.\d+\.\d+"', '"version": "' + $Version + '"'
 Set-Content "src-tauri\tauri.conf.json" $conf -NoNewline
 $cargo = Get-Content "src-tauri\Cargo.toml" -Raw
-$cargo = $cargo -replace '^version = "\d+\.\d+\.\d+"', "version = `"$Version`""
+$cargo = $cargo -replace '(?m)^version = "\d+\.\d+\.\d+"', 'version = "' + $Version + '"'
 Set-Content "src-tauri\Cargo.toml" $cargo -NoNewline
 
 # 3) Tests
