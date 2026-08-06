@@ -68,7 +68,10 @@ Copy-Item "registro.db" "src-tauri\target\release\registro.db" -Force
 Step "latest.json"
 $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $signature = (Get-Content $sig -Raw).Trim()
-$setupUrl = "https://github.com/shaman2527/Service_Tecnico/releases/download/v$Version/" + [uri]::EscapeDataString((Split-Path $setup -Leaf))
+# GitHub normaliza espacios -> puntos en los nombres de assets al subir (gh release).
+# La URL del manifesto DEBE usar el nombre normalizado o la descarga da 404.
+$setupLeaf = (Split-Path $setup -Leaf) -replace ' ', '.'
+$setupUrl = "https://github.com/shaman2527/Service_Tecnico/releases/download/v$Version/" + [uri]::EscapeDataString($setupLeaf)
 $latest = @{
     version  = $Version
     notes    = $Notes
