@@ -12,9 +12,9 @@ Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servici
 celulares: inventario, ventas, órdenes de reparación, abonos, libro diario con tasa BCV,
 impresora térmica y **actualizaciones automáticas con rollback**.
 
-- **Versión actual:** 0.1.2 (updater con fallback de endpoints + fix crítico: la DB nunca se sobreescribe)
-- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) — en `main`, pusheado
-- **Repo:** https://github.com/shaman2527/Service_Tecnico
+- **Versión actual:** 0.1.3 (publicada en GitHub Releases; updater verificado E2E contra el endpoint real)
+- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) → `cffee34` (v0.1.3 UI fixes) → `f2e12a5` (fix URL normalizada) — en `main`, pusheado
+- **Repo:** https://github.com/shaman2527/Service_Tecnico — **release v0.1.3 publicada** (token OK)
 
 ---
 
@@ -89,8 +89,8 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 
 | # | Pendiente | Por qué | Cómo resolverlo |
 |---|---|---|---|
-| 1 | **`gh auth login` en esta PC** | El token de GitHub está **inválido** (HTTP 401). GitHub estuvo INALCANZABLE toda la mañana (timeout TLS; bcv.org.ve sí) y luego respondió <0.5s (intermitente). | `gh auth login` cuando GitHub responda (o desde hotspot del celular). Una sola vez. |
-| 2 | **Publicar la release v0.1.2** | Sin release, el endpoint `latest.json` da 404 (la app lo maneja silencioso, pero no llegan updates). La versión v0.1.2 ya está firmada y probada (fix DB + fallback). | `.\tools\release.ps1 -Version 0.1.2 -Notes "..."` con red que alcance GitHub (paso 1). Alternativa: subir setup + sig + latest.json manualmente a la release. |
+| 1 | ~~**`gh auth login` en esta PC**~~ | ~~El token de GitHub estaba inválido (HTTP 401)~~ | ✅ **HECHO (2026-08-06):** token permanente guardado en keyring (`gh auth login --with-token`), scopes completos, rate 5000 |
+| 2 | ~~**Publicar la release v0.1.3**~~ | ~~Sin release el endpoint daba 404~~ | ✅ **HECHO (2026-08-06):** `release.ps1 -Version 0.1.3` → setup + .sig + latest.json en GitHub; endpoint `releases/latest/download/latest.json` → 200. **E2E real verificado:** app 0.1.2 detectó 0.1.3, descargó (firma válida), instaló, relanzó y health check → `ok`, kit de rescate generado. **Bug encontrado y fixeado:** GitHub normaliza espacios→puntos en los nombres de assets (`Registro.Servicio.Tecnico_...`) pero `release.ps1` generaba la URL con `%20` → 404 en descarga; fix: `$setupLeaf = (Split-Path $setup -Leaf) -replace ' ', '.'` en release.ps1 |
 | 3 | **Guardar copia de la llave privada** | `C:\Users\ROBER\.tauri\registro.key` — **si se pierde, no se pueden publicar más actualizaciones** (los instaladores ya distribuidos quedarían huérfanos). | Copiarla a un USB/carpeta segura. NO subirla a GitHub ni a la nube pública. |
 | 4 | **Instalar v0.1.2 manualmente en la PC de la tienda** | Es la primera versión con updater: se instala una sola vez a mano (pendrive). De ahí en adelante todo automático. | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
 | 5 | **Activar respaldo Google Drive (opcional)** | Si GitHub estuviera bloqueado en la tienda, los updates no llegarían. Con Drive como 2º endpoint se cubre. | Subir a Drive (público) `latest.json` + el setup (sobrescribir el mismo archivo en cada release — los IDs NO cambian). Crear `tools\drive_ids.json` con los 2 IDs. Agregar el endpoint de Drive en `tauri.conf.json` (`https://drive.usercontent.google.com/download?id=<LATEST_ID>&export=download`) y rebuild. |
@@ -120,9 +120,9 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 
 ### Publicar una versión nueva (cuando haya cambios)
 ```powershell
-gh auth login                                     # una sola vez (P1-1)
-.\tools\release.ps1 -Version 0.1.2 -Notes "Qué cambió"
-# → tests, bump versión, build firmado, latest.json, release en GitHub
+# El token ya está en el keyring (gh auth status → Logged in)
+.\tools\release.ps1 -Version 0.1.4 -Notes "Qué cambió"
+# → tests, bump versión, build firmado, latest.json (URL con puntos, ver fix), release en GitHub
 # → las PCs de la tienda avisan solas al arrancar
 ```
 
