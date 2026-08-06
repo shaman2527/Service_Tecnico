@@ -104,9 +104,22 @@ pub fn get_db_path() -> PathBuf {
     // 1. Check next to executable
     let mut path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     path.pop();
+    let exe_dir = path.clone();
     path.push("registro.db");
     if path.exists() {
         return path;
+    }
+
+    // 1b. Seed DB from template (registro.default.db, instalada por el setup) si no existe.
+    //     El instalador NSIS sobrescribe SIEMPRE sus recursos, por eso la DB real nunca viaja
+    //     como registro.db (se pisaría en reinstalaciones/updates). La plantilla solo se copia
+    //     en el PRIMER arranque: una DB existente del usuario jamás se toca.
+    let template = exe_dir.join("registro.default.db");
+    if template.exists() {
+        std::fs::copy(&template, &path).ok();
+        if path.exists() {
+            return path;
+        }
     }
 
     // 2. Check project root (for development)
@@ -127,8 +140,15 @@ pub fn get_db_path() -> PathBuf {
             let mut src = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
             src.pop();
             src.push("registro.db");
+            let mut copied = false;
             if src.exists() {
-                std::fs::copy(&src, &p).ok();
+                copied = std::fs::copy(&src, &p).is_ok();
+            }
+            if !copied {
+                let tpl = exe_dir.join("registro.default.db");
+                if tpl.exists() {
+                    std::fs::copy(&tpl, &p).ok();
+                }
             }
         }
         return p;

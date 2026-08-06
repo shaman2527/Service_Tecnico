@@ -145,5 +145,12 @@
     "description": "get_technician_stats (TechnicianStat: total, activos, entregados, ingresos; LEFT JOIN technicians, fila 'Sin asignar', snapshot conservado al borrar). Card 'Servicios por Técnico' en Dashboard con círculos de iniciales. Test test_technician_stats. initialsOf movido a lib/utils.ts (fuente única: Services/Clients/Dashboard). Duplicados del catálogo eliminados: 982→980 productos (2 grupos Infinix viejos sin stock/movimientos borrados, conservando los multi-modelo con stock). Verificado en vivo: Aldri $50/1 entregado, William 1 en taller. Suite 26/26.",
     "status": "done",
     "priority": "medium"
+  },
+  {
+    "id": 22,
+    "title": "Updater hardening: DB nunca se sobreescribe + fallback de endpoints (v0.1.2)",
+    "description": "FIX CRÍTICO: el template NSIS de tauri-bundler usa File /a (SetOverwrite on) → el instalador PISABA registro.db (verificado en vivo: hash cambiaba, datos=0). Fix: la DB viaja como plantilla registro.default.db (bundle.resources) y get_db_path() (lib.rs) la copia SOLO si registro.db no existe (primer arranque). Verificado: reinstalación sobre datos → hash DB idéntico; DB borrada → recreada desde plantilla (980 productos). Multi-endpoint: plugins.updater.endpoints es array — el plugin prueba en orden y solo rompe con 2XX+JSON válido (verificado en código tauri-plugin-updater core.rs y E2E: endpoint 1 roto → endpoint 2 local → update encontrado). release.ps1: soporte opcional Google Drive (tools/drive_ids.json → latest_drive.json con URLs estables de drive.usercontent.google.com; sobrescribir archivo = mismo ID). E2E completo v0.1.2: fallback → kit → instalación → relanzamiento → health check ok → estado ok; datos de prueba intactos tras el update. Suite 26/26. Versión 0.1.2.",
+    "status": "done",
+    "priority": "high"
   }
 ]

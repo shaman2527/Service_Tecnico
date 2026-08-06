@@ -196,18 +196,21 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Verificación en vivo: arranque en frío del instalado → gate visible; PIN 1234 → owner; 9999 → rechazado; `get_pin_status` via CDP = true.
 - "Entrar como cajera" salta a Ventas sin Dashboard (role cashier).
 
-### Actualizaciones automáticas (updater + rollback) — F8 2026-08-04
+### Actualizaciones automáticas (updater + rollback) — F8 2026-08-04, hardening 2026-08-05
 - **Plugin oficial:** `tauri-plugin-updater` + `tauri-plugin-process` (relaunch) + permisos `updater:default`/`process:default`. Firma obligatoria: llaves en `~/.tauri/registro.key` (privada, NO se commitea) + pubkey en `tauri.conf.json` (`plugins.updater.pubkey`). Build: `createUpdaterArtifacts: true` → genera `setup.exe.sig`; requiere `$env:TAURI_SIGNING_PRIVATE_KEY` (ruta o contenido). `installMode: "passive"`.
 - **Servidor:** GitHub Releases con `latest.json` estático (endpoint `https://github.com/shaman2527/Service_Tecnico/releases/latest/download/latest.json`). `tools/release.ps1 -Version X.Y.Z -Notes "..."` → tests → bump versión → build firmado → latest.json (version/notes/pub_date/signature/url) → `gh release create` (requiere `gh auth login`).
+- **Multi-endpoint (2026-08-05):** `plugins.updater.endpoints` es un ARRAY — el plugin (tauri-plugin-updater core.rs) prueba los endpoints EN ORDEN y solo rompe el loop con un 2XX + JSON válido (error de red, timeout o status no-2XX → pasa al siguiente). `check({timeout:5000})` aplica por request. E2E verificado en vivo: endpoint 1 roto (connection refused) → endpoint 2 local → update encontrado.
+- **Respaldo Google Drive (opcional, documentado en release.ps1):** si GitHub está bloqueado, `tools/drive_ids.json` (`{"latest_id":..., "setup_id":...}`) + `release.ps1` genera `latest_drive.json` con url `https://drive.usercontent.google.com/download?id=<SETUP_ID>&export=download`. Los IDs de Drive son ESTABLES si se SOBRESCRIBE el archivo (mismo nombre/carpeta) — nunca crear archivos nuevos (ID nuevo → endpoint roto). El endpoint de Drive en tauri.conf.json se rellena cuando el usuario cree el archivo (ver ESTADO.md P1-5).
 - **Flujo (módulo `updates.rs`):**
   1. `backup_before_update` (JS antes de instalar): checkpoint WAL + copia exe → `updates/prev/`, DB → `updates/registro.backup_pre_vX.db`, estado `pending` en `update-state.json` + genera y LANZA `watchdog.ps1` (proceso aparte, 90s).
   2. El updater instala (la app se cierra sola en Windows; el instalador NSIS la relanza — verificado) y la versión nueva corre `run_health_check` al primer arranque (tras PIN): integridad DB + `next_order_num` + `get_active_day` + `get_daily_totals` (+ `get_bcv_rate` como WARNING: el scrape externo puede fallar sin que la app esté rota; la entrada manual es el fallback oficial).
   3. OK → `mark_update_ok` (estado ok) + aviso "Actualizado a vX ✓". FALLA → `rollback_update` restaura `prev/registro.exe` + relanza (estado rolled_back).
   4. **Watchdog** (si la app nueva no arrancó/confirmó en 90s): detecta exe reemplazado + sin proceso corriendo → lanza la app nueva; timeout sin confirmación → restaura prev y lanza. `Try-Launch` con try/catch (un exe roto NO debe matar al watchdog — lesson E2E).
 - **UI:** `UpdateDialog.tsx` (dialog con notas + progreso + "Recordar después" persistido en `localStorage('update_dismissed_v')`), check al arranque (5s timeout, silencio sin internet — offline-first), botón "Revisar actualizaciones" + "Restaurar versión anterior" en Ayuda (via evento `registro:check-update`), versión dinámica con `getVersion()`.
-- **La DB del usuario NUNCA se sobreescribe** (el instalador NSIS solo escribe `registro.db` si no existe); el respaldo DB es último recurso manual.
-- Tests: `updates::tests` (5: kit backup, rollback restaura, rollback sin prev, health check DB fresca, estado roundtrip). Suite 25/25.
-- **E2E verificado en vivo (servidor local + build de prueba):** dialog → kit → descarga → instalación → relanzamiento → PIN → health check → ok + aviso; DB preservada. Update ROTO: exe basura + watchdog → restaura + relanza (2 veces). Regresión final: BCV en vivo 752.09, venta Bs 7520.943 → grand_total 35 exacto, cierre diferencia 0.
+- **La DB del usuario NUNCA se sobreescribe — FIX CRÍTICO 2026-08-05:** el template NSIS de tauri-bundler usa `File /a "/oname=..."` que SOBRESCRIBE SIEMPRE los resources (SetOverwrite on default) — verificado en vivo: reinstalar el setup pisaba registro.db (hash cambiaba, datos = 0). Por eso la DB NO viaja como recurso `registro.db` sino como plantilla **`registro.default.db`** (`bundle.resources: {"../registro.db": "registro.default.db"}`), y el SEED ocurre en `get_db_path()` (lib.rs): si `registro.db` no existe junto al exe y hay `registro.default.db`, se copia — solo en el PRIMER arranque. Reinstalar/actualizar sobre datos NUNCA los toca (verificado: hash idéntico tras reinstalar con datos). La plantilla sí se sobrescribe en cada instalación (inofensivo).
+- Tests: `updates::tests` (5: kit backup, rollback restaura, rollback sin prev, health check DB fresca, estado roundtrip). Suite 26/26.
+- **E2E verificado en vivo (2026-08-05, servidor local + build de prueba):** dialog (fallback endpoint roto→local) → kit → descarga → instalación → relanzamiento → PIN → health check ok (0 issues) → estado ok; **DB con datos de prueba INTACTA tras el update** (1 servicio + 1 cliente + 1 día + 980 productos). Seed de primer arranque: borrando registro.db → la app la recrea desde la plantilla con 980 productos. Reinstalación del setup final sobre datos: hash DB idéntico.
+- **Nota observada en E2E:** el useEffect de App.tsx que corre `mark_update_ok` tras el PIN no siempre completó el flujo en el primer intento (quedó `pending` hasta marcar ok manualmente — inofensivo: en el siguiente arranque el health check corre de nuevo y marca ok; el watchdog expira a los 90s). F8 había verificado el flujo completo con aviso visible.
 
 ## Constraint Checks (Pre-Push / CI)
 
@@ -286,6 +289,8 @@ Antes de hacer commit:
 | 2026-08-04 | **Watchdog muere al lanzar un exe roto**: `Start-Process` de un archivo no ejecutable lanza error TERMINAL en PowerShell → el script salía ANTES de la rama de restauración (update roto = sin rollback). Detectado en E2E: exe basura de 39 bytes + watchdog → tras 90s seguía la basura. | `Try-Launch` (función con `try { Start-Process $curExe -ErrorAction Stop } catch {}`) para TODOS los lanzamientos; la restauración con `Copy-Item -ErrorAction SilentlyContinue`. Verificado en vivo: exe roto → watchdog restaura (16,448,000 bytes) y relanza la app. |
 | 2026-08-04 | **El relanzamiento tras actualizar NO lo hace el JS**: `downloadAndInstall` mata el proceso en Windows antes de que `relaunch()` corra (el instalador NSIS de Tauri relanza la app por su cuenta — verificado). El `relaunch()` JS solo aplica en rollback (proceso vivo). | Diseño por capas: el instalador relanza en el flujo normal; el watchdog lanza la app nueva si detecta instalación (exe con mtime > respaldo) y nadie la corrió; timeout → restaura prev. E2E: flujo completo llegó a health check + ok sin intervención. |
 | 2026-08-04 | **`localStorage('update_dismissed_v')` persistía entre E2E**: la versión descartada en una prueba bloqueaba el dialog en la siguiente instalación (silencio confuso). | Comportamiento por diseño (no molestar con la versión que el usuario descartó); para pruebas limpias borrar la clave o reinstalar limpio. Documentado en esta entrada. |
+| 2026-08-05 | **El instalador NSIS SOBRESCRIBE la DB del usuario — CRÍTICO**: tauri-bundler template usa `File /a "/oname=registro.db"` (SetOverwrite on default). Verificado en vivo: reinstalar el setup 0.1.2 sobre una instalación con datos de prueba → registro.db pisada por la DB embebida limpia (hash cambió, servicios=0). AGENTS.md decía "solo escribe si no existe" — FALSO. El flujo del updater (corre el mismo setup) habría borrado TODO el histórico de la tienda. | Fix: la DB NO viaja como recurso `registro.db` sino como plantilla `registro.default.db` (`bundle.resources: {"../registro.db": "registro.default.db"}`); `get_db_path()` (lib.rs) copia la plantilla SOLO si `registro.db` no existe (primer arranque). Verificado E2E: reinstalación sobre datos → hash idéntico; DB borrada → recreada desde plantilla con 980 productos. |
+| 2026-08-05 | **GitHub inaccesible desde esta PC (intermitente)**: a las ~08:50 TLS handshake timeout contra github.com y api.github.com (posible bloqueo del ISP; bcv.org.ve sí respondía) → `gh auth login` imposible, release sin publicar. Horas después GitHub responde 200/404 en <0.5s (3/3 intentos). | No fix en código: el updater ya es silencioso offline (timeout 5s) y con el multi-endpoint se puede añadir un respaldo (Google Drive documentado en release.ps1). Publicar releases desde una red que alcance GitHub (hotspot). |
 
 ## Feedback Loops
 
@@ -301,8 +306,8 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-05
-- **Build: ✅ PASS (16.1s)**
+- **Date:** 2026-08-06
+- **Build: ✅ PASS (18.8s)**
 - **Errors:** 0
 - **Warnings:** 0
 

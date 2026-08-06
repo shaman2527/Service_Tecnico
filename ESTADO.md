@@ -1,4 +1,4 @@
-# 📋 Registro — Estado del Proyecto (2026-08-04)
+# 📋 Registro — Estado del Proyecto (2026-08-05)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
@@ -12,8 +12,8 @@ Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servici
 celulares: inventario, ventas, órdenes de reparación, abonos, libro diario con tasa BCV,
 impresora térmica y **actualizaciones automáticas con rollback**.
 
-- **Versión actual:** 0.1.1 (con sistema de actualizaciones incluido)
-- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) — en `main`, pusheado
+- **Versión actual:** 0.1.2 (updater con fallback de endpoints + fix crítico: la DB nunca se sobreescribe)
+- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) — en `main`, pusheado
 - **Repo:** https://github.com/shaman2527/Service_Tecnico
 
 ---
@@ -77,6 +77,9 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 | Venta diaria (build final) | venta Bs 7.520,943 → `grand_total 35` exacto, cierre diferencia 0 |
 | Gate PIN arranque en frío (instalado) | pide PIN antes de abrir ✅ |
 | Instalador /S + desinstalación | DB limpia instalada, 982 productos, uninstall limpio ✅ |
+| **E2E multi-endpoint (2026-08-05)** | endpoint 1 roto (connection refused) → endpoint 2 local → dialog "0.1.3" apareció → kit → instalación → relanzamiento → health check ok → estado ok. **DB con datos de prueba INTACTA** (1 servicio + 1 cliente + 1 día + 980 productos) |
+| **Fix DB nunca se sobreescribe (2026-08-05)** | reinstalación del setup sobre datos → **hash DB idéntico**; DB borrada → recreada desde `registro.default.db` (980 productos). **Antes: el instalador pisaba la DB (crítico)** |
+| Reinstalación build final 0.1.2 sobre instalación con datos | hash DB idéntico, servicio de prueba visible, día abierto con tasa 748.79 ✅ (datos QA limpiados después) |
 
 ---
 
@@ -86,10 +89,11 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 
 | # | Pendiente | Por qué | Cómo resolverlo |
 |---|---|---|---|
-| 1 | **`gh auth login` en esta PC** | El token de GitHub está **inválido** (HTTP 401). Además **github.com y api.github.com NO responden desde esta PC** (timeout TLS — probable bloqueo del ISP; bcv.org.ve sí funciona). | En esta PC: `gh auth login` cuando el acceso a GitHub funcione (o desde otro punto de red, ej. hotspot del celular). Una sola vez. |
-| 2 | **Publicar la release v0.1.1** | Sin release en GitHub, el endpoint `latest.json` da 404 (la app lo maneja silencioso, pero no llegan updates). | `.\tools\release.ps1 -Version 0.1.1 -Notes "..."` con red que alcance GitHub (paso 1). Alternativa: subir los assets (setup + sig + latest.json) manualmente desde otra red. |
+| 1 | **`gh auth login` en esta PC** | El token de GitHub está **inválido** (HTTP 401). GitHub estuvo INALCANZABLE toda la mañana (timeout TLS; bcv.org.ve sí) y luego respondió <0.5s (intermitente). | `gh auth login` cuando GitHub responda (o desde hotspot del celular). Una sola vez. |
+| 2 | **Publicar la release v0.1.2** | Sin release, el endpoint `latest.json` da 404 (la app lo maneja silencioso, pero no llegan updates). La versión v0.1.2 ya está firmada y probada (fix DB + fallback). | `.\tools\release.ps1 -Version 0.1.2 -Notes "..."` con red que alcance GitHub (paso 1). Alternativa: subir setup + sig + latest.json manualmente a la release. |
 | 3 | **Guardar copia de la llave privada** | `C:\Users\ROBER\.tauri\registro.key` — **si se pierde, no se pueden publicar más actualizaciones** (los instaladores ya distribuidos quedarían huérfanos). | Copiarla a un USB/carpeta segura. NO subirla a GitHub ni a la nube pública. |
-| 4 | **Instalar v0.1.1 manualmente en la PC de la tienda** | Es la primera versión con updater: se instala una sola vez a mano (pendrive). De ahí en adelante todo automático. | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
+| 4 | **Instalar v0.1.2 manualmente en la PC de la tienda** | Es la primera versión con updater: se instala una sola vez a mano (pendrive). De ahí en adelante todo automático. | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
+| 5 | **Activar respaldo Google Drive (opcional)** | Si GitHub estuviera bloqueado en la tienda, los updates no llegarían. Con Drive como 2º endpoint se cubre. | Subir a Drive (público) `latest.json` + el setup (sobrescribir el mismo archivo en cada release — los IDs NO cambian). Crear `tools\drive_ids.json` con los 2 IDs. Agregar el endpoint de Drive en `tauri.conf.json` (`https://drive.usercontent.google.com/download?id=<LATEST_ID>&export=download`) y rebuild. |
 
 ### P2 — Importantes (verificar en la tienda)
 
@@ -108,7 +112,7 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 | 10 | ~~Duplicados del catálogo~~ | ✅ **HECHO (2026-08-05):** 982→980 productos, 0 grupos duplicados (2 Infinix viejos sin stock/movimientos eliminados) |
 | 11 | Sincronización multiusuario en la nube | Fuera de alcance v1: el respaldo es copiar `registro.db` |
 | 12 | Notificación de actualización tipo toast de Windows | Hoy es aviso in-app (suficiente); se puede añadir `tauri-plugin-notification` |
-| 13 | Prueba de actualización real contra GitHub | Bloqueada mientras GitHub no sea alcanzable desde esta PC (P1-1/P1-2) |
+| 13 | Prueba de actualización real contra GitHub | En curso: GitHub volvió a responder (intermitente). Probar tras publicar la release v0.1.2 (P1-2). |
 
 ---
 

@@ -1,9 +1,14 @@
-# release.ps1 — Publica una versión nueva: build firmado + latest.json + GitHub Release.
+# release.ps1 — Publica una versión nueva: build firmado + latest.json + GitHub Release + respaldo Google Drive.
 # Uso: .\tools\release.ps1 -Version 0.1.2 -Notes "Fix X, mejora Y"
 # Requisitos: gh auth login (una vez) + llave privada en C:\Users\$env:USERNAME\.tauri\registro.key
+# Drive (opcional, respaldo si GitHub está bloqueado): tools\drive_ids.json con
+#   { "latest_id": "<FILE_ID del latest.json en Drive>", "setup_id": "<FILE_ID del setup.exe en Drive>" }
+#   Los FILE_ID NUNCA cambian si se re-suben los archivos SOBRE los mismos (cambiar contenido, no crear archivos nuevos).
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [string]$Notes = "Mejoras y correcciones"
+    [string]$Notes = "Mejoras y correcciones",
+    [string]$DriveLatestId = "",
+    [string]$DriveSetupId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,14 +84,50 @@ Set-Content "src-tauri\target\release\bundle\nsis\latest.json" $latest -Encoding
 Write-Host "Manifesto:" -ForegroundColor Green
 $latest
 
-# 7) Copiar a instaladores\ (pendrive)
+# 7) Manifesto Drive (respaldo si GitHub está bloqueado — endpoint 2 del updater)
+Step "latest_drive.json (Google Drive)"
+$driveConfig = "tools\drive_ids.json"
+if (-not $DriveLatestId -and (Test-Path $driveConfig)) {
+    $ids = Get-Content $driveConfig -Raw | ConvertFrom-Json
+    $DriveLatestId = $ids.latest_id
+    $DriveSetupId = $ids.setup_id
+}
+if ($DriveLatestId -and $DriveSetupId) {
+    $setupUrlDrive = "https://drive.usercontent.google.com/download?id=$DriveSetupId&export=download"
+    $latestDrive = @{
+        version   = $Version
+        notes     = $Notes
+        pub_date  = $pubDate
+        platforms = @{
+            "windows-x86_64" = @{
+                signature = $signature
+                url       = $setupUrlDrive
+            }
+        }
+    } | ConvertTo-Json -Depth 5
+    Set-Content "src-tauri\target\release\bundle\nsis\latest_drive.json" $latestDrive -Encoding utf8
+    Write-Host "Manifesto Drive:" -ForegroundColor Green
+    $latestDrive
+    Write-Host "SUBIR a Drive (SOBRESCRIBIENDO los archivos existentes, mismo nombre y misma carpeta):" -ForegroundColor Yellow
+    Write-Host "  1. Sube 'latest_drive.json' sobre el latest.json de Drive (reemplazar)" -ForegroundColor Yellow
+    Write-Host "  2. Sube '$([IO.Path]::GetFileName($setup))' sobre el setup de Drive (reemplazar)" -ForegroundColor Yellow
+    Write-Host "  (Los enlaces de descarga NO cambian: los IDs de archivo son estables.)" -ForegroundColor Yellow
+} else {
+    Write-Host "Drive no configurado (opcional). Para activarlo:" -ForegroundColor Yellow
+    Write-Host "  1. Sube una vez a Drive: latest.json + setup.exe (públicos, cualquiera con el enlace)" -ForegroundColor Yellow
+    Write-Host "  2. Crea tools\drive_ids.json: { `"latest_id`": `"<ID del latest.json>`", `"setup_id`": `"<ID del setup.exe>`" }" -ForegroundColor Yellow
+    Write-Host "  (IDs de enlace: https://drive.google.com/file/d/<ID>/view)" -ForegroundColor Yellow
+}
+
+# 8) Copiar a instaladores\ (pendrive)
 Step "Carpeta instaladores"
 $instDir = "instaladores"
 New-Item -ItemType Directory -Force -Path $instDir | Out-Null
 Copy-Item $setup $instDir -Force
 Copy-Item "src-tauri\target\release\bundle\nsis\latest.json" $instDir -Force
+if (Test-Path "src-tauri\target\release\bundle\nsis\latest_drive.json") { Copy-Item "src-tauri\target\release\bundle\nsis\latest_drive.json" $instDir -Force }
 
-# 8) GitHub Release (solo si gh está autenticado)
+# 9) GitHub Release (solo si gh está autenticado)
 Step "GitHub Release v$Version"
 gh auth status 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) {
@@ -103,3 +144,4 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host "`nLISTO. Instalador en: instaladores\Registro Servicio Tecnico_${Version}_x64-setup.exe" -ForegroundColor Green
+Write-Host "Recordatorio: si GitHub está bloqueado, sube latest_drive.json y el setup a Drive (misma carpeta, reemplazar archivos)." -ForegroundColor Green

@@ -1,10 +1,10 @@
-# 📦 Registro v0.1.1 — Instalación en una PC nueva
+# 📦 Registro v0.1.2 — Instalación en una PC nueva
 
 Copia esta carpeta completa a un **pendrive** y llévala a la PC del cliente.
 
 ## 1. Instalar (2 minutos)
 
-1. Doble clic en **`Registro Servicio Tecnico_0.1.1_x64-setup.exe`**.
+1. Doble clic en **`Registro Servicio Tecnico_0.1.2_x64-setup.exe`**.
 2. Si Windows muestra "Protegió su PC" (SmartScreen): clic en **"Más información" → "Ejecutar de todos modos"** (es nuestra app, firmada con el sistema de actualizaciones).
 3. Se instala solo en `%LOCALAPPDATA%\Registro Servicio Tecnico\`. **No pide drivers ni internet**: el WebView2 (motor de la ventana) viaja embebido en el instalador — si la PC lo necesita, se instala automáticamente durante el proceso.
 
@@ -17,8 +17,9 @@ Copia esta carpeta completa a un **pendrive** y llévala a la PC del cliente.
 
 ## 3. Sus datos
 
-- Toda la información vive en **`registro.db`** (junto al exe instalado): productos (982), clientes, ventas, servicios, cierres, PIN y configuración de impresora.
-- **Respaldo:** copiar ese archivo (con la app cerrada). El instalador NUNCA borra una base de datos existente.
+- Toda la información vive en **`registro.db`** (junto al exe instalado): productos (980), clientes, ventas, servicios, cierres, PIN y configuración de impresora.
+- **Respaldo:** copiar ese archivo (con la app cerrada).
+- **El instalador NUNCA borra ni sobreescribe una base de datos existente** (verificado en pruebas): el catálogo inicial viaja como plantilla `registro.default.db` y solo se copia en el PRIMER arranque si `registro.db` no existe. Reinstalar o actualizar nunca toca tus datos.
 
 ## 4. Actualizaciones (automáticas)
 
@@ -32,5 +33,5 @@ Copia esta carpeta completa a un **pendrive** y llévala a la PC del cliente.
 
 | Archivo | Qué es |
 |---|---|
-| `Registro Servicio Tecnico_0.1.1_x64-setup.exe` | Instalador completo (con catálogo + PIN inicial + WebView2 embebido) |
+| `Registro Servicio Tecnico_0.1.2_x64-setup.exe` | Instalador completo (con catálogo + PIN inicial + WebView2 embebido) |
 | `INSTALACION.md` | Esta guía |

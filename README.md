@@ -213,9 +213,9 @@ registro/
 ### Instalación en la tienda
 
 1. Copiar la carpeta `instaladores\` (setup + guía) a un pendrive.
-2. Ejecutar `Registro Servicio Tecnico_0.1.1_x64-setup.exe` (SmartScreen → "Más información → Ejecutar de todos modos"). **WebView2 embebido**: no necesita drivers ni internet.
+2. Ejecutar `Registro Servicio Tecnico_0.1.2_x64-setup.exe` (SmartScreen → "Más información → Ejecutar de todos modos"). **WebView2 embebido**: no necesita drivers ni internet.
 3. Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe
-   (no sobreescribe una DB existente).
+   (el catálogo inicial viaja como plantilla `registro.default.db` y solo se copia en el primer arranque — reinstalar/actualizar **nunca** toca la DB existente, verificado).
 4. PIN inicial `1234` → cambiarlo en Libro Diario → PIN.
 5. Abrir el día (efectivo inicial + Auto BCV) y configurar la impresora (Servicio Técnico → Impresora → Detectar).
 

@@ -14,7 +14,9 @@
 //!    ni reportó), restaura prev/registro.exe y lanza la versión anterior.
 //!
 //! La DB del usuario NUNCA se sobreescribe en el flujo normal (el instalador NSIS solo
-//! escribe registro.db si no existe); el respaldo de la DB existe como último recurso
+//! escribe registro.db si no existe — ver NOTA: el instalador NSIS sobrescribe SIEMPRE sus
+//! resources; por eso la DB viaja como plantilla registro.default.db y el seed ocurre en
+//! get_db_path (lib.rs) solo si registro.db no existe. El respaldo de la DB existe como último recurso
 //! para una restauración manual.
 
 use serde::{Deserialize, Serialize};
