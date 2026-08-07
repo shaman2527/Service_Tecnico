@@ -12,9 +12,9 @@ Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servici
 celulares: inventario, ventas, órdenes de reparación, abonos, libro diario con tasa BCV,
 impresora térmica y **actualizaciones automáticas con rollback**.
 
-- **Versión actual:** 0.1.3 (publicada en GitHub Releases; updater verificado E2E contra el endpoint real)
-- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) → `cffee34` (v0.1.3 UI fixes) → `f2e12a5` (fix URL normalizada) — en `main`, pusheado
-- **Repo:** https://github.com/shaman2527/Service_Tecnico — **release v0.1.3 publicada** (token OK)
+- **Versión actual:** 0.1.4 (publicada en GitHub Releases; "Ver más tarde" descarga en segundo plano + aviso al reiniciar)
+- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) → `cffee34` (v0.1.3 UI fixes) → `fee012c` (v0.1.4 ver-más-tarde) — en `main`, pusheado
+- **Repo:** https://github.com/shaman2527/Service_Tecnico — **PUBLICO** (se descartó privado: GitHub no sirve assets de releases privadas sin auth; el updater no lleva token) — release v0.1.4 publicada (token OK)
 
 ---
 
@@ -92,7 +92,7 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 | 1 | ~~**`gh auth login` en esta PC**~~ | ~~El token de GitHub estaba inválido (HTTP 401)~~ | ✅ **HECHO (2026-08-06):** token permanente guardado en keyring (`gh auth login --with-token`), scopes completos, rate 5000 |
 | 2 | ~~**Publicar la release v0.1.3**~~ | ~~Sin release el endpoint daba 404~~ | ✅ **HECHO (2026-08-06):** `release.ps1 -Version 0.1.3` → setup + .sig + latest.json en GitHub; endpoint `releases/latest/download/latest.json` → 200. **E2E real verificado:** app 0.1.2 detectó 0.1.3, descargó (firma válida), instaló, relanzó y health check → `ok`, kit de rescate generado. **Bug encontrado y fixeado:** GitHub normaliza espacios→puntos en los nombres de assets (`Registro.Servicio.Tecnico_...`) pero `release.ps1` generaba la URL con `%20` → 404 en descarga; fix: `$setupLeaf = (Split-Path $setup -Leaf) -replace ' ', '.'` en release.ps1 |
 | 3 | **Guardar copia de la llave privada** | `C:\Users\ROBER\.tauri\registro.key` — **si se pierde, no se pueden publicar más actualizaciones** (los instaladores ya distribuidos quedarían huérfanos). | Copiarla a un USB/carpeta segura. NO subirla a GitHub ni a la nube pública. |
-| 4 | **Instalar v0.1.2 manualmente en la PC de la tienda** | Es la primera versión con updater: se instala una sola vez a mano (pendrive). De ahí en adelante todo automático. | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
+| 4 | **Instalar v0.1.4 manualmente en la PC de la tienda** | La otra PC (cliente) debe tener la app instalada al menos con updater funcional. De ahí en adelante todo automático (la v0.1.4 ya trae "Ver más tarde" con descarga en segundo plano). | Copiar `instaladores\` al pendrive → ejecutar el setup → seguir `INSTALACION.md` (cambiar PIN 1234, abrir día, impresora). |
 | 5 | **Activar respaldo Google Drive (opcional)** | Si GitHub estuviera bloqueado en la tienda, los updates no llegarían. Con Drive como 2º endpoint se cubre. | Subir a Drive (público) `latest.json` + el setup (sobrescribir el mismo archivo en cada release — los IDs NO cambian). Crear `tools\drive_ids.json` con los 2 IDs. Agregar el endpoint de Drive en `tauri.conf.json` (`https://drive.usercontent.google.com/download?id=<LATEST_ID>&export=download`) y rebuild. |
 
 ### P2 — Importantes (verificar en la tienda)
