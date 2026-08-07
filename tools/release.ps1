@@ -71,9 +71,8 @@ $signature = (Get-Content $sig -Raw).Trim()
 # GitHub normaliza espacios -> puntos en los nombres de assets al subir (gh release).
 # La URL del manifesto DEBE usar el nombre normalizado o la descarga da 404.
 $setupLeaf = (Split-Path $setup -Leaf) -replace ' ', '.'
-# Canal de actualizaciones = repo PUBLICO de releases (el repo de código es PRIVADO;
-# GitHub no sirve assets de repos privados sin auth, el updater no lleva token).
-$releaseRepo = "shaman2527/Service_Tecnico-Releases"
+# Canal de actualizaciones = repo PUBLICO de código (los clientes ya apuntan ahí).
+$releaseRepo = "shaman2527/Service_Tecnico"
 $setupUrl = "https://github.com/$releaseRepo/releases/download/v$Version/" + [uri]::EscapeDataString($setupLeaf)
 $latest = @{
     version  = $Version

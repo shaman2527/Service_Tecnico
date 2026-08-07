@@ -310,8 +310,8 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-06
-- **Build: ✅ PASS (14.0s)**
+- **Date:** 2026-08-07
+- **Build: ✅ PASS (25.1s)**
 - **Errors:** 0
 - **Warnings:** 0
 

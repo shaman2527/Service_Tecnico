@@ -1,6 +1,6 @@
 [package]
 name = "registro"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Sistema de Registro para Servicio Técnico"
 authors = ["Roberth Silva"]
