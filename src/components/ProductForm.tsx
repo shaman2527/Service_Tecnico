@@ -58,6 +58,13 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{product ? `Editar: ${product.name}` : 'Nuevo Producto'}</DialogTitle>
+          <div className="text-xs text-muted-foreground">
+            {product
+              ? product.created_at
+                ? <>Agregado el <strong>{product.created_at.slice(0, 10)}</strong> — la fecha se guarda automáticamente al crear.</>
+                : 'Producto sin fecha de registro (migrado antes de esta versión).'
+              : <>Se guardará con la fecha de hoy (automática).</>}
+          </div>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-4">

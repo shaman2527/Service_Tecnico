@@ -269,6 +269,42 @@ const sections = [
       </div>
     ),
   },
+  {
+    value: 'actualizaciones',
+    icon: RefreshCw,
+    title: 'Actualizaciones y versiones',
+    color: 'text-sky-600',
+    bg: 'bg-sky-50',
+    content: (
+      <div className="space-y-3">
+        <div>
+          <p className="font-medium text-foreground">¿Cuándo se revisa si hay una versión nueva?</p>
+          <p>Al <span className="font-medium text-foreground">abrir la aplicación</span> (solo una vez al arrancar, en silencio) o pulsando <Badge variant="outline">Revisar actualizaciones</Badge> aquí arriba. No hay avisos en segundo plano: si la app ya está abierta desde antes, reiníciala para revisar.</p>
+        </div>
+        <div>
+          <p className="font-medium text-foreground">¿Por qué a veces no llega la actualización?</p>
+          <p>Se necesitan tres cosas: (1) que exista una <span className="font-medium text-foreground">versión publicada</span> más nueva (se publica desde la PC del desarrollo, no desde la tienda); (2) <span className="font-medium text-foreground">internet que alcance GitHub</span> (si GitHub está bloqueado no llega; hay respaldo opcional por Google Drive); y (3) abrir la app. Si ya tienes la última versión publicada, el botón dirá "Ya tienes la última versión".</p>
+        </div>
+        <div>
+          <p className="font-medium text-foreground">¿Qué pasa al instalar?</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Se hace un <span className="font-medium text-foreground">respaldo automático</span> de la base de datos y de la versión actual.</li>
+            <li>Se descarga e instala; la app se cierra y <span className="font-medium text-foreground">vuelve a abrir sola</span>.</li>
+            <li>Al arrancar, la versión nueva <span className="font-medium text-foreground">verifica la base de datos</span>; si algo fallara, restaura la versión anterior automáticamente.</li>
+          </ol>
+          <p className="text-xs text-muted-foreground">Tus datos (registro.db) y el PIN nunca se tocan en una actualización.</p>
+        </div>
+        <div>
+          <p className="font-medium text-foreground">"Ver más tarde"</p>
+          <p>Descarga la actualización en segundo plano y, la próxima vez que abras la app, te recuerda que ya está lista para instalar.</p>
+        </div>
+        <div>
+          <p className="font-medium text-foreground">¿Volver a una versión anterior?</p>
+          <p>Usa <Badge variant="outline">Restaurar versión anterior</Badge> (disponible si existe un respaldo previo). Se restaura el programa, no tus datos.</p>
+        </div>
+      </div>
+    ),
+  },
 ];
 
 const quickActions = [

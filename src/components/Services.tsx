@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,7 +16,7 @@ import PaymentDialog from './PaymentDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician } from '../types';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
@@ -262,6 +262,31 @@ export default function Services() {
   // Lista visible: la cargada por backend (búsqueda + estado) filtrada por tipo client-side
   const visibleServices = typeFilter ? services.filter(s => parseServiceTypes(s).includes(typeFilter)) : services;
 
+  // Órdenes multi-equipo: los equipos con group_id se renderizan juntos bajo un banner de orden
+  type GroupItem =
+    | { type: 'group'; groupId: string; services: Service[] }
+    | { type: 'single'; service: Service };
+  const groupItems: GroupItem[] = useMemo(() => {
+    const groups = new Map<string, Service[]>();
+    const singles: GroupItem[] = [];
+    for (const s of visibleServices) {
+      if (s.group_id) {
+        const arr = groups.get(s.group_id) ?? [];
+        arr.push(s);
+        groups.set(s.group_id, arr);
+      } else {
+        singles.push({ type: 'single', service: s });
+      }
+    }
+    const grouped: GroupItem[] = [...groups.entries()].map(([groupId, svcs]) => ({
+      type: 'group', groupId, services: svcs,
+    }));
+    const maxId = (i: GroupItem) => i.type === 'group'
+      ? Math.max(...i.services.map(s => s.id))
+      : i.service.id;
+    return [...grouped, ...singles].sort((a, b) => maxId(b) - maxId(a));
+  }, [visibleServices]);
+
   const statusBadgeVariant = (status: string | null) => {
     switch (status) {
       case 'Entregado': return 'default' as const;
@@ -269,6 +294,172 @@ export default function Services() {
       case 'Cancelado / Devuelto': return 'destructive' as const;
       default: return 'outline' as const;
     }
+  };
+
+  // Tarjeta de un equipo (o de una orden individual). En órdenes multi-equipo muestra
+  // "Equipo X/Y" con el número de la orden; los pagos/abonos son POR EQUIPO.
+  const renderServiceCard = (s: Service, groupId: string | null, pos: number, count: number) => {
+    const balance = s.amount - s.paid_amount;
+    const checklist = parseChecklist(s.device_checklist);
+    const hasChecklist = Object.keys(checklist).length > 0;
+    const entregado = s.status === 'Entregado';
+    const porEntregar = s.status === 'Por entregar';
+    const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
+    return (
+      <Card key={s.id} className={cn(
+        'overflow-hidden transition-shadow hover:shadow-md',
+        entregado && 'border-emerald-500/40 bg-emerald-500/5',
+        porEntregar && 'border-amber-500/40 bg-amber-500/5'
+      )}>
+        <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            {groupId ? (
+              <span className="text-sm font-bold flex items-center gap-1.5 flex-wrap">
+                {groupId}
+                <span className="rounded-full bg-primary/10 text-primary px-1.5 py-0.5 text-[10px] font-bold">
+                  Equipo {pos}/{count}
+                </span>
+              </span>
+            ) : (
+              <span className="text-sm font-bold">{s.order_num}</span>
+            )}
+            {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
+            {porEntregar && <Clock className="size-4 text-amber-500" />}
+            <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
+            {techById(s.technician_id) ? (
+              <span title={`${techById(s.technician_id)!.name} — técnico`}
+                className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', techById(s.technician_id)!.color)}>
+                {techById(s.technician_id)!.initials}
+              </span>
+            ) : s.technician ? (
+              <span title={`${s.technician} — técnico`}
+                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[10px] font-bold text-white">
+                {initialsOf(s.technician)}
+              </span>
+            ) : null}
+          </div>
+          <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
+        </CardHeader>
+        <CardContent className="px-4 pb-4 pt-0">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start gap-2.5">
+              <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-primary/10 text-primary shrink-0">
+                <User className="size-3.5" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-medium leading-tight truncate">{s.client ?? '-'}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {[s.phone, s.client_ci].filter(Boolean).join(' · ') || '—'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2.5">
+              <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-muted text-muted-foreground shrink-0">
+                <Smartphone className="size-3.5" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-medium leading-tight truncate">{s.model ?? '-'}</p>
+                <p className="text-xs text-muted-foreground line-clamp-2">{s.fault ?? '-'}</p>
+              </div>
+            </div>
+
+            <div className="rounded-md bg-muted/50 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
+                {balance <= 0.005 ? (
+                  <Badge variant="outline" className="text-success">Cancelado</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-danger">${balance.toFixed(2)} pendiente</Badge>
+                )}
+              </div>
+              <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
+                <span className="truncate">
+                  {s.payment_method ?? '-'}
+                  {isMovilOrZelle(s.payment_method) && s.zelle_reference && (
+                    <span className="text-[11px] text-muted-foreground"> · ref ····{s.zelle_reference.slice(-4)}</span>
+                  )}
+                </span>
+                {s.paid_amount > 0 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap gap-1.5">
+                {parseServiceTypes(s).map(t => (
+                  <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
+                ))}
+                {warr === 'activa' && (
+                  <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10 whitespace-nowrap">
+                    Garantía hasta {warrantyEnd(s.date_out)}
+                  </Badge>
+                )}
+                {warr === 'vencida' && (
+                  <Badge variant="outline" className="text-xs text-muted-foreground whitespace-nowrap">
+                    Garantía vencida
+                  </Badge>
+                )}
+                {s.date_out && (
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                    <CalendarDays className="size-3" /> {s.date_out.slice(0, 10)}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5 border-t pt-3">
+                {ACTIVE_STATUSES.includes(s.status ?? '') && (
+                  <Button size="sm" variant="outline" className="flex-1 text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
+                    disabled={delivering?.id === s.id}
+                    onClick={() => {
+                      // Confirmar solo si el cliente no pagó la totalidad
+                      if (s.amount - s.paid_amount > 0.005) setConfirmDeliver(s);
+                      else deliver(s);
+                    }}>
+                    <CheckCircle2 className="size-3.5" /> {delivering?.id === s.id ? 'Entregando...' : 'Entregar'}
+                  </Button>
+                )}
+                <Button size="sm" className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+                  onClick={() => setPayFor(s)}>
+                  <Banknote className="size-3.5" /> Pago / Abono
+                </Button>
+                {hasChecklist && (
+                  <TooltipProvider delayDuration={100}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="ghost" size="icon" className="text-emerald-600"
+                          onClick={() => { setEditing(s); setShowForm(true); }}>
+                          <ShieldCheck className="size-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <div className="text-xs space-y-1">
+                          <div className="font-medium">{checklistSummary(s.device_checklist)}</div>
+                          {Object.entries(checklist).map(([k, v]) => {
+                            const item = CHECKLIST_ITEMS.find(i => i.key === k);
+                            if (!item || !v) return null;
+                            return <div key={k}>{item.label}: {v === 'si' ? 'Sí' : 'No'}</div>;
+                          })}
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                <Button variant="outline" size="sm" className="flex-1" title="Imprimir factura"
+                  onClick={() => setPrintFor(s)}>
+                  <Printer className="size-3.5" /> Factura
+                </Button>
+                <Button variant="outline" size="sm" className="flex-1" onClick={() => { setEditing(s); setShowForm(true); }}>
+                  Editar
+                </Button>
+                <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger"
+                  onClick={() => setDeleting(s)}>
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
   };
 
   return (
@@ -368,159 +559,35 @@ export default function Services() {
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-4">
-          {visibleServices.map(s => {
-            const balance = s.amount - s.paid_amount;
-            const checklist = parseChecklist(s.device_checklist);
-            const hasChecklist = Object.keys(checklist).length > 0;
-            const entregado = s.status === 'Entregado';
-            const porEntregar = s.status === 'Por entregar';
-            const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
-            return (
-              <Card key={s.id} className={cn(
-                'overflow-hidden transition-shadow hover:shadow-md',
-                entregado && 'border-emerald-500/40 bg-emerald-500/5',
-                porEntregar && 'border-amber-500/40 bg-amber-500/5'
-              )}>
-                <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold">{s.order_num}</span>
-                    {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
-                    {porEntregar && <Clock className="size-4 text-amber-500" />}
-                    <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
-                    {techById(s.technician_id) ? (
-                      <span title={`${techById(s.technician_id)!.name} — técnico`}
-                        className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', techById(s.technician_id)!.color)}>
-                        {techById(s.technician_id)!.initials}
-                      </span>
-                    ) : s.technician ? (
-                      <span title={`${s.technician} — técnico`}
-                        className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[10px] font-bold text-white">
-                        {initialsOf(s.technician)}
-                      </span>
-                    ) : null}
+          {groupItems.map(item => {
+            if (item.type === 'group') {
+              const svcs = item.services;
+              const total = svcs.reduce((a, s) => a + s.amount, 0);
+              const abonado = svcs.reduce((a, s) => a + s.paid_amount, 0);
+              const saldo = total - abonado;
+              return (
+                <Fragment key={`g-${item.groupId}`}>
+                  <div className="col-span-full rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <span className="text-sm font-bold flex items-center gap-1.5">
+                      <Smartphone className="size-4 text-primary" /> Orden {item.groupId}
+                    </span>
+                    <span className="rounded-full bg-primary/10 text-primary px-1.5 py-0.5 text-[10px] font-bold">
+                      {svcs.length} equipos
+                    </span>
+                    <span className="text-xs text-muted-foreground truncate max-w-[200px]">{svcs[0]?.client ?? '-'}</span>
+                    <span className="text-xs font-semibold">Total ${total.toFixed(2)}</span>
+                    <span className={cn('text-xs font-semibold', saldo <= 0.005 ? 'text-success' : 'text-danger')}>
+                      {saldo <= 0.005 ? 'Cancelado' : `Abonado $${abonado.toFixed(2)} · Saldo $${saldo.toFixed(2)}`}
+                    </span>
+                    <span className="ml-auto text-[11px] text-muted-foreground hidden lg:block">
+                      Cada equipo se paga y entrega por separado
+                    </span>
                   </div>
-                  <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
-                </CardHeader>
-                <CardContent className="px-4 pb-4 pt-0">
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-start gap-2.5">
-                      <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-primary/10 text-primary shrink-0">
-                        <User className="size-3.5" />
-                      </span>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium leading-tight truncate">{s.client ?? '-'}</p>
-                        <p className="text-xs text-muted-foreground truncate">
-                          {[s.phone, s.client_ci].filter(Boolean).join(' · ') || '—'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-start gap-2.5">
-                      <span className="mt-0.5 flex items-center justify-center size-7 rounded-md bg-muted text-muted-foreground shrink-0">
-                        <Smartphone className="size-3.5" />
-                      </span>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium leading-tight truncate">{s.model ?? '-'}</p>
-                        <p className="text-xs text-muted-foreground line-clamp-2">{s.fault ?? '-'}</p>
-                      </div>
-                    </div>
-
-                    <div className="rounded-md bg-muted/50 px-3 py-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
-                        {balance <= 0.005 ? (
-                          <Badge variant="outline" className="text-success">Cancelado</Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-danger">${balance.toFixed(2)} pendiente</Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
-                        <span className="truncate">
-                          {s.payment_method ?? '-'}
-                          {isMovilOrZelle(s.payment_method) && s.zelle_reference && (
-                            <span className="text-[11px] text-muted-foreground"> · ref ····{s.zelle_reference.slice(-4)}</span>
-                          )}
-                        </span>
-                        {s.paid_amount > 0 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col gap-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {parseServiceTypes(s).map(t => (
-                          <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
-                        ))}
-                        {warr === 'activa' && (
-                          <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10 whitespace-nowrap">
-                            Garantía hasta {warrantyEnd(s.date_out)}
-                          </Badge>
-                        )}
-                        {warr === 'vencida' && (
-                          <Badge variant="outline" className="text-xs text-muted-foreground whitespace-nowrap">
-                            Garantía vencida
-                          </Badge>
-                        )}
-                        {s.date_out && (
-                          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
-                            <CalendarDays className="size-3" /> {s.date_out.slice(0, 10)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-1.5 border-t pt-3">
-                        {ACTIVE_STATUSES.includes(s.status ?? '') && (
-                          <Button size="sm" variant="outline" className="flex-1 text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
-                            disabled={delivering?.id === s.id}
-                            onClick={() => {
-                              // Confirmar solo si el cliente no pagó la totalidad
-                              if (s.amount - s.paid_amount > 0.005) setConfirmDeliver(s);
-                              else deliver(s);
-                            }}>
-                            <CheckCircle2 className="size-3.5" /> {delivering?.id === s.id ? 'Entregando...' : 'Entregar'}
-                          </Button>
-                        )}
-                        <Button size="sm" className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
-                          onClick={() => setPayFor(s)}>
-                          <Banknote className="size-3.5" /> Pago / Abono
-                        </Button>
-                        {hasChecklist && (
-                          <TooltipProvider delayDuration={100}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button variant="ghost" size="icon" className="text-emerald-600"
-                                  onClick={() => { setEditing(s); setShowForm(true); }}>
-                                  <ShieldCheck className="size-4" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <div className="text-xs space-y-1">
-                                  <div className="font-medium">{checklistSummary(s.device_checklist)}</div>
-                                  {Object.entries(checklist).map(([k, v]) => {
-                                    const item = CHECKLIST_ITEMS.find(i => i.key === k);
-                                    if (!item || !v) return null;
-                                    return <div key={k}>{item.label}: {v === 'si' ? 'Sí' : 'No'}</div>;
-                                  })}
-                                </div>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
-                        )}
-                        <Button variant="outline" size="sm" className="flex-1" title="Imprimir factura"
-                          onClick={() => setPrintFor(s)}>
-                          <Printer className="size-3.5" /> Factura
-                        </Button>
-                        <Button variant="outline" size="sm" className="flex-1" onClick={() => { setEditing(s); setShowForm(true); }}>
-                          Editar
-                        </Button>
-                        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger"
-                          onClick={() => setDeleting(s)}>
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            );
+                  {svcs.map((s, i) => renderServiceCard(s, item.groupId, i + 1, svcs.length))}
+                </Fragment>
+              );
+            }
+            return renderServiceCard(item.service, null, 0, 0);
           })}
         </div>
       )}
@@ -596,6 +663,262 @@ export default function Services() {
   );
 }
 
+interface FormDevice {
+  model: string;
+  fault: string;
+  serviceTypes: string[];
+  otherFault: string;
+  amount: number;
+  payment: string;
+  bankFeePercent: number;
+  zelleReference: string;
+  checklist: Record<string, string>;
+  amountTouched: boolean;
+  modelPicked: boolean;
+}
+
+function emptyDevice(): FormDevice {
+  return {
+    model: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
+    payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: {},
+    amountTouched: false, modelPicked: false,
+  };
+}
+
+// Un equipo dentro de una orden multi-equipo (solo modo crear):
+// modelo (con sugerencias), monto, trabajos/fallas, blindaje colapsable y finanzas propias.
+function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove, canRemove }: {
+  device: FormDevice;
+  onChange: (patch: Partial<FormDevice>) => void;
+  phoneModels: PhoneModelEntry[];
+  methods: { id: number; name: string }[];
+  index: number;
+  onRemove: () => void;
+  canRemove: boolean;
+}) {
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelSuggestions, setModelSuggestions] = useState<PhoneModelEntry[]>([]);
+  const [showChecklist, setShowChecklist] = useState(false);
+
+  const isPos = device.payment.includes('Punto');
+  const isZelle = device.payment.includes('Zelle');
+  const isPagoMovil = device.payment.includes('Móvil') || device.payment.includes('Movil');
+
+  useEffect(() => {
+    const q = normPhoneModel(device.model);
+    if (q.length >= 1 && phoneModels.length > 0) {
+      const filtered = phoneModels
+        .filter(e => e.norm.includes(q) || e.products.some(p =>
+          normPhoneModel([p.brand ?? '', p.model ?? '', p.name].join(' ')).includes(q)))
+        .slice(0, 10);
+      setModelSuggestions(filtered);
+      setModelOpen(filtered.length > 0 && !device.modelPicked);
+    } else {
+      setModelSuggestions([]);
+      setModelOpen(false);
+    }
+  }, [device.model, phoneModels]);
+
+  const selectModel = (sugg: PhoneModelEntry) => {
+    onChange({ model: sugg.label, modelPicked: true });
+    const prices = new Set(sugg.products.map(p => p.price_sale));
+    if (!device.amountTouched && prices.size === 1) onChange({ amount: [...prices][0] });
+    setModelOpen(false);
+  };
+
+  return (
+    <div className="rounded-xl border border-border/70 p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-semibold flex items-center gap-2">
+          <Smartphone className="size-4 text-primary" /> Equipo {index + 1}
+        </p>
+        <Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
+          onClick={onRemove} disabled={!canRemove}>
+          <Trash2 className="size-3.5" /> Quitar
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Modelo *</label>
+          <Input value={device.model}
+            onChange={e => { onChange({ model: e.target.value, modelPicked: false }); }}
+            placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)..." />
+          {modelOpen && modelSuggestions.length > 0 && (
+            <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
+              {modelSuggestions.map(sugg => (
+                <button key={sugg.norm} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
+                  onClick={() => selectModel(sugg)}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">{sugg.label}</span>
+                    <span className="text-muted-foreground text-xs shrink-0">
+                      {sugg.products.length} repuesto{sugg.products.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  {sugg.products.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {sugg.products.slice(0, 8).map(p => (
+                        <span key={p.id} className={cn(
+                          'text-[11px] px-1.5 py-0.5 rounded-md',
+                          p.stock <= 0 ? 'bg-danger/10 text-danger' : 'bg-muted text-muted-foreground'
+                        )}>
+                          {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`}
+                        </span>
+                      ))}
+                      {sugg.products.length > 8 && (
+                        <span className="text-[11px] text-muted-foreground">+{sugg.products.length - 8}</span>
+                      )}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Monto ($)</label>
+          <Input type="number" step={0.01} min={0} value={device.amount}
+            onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-sm font-medium">
+          Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {SERVICE_TYPES.map(t => {
+            const active = device.serviceTypes.includes(t);
+            return (
+              <button key={t} type="button"
+                className={cn(
+                  'rounded-full border px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors',
+                  active
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'bg-background text-muted-foreground border-border hover:border-primary/50 hover:text-foreground'
+                )}
+                onClick={() => onChange({
+                  serviceTypes: active ? device.serviceTypes.filter(x => x !== t) : [...device.serviceTypes, t]
+                })}>
+                {active && <Check className="size-3 inline mr-1" />}
+                {t}
+              </button>
+            );
+          })}
+        </div>
+        {device.serviceTypes.length === 0 && (
+          <p className="text-xs text-danger">Elige al menos un trabajo o falla</p>
+        )}
+        {device.serviceTypes.includes('Otro') && (
+          <Input value={device.otherFault} onChange={e => onChange({ otherFault: e.target.value })}
+            placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
+        <Textarea value={device.fault} onChange={e => onChange({ fault: e.target.value })}
+          placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
+      </div>
+
+      <div className="space-y-2">
+        <Button type="button" variant="outline" size="sm" className="w-full"
+          onClick={() => setShowChecklist(v => !v)}>
+          <ShieldCheck className="size-3.5" /> Blindaje del equipo
+          <span className="text-muted-foreground text-xs">
+            {Object.values(device.checklist).filter(v => v === 'si' || v === 'no').length}/10
+          </span>
+        </Button>
+        {showChecklist && (
+          <div className="rounded-md border border-border/60 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-muted-foreground">
+                Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
+              </p>
+              <Button type="button" size="sm" variant="outline" className="shrink-0"
+                onClick={() => onChange({ checklist: Object.fromEntries(CHECKLIST_ITEMS.map(i => [i.key, 'si'])) })}
+                disabled={CHECKLIST_ITEMS.every(i => device.checklist[i.key] === 'si')}>
+                Marcar todo Sí
+              </Button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {CHECKLIST_ITEMS.map(item => {
+                const val = device.checklist[item.key] ?? '';
+                return (
+                  <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
+                    <span className="text-sm">{item.label}</span>
+                    <ToggleGroup type="single" size="sm" value={val}
+                      onValueChange={v => onChange({ checklist: { ...device.checklist, [item.key]: v } })}
+                      className="shrink-0">
+                      <ToggleGroupItem value="si" variant="outline"
+                        className={cn('min-w-12 data-[state=on]:bg-emerald-600 data-[state=on]:text-white data-[state=on]:hover:bg-emerald-600',
+                          val === 'si' ? 'bg-emerald-600 text-white hover:bg-emerald-600' : '')}>
+                        Sí
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="no" variant="outline"
+                        className={cn('min-w-12 data-[state=on]:bg-destructive data-[state=on]:text-white data-[state=on]:hover:bg-destructive',
+                          val === 'no' ? 'bg-destructive text-white hover:bg-destructive' : '')}>
+                        No
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Método de Pago</label>
+          <Select value={device.payment} onValueChange={v => {
+            const patch: Partial<FormDevice> = { payment: v };
+            if (v.includes('Punto')) patch.bankFeePercent = 3.5;
+            onChange(patch);
+          }}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {methods.map(m => (
+                <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        {isPos && (
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Comisión Punto (%)</label>
+            <Input type="number" step={0.1} min={0} max={100} value={device.bankFeePercent}
+              onChange={e => onChange({ bankFeePercent: Number(e.target.value) })} />
+            <p className="text-xs text-muted-foreground">
+              Comisión: ${((device.amount * device.bankFeePercent) / 100).toFixed(2)} · Neto: ${(device.amount - (device.amount * device.bankFeePercent) / 100).toFixed(2)}
+            </p>
+          </div>
+        )}
+        {!isPos && (
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Moneda</label>
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
+              <span className="font-semibold">{currencySymbol(methodCurrency(device.payment))}</span>
+              <span className="text-muted-foreground text-xs">
+                {methodCurrency(device.payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {(isZelle || isPagoMovil) && (
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Referencia</label>
+          <Input value={device.zelleReference} onChange={e => onChange({ zelleReference: e.target.value })}
+            placeholder="Número de referencia (últimos 4 dígitos)..." />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   service: Service | null;
   statuses: ServiceStatus[];
@@ -643,6 +966,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techSel, setTechSel] = useState('');
   const [showTechDialog, setShowTechDialog] = useState(false);
+  // Órdenes multi-equipo (solo modo crear): un cliente, N teléfonos en una sola orden
+  const [devices, setDevices] = useState<FormDevice[]>([emptyDevice()]);
+  const setDevice = (i: number, patch: Partial<FormDevice>) =>
+    setDevices(prev => prev.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
+  const addDevice = () => setDevices(prev => [...prev, emptyDevice()]);
+  const removeDevice = (i: number) =>
+    setDevices(prev => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
+  const devicesValid = devices.length > 0 &&
+    devices.every(d => d.model.trim() && d.fault.trim() && d.serviceTypes.length > 0);
 
   // Tipo PRIMARIO = el primero elegido (compatibilidad con service_type y auto-inventario)
   const serviceType = serviceTypes[0] ?? 'Cambio pantalla';
@@ -798,14 +1130,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const needCi = !service && !clientId;
 
   const save = async () => {
-    if (!client || !model || !fault || serviceTypes.length === 0) return;
+    if (service) {
+      if (!client || !model || !fault || serviceTypes.length === 0) return;
+    } else if (!client || !devicesValid) return;
     setSaving(true);
     try {
-      const checklistJson = JSON.stringify(checklist);
-      // El texto de "Otro" se guarda como trabajo propio (badge propio en la orden)
-      const typesArr = [...serviceTypes];
-      if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
-      const serviceTypesJson = JSON.stringify(typesArr);
       let cid = clientId;
       if (client && !cid) {
         cid = await api.addOrFindClient(client, phone, clientCi, clientAddress);
@@ -814,9 +1143,33 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       const techId = currentTech?.id ?? null;
       if (techId) localStorage.setItem('last_technician', String(techId));
       if (service) {
+        const checklistJson = JSON.stringify(checklist);
+        // El texto de "Otro" se guarda como trabajo propio (badge propio en la orden)
+        const typesArr = [...serviceTypes];
+        if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
+        const serviceTypesJson = JSON.stringify(typesArr);
         await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId);
       } else {
-        await api.addService(orderNum, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, cid, techName, techId);
+        const inputs: ServiceDeviceInput[] = devices.map(d => {
+          const typesArr = [...d.serviceTypes];
+          if (d.serviceTypes.includes('Otro') && d.otherFault.trim()) typesArr.push(d.otherFault.trim());
+          return {
+            model: d.model,
+            fault: d.fault,
+            service_type: d.serviceTypes[0] ?? 'Cambio pantalla',
+            service_types: JSON.stringify(typesArr),
+            amount: d.amount,
+            payment_method: d.payment,
+            observations: '',
+            bank_fee_percent: d.bankFeePercent,
+            zelle_reference: d.zelleReference,
+            currency: methodCurrency(d.payment),
+            device_checklist: JSON.stringify(d.checklist),
+          };
+        });
+        // addServiceOrder es transaccional y asigna los números: equipo 1 = base, 2+ = base-B/C...
+        // (1 solo equipo → sin group_id, exactamente como antes)
+        await api.addServiceOrder(client, phone, clientCi, clientAddress, cid, techName, techId, inputs);
       }
       onSaved();
     } finally {
@@ -1080,6 +1433,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           )}
 
+          {service ? (
+            <>
           <SectionTitle step={2} title="Equipo y diagnóstico" />
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -1259,6 +1614,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 placeholder="Número de referencia (últimos 4 dígitos)..." />
             </div>
           )}
+            </>
+          ) : (
+            <>
+              <SectionTitle step={2} title={`Equipos (${devices.length})`} />
+              <div className="space-y-3">
+                {devices.map((d, i) => (
+                  <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
+                    phoneModels={phoneModels} methods={methods} index={i}
+                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} />
+                ))}
+              </div>
+              <Button type="button" variant="outline" onClick={addDevice} disabled={devices.length >= 10}>
+                <Plus className="size-4" /> Agregar otro equipo
+              </Button>
+              {devices.length > 1 && (
+                <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
+                  {devices.length} equipos se guardan bajo una sola orden. Cada equipo tiene su propio
+                  monto, pagos y entrega — el cliente puede pagar o abonar cada teléfono por separado.
+                </p>
+              )}
+            </>
+          )}
 
           {service && (
             <>
@@ -1276,8 +1653,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving || dayOpen === false || !client || !model || !fault || (needCi && !clientCi.trim())}>
-            {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : 'Guardar Servicio')}
+          <Button onClick={save} disabled={saving || dayOpen === false || !client || (service ? (!model || !fault) : !devicesValid) || (needCi && !clientCi.trim())}>
+            {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -106,13 +106,14 @@ export default function Inventory() {
                     <TableHead className="text-right">Venta</TableHead>
                     <TableHead className="text-right">Stock</TableHead>
                     <TableHead className="text-right">Stock Mín</TableHead>
+                    <TableHead>Agregado</TableHead>
                     <TableHead className="w-24"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {products.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
                         Sin productos registrados
                       </TableCell>
                     </TableRow>
@@ -154,6 +155,9 @@ export default function Inventory() {
                           </span>
                         </TableCell>
                         <TableCell className="text-right">{p.min_stock}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                          {p.created_at ? p.created_at.slice(0, 10) : '—'}
+                        </TableCell>
                         <TableCell>
                           <div className="flex gap-1">
                             <Button variant="outline" size="sm"

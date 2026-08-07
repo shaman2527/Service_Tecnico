@@ -97,6 +97,15 @@ pub fn add_service(db: State<Database>, order_num: String, client: String, phone
         .map_err(|e| e.to_string())
 }
 
+// Orden multi-equipo: un cliente trae N teléfonos → una orden con group_id compartido (transaccional)
+#[tauri::command]
+pub fn add_service_order(db: State<Database>, client: String, phone: String, client_ci: String, client_address: String,
+                         client_id: Option<i64>, technician: String, technician_id: Option<i64>,
+                         devices: Vec<crate::db::ServiceDeviceInput>) -> Result<String, String> {
+    db.add_service_order(&client, &phone, &client_ci, &client_address, client_id, &technician, technician_id, &devices)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_service(db: State<Database>, id: i64, client: String, phone: String, model: String, fault: String,
                       service_type: String, service_types: String, amount: f64, payment_method: String, date_out: String, status: String, observations: String,

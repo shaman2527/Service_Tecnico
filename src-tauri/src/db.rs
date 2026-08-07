@@ -113,6 +113,23 @@ pub struct Service {
     pub paid_amount: f64,
     pub technician_id: Option<i64>,
     pub technician: Option<String>,
+    pub group_id: Option<String>,
+}
+
+// Un equipo dentro de una orden multi-equipo (add_service_order)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ServiceDeviceInput {
+    pub model: String,
+    pub fault: String,
+    pub service_type: String,
+    pub service_types: String,
+    pub amount: f64,
+    pub payment_method: String,
+    pub observations: String,
+    pub bank_fee_percent: f64,
+    pub zelle_reference: String,
+    pub currency: String,
+    pub device_checklist: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -635,6 +652,11 @@ impl Database {
         if !has_paid_amount {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN paid_amount REAL DEFAULT 0;");
         }
+        // Migration: órdenes multi-equipo (un cliente trae varios teléfonos → filas con group_id compartido)
+        let has_group_id: bool = conn.prepare("SELECT group_id FROM services LIMIT 1").is_ok();
+        if !has_group_id {
+            let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN group_id TEXT;");
+        }
         // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
         // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
         if conn.prepare("SELECT id FROM service_payments LIMIT 1").is_ok() {
@@ -795,12 +817,19 @@ impl Database {
 
     pub fn next_order_num(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
+        Self::next_order_num_on(&conn)
+    }
+
+    // Cálculo conn-level (reutilizable sin re-lock: patrón deadlock de open_day).
+    fn next_order_num_on(conn: &rusqlite::Connection) -> SqlResult<String> {
         // Monótono e idempotente: MAX del número existente + 1 (borrar no reutiliza).
         // El PREFIJO y el ancho se derivan del último número guardado ("DEV-0001" -> "DEV-0002",
         // "ORD-1023" -> "ORD-1024") — antes estaba fijo a 'ORD-%' y un back con prefijo distinto
         // hacía MAX=NULL <- error "Invalid column type Null" (r.get(0) se infiere i64, no Option).
+        // Órdenes multi-equipo: las filas grupales tienen group_id NOT NULL y order_num con sufijo
+        // ("DEV-0001-B"), se excluyen de la derivación (un sufijo deformaría el ancho del número).
         let last: Option<String> = conn
-            .query_row("SELECT order_num FROM services ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT order_num FROM services WHERE group_id IS NULL ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
             .optional()?;
         let (prefix, width): (String, usize) = match &last {
             Some(s) => {
@@ -1057,15 +1086,62 @@ impl Database {
                        bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                        client_ci: &str, client_address: &str, device_checklist: &str,
                        client_id: Option<i64>, technician: &str, technician_id: Option<i64>) -> SqlResult<i64> {
-        let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
-        let net_amount = amount - bank_fee_amount;
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
+        Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id)
+    }
+
+    // Insert transaccional conn-level (sin lock: lo comparte add_service y add_service_order).
+    // group_id: None = orden de un solo equipo (compatible con datos viejos).
+    fn insert_service_row(conn: &rusqlite::Connection, order_num: &str, group_id: Option<&str>,
+                          client: &str, phone: &str, model: &str,
+                          fault: &str, service_type: &str, service_types: &str, amount: f64, payment_method: &str, observations: &str,
+                          bank_fee_percent: f64, zelle_reference: &str, currency: &str,
+                          client_ci: &str, client_address: &str, device_checklist: &str,
+                          client_id: Option<i64>, technician: &str, technician_id: Option<i64>) -> SqlResult<i64> {
+        let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
+        let net_amount = amount - bank_fee_amount;
         conn.execute(
-            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21)",
-            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id],
+            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22)",
+            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    // Orden multi-equipo: un cliente, N teléfonos, UNA orden (mismo group_id).
+    // Transaccional: si un equipo falla, NO se guarda ninguno.
+    // Números: equipo 1 = base ("DEV-0001"), equipos 2+ = base + sufijo ("DEV-0001-B", ...).
+    pub fn add_service_order(&self, client: &str, phone: &str, client_ci: &str, client_address: &str,
+                             client_id: Option<i64>, technician: &str, technician_id: Option<i64>,
+                             devices: &[ServiceDeviceInput]) -> SqlResult<String> {
+        if devices.is_empty() {
+            return Err(day_shift_error("Debe agregar al menos un equipo."));
+        }
+        for (i, d) in devices.iter().enumerate() {
+            if d.model.trim().is_empty() || d.fault.trim().is_empty() {
+                return Err(day_shift_error(&format!("Equipo {}: el modelo y la falla son obligatorios.", i + 1)));
+            }
+        }
+        let conn = self.conn.lock().unwrap();
+        self.require_open_day(&conn)?;
+        let tx = conn.unchecked_transaction()?;
+        let base = Self::next_order_num_on(&tx)?;
+        let group_id = if devices.len() > 1 { Some(base.as_str()) } else { None };
+        for (i, d) in devices.iter().enumerate() {
+            let order_num = if i == 0 {
+                base.clone()
+            } else {
+                let suffix = char::from(b'A' + (i - 1) as u8);
+                format!("{}-{}", base, suffix)
+            };
+            Self::insert_service_row(&tx, &order_num, group_id, client, phone, &d.model, &d.fault,
+                                     &d.service_type, &d.service_types, d.amount, &d.payment_method, &d.observations,
+                                     d.bank_fee_percent, &d.zelle_reference, &d.currency,
+                                     client_ci, client_address, &d.device_checklist,
+                                     client_id, technician, technician_id)?;
+        }
+        tx.commit()?;
+        Ok(base)
     }
 
     pub fn update_service(&self, id: i64, client: &str, phone: &str, model: &str, fault: &str,
@@ -1378,7 +1454,7 @@ impl Database {
 
     pub fn get_services(&self, search: &str, status: &str, start_date: &str, end_date: &str) -> SqlResult<Vec<Service>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id FROM services s WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -1424,6 +1500,7 @@ impl Database {
                 paid_amount: r.get(23).unwrap_or(0.0),
                 technician_id: r.get(24).unwrap_or(None),
                 technician: r.get(25).unwrap_or(None),
+                group_id: r.get(26).unwrap_or(None),
             })
         })?;
         let mut services = Vec::new();
@@ -1434,7 +1511,7 @@ impl Database {
     pub fn get_service_by_id(&self, id: i64) -> SqlResult<Option<Service>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.id=?1",
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id FROM services s WHERE s.id=?1",
             params![id],
             |r| Ok(Service {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
@@ -1455,6 +1532,7 @@ impl Database {
                 paid_amount: r.get(23).unwrap_or(0.0),
                 technician_id: r.get(24).unwrap_or(None),
                 technician: r.get(25).unwrap_or(None),
+                group_id: r.get(26).unwrap_or(None),
             }),
         ).optional()?;
         Ok(row)
@@ -1802,7 +1880,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Try by client_id first, fallback to name match
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Service {
@@ -1824,6 +1902,7 @@ impl Database {
                 paid_amount: r.get(23).unwrap_or(0.0),
                 technician_id: r.get(24).unwrap_or(None),
                 technician: r.get(25).unwrap_or(None),
+                group_id: r.get(26).unwrap_or(None),
             })
         })?;
         let mut services = Vec::new();
@@ -1837,7 +1916,7 @@ impl Database {
         ).ok();
         if let Some(ref name) = client_name {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
+                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
             )?;
             let rows = stmt.query_map(params![name], |r| {
                 Ok(Service {
@@ -1859,6 +1938,7 @@ impl Database {
                 paid_amount: r.get(23).unwrap_or(0.0),
                 technician_id: r.get(24).unwrap_or(None),
                 technician: r.get(25).unwrap_or(None),
+                group_id: r.get(26).unwrap_or(None),
             })
         })?;
             let mut services = Vec::new();
@@ -3733,6 +3813,85 @@ mod tests {
         assert!(sid > 0);
         let n2 = db.next_order_num().unwrap();
         assert_eq!(n2, "DEV-0002", "Debe continuar monotónicamente");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_add_service_order_batch() {
+        // Orden multi-equipo: 3 teléfonos → 3 filas, mismo group_id, números DEV-0001/B/C.
+        let test_path = PathBuf::from("test_add_service_order_batch.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let dev = |model: &str, fault: &str, amount: f64| ServiceDeviceInput {
+            model: model.into(), fault: fault.into(), service_type: "Cambio pantalla".into(),
+            service_types: "[\"Cambio pantalla\"]".into(), amount, payment_method: "Divisas (USD Cash)".into(),
+            observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
+            currency: "USD".into(), device_checklist: String::new(),
+        };
+        let base = db.add_service_order("Cliente 1", "0412-1", "V-1", "Dir", None, "", None,
+            &[dev("Samsung A15", "Pantalla rota", 50.0), dev("Tecno SPARK 10", "No carga", 30.0), dev("Apple 11 PRO", "Sin señal", 40.0)]).unwrap();
+        assert_eq!(base, "DEV-0001", "La orden devuelve el número base");
+        let svcs = db.get_services("", "", "", "").unwrap();
+        assert_eq!(svcs.len(), 3, "3 equipos → 3 filas de servicio");
+        let nums: Vec<&str> = svcs.iter().map(|s| s.order_num.as_deref().unwrap()).collect();
+        assert_eq!(nums, vec!["DEV-0001-B", "DEV-0001-A", "DEV-0001"], "Números: base + sufijos por equipo");
+        assert!(svcs.iter().all(|s| s.group_id.as_deref() == Some("DEV-0001")), "Todas las filas comparten group_id");
+        assert_eq!(svcs.iter().map(|s| s.amount).sum::<f64>(), 120.0, "Total de la orden = suma de equipos");
+        assert_eq!(db.next_order_num().unwrap(), "DEV-0002", "El siguiente número ignora las filas grupales");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_add_service_order_single_device_no_group() {
+        // 1 solo equipo → SIN group_id (compatible con órdenes viejas y next_order_num)
+        let test_path = PathBuf::from("test_add_service_order_single.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let d = ServiceDeviceInput {
+            model: "Samsung A15".into(), fault: "Rota".into(), service_type: "Cambio pantalla".into(),
+            service_types: "[\"Cambio pantalla\"]".into(), amount: 10.0, payment_method: "Efectivo Bs".into(),
+            observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
+            currency: "VES".into(), device_checklist: String::new(),
+        };
+        let base = db.add_service_order("Cliente", "0412", "", "", None, "", None, &[d]).unwrap();
+        assert_eq!(base, "DEV-0001");
+        let svcs = db.get_services("", "", "", "").unwrap();
+        assert_eq!(svcs.len(), 1);
+        assert!(svcs[0].group_id.is_none(), "Un solo equipo no forma grupo");
+        assert_eq!(svcs[0].amount, 10.0);
+        assert_eq!(db.next_order_num().unwrap(), "DEV-0002");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_add_service_order_rollback_and_validation() {
+        let test_path = PathBuf::from("test_add_service_order_rollback.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let d = ServiceDeviceInput {
+            model: "Samsung A15".into(), fault: "Rota".into(), service_type: "Cambio pantalla".into(),
+            service_types: "[\"Cambio pantalla\"]".into(), amount: 10.0, payment_method: "Efectivo Bs".into(),
+            observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
+            currency: "VES".into(), device_checklist: String::new(),
+        };
+        // Sin día abierto → error de negocio (gate require_open_day)
+        let err = db.add_service_order("C", "1", "", "", None, "", None, &[d.clone()]).unwrap_err();
+        assert!(err.to_string().contains("Debe abrir el día"));
+        // Sin equipos → error sin tocar la DB
+        let err2 = db.add_service_order("C", "1", "", "", None, "", None, &[]).unwrap_err();
+        assert!(err2.to_string().contains("al menos un equipo"));
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        // Equipo 2 con falla vacía → rollback TOTAL (ninguna fila queda)
+        let bad = ServiceDeviceInput { fault: String::new(), ..d.clone() };
+        let err3 = db.add_service_order("C", "1", "", "", None, "", None, &[d.clone(), bad]).unwrap_err();
+        assert!(err3.to_string().contains("Equipo 2"), "El error indica qué equipo falló");
+        assert_eq!(db.get_services("", "", "", "").unwrap().len(), 0, "Rollback: no queda ninguna fila");
+        assert_eq!(db.next_order_num().unwrap(), "DEV-0001", "Los números no se consumen al hacer rollback");
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

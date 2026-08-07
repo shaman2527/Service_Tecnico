@@ -99,6 +99,21 @@ export interface Service {
   paid_amount: number;
   technician_id: number | null;
   technician: string | null;
+  group_id: string | null;
+}
+
+export interface ServiceDeviceInput {
+  model: string;
+  fault: string;
+  service_type: string;
+  service_types: string;
+  amount: number;
+  payment_method: string;
+  observations: string;
+  bank_fee_percent: number;
+  zelle_reference: string;
+  currency: string;
+  device_checklist: string;
 }
 
 export interface Technician {

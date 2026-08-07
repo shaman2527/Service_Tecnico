@@ -2,7 +2,8 @@ import type {
   Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
-  Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport
+  Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
+  ServiceDeviceInput
 } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -98,6 +99,11 @@ export const api = {
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
     clientId: number | null = null, technician: string = '', technicianId: number | null = null) =>
     tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId }),
+
+  addServiceOrder: (client: string, phone: string, clientCi: string, clientAddress: string,
+    clientId: number | null, technician: string, technicianId: number | null,
+    devices: ServiceDeviceInput[]) =>
+    tauriInvoke<string>('add_service_order', { client, phone, clientCi, clientAddress, clientId, technician, technicianId, devices }),
 
   updateService: (id: number, client: string, phone: string, model: string, fault: string,
     serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,

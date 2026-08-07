@@ -39,6 +39,7 @@ pub fn run() {
             commands::get_sales,
             commands::get_sales_stats,
             commands::add_service,
+            commands::add_service_order,
             commands::update_service,
             commands::delete_service,
             commands::get_services,
@@ -204,3 +205,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 111740
 // force rebuild 113608
 // force rebuild 120224
+// force rebuild: Help docs

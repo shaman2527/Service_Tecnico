@@ -314,7 +314,14 @@ function ServiceRow({ s, expanded, payments, techs, onToggle }: {
         <TableCell className="w-8">
           {expanded ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
         </TableCell>
-        <TableCell className="font-medium">{s.order_num}</TableCell>
+        <TableCell className="font-medium">
+          {s.order_num}
+          {s.group_id && (
+            <span className="ml-1.5 rounded-full bg-primary/10 text-primary px-1.5 py-0.5 text-[9px] font-bold align-middle">
+              {s.group_id}
+            </span>
+          )}
+        </TableCell>
         <TableCell>{s.date_in ?? '-'}</TableCell>
         <TableCell>
           <span className="flex items-center gap-1.5">
