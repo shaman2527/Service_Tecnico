@@ -137,6 +137,141 @@ pub fn list_com_ports() -> Result<Vec<ComPortInfo>, String> {
     Ok(out)
 }
 
+// ============================================================================
+// Impresión vía Windows Print Spooler (impresoras instaladas como "driver",
+// ej. HPRT MPT-II en USB001, POS-58, etc.). Sin dependencias: FFI directo a
+// winspool.drv (patrón curl.exe/reg.exe del proyecto).
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+mod winspool {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    #[repr(C)]
+    struct DocInfo1W {
+        p_doc_name: *mut u16,
+        p_output_file: *mut u16,
+        p_datatype: *mut u16,
+    }
+
+    #[link(name = "winspool")]
+    extern "system" {
+        fn OpenPrinterW(
+            p_printer_name: *const u16,
+            ph_printer: *mut *mut c_void,
+            p_default: *const c_void,
+        ) -> i32;
+        fn ClosePrinter(h_printer: *mut c_void) -> i32;
+        fn StartDocPrinterW(h_printer: *mut c_void, level: u32, p_doc_info: *const DocInfo1W) -> i32;
+        fn StartPagePrinter(h_printer: *mut c_void) -> i32;
+        fn WritePrinter(
+            h_printer: *mut c_void,
+            p_buf: *const u8,
+            cb_buf: u32,
+            pc_written: *mut u32,
+        ) -> i32;
+        fn EndPagePrinter(h_printer: *mut c_void) -> i32;
+        fn EndDocPrinter(h_printer: *mut c_void) -> i32;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Lista los nombres de impresoras instaladas (spooler de Windows).
+    /// Se usa powershell.exe Get-CimInstance (patrón curl.exe/reg.exe del
+    /// proyecto): EnumPrintersW devolvía structs inestables (crash 0xc0000005
+    /// en esta PC — lección Entropy Registry 2026-08-11) y el FFI no es fiable
+    /// entre builds de Windows. Get-CimInstance viene con Windows 10+.
+    pub fn list_printers() -> Vec<String> {
+        let out = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Printer | ForEach-Object { $_.Name }",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Envía bytes crudos (datatype RAW) a una impresora del spooler de Windows.
+    /// No pasa por el driver de renderizado: el spooler escribe directo al puerto,
+    /// ideal para ESC/POS (impresoras térmicas).
+    pub fn print_raw(printer: &str, bytes: &[u8]) -> Result<(), String> {
+        let name = wide(printer);
+        let doc_name = wide("Registro - Ticket");
+        let datatype = wide("RAW");
+        let mut h: *mut c_void = ptr::null_mut();
+        unsafe {
+            if OpenPrinterW(name.as_ptr(), &mut h, ptr::null()) == 0 {
+                return Err(format!(
+                    "No se pudo abrir la impresora de Windows \"{printer}\". Revisa que esté instalada y encendida."
+                ));
+            }
+            let doc = DocInfo1W {
+                p_doc_name: doc_name.as_ptr() as *mut u16,
+                p_output_file: ptr::null_mut(),
+                p_datatype: datatype.as_ptr() as *mut u16,
+            };
+            if StartDocPrinterW(h, 1, &doc) == 0 {
+                ClosePrinter(h);
+                return Err(format!("No se pudo iniciar el trabajo de impresión en \"{printer}\"."));
+            }
+            let mut written: u32 = 0;
+            let ok_page = StartPagePrinter(h) != 0;
+            let ok_write = ok_page && WritePrinter(h, bytes.as_ptr(), bytes.len() as u32, &mut written) != 0;
+            if ok_write {
+                EndPagePrinter(h);
+            }
+            EndDocPrinter(h);
+            ClosePrinter(h);
+            if !ok_write {
+                return Err(format!(
+                    "Error al escribir en \"{printer}\" (enviados {written} de {} bytes). Verifica que la impresora esté conectada y encendida.",
+                    bytes.len()
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod winspool {
+    pub fn list_printers() -> Vec<String> {
+        Vec::new()
+    }
+    pub fn print_raw(printer: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err(format!("Impresión a Windows no disponible en esta plataforma ({printer})"))
+    }
+}
+
+/// Lista las impresoras instaladas en Windows (spooler): las que aparecen en
+/// Configuración → Dispositivos → Impresoras. Ej: "HPRT MPT-II", "POS-58".
+pub fn list_windows_printers() -> Result<Vec<String>, String> {
+    Ok(winspool::list_printers())
+}
+
+/// Imprime un ticket ESC/POS a una impresora de Windows (spooler, datatype RAW).
+/// Ideal para impresoras instaladas con driver oficial (ej. HPRT MPT-II en USB001).
+pub fn print_to_windows_printer(printer: &str, text: &str) -> Result<(), String> {
+    if printer.trim().is_empty() {
+        return Err("No hay impresora de Windows seleccionada.".to_string());
+    }
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let bytes = build_escpos(&lines);
+    winspool::print_raw(printer, &bytes)
+}
+
 /// Codifica texto a CP850 (Latin-1 extendido) — el set de caracteres estándar que
 /// entienden las impresoras térmicas ESC/POS para acentos y ñ. Caracteres no
 /// mapeables caen a '?' (nunca rompe el ticket).
@@ -286,5 +421,25 @@ mod tests {
             assert!(com.starts_with("COM"), "clave debe ser COMx: {com}");
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn test_list_windows_printers_never_panics() {
+        // Debe listar impresoras del spooler sin paniquear (normalmente hay al menos
+        // "Microsoft Print to PDF" en cualquier Windows). Solo verifica que corra.
+        let printers = list_windows_printers().unwrap_or_default();
+        for p in &printers {
+            assert!(!p.trim().is_empty(), "nombre de impresora vacío");
+        }
+    }
+
+    #[test]
+    fn test_print_to_windows_printer_errors() {
+        // Impresora vacía → error amigable (nunca panica ni toca el spooler)
+        let err = print_to_windows_printer("", "hola").unwrap_err();
+        assert!(err.contains("No hay impresora"), "error: {err}");
+        // Impresora inexistente → error amigable (o en su defecto cualquier error/ok
+        // controlado, NUNCA panic)
+        let _ = print_to_windows_printer("_impresora_que_no_existe_12345_", "hola");
     }
 }

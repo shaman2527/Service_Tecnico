@@ -15,7 +15,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange }: {
 }) {
   const [service, setService] = useState<Service | null>(null);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
-  const [settings, setSettings] = useState<PrinterSettings>({ port: '', baud: 9600, width: 58 });
+  const [settings, setSettings] = useState<PrinterSettings>({ port: '', baud: 9600, width: 58, windowsPrinter: '' });
   const [printing, setPrinting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -38,8 +38,20 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange }: {
   const receipt = buildServiceReceipt(service, payments, { width: settings.width });
 
   const doPrint = async () => {
+    if (settings.windowsPrinter) {
+      setPrinting(true);
+      try {
+        await api.printToWindowsPrinter(settings.windowsPrinter, receipt);
+        toast.success(`Factura enviada a "${settings.windowsPrinter}"`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        setPrinting(false);
+      }
+      return;
+    }
     if (!settings.port) {
-      toast.warning('No hay impresora configurada. Selecciona el puerto COM.');
+      toast.warning('No hay impresora configurada. Selecciona la impresora o el puerto COM.');
       setShowSettings(true);
       return;
     }

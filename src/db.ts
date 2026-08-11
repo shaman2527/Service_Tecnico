@@ -296,12 +296,21 @@ export const api = {
     tauriInvoke<void>('print_receipt', { port, baud, text }).catch(() =>
       mock<void>(undefined)),
 
+  // --- Impresoras de Windows (spooler, driver instalado ej. HPRT MPT-II) ---
+  listWindowsPrinters: () =>
+    tauriInvoke<string[]>('list_windows_printers').catch(() =>
+      mock<string[]>([])),
+
+  printToWindowsPrinter: (printer: string, text: string) =>
+    tauriInvoke<void>('print_to_windows_printer', { printer, text }).catch(() =>
+      mock<void>(undefined)),
+
   getPrinterSettings: () =>
     tauriInvoke<PrinterSettings>('get_printer_settings').catch(() =>
-      mock<PrinterSettings>({ port: '', baud: 9600, width: 58 })),
+      mock<PrinterSettings>({ port: '', baud: 9600, width: 58, windowsPrinter: '' })),
 
-  setPrinterSettings: (port: string, baud: number, width: number) =>
-    tauriInvoke<void>('set_printer_settings', { port, baud, width }).catch(() =>
+  setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string) =>
+    tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter }).catch(() =>
       mock<void>(undefined)),
 
   // --- Actualizaciones (respaldo / rollback / chequeo de salud) ---

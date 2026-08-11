@@ -11,19 +11,28 @@ import type { ComPort, PrinterSettings } from '../types';
 
 const BAUD_RATES = [9600, 19200, 38400, 115200];
 
+const DEFAULT_SETTINGS: PrinterSettings = { port: '', baud: 9600, width: 58, windowsPrinter: '' };
+
 export default function PrinterSettingsDialog({ open, onOpenChange }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
   const [ports, setPorts] = useState<ComPort[]>([]);
-  const [settings, setSettings] = useState<PrinterSettings>({ port: '', baud: 9600, width: 58 });
+  const [winPrinters, setWinPrinters] = useState<string[]>([]);
+  const [settings, setSettings] = useState<PrinterSettings>(DEFAULT_SETTINGS);
   const [scanning, setScanning] = useState(false);
   const [testing, setTesting] = useState(false);
 
   const refreshPorts = () => {
     setScanning(true);
-    api.listComPorts()
-      .then(setPorts)
+    Promise.all([
+      api.listComPorts().catch(() => [] as ComPort[]),
+      api.listWindowsPrinters().catch(() => [] as string[]),
+    ])
+      .then(([p, w]) => {
+        setPorts(p);
+        setWinPrinters(w);
+      })
       .finally(() => setScanning(false));
   };
 
@@ -31,32 +40,46 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 
   useEffect(() => {
     if (!open) return;
-    api.getPrinterSettings().then(setSettings).catch(() => {});
+    api.getPrinterSettings().then(s => setSettings(s || DEFAULT_SETTINGS)).catch(() => {});
     refreshPorts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const save = (next: PrinterSettings) => {
     setSettings(next);
-    api.setPrinterSettings(next.port, next.baud, next.width).catch(() => {});
+    api.setPrinterSettings(next.port, next.baud, next.width, next.windowsPrinter).catch(() => {});
   };
 
+  const testText = (target: string) => [
+    'REGISTRO · SERVICIO TECNICO',
+    '='.repeat(printerWidthChars(settings.width)),
+    `   PRUEBA DE IMPRESORA`,
+    `   Ruta: ${target}`,
+    '   Si ves este ticket el',
+    '   equipo esta OK.',
+    '   Fecha: ' + new Date().toLocaleString(),
+  ].join('\n');
+
   const testPrint = async () => {
+    if (settings.windowsPrinter) {
+      setTesting(true);
+      try {
+        await api.printToWindowsPrinter(settings.windowsPrinter, testText('Windows'));
+        toast.success(`Prueba enviada a "${settings.windowsPrinter}". La impresora debe sacar un ticket.`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        setTesting(false);
+      }
+      return;
+    }
     if (!settings.port) {
-      toast.warning('Primero selecciona el puerto COM de la impresora');
+      toast.warning('Primero selecciona una impresora de Windows o un puerto COM');
       return;
     }
     setTesting(true);
-    const testText = [
-      'REGISTRO · SERVICIO TECNICO',
-      '='.repeat(printerWidthChars(settings.width)),
-      '   PRUEBA DE IMPRESORA',
-      '   Si ves este ticket el',
-      '   puerto esta OK.',
-      '   Fecha: ' + new Date().toLocaleString(),
-    ].join('\n');
     try {
-      await api.printReceipt(settings.port, settings.baud, testText);
+      await api.printReceipt(settings.port, settings.baud, testText(settings.port));
       toast.success('Prueba enviada. La impresora debe sacar un ticket.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -67,19 +90,37 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-md max-h-[88vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <Printer className="size-4" /> Impresora de tickets
           </DialogTitle>
           <DialogDescription>
-            Puerto COM donde está tu impresora térmica — por USB o Bluetooth. Se detecta automáticamente.
+            Elige la impresora instalada en Windows (driver, ej. HPRT MPT-II) o un puerto COM directo.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium">Puerto COM</label>
+            <label className="text-sm font-medium">Impresora de Windows (driver instalado)</label>
+            <Select value={settings.windowsPrinter} onValueChange={v => save({ ...settings, windowsPrinter: v })}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Ninguna — usa la lista de la izquierda..." /></SelectTrigger>
+              <SelectContent>
+                {winPrinters.length === 0 && (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">No hay impresoras instaladas en Windows</div>
+                )}
+                {winPrinters.map(p => (
+                  <SelectItem key={p} value={p}>{p}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Se imprime en ESC/POS crudo (RAW) — funciona con el driver oficial de tu impresora (ej. HPRT MPT-II).
+            </p>
+          </div>
+
+          <div className="border-t pt-3 flex flex-col gap-2">
+            <label className="text-sm font-medium">Puerto COM (alternativa USB/Bluetooth directa)</label>
             <div className="flex gap-2">
               <Select value={settings.port} onValueChange={v => save({ ...settings, port: v })}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Selecciona un puerto..." /></SelectTrigger>
@@ -98,12 +139,6 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
                 <RefreshCw className={`size-4 ${scanning ? 'animate-spin' : ''}`} /> Detectar
               </Button>
             </div>
-            {ports.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                Conecta la impresora por USB y pulsa Detectar, o parea tu impresora Bluetooth en Windows
-                (ver ayuda abajo). Si no aparece, revisa el cable y reinicia la impresora.
-              </p>
-            )}
             {hasBluetooth && (
               <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
                 <span className="font-semibold text-foreground">Impresora Bluetooth:</span> si tu impresora
@@ -115,14 +150,13 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium">Velocidad (baudios)</label>
+            <label className="text-sm font-medium">Velocidad (baudios) — solo puerto COM</label>
             <Select value={String(settings.baud)} onValueChange={v => save({ ...settings, baud: Number(v) })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 {BAUD_RATES.map(b => <SelectItem key={b} value={String(b)}>{b} baudios</SelectItem>)}
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">La mayoría de impresoras térmicas usan 9600. Si sale basura o cortado, prueba con otra velocidad.</p>
           </div>
 
           <div className="flex flex-col gap-2">
@@ -135,7 +169,7 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
           </div>
         </div>
 
-        <DialogFooter className="flex items-center gap-2">
+        <DialogFooter className="shrink-0 border-t pt-3 flex items-center gap-2">
           <Button variant="outline" onClick={testPrint} disabled={testing}>
             {testing ? 'Imprimiendo...' : <><Printer className="size-4" /> Imprimir prueba</>}
           </Button>

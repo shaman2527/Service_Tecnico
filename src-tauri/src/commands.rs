@@ -377,13 +377,23 @@ pub fn print_receipt(port: String, baud: u32, text: String) -> Result<(), String
 }
 
 #[tauri::command]
+pub fn list_windows_printers() -> Result<Vec<String>, String> {
+    crate::printer::list_windows_printers()
+}
+
+#[tauri::command]
+pub fn print_to_windows_printer(printer: String, text: String) -> Result<(), String> {
+    crate::printer::print_to_windows_printer(&printer, &text)
+}
+
+#[tauri::command]
 pub fn get_printer_settings(db: State<Database>) -> Result<crate::db::PrinterSettings, String> {
     db.get_printer_settings().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32) -> Result<(), String> {
-    db.set_printer_settings(&port, baud, width).map_err(|e| e.to_string())
+pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32, windows_printer: String) -> Result<(), String> {
+    db.set_printer_settings(&port, baud, width, &windows_printer).map_err(|e| e.to_string())
 }
 
 // --- Updates (respaldo / rollback / salud — módulo updates.rs) ---

@@ -255,6 +255,7 @@ pub struct PrinterSettings {
     pub port: String,
     pub baud: u32,
     pub width: u32,
+    pub windows_printer: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2523,9 +2524,9 @@ impl Database {
         Ok(())
     }
 
-    // --- Impresora térmica (puerto COM persiste en settings) ---
+    // --- Impresora térmica (puerto COM + impresora de Windows persisten en settings) ---
     pub fn get_printer_settings(&self) -> SqlResult<PrinterSettings> {
-        let default = PrinterSettings { port: String::new(), baud: 9600, width: 58 };
+        let default = PrinterSettings { port: String::new(), baud: 9600, width: 58, windows_printer: String::new() };
         Ok(PrinterSettings {
             port: self.get_setting("printer_port")?.unwrap_or_default(),
             baud: match self.get_setting("printer_baud")? {
@@ -2536,13 +2537,15 @@ impl Database {
                 Some(w) => w.parse::<u32>().unwrap_or(default.width),
                 None => default.width,
             },
+            windows_printer: self.get_setting("printer_windows")?.unwrap_or_default(),
         })
     }
 
-    pub fn set_printer_settings(&self, port: &str, baud: u32, width: u32) -> SqlResult<()> {
+    pub fn set_printer_settings(&self, port: &str, baud: u32, width: u32, windows_printer: &str) -> SqlResult<()> {
         self.set_setting("printer_port", port)?;
         self.set_setting("printer_baud", &baud.to_string())?;
         self.set_setting("printer_width", &width.to_string())?;
+        self.set_setting("printer_windows", windows_printer)?;
         Ok(())
     }
 

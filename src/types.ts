@@ -349,6 +349,7 @@ export interface PrinterSettings {
   port: string;
   baud: number;
   width: number;
+  windowsPrinter: string;
 }
 
 export interface UpdateState {

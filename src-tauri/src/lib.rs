@@ -90,6 +90,8 @@ pub fn run() {
             commands::export_daily_report,
             commands::list_com_ports,
             commands::print_receipt,
+            commands::list_windows_printers,
+            commands::print_to_windows_printer,
             commands::get_printer_settings,
             commands::set_printer_settings,
             commands::backup_before_update,

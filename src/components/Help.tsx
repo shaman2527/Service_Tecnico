@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BookOpen, CalendarCheck, CalendarDays, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw } from 'lucide-react';
+import { BookOpen, CalendarCheck, CalendarDays, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw, Printer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
@@ -166,6 +166,33 @@ const sections = [
         <p><Badge variant="outline">Inventario</Badge> muestra todos los productos con su stock, costo, precio y compatibilidad. <Badge variant="outline">Pantallas</Badge> filtra solo la categoría de pantallas.</p>
         <p>Cada pantalla puede ser compatible con varios modelos — verás los modelos como chips. Al vender o entregar un servicio, el stock se actualiza solo, y cada movimiento queda registrado (entradas/salidas con motivo).</p>
         <p>Los productos con stock bajo (menor al mínimo) aparecen en el <Badge variant="outline">Dashboard</Badge> y en <Badge variant="outline">Pedidos</Badge> con sugerencia de reposición.</p>
+      </div>
+    ),
+  },
+  {
+    value: 'impresora',
+    icon: Printer,
+    title: 'Impresora de tickets (HPRT MPT-II)',
+    color: 'text-slate-600',
+    bg: 'bg-slate-100',
+    content: (
+      <div className="space-y-2">
+        <p>Las <span className="font-medium text-foreground">facturas de servicio</span> se imprimen en una impresora térmica. Funciona de dos formas: con el <span className="font-medium text-foreground">driver de Windows</span> (recomendado, ej. HPRT MPT-II) o por <span className="font-medium text-foreground">puerto COM directo</span> (impresoras USB/Bluetooth).</p>
+        <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Instalar el driver HPRT MPT-II (una vez por PC):</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Conecta la impresora por <span className="font-medium text-foreground">USB</span> y enciéndela.</li>
+            <li>Instala el driver oficial de HPRT que viene con la impresora (MPT-II / "IMPRESORA USB"). Windows crea una impresora llamada <code className="rounded bg-muted px-1.5 py-0.5 text-xs">HPRT MPT-II</code>.</li>
+            <li>Abre la app → botón <Badge variant="outline">Impresora</Badge> (en Servicio Técnico) → en <span className="font-medium text-foreground">"Impresora de Windows"</span> verás el nombre y puedes pulsar <Badge variant="outline">Imprimir prueba</Badge>.</li>
+            <li>Si el ticket sale, listo: cada orden tendrá su botón <Badge variant="outline">Factura</Badge> para imprimir el recibo del servicio (32/48 columnas según el ancho 58/80 mm, con falla completa, abonos y garantía).</li>
+          </ol>
+        </div>
+        <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-700">
+          <span className="font-semibold">Si no aparece en la lista:</span> revisa que el driver esté instalado (Configuración de Windows → Dispositivos → Impresoras y escáneres) y que la impresora esté <span className="font-medium">encendida y conectada por USB</span>. Si usas un modelo Bluetooth (ej. MP58-04BLE), páréala en Windows: Configuración → Bluetooth y dispositivos; luego pulsa <Badge variant="outline">Detectar</Badge> en la app — debe aparecer como "COMx — Bluetooth · MP58-04BLE".
+        </div>
+        <div className="rounded-md bg-slate-500/10 border border-slate-500/30 px-3 py-2 text-sm">
+          <span className="font-semibold text-foreground">Papel:</span> elige el ancho del rollo (58 mm o 80 mm) en <span className="font-medium text-foreground">Ancho del papel</span>. Si el ticket sale con letras cortadas o demasiado estrecho, cambia ese ajuste y vuelve a imprimir la prueba.
+        </div>
       </div>
     ),
   },
@@ -357,6 +384,11 @@ const quickActions = [
     icon: ShoppingBag, label: 'Reponer stock', desc: 'Pedidos → Pedir N', target: 'pedidos',
     color: 'text-rose-600', chip: 'bg-rose-500/15 ring-rose-500/25',
     bar: 'from-rose-500/70 via-rose-400/30 to-transparent', hover: 'hover:border-rose-500/40 hover:shadow-rose-500/10',
+  },
+  {
+    icon: Printer, label: 'Configurar la impresora', desc: 'Instalar driver HPRT MPT-II y probar el ticket', target: 'impresora',
+    color: 'text-slate-600', chip: 'bg-slate-500/15 ring-slate-500/25',
+    bar: 'from-slate-500/70 via-slate-400/30 to-transparent', hover: 'hover:border-slate-500/40 hover:shadow-slate-500/10',
   },
   {
     icon: LayoutDashboard, label: 'Ver el negocio', desc: 'Dashboard → Actualizar', target: 'dashboard',
