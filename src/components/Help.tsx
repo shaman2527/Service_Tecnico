@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { BookOpen, CalendarCheck, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { BookOpen, CalendarCheck, CalendarDays, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
@@ -105,6 +105,30 @@ const sections = [
           <span className="font-semibold">Buscar servicios:</span> el buscador encuentra por cliente, cédula, modelo u orden. Los campos <Badge variant="outline">Desde / Hasta</Badge> filtran por el día en que se recibieron los equipos (útil para "¿qué entró el 01-08?"), combinable con el filtro de estado.
         </div>
         <p className="text-sm">Las órdenes se muestran como tarjetas con toda la información: cliente, equipo, falla completa, finanzas (monto, abonado, saldo), tipo de servicio y fecha de salida.</p>
+      </div>
+    ),
+  },
+  {
+    value: 'dia',
+    icon: CalendarDays,
+    title: 'El día de trabajo (cómo funciona)',
+    color: 'text-teal-600',
+    bg: 'bg-teal-50',
+    content: (
+      <div className="space-y-2">
+        <div className="rounded-md bg-teal-500/10 border border-teal-500/30 px-3 py-2 text-sm text-teal-700">
+          <span className="font-semibold">Regla de oro:</span> el día de la caja es una cosa y los servicios son otra. Cerrar el día NO borra ni archiva los servicios pendientes: solo cierra el conteo de ese día.
+        </div>
+        <ol className="list-decimal list-inside space-y-1 text-sm">
+          <li>Al abrir el día en <span className="font-medium text-foreground">Libro Diario</span> la caja empieza de cero. Los equipos que quedaron en taller ayer <span className="font-medium text-foreground">siguen activos</span> (se ven al entrar a Servicios: el filtro "Activos en taller").</li>
+          <li>Un cliente dejó el teléfono hace 3 días y viene hoy a retirar: búscalo en <span className="font-medium text-foreground">Servicios</span> (por nombre, cédula u orden). La tarjeta muestra si tiene saldo pendiente.</li>
+          <li>Si le falta pagar algo → botón <Badge variant="outline">Pago / Abono</Badge>: ese abono se registra <span className="font-medium text-foreground">con la fecha de hoy</span>, aunque el equipo haya entrado hace días. Luego botón <Badge variant="default" className="bg-success">Entregar</Badge> (o entregar con saldo pendiente, si quedó a deber).</li>
+          <li>Todo lo cobrado hoy (ventas + abonos + entregas) cuenta en <span className="font-medium text-foreground">Libro Diario</span> del día de hoy, no en el día en que entró el equipo.</li>
+          <li>En <span className="font-medium text-foreground">Ventas</span> el período abre en "Hoy" por defecto: ves lo vendido hoy y nada más. Cambia a "Todo" o una fecha para ver el resto.</li>
+        </ol>
+        <div className="rounded-md bg-primary/5 border border-primary/20 px-3 py-2 text-sm">
+          <span className="font-semibold text-foreground">Recuerda:</span> el Libro Diario muestra la tarjeta <span className="font-medium">"Resumen del día"</span> con recibidos/entregados de hoy, equipos en taller y lo cobrado hoy. El Dashboard suma todo igual que el Libro Diario.
+        </div>
       </div>
     ),
   },
@@ -308,18 +332,53 @@ const sections = [
 ];
 
 const quickActions = [
-  { icon: CircleDollarSign, label: 'Vender una pantalla', desc: 'Ventas → Nueva Venta', color: 'text-emerald-600', bg: 'bg-emerald-50' },
-  { icon: Wrench, label: 'Registrar un equipo', desc: 'Servicio Técnico → Nuevo Servicio', color: 'text-orange-600', bg: 'bg-orange-50' },
-  { icon: Wallet, label: 'Cobrar un abono', desc: 'Servicio → Editar → Pagos y Abonos', color: 'text-violet-600', bg: 'bg-violet-50' },
-  { icon: CalendarCheck, label: 'Abrir el día', desc: 'Libro Diario → Abrir Día', color: 'text-purple-600', bg: 'bg-purple-50' },
-  { icon: ShoppingBag, label: 'Reponer stock', desc: 'Pedidos → Pedir N', color: 'text-rose-600', bg: 'bg-rose-50' },
-  { icon: LayoutDashboard, label: 'Ver el negocio', desc: 'Dashboard → Actualizar', color: 'text-sky-600', bg: 'bg-sky-50' },
+  {
+    icon: CircleDollarSign, label: 'Vender una pantalla', desc: 'Ventas → Nueva Venta', target: 'venta',
+    color: 'text-emerald-600', chip: 'bg-emerald-500/15 ring-emerald-500/25',
+    bar: 'from-emerald-500/70 via-emerald-400/30 to-transparent', hover: 'hover:border-emerald-500/40 hover:shadow-emerald-500/10',
+  },
+  {
+    icon: Wrench, label: 'Registrar un equipo', desc: 'Servicio Técnico → Nuevo Servicio', target: 'servicio',
+    color: 'text-orange-600', chip: 'bg-orange-500/15 ring-orange-500/25',
+    bar: 'from-orange-500/70 via-orange-400/30 to-transparent', hover: 'hover:border-orange-500/40 hover:shadow-orange-500/10',
+  },
+  {
+    icon: Wallet, label: 'Cobrar un abono', desc: 'Servicio → Editar → Pagos y Abonos', target: 'abonos',
+    color: 'text-violet-600', chip: 'bg-violet-500/15 ring-violet-500/25',
+    bar: 'from-violet-500/70 via-violet-400/30 to-transparent', hover: 'hover:border-violet-500/40 hover:shadow-violet-500/10',
+  },
+  {
+    icon: CalendarCheck, label: 'Abrir el día', desc: 'Libro Diario → Abrir Día', target: 'libro',
+    color: 'text-purple-600', chip: 'bg-purple-500/15 ring-purple-500/25',
+    bar: 'from-purple-500/70 via-purple-400/30 to-transparent', hover: 'hover:border-purple-500/40 hover:shadow-purple-500/10',
+    gradient: 'from-purple-500/10 via-background to-background', featured: true,
+  },
+  {
+    icon: ShoppingBag, label: 'Reponer stock', desc: 'Pedidos → Pedir N', target: 'pedidos',
+    color: 'text-rose-600', chip: 'bg-rose-500/15 ring-rose-500/25',
+    bar: 'from-rose-500/70 via-rose-400/30 to-transparent', hover: 'hover:border-rose-500/40 hover:shadow-rose-500/10',
+  },
+  {
+    icon: LayoutDashboard, label: 'Ver el negocio', desc: 'Dashboard → Actualizar', target: 'dashboard',
+    color: 'text-sky-600', chip: 'bg-sky-500/15 ring-sky-500/25',
+    bar: 'from-sky-500/70 via-sky-400/30 to-transparent', hover: 'hover:border-sky-500/40 hover:shadow-sky-500/10',
+    gradient: 'from-sky-500/10 via-background to-background', featured: true,
+  },
 ];
 
 export default function Help() {
   const [appVersion, setAppVersion] = useState('');
   const [hasPrev, setHasPrev] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [openSection, setOpenSection] = useState('inicio');
+  const guideRef = useRef<HTMLDivElement>(null);
+
+  const openGuide = (target: string) => {
+    setOpenSection(target);
+    requestAnimationFrame(() => {
+      guideRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
 
   useEffect(() => {
     import('@tauri-apps/api/app')
@@ -362,7 +421,7 @@ export default function Help() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Centro de Ayuda</h1>
-          <p className="text-sm text-muted-foreground mt-1">Todo lo que necesitas para usar la aplicación</p>
+          <p className="text-sm text-muted-foreground mt-1">Elige qué quieres hacer — te mostramos el paso a paso</p>
         </div>
         <div className="flex items-center gap-3">
           {isTauri && (
@@ -401,30 +460,44 @@ export default function Help() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {quickActions.map(a => {
           const Icon = a.icon;
           return (
-            <div key={a.label} className={`group rounded-xl border border-border/70 ${a.bg} p-4 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 cursor-default`}>
+            <div
+              key={a.label}
+              role="button"
+              tabIndex={0}
+              onClick={() => openGuide(a.target)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openGuide(a.target); } }}
+              className={`group relative overflow-hidden rounded-2xl border border-border/70 ${a.featured ? `md:col-span-2 lg:col-span-2 bg-gradient-to-br ${a.gradient}` : ''} bg-card ${a.featured ? 'p-6' : 'p-5'} transition-all duration-200 hover:-translate-y-1 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${a.hover}`}
+            >
+              <div className={`absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r ${a.bar}`} />
               <div className="flex items-start justify-between">
-                <Icon className={`size-5 ${a.color}`} />
-                <ArrowRight className="size-4 text-muted-foreground/40 group-hover:text-muted-foreground group-hover:translate-x-0.5 transition-all" />
+                <span className={`flex size-11 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset ${a.chip}`}>
+                  <Icon className={`size-5 ${a.color}`} />
+                </span>
+                <ArrowRight className="size-4 text-muted-foreground/40 transition-all duration-200 group-hover:translate-x-1 group-hover:text-primary" />
               </div>
-              <p className="mt-3 text-sm font-semibold text-foreground">{a.label}</p>
-              <p className="text-xs text-muted-foreground mt-0.5">{a.desc}</p>
+              <p className={`mt-4 font-semibold text-foreground ${a.featured ? 'text-base' : 'text-sm'}`}>{a.label}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{a.desc}</p>
+              <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-primary/70 transition-colors group-hover:text-primary">
+                Ver guía paso a paso
+                <ArrowRight className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
+              </p>
             </div>
           );
         })}
       </div>
 
-      <Card className="overflow-hidden">
+      <Card ref={guideRef} className="overflow-hidden scroll-mt-6">
         <CardHeader className="bg-gradient-to-r from-primary/5 via-transparent to-transparent border-b border-border/50">
           <CardTitle className="flex items-center gap-2">
             <ClipboardList className="size-5 text-primary" /> Guía completa
           </CardTitle>
         </CardHeader>
         <CardContent className="p-4 pt-4">
-          <Accordion type="single" collapsible defaultValue="inicio" className="w-full">
+          <Accordion type="single" collapsible value={openSection} onValueChange={setOpenSection} className="w-full">
             {sections.map(s => {
               const Icon = s.icon;
               return (

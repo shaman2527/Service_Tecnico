@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -8,11 +10,105 @@ pub struct ComPortInfo {
     pub description: String,
 }
 
+/// Lee del registro de Windows (vía `reg.exe`, sin dependencias extra — patrón curl.exe)
+/// el nombre de los dispositivos Bluetooth que exponen un puerto COM virtual.
+/// Devuelve mapa "COM7" → "MP58-04BLE". Vacío si no hay equipos pareados o falla la lectura.
+fn bluetooth_friendly_names() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let out = match Command::new("reg")
+        .args(["query", "HKLM\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM", "/s", "/v", "PortName"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    for (com, addr) in parse_bthenum_output(&text) {
+        if let Some(name) = bluetooth_device_name(&addr) {
+            map.insert(com, name);
+        }
+    }
+    map
+}
+
+/// Parsea la salida de `reg query ... /s /v PortName`:
+/// ```text
+/// HKEY_LOCAL_MACHINE\...\BTHENUM\{00001101-...}\LOCALMFG&0002&0000&P2-6\7&1a2b3c&0&D75FE8E1A25C\0000\Device Parameters
+///     PortName    REG_SZ    COM7
+/// ```
+/// Devuelve (puerto COM, dirección BT en reverse-MAC) por cada dispositivo.
+fn parse_bthenum_output(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut key = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("HKEY_") {
+            key = line.to_string();
+            continue;
+        }
+        if key.is_empty() || !key.ends_with("\\Device Parameters") {
+            continue;
+        }
+        if !line.contains("PortName") || !line.contains("REG_SZ") {
+            continue;
+        }
+        let com = line.split_whitespace().find(|t| t.starts_with("COM")).map(|t| t.to_string());
+        if let Some(com) = com {
+            if let Some(addr) = mac_from_device_path(&key) {
+                out.push((com, addr));
+            }
+        }
+    }
+    out
+}
+
+/// Extrae la dirección Bluetooth (formato reverse-MAC, ej. `D75FE8E1A25C`) del
+/// segmento `&XXXX...` del path de un dispositivo BTHENUM.
+fn mac_from_device_path(path: &str) -> Option<String> {
+    let seg = path.rsplit('\\').find(|s| s.contains('&'))?;
+    let addr = seg.rsplit('&').next()?;
+    if addr.len() == 12 && addr.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(addr.to_string())
+    } else {
+        None
+    }
+}
+
+/// Consulta el nombre amigable del equipo Bluetooth (ej. "MP58-04BLE") en
+/// `BTHPORT\Parameters\Devices\<ADDR>\Name`.
+fn bluetooth_device_name(addr: &str) -> Option<String> {
+    let out = Command::new("reg")
+        .args([
+            "query",
+            &format!("HKLM\\SYSTEM\\CurrentControlSet\\Services\\BTHPORT\\Parameters\\Devices\\{addr}"),
+            "/v",
+            "Name",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|l| {
+        let parts: Vec<&str> = l.trim().split_whitespace().collect();
+        if parts.first().copied() == Some("Name") && parts.contains(&"REG_SZ") {
+            parts.get(2).map(|s| s.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 /// Enumerar puertos COM disponibles (detección automática de la impresora térmica).
-/// En Windows, las impresoras térmicas USB serial aparecen como COMx; se enriquece la
-/// descripción con fabricante/producto del USB (VID/PID) cuando el driver lo reporta.
+/// En Windows, las impresoras térmicas aparecen como COMx: USB serial (con
+/// fabricante/producto del USB) o Bluetooth (con el nombre del equipo pareado).
 pub fn list_com_ports() -> Result<Vec<ComPortInfo>, String> {
     let ports = serialport::available_ports().map_err(|e| format!("No se pudieron listar los puertos: {e}"))?;
+    let bt_names = bluetooth_friendly_names();
     let mut out: Vec<ComPortInfo> = Vec::with_capacity(ports.len());
     for p in ports {
         let desc = match p.port_type {
@@ -29,7 +125,10 @@ pub fn list_com_ports() -> Result<Vec<ComPortInfo>, String> {
                 }
                 parts.join(" · ")
             }
-            serialport::SerialPortType::BluetoothPort => "Bluetooth".to_string(),
+            serialport::SerialPortType::BluetoothPort => match bt_names.get(&p.port_name) {
+                Some(name) => format!("Bluetooth · {name}"),
+                None => "Bluetooth".to_string(),
+            },
             serialport::SerialPortType::PciPort => "PCI".to_string(),
             serialport::SerialPortType::Unknown => "Puerto serial".to_string(),
         };
@@ -82,10 +181,17 @@ pub fn print_receipt(port: &str, baud: u32, text: &str) -> Result<(), String> {
     if port.trim().is_empty() {
         return Err("No hay impresora configurada. Configúrala en Impresora de tickets.".to_string());
     }
+    let is_bt = bluetooth_friendly_names().contains_key(port);
     let mut serial = serialport::new(port, baud)
         .timeout(Duration::from_secs(5))
         .open()
-        .map_err(|e| format!("No se pudo abrir {port}: {e}. Revisa que la impresora esté conectada."))?;
+        .map_err(|e| {
+            if is_bt {
+                format!("No se pudo abrir {port}: {e}. Si es Bluetooth, verifica que la impresora esté pareada (Configuración → Bluetooth → Más opciones → Puertos COM) y encendida.")
+            } else {
+                format!("No se pudo abrir {port}: {e}. Revisa que la impresora esté conectada.")
+            }
+        })?;
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
     let bytes = build_escpos(&lines);
     serial
@@ -141,5 +247,44 @@ mod tests {
         let t = test_ticket();
         assert!(t.contains("Prueba de impresora"));
         assert!(t.lines().count() > 3);
+    }
+
+    #[test]
+    fn test_parse_bthenum_output() {
+        // Salida real de `reg query ... /s /v PortName` (esquema BTHENUM de Windows)
+        let sample = "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}\\LOCALMFG&0002&0000&P2-6\\7&1a2b3c&0&D75FE8E1A25C\\0000\\Device Parameters\n    PortName    REG_SZ    COM7\n\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}\\LOCALMFG&0002&0000&P2-6\\7&1a2b3c&0&D75FE8E1A25C\\0001\\Device Parameters\n    PortName    REG_SZ    COM8";
+        let pairs = parse_bthenum_output(sample);
+        assert_eq!(pairs.len(), 2, "dos dispositivos Bluetooth con COM");
+        assert_eq!(pairs[0], ("COM7".to_string(), "D75FE8E1A25C".to_string()));
+        assert_eq!(pairs[1], ("COM8".to_string(), "D75FE8E1A25C".to_string()));
+    }
+
+    #[test]
+    fn test_parse_bthenum_ignores_no_com() {
+        // Dispositivos sin PortName (p.ej. BT LE sin SPP) no deben mapearse
+        let sample = "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}\\LOCALMFG&0002&0000&P2-6\\7&1a2b3c&0&D75FE8E1A25C\\0000\\Device Parameters\n    PortName    REG_SZ    COM7\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}\\LOCALMFG&0002&0000&P2-6\\7&1a2b3c&0&DEADBEEF1234\n    NoPort    REG_SZ    nada";
+        let pairs = parse_bthenum_output(sample);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "COM7");
+    }
+
+    #[test]
+    fn test_mac_from_device_path() {
+        let path = "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}\\LOCALMFG&0002&0000&P2-6\\7&1a2b3c&0&D75FE8E1A25C\\0000\\Device Parameters";
+        assert_eq!(mac_from_device_path(path).as_deref(), Some("D75FE8E1A25C"));
+        // Sin segmento &addr válido
+        assert_eq!(mac_from_device_path("HKLM\\BTHENUM\\foo\\0000\\Device Parameters"), None);
+        assert_eq!(mac_from_device_path("HKLM\\BTHENUM\\x&ZZZ\\0000"), None);
+    }
+
+    #[test]
+    fn test_bluetooth_friendly_names_never_panics() {
+        // En una PC sin Bluetooth o sin equipos pareados debe devolver mapa vacío
+        // (nunca un error que tumbe list_com_ports).
+        let map = bluetooth_friendly_names();
+        for (com, name) in &map {
+            assert!(com.starts_with("COM"), "clave debe ser COMx: {com}");
+            assert!(!name.is_empty());
+        }
     }
 }

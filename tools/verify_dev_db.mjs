@@ -1,0 +1,11 @@
+import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync('dev_registro.db', { readOnly: true });
+const clients = db.prepare('SELECT id, name, ci, phone FROM clients ORDER BY id').all();
+console.log('Clientes:', clients.map(r => `${r.name}${r.ci ? ' (' + r.ci + ')' : ''}`).join(' | '));
+const activos = db.prepare("SELECT COUNT(*) c FROM services WHERE status NOT IN ('Entregado','Cancelado','Devuelto','Cancelado / Devuelto')").get().c;
+console.log('Servicios activos:', activos);
+const day = db.prepare('SELECT close_date, tasa_bcv, initial_cash_usd FROM daily_closings WHERE is_closed=0').all();
+console.log('Dia abierto:', JSON.stringify(day));
+const svc = db.prepare('SELECT order_num, client, model, status, paid_amount, group_id FROM services ORDER BY order_num').all();
+console.log('Servicios:', svc.map(s => `${s.order_num} ${s.client} ${s.model} [${s.status}] paid=${s.paid_amount}${s.group_id ? ' GRUPO=' + s.group_id : ''}`).join('\n  '));
+db.close();

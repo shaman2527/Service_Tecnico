@@ -3,7 +3,7 @@ import type {
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
-  ServiceDeviceInput
+  ServiceDeviceInput, DaySummary
 } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -168,7 +168,16 @@ export const api = {
       category_stats: [], top_models: [], product_count: 0, sale_count: 0,
       service_count: 0, client_count: 0,
       last_sale: null, last_service: null, last_movement: null, last_activity: null,
+      today_received: 0, today_delivered: 0,
+      service_income_today_usd: 0, service_income_today_bs: 0,
     })),
+
+  getDaySummary: (date: string) =>
+    tauriInvoke<DaySummary>('get_day_summary', { date }).catch(() =>
+      mock<DaySummary>({
+        date, received: 0, delivered: 0, workshop: 0, payments_count: 0,
+        payments_usd: 0, payments_bs: 0, sales_usd: 0, sales_bs: 0,
+      })),
 
   getClients: (search: string = '') =>
     tauriInvoke<ClientSummary[]>('get_clients', { search }),
@@ -178,6 +187,9 @@ export const api = {
 
   addOrFindClient: (name: string, phone: string, ci: string = '', address: string = '') =>
     tauriInvoke<number>('add_or_find_client', { name, phone, ci, address }),
+
+  saveClient: (id: number | null, name: string, phone: string, ci: string, address: string, email: string, notes: string) =>
+    tauriInvoke<number>('save_client', { id, name, phone, ci, address, email, notes }),
 
   findClientByCi: (ci: string) =>
     tauriInvoke<Client | null>('find_client_by_ci', { ci }).catch(() =>

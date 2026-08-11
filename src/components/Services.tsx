@@ -15,7 +15,7 @@ import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -188,7 +188,7 @@ export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('__activos__');
   const [typeFilter, setTypeFilter] = useState('');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
@@ -222,6 +222,25 @@ export default function Services() {
     const t = setTimeout(load, 350);
     return () => clearTimeout(t);
   }, [search, statusFilter, dateStart, dateEnd]);
+
+  // Períodos rápidos por fecha de RECIBIDO (días=0 → hoy; null → todos)
+  const setQuickPeriod = (days: number | null) => {
+    if (days === null) {
+      setDateStart('');
+      setDateEnd('');
+      return;
+    }
+    const now = new Date();
+    if (days === 0) {
+      const d = now.toISOString().slice(0, 10);
+      setDateStart(d);
+      setDateEnd(d);
+    } else {
+      const start = new Date(now.getTime() - (days - 1) * 86400000);
+      setDateStart(start.toISOString().slice(0, 10));
+      setDateEnd(now.toISOString().slice(0, 10));
+    }
+  };
 
   useEffect(() => {
     api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
@@ -525,11 +544,18 @@ export default function Services() {
             </Button>
           )}
         </div>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(0)}>Hoy</Button>
+          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(7)}>7 días</Button>
+          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(30)}>30 días</Button>
+          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(null)}>Todo</Button>
+        </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-44">
             <SelectValue placeholder="Todos los estados" />
           </SelectTrigger>
           <SelectContent>
+            <SelectItem value="__activos__">Activos en taller</SelectItem>
             <SelectItem value="">Todos los estados</SelectItem>
             {statuses.map(st => (
               <SelectItem key={st.id} value={st.name}>{st.name}</SelectItem>
@@ -1265,6 +1291,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente *</label>
               <Input value={client} onChange={e => { clientPicked.current = false; setClient(e.target.value); setClientId(null); }}
+                onBlur={() => { if (client.trim()) setClient(titleCase(client)); }}
                 placeholder="Buscar o escribir nombre..." />
               {clientOpen && clientSugs.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">

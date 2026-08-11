@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing, PagoMovilDetail } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary } from '../types';
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 const fmtBs = (n: number) => `Bs.${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -115,6 +115,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [pinCurrent, setPinCurrent] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
   const [lastTasa, setLastTasa] = useState(0);
+  const [daySummary, setDaySummary] = useState<DaySummary | null>(null);
 
   const effectiveTab = isOwner ? tab : 'diario';
   const effectiveStart = isOwner ? startDate : today;
@@ -133,6 +134,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       setActiveDay(await api.getActiveDay());
     } catch {
       setActiveDay(null);
+    }
+    try {
+      setDaySummary(await api.getDaySummary(today));
+    } catch {
+      setDaySummary(null);
     }
   };
 
@@ -425,6 +431,41 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               accent="bg-success/10 text-success" className="text-success" />
           </div>
 
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold">Resumen del día {today}</CardTitle>
+              <CardDescription className="text-xs">
+                Movimientos del día de hoy — los equipos pendientes de ayer siguen activos y sus cobros/entregas cuentan en el día en que ocurren
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Recibidos hoy</p>
+                <p className="text-xl font-bold tabular-nums">{daySummary?.received ?? 0}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Entregados hoy</p>
+                <p className="text-xl font-bold tabular-nums text-emerald-600">{daySummary?.delivered ?? 0}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">En taller ahora</p>
+                <p className="text-xl font-bold tabular-nums">{daySummary?.workshop ?? 0}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Cobrado servicios</p>
+                <p className="text-xl font-bold tabular-nums text-primary">
+                  {fmtMix(daySummary?.payments_usd ?? 0, daySummary?.payments_bs ?? 0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Ventas del día</p>
+                <p className="text-xl font-bold tabular-nums">
+                  {fmtMix(daySummary?.sales_usd ?? 0, daySummary?.sales_bs ?? 0)}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card className="overflow-hidden border-primary/30 bg-primary/5">
             <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-4">
               <div className="space-y-1">
@@ -697,8 +738,16 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <MethodRow icon={<Banknote className="size-3.5" />} label="Efectivo Bs"
                   detail="Bolívares en caja — se cuenta abajo" value={fmtBs(expected?.cash_bs ?? 0)}
                   valueClass="text-warning" />
-                <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta ($ + Bs)"
-                  value={fmtMix(expected?.pos_net_usd ?? 0, expected?.pos_net_bs ?? 0)} valueClass="text-success" />
+                {(expected?.pos_net_usd ?? 0) > 0.005 && (
+                  <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta ($)"
+                    detail="Punto en dólares · neto tras comisión" value={fmtUsd(expected?.pos_net_usd ?? 0)}
+                    valueClass="text-success" />
+                )}
+                {(expected?.pos_net_bs ?? 0) > 0.005 && (
+                  <MethodRow icon={<CreditCard className="size-3.5" />} label="Punto de Venta (Bs)"
+                    detail="Punto en bolívares · neto tras comisión" value={fmtBs(expected?.pos_net_bs ?? 0)}
+                    valueClass="text-warning" />
+                )}
                 <MethodRow icon={<Smartphone className="size-3.5" />} label="Pago Móvil"
                   detail={`${pagoMovilList.length} pago(s) por referencia`}
                   value={fmtBs(expected?.pago_movil_total ?? 0)} valueClass="text-warning" />
@@ -726,8 +775,16 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             <div className="flex flex-col gap-2">
               <p className="text-sm font-semibold">Punto de Venta — monto impreso</p>
               <p className="text-xs text-muted-foreground">
-                El sistema cobró <strong>{fmtMix(expected?.pos_charged_usd ?? 0, expected?.pos_charged_bs ?? 0)}</strong>.
-                Escribe el monto total que imprimió la máquina del Punto al cerrarla — debe dar el mismo.
+                {((expected?.pos_charged_usd ?? 0) > 0 || (expected?.pos_charged_bs ?? 0) > 0) ? (
+                  <>
+                    El sistema cobró{' '}
+                    {(expected?.pos_charged_usd ?? 0) > 0 && <><strong>{fmtUsd(expected?.pos_charged_usd ?? 0)}</strong>{' '}</>}
+                    {(expected?.pos_charged_bs ?? 0) > 0 && <><strong>{fmtBs(expected?.pos_charged_bs ?? 0)}</strong></>}
+                    {' '}por Punto. Escribe el monto total que imprimió la máquina al cerrarla — debe dar el mismo.
+                  </>
+                ) : (
+                  'No hubo cobros por Punto de Venta hoy.'
+                )}
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {(expected?.pos_charged_usd ?? 0) > 0 && (

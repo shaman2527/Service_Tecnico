@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, Phone, Wrench, ShoppingCart, ChevronDown, ChevronRight, Smartphone, ShieldCheck, CalendarDays, FileText, User, Wallet, CircleDollarSign } from 'lucide-react';
+import { Search, Phone, Wrench, ShoppingCart, ChevronDown, ChevronRight, Smartphone, ShieldCheck, CalendarDays, FileText, User, Wallet, CircleDollarSign, Pencil, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,6 +20,8 @@ export default function Clients() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [servicePayments, setServicePayments] = useState<Record<number, ServicePayment[]>>({});
   const [technicians, setTechnicians] = useState<Technician[]>([]);
+  const [formOpen, setFormOpen] = useState(false);
+  const [formClient, setFormClient] = useState<ClientSummary | null>(null);
 
   const load = async () => {
     setClients(await api.getClients(search));
@@ -54,9 +56,14 @@ export default function Clients() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Clientes</h1>
-        <p className="text-sm text-muted-foreground mt-1">Historial de clientes y seguimiento</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Clientes</h1>
+          <p className="text-sm text-muted-foreground mt-1">Historial de clientes y seguimiento</p>
+        </div>
+        <Button onClick={() => { setFormClient(null); setFormOpen(true); }}>
+          <Plus className="size-4" /> Nuevo cliente
+        </Button>
       </div>
 
       <div className="relative max-w-sm">
@@ -99,9 +106,15 @@ export default function Clients() {
                     <TableCell className="text-right font-bold">${c.total_spent.toFixed(2)}</TableCell>
                     <TableCell>{c.last_date ?? '-'}</TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); openHistory(c); }}>
-                        Ver
-                      </Button>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="sm"
+                          onClick={(e) => { e.stopPropagation(); setFormClient(c); setFormOpen(true); }}>
+                          <Pencil className="size-3.5" />
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); openHistory(c); }}>
+                          Ver
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
@@ -286,7 +299,86 @@ export default function Clients() {
           )}
         </DialogContent>
       </Dialog>
+
+      <ClientFormDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        client={formClient}
+        onSaved={load}
+      />
     </div>
+  );
+}
+
+function ClientFormDialog({ open, onOpenChange, client, onSaved }: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  client: ClientSummary | null;
+  onSaved: () => void;
+}) {
+  const emptyForm = { name: '', phone: '', ci: '', address: '', email: '', notes: '' };
+  const [form, setForm] = useState(emptyForm);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setForm(client ? {
+        name: client.name ?? '', phone: client.phone ?? '', ci: client.ci ?? '',
+        address: client.address ?? '', email: client.email ?? '', notes: client.notes ?? '',
+      } : emptyForm);
+      setError(null);
+    }
+  }, [open, client]);
+
+  const set = (k: keyof typeof emptyForm) => (v: string) => setForm(f => ({ ...f, [k]: v }));
+
+  const save = async () => {
+    if (!form.name.trim()) { setError('El nombre del cliente es obligatorio.'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.saveClient(client?.id ?? null, form.name, form.phone, form.ci, form.address, form.email, form.notes);
+      onSaved();
+      onOpenChange(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{client ? 'Editar cliente' : 'Nuevo cliente'}</DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Input placeholder="Nombre *" value={form.name}
+            onChange={e => set('name')(e.target.value)} className="sm:col-span-2" />
+          <Input placeholder="Teléfono" value={form.phone}
+            onChange={e => set('phone')(e.target.value)} />
+          <Input placeholder="Cédula" value={form.ci}
+            onChange={e => set('ci')(e.target.value)} />
+          <Input placeholder="Email" value={form.email}
+            onChange={e => set('email')(e.target.value)} className="sm:col-span-2" />
+          <Input placeholder="Dirección" value={form.address}
+            onChange={e => set('address')(e.target.value)} className="sm:col-span-2" />
+          <textarea
+            placeholder="Notas"
+            value={form.notes}
+            onChange={e => set('notes')(e.target.value)}
+            className="sm:col-span-2 flex min-h-[70px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        </div>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
+          <Button onClick={save} disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

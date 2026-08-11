@@ -10,14 +10,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Badge } from '@/components/ui/badge';
 
 import { api } from '../db';
-import { methodCurrency, currencySymbol } from '@/lib/utils';
+import { methodCurrency, currencySymbol, titleCase } from '@/lib/utils';
 import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 
 export default function Sales() {
   const [sales, setSales] = useState<Sale[]>([]);
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [search, setSearch] = useState('');
-  const [period, setPeriod] = useState('todo');
+  const [period, setPeriod] = useState('hoy');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -32,6 +32,10 @@ export default function Sales() {
     if (dateStart || dateEnd) {
       start = dateStart;
       end = dateEnd;
+    } else if (period === 'hoy') {
+      const d = new Date().toISOString().slice(0, 10);
+      start = d;
+      end = d;
     } else if (period === '7d') days = 7;
     else if (period === '30d') days = 30;
     else if (period === 'mes') {
@@ -136,6 +140,7 @@ export default function Sales() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
+            <SelectItem value="hoy">Hoy</SelectItem>
             <SelectItem value="todo">Todo</SelectItem>
             <SelectItem value="7d">7 días</SelectItem>
             <SelectItem value="30d">30 días</SelectItem>
@@ -311,12 +316,14 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
     setSaving(true);
     setSaveError(null);
     try {
+      // Si el usuario escribió el nombre sin elegir sugerencia, se usa el texto (ya en formato Título)
+      const finalName = clientName || titleCase(clientQuery.trim());
       let cid = clientId;
-      if (clientName && !cid) {
-        cid = await api.addOrFindClient(clientName, '', clientCi);
+      if (finalName && !cid) {
+        cid = await api.addOrFindClient(finalName, '', clientCi);
       }
       const total = quantity * price;
-      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, clientName, cid, notes, 0, reference, saleCurrency);
+      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, finalName, cid, notes, 0, reference, saleCurrency);
       onSaved();
     } finally {
       setSaving(false);
@@ -400,7 +407,8 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente</label>
               <Input placeholder="Buscar o escribir nombre..." value={clientQuery}
-                onChange={e => { clientPicked.current = false; setClientQuery(e.target.value); setClientOpen(true); }} />
+                onChange={e => { clientPicked.current = false; setClientQuery(e.target.value); setClientOpen(true); }}
+                onBlur={() => { if (clientQuery.trim()) setClientQuery(titleCase(clientQuery)); }} />
               {clientOpen && clientSugs.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">
                   {clientSugs.map(c => (

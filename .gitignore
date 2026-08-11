@@ -45,3 +45,6 @@ backup/
 REGISTRO OFICIAL.xlsx
 registro_export.json
 cellworld_items.json
+dev_registro.db
+dev_registro.db-shm
+dev_registro.db-wal

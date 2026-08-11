@@ -104,6 +104,16 @@ export function parseServiceTypes(sv: { service_type?: string | null; service_ty
   return [];
 }
 
+// --- Nombres de personas ---
+// "roberth silva" → "Roberth Silva" (coincide con title_case del backend).
+export function titleCase(s: string): string {
+  return s
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
 // --- Modelos de teléfono (lista maestra derivada del catálogo) ---
 // Normaliza: minúsculas, sin acentos, solo letras/números (consistente con norm_model del backend).
 export function normPhoneModel(s: string): string {

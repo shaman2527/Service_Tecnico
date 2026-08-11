@@ -62,6 +62,7 @@ pub fn run() {
             commands::get_clients,
             commands::add_client,
             commands::add_or_find_client,
+            commands::save_client,
             commands::find_client,
             commands::find_client_by_ci,
             commands::get_client_services,
@@ -73,6 +74,7 @@ pub fn run() {
             commands::export_data,
             commands::import_data,
             commands::get_daily_totals,
+            commands::get_day_summary,
             commands::get_daily_closings,
             commands::get_bcv_rate,
             commands::open_day,
@@ -102,6 +104,13 @@ pub fn run() {
 }
 
 pub fn get_db_path() -> PathBuf {
+    // 0. Override para desarrollo/pruebas: REGISTRO_DB=<ruta> usa ESA base sin tocar la real.
+    //    (Útil para correr la app en dev contra una copia o base de prueba — harness 2026-08-07.)
+    if let Ok(custom) = std::env::var("REGISTRO_DB") {
+        if !custom.trim().is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
     // 1. Check next to executable
     let mut path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     path.pop();

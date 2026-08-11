@@ -27,6 +27,9 @@ export interface ClientSummary {
   sale_count: number;
   last_date: string | null;
   ci?: string | null;
+  address?: string | null;
+  email?: string | null;
+  notes?: string | null;
 }
 
 export interface PagoMovilDetail {
@@ -298,6 +301,22 @@ export interface DashboardAnalytics {
   last_service: string | null;
   last_movement: string | null;
   last_activity: string | null;
+  today_received: number;
+  today_delivered: number;
+  service_income_today_usd: number;
+  service_income_today_bs: number;
+}
+
+export interface DaySummary {
+  date: string;
+  received: number;
+  delivered: number;
+  workshop: number;
+  payments_count: number;
+  payments_usd: number;
+  payments_bs: number;
+  sales_usd: number;
+  sales_bs: number;
 }
 
 export interface InventoryMovement {

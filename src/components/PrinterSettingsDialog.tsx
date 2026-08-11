@@ -27,6 +27,8 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
       .finally(() => setScanning(false));
   };
 
+  const hasBluetooth = ports.some(p => p.description.startsWith('Bluetooth'));
+
   useEffect(() => {
     if (!open) return;
     api.getPrinterSettings().then(setSettings).catch(() => {});
@@ -71,7 +73,7 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
             <Printer className="size-4" /> Impresora de tickets
           </DialogTitle>
           <DialogDescription>
-            Puerto serial (COM) donde está conectada tu impresora térmica. Se detecta automáticamente al conectar por USB.
+            Puerto COM donde está tu impresora térmica — por USB o Bluetooth. Se detecta automáticamente.
           </DialogDescription>
         </DialogHeader>
 
@@ -98,8 +100,17 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
             </div>
             {ports.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                Conecta la impresora por USB y pulsa Detectar. Si no aparece, revisa el cable y reinicia la impresora.
+                Conecta la impresora por USB y pulsa Detectar, o parea tu impresora Bluetooth en Windows
+                (ver ayuda abajo). Si no aparece, revisa el cable y reinicia la impresora.
               </p>
+            )}
+            {hasBluetooth && (
+              <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">Impresora Bluetooth:</span> si tu impresora
+                (ej. MP58-04BLE) no aparece, parea el equipo en{' '}
+                <span className="font-medium text-foreground">Configuración → Bluetooth y dispositivos</span>,
+                enciéndela y pulsa Detectar. Debe aparecer con su nombre, ej. "COM7 — Bluetooth · MP58-04BLE".
+              </div>
             )}
           </div>
 

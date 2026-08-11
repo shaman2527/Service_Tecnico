@@ -231,6 +231,11 @@ pub fn add_or_find_client(db: State<Database>, name: String, phone: String, ci: 
 }
 
 #[tauri::command]
+pub fn save_client(db: State<Database>, id: Option<i64>, name: String, phone: String, ci: String, address: String, email: String, notes: String) -> Result<i64, String> {
+    db.save_client(id, &name, &phone, &ci, &address, &email, &notes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn find_client_by_ci(db: State<Database>, ci: String) -> Result<Option<crate::db::Client>, String> {
     db.find_client_by_ci(&ci).map_err(|e| e.to_string())
 }
@@ -294,6 +299,11 @@ pub fn get_bcv_rate() -> Result<crate::bcv::TasasBCV, String> {
 #[tauri::command]
 pub fn get_daily_totals(db: State<Database>, start_date: String, end_date: String) -> Result<Vec<crate::db::DailyTotals>, String> {
     db.get_daily_totals(&start_date, &end_date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_day_summary(db: State<Database>, date: String) -> Result<crate::db::DaySummary, String> {
+    db.get_day_summary(&date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-﻿use rusqlite::{Connection, OptionalExtension, params, Result as SqlResult};
+use rusqlite::{Connection, OptionalExtension, params, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::path::PathBuf;
@@ -35,6 +35,9 @@ pub struct ClientSummary {
     pub sale_count: i64,
     pub last_date: Option<String>,
     pub ci: Option<String>,
+    pub address: Option<String>,
+    pub email: Option<String>,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -279,6 +282,28 @@ pub struct DailyTotals {
     pub tasa_bcv: f64,
 }
 
+// Resumen de actividad de un día (Libro Diario → tarjeta "Resumen del día", harness 2026-08-07)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DaySummary {
+    pub date: String,
+    /// Equipos RECIBIDOS ese día (date_in)
+    pub received: i64,
+    /// Entregados ese día (status='Entregado' AND date_out = día)
+    pub delivered: i64,
+    /// En taller ahora mismo (status activo, sin entregados/cancelados)
+    pub workshop: i64,
+    /// Abonos/pagos de servicios registrados ese día
+    pub payments_count: i64,
+    /// Abonos del día en USD
+    pub payments_usd: f64,
+    /// Abonos del día en Bs
+    pub payments_bs: f64,
+    /// Ventas del día en USD
+    pub sales_usd: f64,
+    /// Ventas del día en Bs
+    pub sales_bs: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DailyClosing {
     pub id: i64,
@@ -352,6 +377,13 @@ pub struct DashboardAnalytics {
     pub last_service: Option<String>,
     pub last_movement: Option<String>,
     pub last_activity: Option<String>,
+    /// Equipos recibidos hoy (date_in = hoy)
+    pub today_received: i64,
+    /// Entregados hoy (status Entregado y date_out = hoy)
+    pub today_delivered: i64,
+    /// Cobrado de servicios HOY (misma definición que el Libro Diario: abonos + entregados sin pago)
+    pub service_income_today_usd: f64,
+    pub service_income_today_bs: f64,
 }
 
 pub struct Database {
@@ -812,6 +844,48 @@ impl Database {
         // deben quedar guardados"). El coste de escritura es despreciable para esta carga.
         conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;")?;
         let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+        // Migración 2026-08-07: normalizar nombres propios a Title Case (idempotente).
+        // Clientes: solo si no existe ya otro cliente con el nombre normalizado (sin duplicar).
+        // services.client / sales.client_name son snapshots: se normalizan siempre.
+        Self::migrate_title_case_names(&conn)?;
+        Ok(())
+    }
+
+    // Title Case en datos existentes (migración idempotente): clients, services.client, sales.client_name.
+    fn migrate_title_case_names(conn: &rusqlite::Connection) -> SqlResult<()> {
+        let normalize_column = |conn: &rusqlite::Connection, table: &str, column: &str| -> SqlResult<()> {
+            let sql = format!("SELECT id, {} FROM {}", column, table);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut updates: Vec<(String, i64)> = Vec::new();
+            for row in rows {
+                let (id, name) = row?;
+                let norm = title_case(&name);
+                if norm != name {
+                    updates.push((norm, id));
+                }
+            }
+            drop(stmt);
+            for (norm, id) in updates {
+                if table == "clients" {
+                    let exists: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM clients WHERE name=?1 AND id<>?2)",
+                        params![norm, id], |r| r.get(0),
+                    )?;
+                    if exists {
+                        continue; // no duplicar clientes
+                    }
+                }
+                let sql = format!("UPDATE {} SET {}=?1 WHERE id=?2", table, column);
+                conn.execute(&sql, params![norm, id])?;
+            }
+            Ok(())
+        };
+        normalize_column(conn, "clients", "name")?;
+        normalize_column(conn, "services", "client")?;
+        normalize_column(conn, "sales", "client_name")?;
         Ok(())
     }
 
@@ -990,6 +1064,7 @@ impl Database {
         }
         let bank_fee_amount = if bank_fee_percent > 0.0 { total * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = total - bank_fee_amount;
+        let client_name = title_case(client_name.trim());
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         let tx = conn.unchecked_transaction()?;
@@ -1101,6 +1176,7 @@ impl Database {
                           client_id: Option<i64>, technician: &str, technician_id: Option<i64>) -> SqlResult<i64> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
+        let client = title_case(client.trim());
         conn.execute(
             "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22)",
             params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id],
@@ -1151,6 +1227,7 @@ impl Database {
                           technician: &str, technician_id: Option<i64>) -> SqlResult<()> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
+        let client = title_case(client.trim());
         let conn = self.conn.lock().unwrap();
 
         // Auto-inventory: if status changes to Entregado → deduct screen stock; if leaves Entregado → return stock
@@ -1461,7 +1538,11 @@ impl Database {
             sql.push_str(" AND (s.client LIKE ?1 OR s.model LIKE ?1 OR s.order_num LIKE ?1 OR s.phone LIKE ?1 OR s.client_ci LIKE ?1)");
             params_vec.push(Box::new(format!("%{}%", search)));
         }
-        if !status.is_empty() {
+        // Sentinela "__activos__": órdenes EN TALLER (Recibido → Por entregar), sin entregados/terminales.
+        // Harness 2026-08-07: la vista por defecto de Servicios ya no mezcla lo entregado con lo pendiente.
+        if status == "__activos__" {
+            sql.push_str(" AND s.status NOT IN ('Entregado','Cancelado','Devuelto','Cancelado / Devuelto')");
+        } else if !status.is_empty() {
             let idx = params_vec.len() + 1;
             sql.push_str(&format!(" AND s.status=?{}", idx));
             params_vec.push(Box::new(status.to_string()));
@@ -1735,10 +1816,85 @@ impl Database {
             )", [], |r| r.get(0),
         ).ok();
 
+        // Actividad de servicios HOY (para el Dashboard "qué hice hoy")
+        let today_received: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM services WHERE date(date_in)=date('now','localtime')", [], |r| r.get(0),
+        )?;
+        let today_delivered: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM services WHERE status='Entregado' AND date(date_out)=date('now','localtime')", [], |r| r.get(0),
+        )?;
+        // Cobrado de servicios HOY — MISMA definición que el Libro Diario (compute_daily_totals):
+        // abonos/pagos del día + servicios entregados hoy SIN ningún pago (monto completo en date_out).
+        let mut service_income_today_usd = 0.0;
+        let mut service_income_today_bs = 0.0;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT method, amount, currency FROM (
+                    SELECT payment_method as method, amount, COALESCE(currency,'USD') as currency
+                    FROM service_payments WHERE date(payment_date)=date('now','localtime')
+                    UNION ALL
+                    SELECT payment_method, amount, COALESCE(currency,'USD')
+                    FROM services WHERE status='Entregado' AND date(date_out)=date('now','localtime')
+                      AND NOT EXISTS (SELECT 1 FROM service_payments sp WHERE sp.service_id=services.id)
+                )"
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
+            })?;
+            for row in rows {
+                let (method, amount, currency) = row?;
+                if normalize_payment_currency(method.as_deref().unwrap_or(""), &currency) == "USD" {
+                    service_income_today_usd += amount;
+                } else {
+                    service_income_today_bs += amount;
+                }
+            }
+        }
+
         Ok(DashboardAnalytics {
             today_usd, today_bs, week_usd, week_bs, week_units, week_count,
             category_stats, top_models, product_count, sale_count, service_count,
             client_count, last_sale, last_service, last_movement, last_activity,
+            today_received, today_delivered, service_income_today_usd, service_income_today_bs,
+        })
+    }
+
+    // Resumen de actividad de un día (Libro Diario → "Resumen del día")
+    pub fn get_day_summary(&self, date: &str) -> SqlResult<DaySummary> {
+        let conn = self.conn.lock().unwrap();
+        let received: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM services WHERE date(date_in)=?1", params![date], |r| r.get(0),
+        )?;
+        let delivered: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM services WHERE status='Entregado' AND date(date_out)=?1", params![date], |r| r.get(0),
+        )?;
+        let workshop: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM services WHERE status NOT IN ('Entregado','Cancelado','Devuelto','Cancelado / Devuelto')", [], |r| r.get(0),
+        )?;
+        let payments_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM service_payments WHERE date(payment_date)=?1", params![date], |r| r.get(0),
+        )?;
+        let (payments_usd, payments_bs) = {
+            let row = conn.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN currency='USD' THEN amount ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN currency!='USD' THEN amount ELSE 0 END),0)
+                 FROM service_payments WHERE date(payment_date)=?1",
+                params![date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+            )?;
+            row
+        };
+        let (sales_usd, sales_bs) = {
+            let row = conn.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')='USD' THEN total ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')!='USD' THEN total ELSE 0 END),0)
+                 FROM sales WHERE date(date)=?1",
+                params![date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+            )?;
+            row
+        };
+        Ok(DaySummary {
+            date: date.to_string(), received, delivered, workshop,
+            payments_count, payments_usd, payments_bs, sales_usd, sales_bs,
         })
     }
 
@@ -1748,15 +1904,15 @@ impl Database {
         let mut sql = String::from(
             "SELECT c.id, c.name, c.phone,
                     COALESCE((SELECT SUM(s.total) FROM sales s WHERE s.client_id = c.id), 0) +
-                    COALESCE((SELECT SUM(sv.amount) FROM services sv WHERE sv.client = c.name AND sv.status = 'Entregado'), 0) as total_spent,
-                    (SELECT COUNT(*) FROM services sv WHERE sv.client = c.name) as service_count,
+                    COALESCE((SELECT SUM(sv.amount) FROM services sv WHERE (sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)) AND sv.status = 'Entregado'), 0) as total_spent,
+                    (SELECT COUNT(*) FROM services sv WHERE sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)) as service_count,
                     (SELECT COUNT(*) FROM sales s WHERE s.client_id = c.id) as sale_count,
                     COALESCE(
-                        (SELECT MAX(sv.date_out) FROM services sv WHERE sv.client = c.name),
+                        (SELECT MAX(sv.date_out) FROM services sv WHERE sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)),
                         (SELECT MAX(s.date) FROM sales s WHERE s.client_id = c.id),
                         ''
                     ) as last_date,
-                    c.ci
+                    c.ci, c.address, c.email, c.notes
              FROM clients c WHERE 1=1"
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -1773,6 +1929,9 @@ impl Database {
                 total_spent: r.get(3)?, service_count: r.get(4)?,
                 sale_count: r.get(5)?, last_date: r.get(6)?,
                 ci: r.get(7).unwrap_or(None),
+                address: r.get(8).unwrap_or(None),
+                email: r.get(9).unwrap_or(None),
+                notes: r.get(10).unwrap_or(None),
             })
         })?;
         let mut clients = Vec::new();
@@ -1782,6 +1941,7 @@ impl Database {
 
     pub fn add_client(&self, name: &str, phone: &str, email: &str, notes: &str) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
+        let name = title_case(name.trim());
         conn.execute(
             "INSERT INTO clients (name, phone, email, notes) VALUES (?1,?2,?3,?4)",
             params![name, phone, email, notes],
@@ -1830,6 +1990,7 @@ impl Database {
     }
 
     pub fn add_or_find_client(&self, name: &str, phone: &str, ci: &str, address: &str) -> SqlResult<i64> {
+        let name = title_case(name.trim());
         // 1) Buscar por cédula exacta si viene
         if !ci.is_empty() {
             if let Some(client) = self.find_client_by_ci(ci)? {
@@ -1847,7 +2008,7 @@ impl Database {
             }
         }
         // 2) Buscar por nombre exacto
-        if let Some(id) = self.find_client(name)? {
+        if let Some(id) = self.find_client(&name)? {
             if !phone.is_empty() || !ci.is_empty() || !address.is_empty() {
                 let conn = self.conn.lock().unwrap();
                 if !phone.is_empty() {
@@ -1872,6 +2033,77 @@ impl Database {
                 if ci.is_empty() { None } else { Some(ci) },
                 if address.is_empty() { None } else { Some(address) },
             ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    // Upsert de cliente con TODA la información (Clientes → Nuevo / Editar, harness 2026-08-07).
+    // - id=None → busca existente por cédula o nombre exacto (no duplica) y completa datos faltantes;
+    //   si no existe, inserta nuevo con name/phone/ci/address/email/notes.
+    // - id=Some → actualiza todos los campos; si el NOMBRE cambió, propaga el nuevo nombre a los
+    //   snapshots services.client / sales.client_name (historial y búsqueda coherentes).
+    pub fn save_client(&self, id: Option<i64>, name: &str, phone: &str, ci: &str, address: &str, email: &str, notes: &str) -> SqlResult<i64> {
+        let name = title_case(name.trim());
+        if name.is_empty() {
+            return Err(day_shift_error("El nombre del cliente es obligatorio."));
+        }
+        let conn = self.conn.lock().unwrap();
+        if let Some(cid) = id {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM clients WHERE id=?1)", params![cid], |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(day_shift_error("El cliente no existe."));
+            }
+            conn.execute(
+                "UPDATE clients SET name=?1, phone=?2, ci=?3, address=?4, email=?5, notes=?6 WHERE id=?7",
+                params![name,
+                        if phone.is_empty() { None } else { Some(phone) },
+                        if ci.is_empty() { None } else { Some(ci) },
+                        if address.is_empty() { None } else { Some(address) },
+                        if email.is_empty() { None } else { Some(email) },
+                        if notes.is_empty() { None } else { Some(notes) },
+                        cid],
+            )?;
+            conn.execute("UPDATE services SET client=?1 WHERE client_id=?2", params![name, cid])?;
+            conn.execute("UPDATE sales SET client_name=?1 WHERE client_id=?2", params![name, cid])?;
+            return Ok(cid);
+        }
+        // Nuevo: buscar existente (por cédula o nombre) sin re-lock (deadlock pattern)
+        let existing: Option<i64> = if !ci.trim().is_empty() {
+            let raw = ci.trim();
+            let digits = norm_ci_digits(raw);
+            let with_v = if digits.is_empty() { raw.to_string() } else { format!("V-{}", digits) };
+            let with_e = if digits.is_empty() { raw.to_string() } else { format!("E-{}", digits) };
+            conn.query_row(
+                "SELECT id FROM clients WHERE ci IN (?1,?2,?3,?4) LIMIT 1",
+                params![raw, digits, with_v, with_e], |r| r.get(0),
+            ).optional()?
+        } else {
+            conn.query_row("SELECT id FROM clients WHERE name=?1", params![name], |r| r.get(0)).optional()?
+        };
+        if let Some(cid) = existing {
+            conn.execute(
+                "UPDATE clients SET name=?1,
+                    phone=COALESCE(NULLIF(?2,''), phone),
+                    ci=COALESCE(NULLIF(?3,''), ci),
+                    address=COALESCE(NULLIF(?4,''), address),
+                    email=COALESCE(NULLIF(?5,''), email),
+                    notes=COALESCE(NULLIF(?6,''), notes) WHERE id=?7",
+                params![name, phone, ci, address, email, notes, cid],
+            )?;
+            conn.execute("UPDATE services SET client=?1 WHERE client_id=?2", params![name, cid])?;
+            conn.execute("UPDATE sales SET client_name=?1 WHERE client_id=?2", params![name, cid])?;
+            return Ok(cid);
+        }
+        conn.execute(
+            "INSERT INTO clients (name, phone, ci, address, email, notes) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![name,
+                    if phone.is_empty() { None } else { Some(phone) },
+                    if ci.is_empty() { None } else { Some(ci) },
+                    if address.is_empty() { None } else { Some(address) },
+                    if email.is_empty() { None } else { Some(email) },
+                    if notes.is_empty() { None } else { Some(notes) }],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -2126,15 +2358,15 @@ impl Database {
         let union_sql = format!(
             "SELECT d, payment_method, total, bank_fee_amount, net_amount, currency FROM (
                 SELECT date(date) as d, payment_method, total, bank_fee_amount,
-                       COALESCE(net_amount, total) as net_amount, COALESCE(currency,'USD') as currency
+                       CAST(COALESCE(net_amount, total) AS REAL) as net_amount, COALESCE(currency,'USD') as currency
                 FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2
                 UNION ALL
                 SELECT date(payment_date) as d, payment_method, amount, bank_fee_amount,
-                       COALESCE(net_amount, amount) as net_amount, COALESCE(currency,'USD') as currency
+                       CAST(COALESCE(net_amount, amount) AS REAL) as net_amount, COALESCE(currency,'USD') as currency
                 FROM service_payments WHERE date(payment_date) >= ?1 AND date(payment_date) <= ?2
                 UNION ALL
                 SELECT date(date_out) as d, payment_method, amount, bank_fee_amount,
-                       COALESCE(net_amount, amount) as net_amount, COALESCE(currency,'USD') as currency
+                       CAST(COALESCE(net_amount, amount) AS REAL) as net_amount, COALESCE(currency,'USD') as currency
                 FROM services WHERE status='Entregado' AND date(date_out) >= ?1 AND date(date_out) <= ?2
                   AND NOT EXISTS (SELECT 1 FROM service_payments sp WHERE sp.service_id = services.id)
             )
@@ -2874,6 +3106,21 @@ fn norm_ci_digits(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
+// Normaliza un nombre propio: cada palabra con inicial mayúscula y resto minúsculas
+// ("ROBERTH SILVA", "roberth  silva" → "Roberth Silva"). Harness 2026-08-07.
+fn title_case(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // Normaliza un modelo para matching: minúsculas, sin acentos, sin espacios extra
 fn norm_model(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -3465,6 +3712,39 @@ mod tests {
     }
 
     #[test]
+    fn test_daily_totals_resilient_to_text_net_amount() {
+        // Regresión 2026-08-08: un INSERT externo (seed dev) metió 'REF-VENTA-01'
+        // (TEXT) en sales.net_amount → get_daily_totals crasheaba con
+        // InvalidColumnType(4) y el dialog Cerrar Día mostraba todo en $0.00.
+        // CAST(... AS REAL) hace la query resiliente (texto → 0.0, no crash).
+        let test_path = PathBuf::from("test_totals_text_net.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        db.add_sale(None, "Venta OK", 1, 5.0, 5.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD").unwrap();
+        // Simular la fila corrupta del seed: net_amount con texto (INSERT directo)
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sales (date, product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, 0, 0, ?8, ?9, ?10)",
+            params![format!("{} 10:00:00", today), "Cargador Rapido 33W", 1, 10.0, 7487.9, "Pago Movil", "Maria", "REF-VENTA-01", "VES", "VES"],
+        ).unwrap();
+        drop(conn);
+
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals.len(), 1, "no debe crashear con fila corrupta");
+        let t = &totals[0];
+        assert_eq!(t.usd_cash_total, 5.0, "la venta sana suma normal");
+        assert_eq!(t.pago_movil_total, 7487.9, "el bucket usa total (columna REAL, sana)");
+        assert_eq!(t.grand_bs, 7487.9, "grand_bs usa total, no el net_amount corrupto");
+        assert!((t.grand_total - (5.0 + 7487.9 / 40.5)).abs() < 1e-9, "grand_total coherente, got {}", t.grand_total);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
     fn test_service_warranty_dates() {
         // Garantía: al entregar sin fecha → date_out = hoy; al reabrir → se limpia;
         // al re-entregar → nueva fecha (garantía de 7 días reinicia).
@@ -3922,6 +4202,160 @@ mod tests {
         let svc = db2.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.order_num.as_deref(), Some("ORD-DUR-1"), "El registro debe persistir tras fsync FULL");
         drop(db2);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_title_case_helper() {
+        assert_eq!(title_case("roberth silva"), "Roberth Silva");
+        assert_eq!(title_case("MARÍA JOSÉ"), "María José");
+        assert_eq!(title_case("  juan   perez  "), "Juan Perez");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn test_title_case_on_write_and_migration() {
+        let test_path = PathBuf::from("test_title_case.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Los write points aplican title_case automáticamente
+        let cid = db.add_client("roberth silva", "0412-1111111", "", "").unwrap();
+        assert!(cid > 0);
+        let cid2 = db.save_client(None, "MARIA LOPEZ", "0412-2222222", "V-111", "Av 1", "m@x.com", "nota").unwrap();
+        assert!(cid2 > 0);
+        let clients = db.get_clients("").unwrap();
+        let r = clients.iter().find(|c| c.id == cid).unwrap();
+        assert_eq!(r.name, "Roberth Silva", "add_client aplica title_case");
+        let m = clients.iter().find(|c| c.id == cid2).unwrap();
+        assert_eq!(m.name, "Maria Lopez", "save_client aplica title_case");
+        assert_eq!(m.email.as_deref(), Some("m@x.com"));
+        assert_eq!(m.address.as_deref(), Some("Av 1"));
+        assert_eq!(m.notes.as_deref(), Some("nota"));
+
+        // save_client con id=None + misma cédula → no duplica
+        let again = db.save_client(None, "maria lopez", "", "V-111", "", "", "").unwrap();
+        assert_eq!(again, cid2, "misma cédula → reutiliza el cliente existente");
+
+        // Datos legacy en minúsculas via SQL directo (la migración de init ya corrió) → migración idempotente
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO clients (name, phone) VALUES ('viejito ruiz', '000')", []).unwrap();
+            conn.execute(
+                "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, status, currency, date_in) \
+                 VALUES ('LEG-1','viejito ruiz','','M1','f','Cambio batería','[\"Cambio batería\"]',10,'Efectivo Bs','Recibido','USD','2026-08-07')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO sales (product_name, quantity, unit_price, total, payment_method, client_name, currency, date) \
+                 VALUES ('P1',1,10,10,'Efectivo Bs','viejito ruiz','VES','2026-08-07')",
+                [],
+            ).unwrap();
+        }
+        Database::migrate_title_case_names(&db.conn.lock().unwrap()).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let n: String = conn.query_row("SELECT name FROM clients WHERE phone='000'", [], |r| r.get(0)).unwrap();
+            assert_eq!(n, "Viejito Ruiz", "migración normaliza clientes");
+            let cn: String = conn.query_row("SELECT client FROM services WHERE order_num='LEG-1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(cn, "Viejito Ruiz", "migración normaliza services.client");
+            let sn: String = conn.query_row("SELECT client_name FROM sales WHERE product_name='P1'", [], |r| r.get(0)).unwrap();
+            assert_eq!(sn, "Viejito Ruiz", "migración normaliza sales.client_name");
+        }
+        // Idempotente: correr de nuevo no cambia nada
+        Database::migrate_title_case_names(&db.conn.lock().unwrap()).unwrap();
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_save_client_rename_propagates() {
+        let test_path = PathBuf::from("test_save_client_rename.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let cid = db.save_client(None, "juan perez", "0412-3333333", "V-222", "Calle 2", "", "").unwrap();
+        db.add_sale(None, "P1", 1, 10.0, 10.0, "Efectivo Bs", "Juan Perez", Some(cid), "", 0.0, "", "VES").unwrap();
+        let sid = db.add_service("REN-1", "Juan Perez", "0412-3333333", "M1", "f", "Cambio batería",
+            "[\"Cambio batería\"]", 20.0, "Efectivo Bs", "", 0.0, "", "USD", "V-222", "", "", Some(cid), "", None).unwrap();
+
+        // Renombrar el cliente → los snapshots se propagan
+        db.save_client(Some(cid), "JUAN PÉREZ R.", "0412-3333333", "V-222", "Calle 2", "", "").unwrap();
+        let sales = db.get_sales("", None, "", "").unwrap();
+        assert_eq!(sales[0].client_name.as_deref(), Some("Juan Pérez R."), "rename propaga a sales.client_name");
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.client.as_deref(), Some("Juan Pérez R."), "rename propaga a services.client");
+        let clients = db.get_clients("").unwrap();
+        assert_eq!(clients[0].name, "Juan Pérez R.");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_get_day_summary() {
+        let test_path = PathBuf::from("test_get_day_summary.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let sid = db.add_service("SUM-1", "Cliente", "", "M1", "f", "Cambio batería",
+            "[\"Cambio batería\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        // Entregado hoy → delivered
+        db.update_service(sid, "Cliente", "", "M1", "f", "Cambio batería", "[\"Cambio batería\"]", 50.0,
+            "Divisas (USD Cash)", &today, "Entregado", "", 0.0, "", "USD", "", "", "", "", None).unwrap();
+        // En taller (recibido hoy, sin entregar)
+        let sid2 = db.add_service("SUM-2", "Cliente2", "", "M2", "g", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        // Abono hoy: $10 USD + Bs 2025 (≈ $50 a tasa 40.5)
+        db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
+        db.add_service_payment(sid2, 2025.0, "Efectivo Bs", 0.0, "", "USD", "").unwrap();
+        // Venta hoy: $15 USD + 1 en Bs (VES 405)
+        db.add_sale(None, "P1", 1, 15.0, 15.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD").unwrap();
+        db.add_sale(None, "P2", 1, 10.0, 405.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES").unwrap();
+
+        let s = db.get_day_summary(&today).unwrap();
+        assert_eq!(s.received, 2, "2 equipos recibidos hoy");
+        assert_eq!(s.delivered, 1, "1 entregado hoy");
+        assert_eq!(s.workshop, 1, "1 en taller");
+        assert_eq!(s.payments_count, 2);
+        assert!((s.payments_usd - 10.0).abs() < 1e-9, "pago USD directo: {}", s.payments_usd);
+        assert!((s.payments_bs - 2025.0).abs() < 1e-9, "pago Bs por método Bs: {}", s.payments_bs);
+        assert!((s.sales_usd - 15.0).abs() < 1e-9, "venta USD: {}", s.sales_usd);
+        assert!((s.sales_bs - 405.0).abs() < 1e-9, "venta Bs: {}", s.sales_bs);
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_get_services_active_sentinel() {
+        let test_path = PathBuf::from("test_active_sentinel.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        db.add_service("ACT-1", "Cliente A", "", "M1", "f", "Cambio batería",
+            "[\"Cambio batería\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap(); // Recibido
+        db.add_service("ACT-2", "Cliente B", "", "M2", "g", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap(); // Recibido
+        let sid3 = db.add_service("ACT-3", "Cliente C", "", "M3", "h", "Software / Formateo",
+            "[\"Software / Formateo\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        let sid4 = db.add_service("ACT-4", "Cliente D", "", "M4", "i", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None).unwrap();
+        // Terminar dos: Entregado y Cancelado
+        db.update_service(sid3, "Cliente C", "", "M3", "h", "Software / Formateo", "[\"Software / Formateo\"]", 10.0,
+            "Efectivo Bs", "2026-08-07", "Entregado", "", 0.0, "", "USD", "", "", "", "", None).unwrap();
+        db.update_service(sid4, "Cliente D", "", "M4", "i", "Cambio pantalla", "[\"Cambio pantalla\"]", 10.0,
+            "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "", None).unwrap();
+
+        let activos = db.get_services("", "__activos__", "", "").unwrap();
+        assert_eq!(activos.len(), 2, "solo los equipos en taller");
+        assert!(activos.iter().all(|s| s.status.as_deref() != Some("Entregado")));
+        assert!(activos.iter().all(|s| s.status.as_deref() != Some("Cancelado")));
+        let todos = db.get_services("", "", "", "").unwrap();
+        assert_eq!(todos.len(), 4, "sin filtro sigue devolviendo todo");
+        drop(db);
         let _ = std::fs::remove_file(&test_path);
     }
 }

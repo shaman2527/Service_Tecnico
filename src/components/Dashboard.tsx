@@ -68,7 +68,7 @@ export default function Dashboard() {
     (dash?.status_stats ?? []).find(s => (s.status ?? '').toLowerCase() === status.toLowerCase())?.count ?? 0;
 
   const activeServices = (dash?.status_stats ?? []).reduce(
-    (a, s) => a + (TERMINAL_STAGES.includes((s.status ?? '').trim()) ? 0 : s.count), 0);
+    (a, s) => a + (TERMINAL_STAGES.includes((s.status ?? '').trim()) || (s.status ?? '').trim() === 'Entregado' ? 0 : s.count), 0);
 
   const maxCatUnits = Math.max(1, ...(analytics?.category_stats ?? []).map(c => c.units));
   const weeklyStats = [
@@ -90,14 +90,14 @@ export default function Dashboard() {
       label: 'Equipos en Taller',
       icon: <Smartphone className="size-4 text-chart-4" />,
       main: `${activeServices}`,
-      sub: `${dash?.entregados ?? 0} entregados · ${dash?.total ?? 0} históricos`,
+      sub: `${analytics?.today_received ?? 0} recibidos hoy · ${analytics?.today_delivered ?? 0} entregados hoy`,
       subClass: 'text-muted-foreground',
     },
     {
-      label: 'Ingresos Servicios',
+      label: 'Cobrado Servicios Hoy',
       icon: <Wrench className="size-4 text-chart-2" />,
-      main: `$${(dash?.total_ingresos ?? 0).toFixed(2)}`,
-      sub: 'Servicios entregados',
+      main: `$${(analytics?.service_income_today_usd ?? 0).toFixed(2)}`,
+      sub: `${analytics && analytics.service_income_today_bs > 0 ? `+ ${fmtBs(analytics.service_income_today_bs)} · ` : ''}Facturado histórico $${(dash?.total_ingresos ?? 0).toFixed(2)} (${dash?.entregados ?? 0} entregados)`,
       subClass: 'text-muted-foreground',
     },
   ];
