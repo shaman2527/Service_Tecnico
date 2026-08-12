@@ -103,6 +103,9 @@ export interface Service {
   technician_id: number | null;
   technician: string | null;
   group_id: string | null;
+  screen_product_id: number | null;
+  color: string | null;
+  printed: number;
 }
 
 export interface ServiceDeviceInput {
@@ -117,6 +120,8 @@ export interface ServiceDeviceInput {
   zelle_reference: string;
   currency: string;
   device_checklist: string;
+  color: string;
+  screen_product_id: number | null;
 }
 
 export interface Technician {
@@ -262,6 +267,13 @@ export interface MethodStat {
   total: number;
 }
 
+export interface ExportResult {
+  ok: boolean;
+  format: 'xlsx' | 'csv';
+  path: string;
+  note: string;
+}
+
 export interface StatusStat {
   status: string | null;
   count: number;
@@ -350,6 +362,10 @@ export interface PrinterSettings {
   baud: number;
   width: number;
   windowsPrinter: string;
+  businessName: string;
+  businessLine: string;
+  /** Logo del ticket: data URL PNG ('' = sin logo). Se imprime en blanco y negro arriba de la cabecera. */
+  logo: string;
 }
 
 export interface UpdateState {

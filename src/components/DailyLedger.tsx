@@ -243,8 +243,10 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const doExport = async () => {
     setExportMsg(null);
     try {
-      const path = await api.exportDailyReport(effectiveStart, effectiveEnd);
-      setExportMsg({ ok: true, text: `Reporte exportado (${effectiveStart} → ${effectiveEnd}): ${path}` });
+      const res = await api.exportDailyReportXlsx(effectiveStart, effectiveEnd);
+      const label = res.format === 'xlsx' ? 'Reporte Excel exportado' : 'Reporte CSV exportado (respaldo)';
+      const note = res.note ? ` ${res.note}` : '';
+      setExportMsg({ ok: res.ok, text: `${label} (${effectiveStart} → ${effectiveEnd}): ${res.path}${note}` });
     } catch (e) {
       setExportMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     }

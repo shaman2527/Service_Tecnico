@@ -198,8 +198,6 @@ export function printerWidthChars(widthMm: number | null | undefined): number {
 }
 
 const fmtUsd = (n: number) => `$ ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtBs = (n: number) => `Bs. ${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtMoney = (n: number, cur: string | null | undefined) => (cur === 'VES' ? fmtBs(n) : fmtUsd(n));
 
 // Recorta a caracteres sin cortar el texto por la mitad de una manera fea (wrap limpio)
 function wrapText(text: string, w: number): string[] {
@@ -245,29 +243,34 @@ function kv(label: string, value: string, w: number): string[] {
 }
 
 /**
- * Construye la factura del servicio como texto plano de ancho fijo (ticket térmico).
+ * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico):
+ * copia superior para el cliente + talón recortable ("CORTA TIJERA") con los
+ * mismos datos para pegar detrás del teléfono. NO es factura fiscal (sin RIF).
  * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
  */
 export function buildServiceReceipt(
   service: Service | null | undefined,
-  payments: ServicePayment[] = [],
-  opts: { width?: number; tasaBcv?: number } = {},
+  _payments: ServicePayment[] = [],
+  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string } = {},
 ): string {
   if (!service) return '';
   const w = printerWidthChars(opts.width);
   const dash = '-'.repeat(w);
   const lines: string[] = [];
+  const tipos = parseServiceTypes(service);
+  const logo = tipos.join(', ');
 
-  lines.push(center('REGISTRO', w));
-  lines.push(center('SERVICIO TECNICO', w));
+  // Cabecera
+  lines.push(center(opts.businessName?.trim() || 'SERVICIO TECNICO', w));
+  if (opts.businessLine?.trim()) lines.push(center(opts.businessLine.trim(), w));
   lines.push('='.repeat(w));
-  lines.push(center('FACTURA DE SERVICIO', w));
+  lines.push(center('SERVICIO', w));
   lines.push(dash);
 
   // Orden y fechas
   for (const l of kv('ORDEN', service.order_num ?? '', w)) lines.push(l);
-  for (const l of kv('FECHA', service.date_in?.slice(0, 16) ?? '', w)) lines.push(l);
-  for (const l of kv('ESTADO', service.status ?? '', w)) lines.push(l);
+  for (const l of kv('FECHA', service.date_in?.slice(0, 10) ?? '', w)) lines.push(l);
+  for (const l of kv('HORA', service.date_in?.slice(11, 16) ?? '', w)) lines.push(l);
   lines.push(dash);
 
   // Cliente
@@ -279,15 +282,10 @@ export function buildServiceReceipt(
 
   // Equipo y diagnóstico
   if (service.model) for (const l of kv('EQUIPO', service.model, w)) lines.push(l);
-  const tipos = parseServiceTypes(service);
-  for (const t of tipos) for (const l of kv('TRABAJO', t, w)) lines.push(l);
+  if (service.color) for (const l of kv('COLOR', service.color, w)) lines.push(l);
+  if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
   if (service.technician) for (const l of kv('TECNICO', service.technician, w)) lines.push(l);
-  if (service.fault) {
-    lines.push('FALLA:');
-    for (const l of wrapText(service.fault, w - 2)) lines.push(' ' + l);
-  }
   if (service.observations) {
-    lines.push(dash);
     for (const l of kv('NOTAS', service.observations, w)) lines.push(l);
   }
   lines.push(dash);
@@ -304,24 +302,152 @@ export function buildServiceReceipt(
   }
   if (service.payment_method) for (const l of kv('METODO', service.payment_method, w)) lines.push(l);
   if (service.zelle_reference) for (const l of kv('REF', service.zelle_reference, w)) lines.push(l);
-
-  // Abonos detallados (si hay más de uno se muestran con su moneda y método)
-  if (payments.length > 0) {
-    lines.push(dash);
-    for (const p of payments) {
-      const line = `${fmtMoney(p.amount, p.currency)} ${p.payment_method ?? ''}`.trim();
-      for (const l of wrapText(line, w - 2)) lines.push('  ' + l);
-    }
-  }
+  lines.push('='.repeat(w));
 
   // Garantía (7 días desde la entrega)
-  const gar = warrantyEnd(service.date_out);
-  if (gar) {
-    lines.push(dash);
-    for (const l of kv('GARANTIA', `hasta ${gar}`, w)) lines.push(l);
+  if (warrantyEnd(service.date_out)) {
+    lines.push(center('GARANTIA 7 DIAS', w));
   }
-
-  lines.push('='.repeat(w));
   lines.push(center('Gracias por su preferencia', w));
+  lines.push('');
+
+  // === Talón recortable: los mismos datos, para pegar detrás del teléfono ===
+  lines.push(dash);
+  lines.push(center('CORTA TIJERA', w));
+  lines.push(dash);
+  for (const l of kv('ORDEN', service.order_num ?? '', w)) lines.push(l);
+  if (service.client) for (const l of kv('CLIENTE', service.client, w)) lines.push(l);
+  if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) lines.push(l);
+  if (service.color) for (const l of kv('COLOR', service.color, w)) lines.push(l);
+  if (service.model) for (const l of kv('MODELO', service.model, w)) lines.push(l);
+  if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
+  lines.push(dash);
+  lines.push('');
+  lines.push(center('FIRMA SALIDA', w));
+
   return lines.join('\n');
+}
+
+// ============================================================================
+// Logo del ticket (bitmap monocromo ESC/POS)
+// ============================================================================
+
+function decodeImage(base64: string, widthPx: number, maxHeightPx: number): Promise<ImageData | null> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const h = Math.max(1, Math.min(maxHeightPx, Math.round((widthPx * img.height) / img.width)));
+        const c = document.createElement('canvas');
+        c.width = widthPx;
+        c.height = h;
+        const g = c.getContext('2d');
+        if (!g) return resolve(null);
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, widthPx, h);
+        g.drawImage(img, 0, 0, widthPx, h);
+        resolve(g.getImageData(0, 0, widthPx, h));
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = base64;
+  });
+}
+
+/** Convierte un logo (PNG data URL) a raster monocromo empaquetado a 1 bit
+ *  (1 = negro, MSB primero por byte y por fila) listo para `GS v 0`.
+ *  `widthPx`: 384 (58 mm) o 576 (80 mm). Null si la imagen no se pudo decodificar.
+ */
+export async function logoToRaster(base64Png: string, widthPx: number, maxHeightPx = 240): Promise<number[] | null> {
+  if (!base64Png) return null;
+  const data = await decodeImage(base64Png, widthPx, maxHeightPx);
+  if (!data) return null;
+  const bytesPerLine = Math.ceil(widthPx / 8);
+  const raster: number[] = new Array(bytesPerLine * data.height).fill(0);
+  for (let y = 0; y < data.height; y++) {
+    for (let x = 0; x < widthPx; x++) {
+      const i = (y * widthPx + x) * 4;
+      const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2], a = data.data[i + 3];
+      if (a < 128) continue;
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (lum < 128) raster[y * bytesPerLine + (x >> 3)] |= 0x80 >> (x & 7);
+    }
+  }
+  return raster;
+}
+
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/** Genera un logo de prueba (mano/teléfono con rayo + alas mecánicas en fondo
+ *  circular negro) como PNG data URL de 384×220 — para imprimir y ver cómo
+ *  queda antes de subir el logo definitivo. Blanco y negro puro.
+ */
+export function makeTestLogoPng(): string {
+  const W = 384, H = 220;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const g = c.getContext('2d');
+  if (!g) return '';
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2;
+
+  // Alas mecánicas (negro, detrás del círculo)
+  g.fillStyle = '#000';
+  const feather = (side: 1 | -1, y0: number, len: number, tilt: number) => {
+    g.beginPath();
+    g.moveTo(cx, y0);
+    g.lineTo(cx + side * len, y0 - tilt);
+    g.lineTo(cx + side * len * 0.45, y0 + 34 - tilt * 0.4);
+    g.lineTo(cx, y0 + 26);
+    g.closePath();
+    g.fill();
+  };
+  feather(-1, cy - 44, 150, 26);
+  feather(-1, cy - 6, 168, 6);
+  feather(1, cy - 44, 150, 26);
+  feather(1, cy - 6, 168, 6);
+  g.beginPath();
+  g.arc(cx, cy, 132, 0, Math.PI * 2);
+  g.fill();
+
+  // Anillo interior blanco
+  g.strokeStyle = '#fff';
+  g.lineWidth = 5;
+  g.beginPath();
+  g.arc(cx, cy, 120, 0, Math.PI * 2);
+  g.stroke();
+
+  // Teléfono blanco vertical con pantalla
+  g.fillStyle = '#fff';
+  roundRectPath(g, cx - 46, cy - 84, 92, 168, 16);
+  g.fill();
+  g.fillStyle = '#000';
+  roundRectPath(g, cx - 32, cy - 64, 64, 128, 10);
+  g.fill();
+
+  // Rayo en la pantalla
+  g.fillStyle = '#fff';
+  g.beginPath();
+  g.moveTo(cx + 10, cy - 56);
+  g.lineTo(cx - 20, cy + 8);
+  g.lineTo(cx - 2, cy + 8);
+  g.lineTo(cx - 12, cy + 56);
+  g.lineTo(cx + 22, cy - 12);
+  g.lineTo(cx + 4, cy - 12);
+  g.closePath();
+  g.fill();
+
+  return c.toDataURL('image/png');
 }

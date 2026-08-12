@@ -202,6 +202,14 @@ export default function Services() {
   const [confirmDeliver, setConfirmDeliver] = useState<Service | null>(null);
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
+  const [catalog, setCatalog] = useState<Product[]>([]);
+
+  // Pantalla exacta → etiqueta del repuesto para el chip de la tarjeta
+  const screenProductById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const p of catalog) if (p.category_id === 1 && p.id != null) m.set(p.id, partLabel(p));
+    return m;
+  }, [catalog]);
 
   const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
@@ -217,6 +225,7 @@ export default function Services() {
   };
 
   useEffect(() => { load(); }, []);
+  useEffect(() => { api.getProducts('', null).then(setCatalog).catch(() => {}); }, []);
   // Debounce: la búsqueda solo consulta tras 350ms de inactividad
   useEffect(() => {
     const t = setTimeout(load, 350);
@@ -261,7 +270,7 @@ export default function Services() {
         s.service_type ?? 'Cambio pantalla', s.service_types ?? '', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
         '', 'Entregado', s.observations ?? '', s.bank_fee_percent ?? 0,
         s.zelle_reference ?? '', s.currency ?? 'USD', s.client_ci ?? '',
-        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null
+        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null, s.color ?? '', s.screen_product_id ?? null
       );
     } finally {
       setDelivering(null);
@@ -408,6 +417,16 @@ export default function Services() {
                 {parseServiceTypes(s).map(t => (
                   <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
                 ))}
+                {s.screen_product_id != null && screenProductById.has(s.screen_product_id) && (
+                  <Badge variant="outline" className="text-xs whitespace-nowrap bg-primary/5 border-primary/30 text-primary">
+                    <Smartphone className="size-3 mr-1" /> {screenProductById.get(s.screen_product_id)}
+                  </Badge>
+                )}
+                {entregado && !s.printed && (
+                  <Badge variant="outline" className="text-xs text-amber-600 border-amber-500/40 bg-amber-500/10 whitespace-nowrap">
+                    Sin imprimir orden
+                  </Badge>
+                )}
                 {warr === 'activa' && (
                   <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-500/40 bg-emerald-500/10 whitespace-nowrap">
                     Garantía hasta {warrantyEnd(s.date_out)}
@@ -462,9 +481,9 @@ export default function Services() {
                     </Tooltip>
                   </TooltipProvider>
                 )}
-                <Button variant="outline" size="sm" className="flex-1" title="Imprimir factura"
+                <Button variant="outline" size="sm" className="flex-1" title="Imprimir orden de servicio"
                   onClick={() => setPrintFor(s)}>
-                  <Printer className="size-3.5" /> Factura
+                  <Printer className="size-3.5" /> Orden
                 </Button>
                 <Button variant="outline" size="sm" className="flex-1" onClick={() => { setEditing(s); setShowForm(true); }}>
                   Editar
@@ -640,6 +659,7 @@ export default function Services() {
         serviceId={printFor?.id ?? null}
         open={!!printFor}
         onOpenChange={(o) => { if (!o) setPrintFor(null); }}
+        onPrinted={load}
       />
 
       <PrinterSettingsDialog open={showPrinterSettings} onOpenChange={setShowPrinterSettings} />
@@ -691,6 +711,7 @@ export default function Services() {
 
 interface FormDevice {
   model: string;
+  color: string;
   fault: string;
   serviceTypes: string[];
   otherFault: string;
@@ -701,14 +722,118 @@ interface FormDevice {
   checklist: Record<string, string>;
   amountTouched: boolean;
   modelPicked: boolean;
+  screenProductId: number | null;
 }
 
 function emptyDevice(): FormDevice {
   return {
-    model: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
+    model: '', color: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
     payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: {},
-    amountTouched: false, modelPicked: false,
+    amountTouched: false, modelPicked: false, screenProductId: null,
   };
+}
+
+// Pantallas (categoría 1) compatibles con un modelo, para el desplegable de pantalla EXACTA.
+// Fuente = la entrada del modelo en phoneModels (compatibilidad curada por producto).
+function compatibleScreens(phoneModels: PhoneModelEntry[], model: string): Product[] {
+  const q = normPhoneModel(model);
+  if (!q) return [];
+  const entry = phoneModels.find(e => e.norm === q);
+  return entry ? entry.products.filter(p => p.category_id === 1) : [];
+}
+
+// La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay opciones en el catálogo
+const screenOk = (serviceTypes: string[], screenProductId: number | null, options: Product[]) =>
+  !(serviceTypes.includes('Cambio pantalla') && options.length > 0 && screenProductId == null);
+
+// Select de "Pantalla a instalar": desplegable con las pantallas compatibles del modelo
+function ScreenSelect({ screenProductId, screenOptions, onChange }: {
+  screenProductId: number | null;
+  screenOptions: Product[];
+  onChange: (id: number | null) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <label className="text-sm font-medium flex items-center gap-1.5">
+        <Smartphone className="size-3.5 text-muted-foreground" /> Pantalla a instalar
+        <span className="font-normal text-muted-foreground text-xs">(descuenta del inventario al entregar)</span>
+      </label>
+      {screenOptions.length > 0 ? (
+        <>
+          <Select value={String(screenProductId ?? '')} onValueChange={v => onChange(v ? Number(v) : null)}>
+            <SelectTrigger className={cn(!screenProductId && 'border-amber-500/60')}>
+              <SelectValue placeholder="Elige la pantalla exacta..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">— Sin seleccionar</SelectItem>
+              {screenOptions.map(p => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`} · ${p.price_sale.toFixed(2)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {screenProductId == null ? (
+            <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
+          ) : (
+            <p className="text-xs text-emerald-600 flex items-center gap-1">
+              <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
+          Modelo sin pantallas en el catálogo — el inventario no se descuenta automáticamente.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Colores predefinidos del equipo — selección rápida sin escribir.
+const DEVICE_COLORS = [
+  'Azul', 'Azul oscuro', 'Celeste',
+  'Rojo', 'Rosado',
+  'Blanco', 'Negro', 'Gris',
+  'Amarillo', 'Naranja',
+  'Verde', 'Morado', 'Dorado', 'Plateado',
+];
+
+// Select de color con valores predefinidos (colores viejos escritos a mano se conservan como opción).
+function ColorSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const options = value && !DEVICE_COLORS.includes(value)
+    ? [...DEVICE_COLORS, value]
+    : DEVICE_COLORS;
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger className={cn(!value && 'text-muted-foreground')}>
+        <SelectValue placeholder="Sin especificar" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="">— Sin especificar —</SelectItem>
+        {options.map(c => (
+          <SelectItem key={c} value={c}>
+            <span className="inline-flex items-center gap-2">
+              <span className={cn('inline-block size-2.5 rounded-full border border-border/50', colorDot(c))} />
+              {c}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+// Punto de color para el Select (clases Tailwind estáticas).
+function colorDot(color: string): string {
+  const map: Record<string, string> = {
+    'Azul': 'bg-blue-500', 'Azul oscuro': 'bg-blue-900', 'Celeste': 'bg-sky-400',
+    'Rojo': 'bg-red-600', 'Rosado': 'bg-pink-500',
+    'Blanco': 'bg-white', 'Negro': 'bg-neutral-950', 'Gris': 'bg-neutral-400',
+    'Amarillo': 'bg-yellow-400', 'Naranja': 'bg-orange-500',
+    'Verde': 'bg-green-600', 'Morado': 'bg-purple-600', 'Dorado': 'bg-amber-500', 'Plateado': 'bg-slate-300',
+  };
+  return map[color] || 'bg-neutral-400';
 }
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
@@ -747,8 +872,13 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
 
   const selectModel = (sugg: PhoneModelEntry) => {
     onChange({ model: sugg.label, modelPicked: true });
+    // Auto-precio SOLO si el teléfono matchea UN ÚNICO repuesto (o todos al mismo precio)
+    // Y el precio es > 0: inventario sin precio NO debe fijar el monto del servicio en $0.
     const prices = new Set(sugg.products.map(p => p.price_sale));
-    if (!device.amountTouched && prices.size === 1) onChange({ amount: [...prices][0] });
+    if (!device.amountTouched && prices.size === 1) {
+      const only = [...prices][0];
+      if (only > 0) onChange({ amount: only });
+    }
     setModelOpen(false);
   };
 
@@ -806,6 +936,10 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           <Input type="number" step={0.01} min={0} value={device.amount}
             onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
         </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Color del equipo</label>
+          <ColorSelect value={device.color} onChange={c => onChange({ color: c })} />
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -840,6 +974,14 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
             placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
         )}
       </div>
+
+      {device.serviceTypes.includes('Cambio pantalla') && (
+        <ScreenSelect
+          screenProductId={device.screenProductId}
+          screenOptions={compatibleScreens(phoneModels, device.model)}
+          onChange={id => onChange({ screenProductId: id })}
+        />
+      )}
 
       <div className="space-y-2">
         <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
@@ -959,6 +1101,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [clientAddress, setClientAddress] = useState('');
   const [model, setModel] = useState('');
   const [fault, setFault] = useState('');
+  const [color, setColor] = useState('');
   const [serviceTypes, setServiceTypes] = useState<string[]>(['Cambio pantalla']);
   const [otherFault, setOtherFault] = useState('');
   const [amount, setAmount] = useState(0);
@@ -989,6 +1132,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [svc, setSvc] = useState<Service | null>(service);
+  const [screenProductId, setScreenProductId] = useState<number | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techSel, setTechSel] = useState('');
   const [showTechDialog, setShowTechDialog] = useState(false);
@@ -999,13 +1143,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const addDevice = () => setDevices(prev => [...prev, emptyDevice()]);
   const removeDevice = (i: number) =>
     setDevices(prev => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
-  const devicesValid = devices.length > 0 &&
-    devices.every(d => d.model.trim() && d.fault.trim() && d.serviceTypes.length > 0);
 
   // Tipo PRIMARIO = el primero elegido (compatibilidad con service_type y auto-inventario)
   const serviceType = serviceTypes[0] ?? 'Cambio pantalla';
-  // Lista maestra de modelos de teléfono: una fila por teléfono, deduplicada del catálogo
+  // Lista maestra de modelos de teléfono: una fila por teléfono, deduplicada del catálogo.
+  // OJO: DEBE declararse ANTES de devicesValid (TDZ: un const no se puede leer antes de init).
   const phoneModels = useMemo(() => buildPhoneModels(catalog), [catalog]);
+
+  const devicesValid = devices.length > 0 &&
+    devices.every(d => d.model.trim() && d.fault.trim() && d.serviceTypes.length > 0 &&
+      screenOk(d.serviceTypes, d.screenProductId, compatibleScreens(phoneModels, d.model)));
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
@@ -1039,6 +1186,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setClientAddress(service.client_address ?? '');
       setModel(service.model ?? '');
       setFault(service.fault ?? '');
+      setColor(service.color ?? '');
       const parsedTypes = parseServiceTypes(service);
       const knownTypes = parsedTypes.filter(t => SERVICE_TYPES.includes(t));
       const customTypes = parsedTypes.filter(t => !SERVICE_TYPES.includes(t));
@@ -1056,11 +1204,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setCurrency(service.currency ?? 'USD');
       setClientId(service.client_id ?? null);
       setTechSel(service.technician_id ? String(service.technician_id) : '');
+      setScreenProductId(service.screen_product_id ?? null);
       api.getServicePayments(service.id).then(setPayments).catch(() => setPayments([]));
     } else {
       api.nextOrderNum().then(setOrderNum);
       setPayments([]);
       setClientId(null);
+      setScreenProductId(null);
     }
   }, [service]);
 
@@ -1114,9 +1264,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     modelPicked.current = true;
     setModel(sugg.label);
     // Auto-precio SOLO si el teléfono matchea UN ÚNICO repuesto (o todos al mismo precio);
-    // con varios repuestos de precios distintos NO se inventa el monto.
+    // con varios repuestos de precios distintos NO se inventa el monto, y un precio
+    // de $0 en el inventario NO fija el monto del servicio.
     const prices = new Set(sugg.products.map(p => p.price_sale));
-    if (!amountTouched.current && prices.size === 1) setAmount([...prices][0]);
+    if (!amountTouched.current && prices.size === 1) {
+      const only = [...prices][0];
+      if (only > 0) setAmount(only);
+    }
     setModelOpen(false);
   };
 
@@ -1155,9 +1309,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   const needCi = !service && !clientId;
 
+  // Pantalla exacta en edición: opciones compatibles + si quedó sin elegir (bloquea guardar)
+  const screenOptions = useMemo(() => compatibleScreens(phoneModels, model), [phoneModels, model]);
+  const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions) === false
+    ? 'Elige la pantalla exacta a instalar (o el modelo debe estar en el catálogo)'
+    : null;
+
   const save = async () => {
     if (service) {
-      if (!client || !model || !fault || serviceTypes.length === 0) return;
+      if (!client || !model || !fault || serviceTypes.length === 0 || screenMissing) return;
     } else if (!client || !devicesValid) return;
     setSaving(true);
     try {
@@ -1174,13 +1334,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         const typesArr = [...serviceTypes];
         if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
         const serviceTypesJson = JSON.stringify(typesArr);
-        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId);
+        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId);
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
           if (d.serviceTypes.includes('Otro') && d.otherFault.trim()) typesArr.push(d.otherFault.trim());
           return {
             model: d.model,
+            color: d.color,
             fault: d.fault,
             service_type: d.serviceTypes[0] ?? 'Cambio pantalla',
             service_types: JSON.stringify(typesArr),
@@ -1191,6 +1352,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             zelle_reference: d.zelleReference,
             currency: methodCurrency(d.payment),
             device_checklist: JSON.stringify(d.checklist),
+            screen_product_id: d.screenProductId,
           };
         });
         // addServiceOrder es transaccional y asigna los números: equipo 1 = base, 2+ = base-B/C...
@@ -1507,6 +1669,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
 
           <div className="space-y-2">
+            <label className="text-sm font-medium">Color del equipo</label>
+            <ColorSelect value={color} onChange={setColor} />
+          </div>
+
+          <div className="space-y-2">
             <label className="text-sm font-medium">
               Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
             </label>
@@ -1536,6 +1703,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
             )}
           </div>
+
+          {serviceTypes.includes('Cambio pantalla') && (
+            <ScreenSelect
+              screenProductId={screenProductId}
+              screenOptions={screenOptions}
+              onChange={setScreenProductId}
+            />
+          )}
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
@@ -1680,7 +1855,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving || dayOpen === false || !client || (service ? (!model || !fault) : !devicesValid) || (needCi && !clientCi.trim())}>
+          <Button onClick={save} disabled={saving || dayOpen === false || !client || (service ? (!model || !fault || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
           </Button>
         </DialogFooter>

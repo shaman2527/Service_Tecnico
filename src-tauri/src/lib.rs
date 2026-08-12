@@ -37,10 +37,11 @@ pub fn run() {
             commands::suggest_products,
             commands::add_sale,
             commands::get_sales,
-            commands::get_sales_stats,
+commands::get_sales_stats,
             commands::add_service,
             commands::add_service_order,
             commands::update_service,
+            commands::mark_service_printed,
             commands::delete_service,
             commands::get_services,
             commands::get_service,
@@ -88,10 +89,13 @@ pub fn run() {
             commands::remove_pin,
             commands::get_pago_movil_detail,
             commands::export_daily_report,
+            commands::export_daily_report_xlsx,
             commands::list_com_ports,
+            commands::probe_com_port,
             commands::print_receipt,
             commands::list_windows_printers,
             commands::print_to_windows_printer,
+            commands::get_windows_printer_status,
             commands::get_printer_settings,
             commands::set_printer_settings,
             commands::backup_before_update,
@@ -217,3 +221,6 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 113608
 // force rebuild 120224
 // force rebuild: Help docs
+// force rebuild
+// force rebuild 2026-08-12
+// force rebuild 2026-08-12 v2

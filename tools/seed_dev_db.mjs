@@ -88,6 +88,7 @@ ensureCol('services', 'technician', 'TEXT');
 ensureCol('services', 'technician_id', 'INTEGER');
 ensureCol('services', 'paid_amount', 'REAL DEFAULT 0');
 ensureCol('services', 'group_id', 'TEXT');
+ensureCol('services', 'screen_product_id', 'INTEGER');
 ensureCol('services', 'bank_fee_percent', 'REAL DEFAULT 0');
 ensureCol('services', 'bank_fee_amount', 'REAL DEFAULT 0');
 ensureCol('services', 'net_amount', 'REAL');

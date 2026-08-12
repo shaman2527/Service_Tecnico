@@ -263,13 +263,57 @@ pub fn list_windows_printers() -> Result<Vec<String>, String> {
 
 /// Imprime un ticket ESC/POS a una impresora de Windows (spooler, datatype RAW).
 /// Ideal para impresoras instaladas con driver oficial (ej. HPRT MPT-II en USB001).
-pub fn print_to_windows_printer(printer: &str, text: &str) -> Result<(), String> {
+/// `raster` = logo monocromo empaquetado (1 bit por píxel, 1 = negro), `raster_width` = ancho en píxeles
+/// (384 para 58 mm, 576 para 80 mm). El logo se imprime al inicio, antes del texto.
+pub fn print_to_windows_printer(
+    printer: &str,
+    text: &str,
+    raster: Option<&[u8]>,
+    raster_width: Option<u32>,
+) -> Result<(), String> {
     if printer.trim().is_empty() {
         return Err("No hay impresora de Windows seleccionada.".to_string());
     }
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let bytes = build_escpos(&lines);
+    let bytes = build_escpos_with_logo(&lines, raster, raster_width);
     winspool::print_raw(printer, &bytes)
+}
+
+/// Estado del spooler para una impresora de Windows (patrón powershell.exe del
+/// proyecto): ¿está conectada/lista, en pausa, sin papel, o falló el último job?
+/// Devuelve texto listo para mostrar al usuario ("Lista", "Fuera de línea", ...).
+pub fn get_windows_printer_status(printer: &str) -> Result<String, String> {
+    if printer.trim().is_empty() {
+        return Ok("Sin impresora seleccionada".to_string());
+    }
+    let out = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$p = Get-CimInstance Win32_Printer -Filter \"Name='{0}'\" -ErrorAction SilentlyContinue; if (-not $p) {{ 'NO_INSTALADA' }} elseif ($p.Offline) {{ 'FUERA_DE_LINEA' }} elseif ($p.PrinterStatus -eq 4) {{ 'EN_PAUSA' }} elseif ($p.PrinterStatus -eq 3) {{ 'SIN_PAPEL' }} elseif ($p.PrinterStatus -ne 3) {{ $j = Get-PrintJob -PrinterName '{0}' -ErrorAction SilentlyContinue | Where-Object {{ $_.JobStatus -like '*Error*' }}; if ($j) {{ 'ERROR_EN_COLA' }} else {{ 'LISTA' }} }} else {{ 'LISTA' }}",
+                printer
+            ),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let status = text.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("DESCONOCIDO");
+            let label = match status {
+                "LISTA" => "Lista — la impresora está conectada y lista".to_string(),
+                "FUERA_DE_LINEA" => "Fuera de línea — revisa que esté encendida y el cable USB conectado".to_string(),
+                "EN_PAUSA" => "En pausa — ábrela en Configuración → Impresoras y reanuda la cola".to_string(),
+                "SIN_PAPEL" => "Sin papel — coloca el rollo térmico e imprime de nuevo".to_string(),
+                "ERROR_EN_COLA" => "El trabajo quedó con error en la cola — revisa el estado en Configuración → Impresoras".to_string(),
+                "NO_INSTALADA" => "No instalada en Windows — instala el driver y reinicia la app".to_string(),
+                _ => format!("Estado: {status}"),
+            };
+            Ok(label)
+        }
+        _ => Ok("No se pudo consultar el estado del spooler".to_string()),
+    }
 }
 
 /// Codifica texto a CP850 (Latin-1 extendido) — el set de caracteres estándar que
@@ -295,11 +339,37 @@ pub fn cp850_encode(s: &str) -> Vec<u8> {
     out
 }
 
-/// Construye el flujo ESC/POS completo para el ticket:
-/// init → líneas (CR LF) → alimentación → corte de papel.
-pub fn build_escpos(lines: &[String]) -> Vec<u8> {
+/// Construye el comando ESC/POS de gráfico raster (GS v 0) para el logo monocromo.
+/// `width_px`: ancho en píxeles (384 típico de impresoras de 58 mm, 576 para 80 mm).
+/// `payload`: filas empaquetadas a 1 bit (1 = negro), tantos bytes por fila como
+/// `ceil(width_px / 8)`. Devuelve None si el payload no cuadra con el ancho.
+pub fn escpos_raster(width_px: u16, payload: &[u8]) -> Option<Vec<u8>> {
+    let bytes_per_line = (width_px as usize).div_ceil(8);
+    if bytes_per_line == 0 || payload.is_empty() || payload.len() % bytes_per_line != 0 {
+        return None;
+    }
+    let height = (payload.len() / bytes_per_line) as u16;
+    let mut cmd: Vec<u8> = vec![0x1D, 0x76, 0x30, 0x00]; // GS v 0 m=0 (normal)
+    cmd.push((bytes_per_line & 0xFF) as u8); // xL
+    cmd.push(((bytes_per_line >> 8) & 0xFF) as u8); // xH
+    cmd.push((height & 0xFF) as u8); // yL
+    cmd.push(((height >> 8) & 0xFF) as u8); // yH
+    cmd.extend_from_slice(payload);
+    Some(cmd)
+}
+
+/// Construye el flujo ESC/POS completo para el ticket, con logo raster opcional:
+/// init → logo (GS v 0) → líneas (CR LF) → alimentación → corte de papel.
+pub fn build_escpos_with_logo(lines: &[String], raster: Option<&[u8]>, raster_width: Option<u32>) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"\x1B\x40"); // ESC @ — inicializar impresora
+    if let (Some(r), Some(w)) = (raster, raster_width) {
+        if w > 0 && w as u16 != 0 && w <= 2000 {
+            if let Some(logo) = escpos_raster(w as u16, r) {
+                out.extend_from_slice(&logo);
+            }
+        }
+    }
     for line in lines {
         out.extend_from_slice(&cp850_encode(line));
         out.extend_from_slice(b"\x0D\x0A"); // CR LF
@@ -309,13 +379,60 @@ pub fn build_escpos(lines: &[String]) -> Vec<u8> {
     out
 }
 
+/// Construye el flujo ESC/POS completo para el ticket:
+/// init → líneas (CR LF) → alimentación → corte de papel.
+pub fn build_escpos(lines: &[String]) -> Vec<u8> {
+    build_escpos_with_logo(lines, None, None)
+}
+
 /// Imprime un ticket en el puerto COM indicado.
 /// `text` es texto plano con saltos de línea; se codifica a CP850 y se envía con
-/// el protocolo ESC/POS (init + líneas + corte).
-pub fn print_receipt(port: &str, baud: u32, text: &str) -> Result<(), String> {
+/// el protocolo ESC/POS (init + logo opcional + líneas + corte).
+/// Tope duro de 10 s: el driver de puertos Bluetooth puede bloquear Open/Write
+/// más allá del timeout serial y dejar la UI "pensando" — aquí el hilo se
+/// abandona en segundo plano y la app responde con un error claro.
+pub fn print_receipt(
+    port: &str,
+    baud: u32,
+    text: &str,
+    raster: Option<&[u8]>,
+    raster_width: Option<u32>,
+) -> Result<(), String> {
     if port.trim().is_empty() {
         return Err("No hay impresora configurada. Configúrala en Impresora de tickets.".to_string());
     }
+    let port_owned = port.to_string();
+    let text_owned = text.to_string();
+    let raster_owned = raster.map(|r| r.to_vec());
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(print_receipt_inner(&port_owned, baud, &text_owned, raster_owned.as_deref(), raster_width));
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(res) => res,
+        Err(_) => {
+            if bluetooth_friendly_names().contains_key(port) {
+                Err(format!(
+                    "La impresora Bluetooth ({port}) no respondió en 10 segundos. \
+                     Verifica que esté ENCENDIDA y cerca de la PC, y que no esté conectada a otro equipo."
+                ))
+            } else {
+                Err(format!(
+                    "No se pudo imprimir en {port}: la impresora no respondió a tiempo. \
+                     Revisa que esté conectada y encendida."
+                ))
+            }
+        }
+    }
+}
+
+fn print_receipt_inner(
+    port: &str,
+    baud: u32,
+    text: &str,
+    raster: Option<&[u8]>,
+    raster_width: Option<u32>,
+) -> Result<(), String> {
     let is_bt = bluetooth_friendly_names().contains_key(port);
     let mut serial = serialport::new(port, baud)
         .timeout(Duration::from_secs(5))
@@ -328,11 +445,50 @@ pub fn print_receipt(port: &str, baud: u32, text: &str) -> Result<(), String> {
             }
         })?;
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let bytes = build_escpos(&lines);
+    let bytes = build_escpos_with_logo(&lines, raster, raster_width);
     serial
         .write_all(&bytes)
         .and_then(|_| serial.flush())
-        .map_err(|e| format!("Error al imprimir en {port}: {e}"))?;
+        .map_err(|e| {
+            if is_bt {
+                format!(
+                    "Error al imprimir en {port} (Bluetooth): {e}. \
+                     Verifica que la impresora esté ENCENDIDA y cerca, y que no esté conectada a otro equipo."
+                )
+            } else {
+                format!("Error al imprimir en {port}: {e}. Revisa que la impresora esté conectada.")
+            }
+        })
+}
+
+/// Prueba de conexión de un puerto COM sin imprimir nada visible: abre el puerto
+/// y envía `ESC @` (init). Usado por la UI para marcar en vivo qué impresoras
+/// responden ("captar" las disponibles). Tope duro de 3 s — un driver BT muerto
+/// no puede colgar la detección.
+pub fn probe_com_port(port: &str, baud: u32) -> Result<(), String> {
+    if port.trim().is_empty() {
+        return Err("Puerto vacío".to_string());
+    }
+    let port_owned = port.to_string();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_com_port_inner(&port_owned, baud));
+    });
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(r) => r,
+        Err(_) => Err(format!("La impresora en {port} no respondió a tiempo (3 s).")),
+    }
+}
+
+fn probe_com_port_inner(port: &str, baud: u32) -> Result<(), String> {
+    let mut serial = serialport::new(port, baud)
+        .timeout(Duration::from_secs(2))
+        .open()
+        .map_err(|e| format!("No se pudo abrir {port}: {e}"))?;
+    serial
+        .write_all(b"\x1B\x40")
+        .and_then(|_| serial.flush())
+        .map_err(|e| format!("La impresora no respondió: {e}"))?;
     Ok(())
 }
 
@@ -375,6 +531,47 @@ mod tests {
         // El texto pasa codificado CP850
         let with_n = build_escpos(&["Mañana".to_string()]);
         assert!(with_n.contains(&0xA4), "La ñ se codifica CP850 (0xA4)");
+    }
+
+    #[test]
+    fn test_escpos_raster_header() {
+        // 384 píxeles = 48 bytes por fila; 30 filas de payload alternado
+        let payload: Vec<u8> = (0..48 * 30).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect();
+        let cmd = escpos_raster(384, &payload).expect("payload válido");
+        assert_eq!(&cmd[0..6], &[0x1D, 0x76, 0x30, 0x00, 48, 0], "GS v 0 m=0 xL=48 xH=0");
+        assert_eq!(&cmd[6..8], &[30, 0], "yL=30 yH=0 (30 filas)");
+        assert_eq!(cmd.len(), 8 + payload.len(), "8 bytes de cabecera + payload");
+        assert_eq!(&cmd[8..], &payload[..]);
+    }
+
+    #[test]
+    fn test_escpos_raster_rejects_bad_payload() {
+        assert!(escpos_raster(384, &[]).is_none(), "vacío");
+        assert!(escpos_raster(384, &[1, 2, 3]).is_none(), "no múltiplo de 48");
+        assert!(escpos_raster(0, &[0]).is_none(), "ancho 0");
+        // 80 mm: 576 px = 72 bytes/fila
+        let payload = vec![0xFF; 72 * 10];
+        let cmd = escpos_raster(576, &payload).expect("payload válido 80mm");
+        assert_eq!(&cmd[0..6], &[0x1D, 0x76, 0x30, 0x00, 72, 0]);
+        assert_eq!(&cmd[6..8], &[10, 0]);
+    }
+
+    #[test]
+    fn test_build_escpos_with_logo_order() {
+        let lines = vec!["HOLA".to_string()];
+        let payload = vec![0x00; 48 * 2];
+        let bytes = build_escpos_with_logo(&lines, Some(&payload), Some(384));
+        assert!(bytes.starts_with(b"\x1B\x40"), "ESC @ primero");
+        assert_eq!(&bytes[2..8], &[0x1D, 0x76, 0x30, 0x00, 48, 0], "logo raster tras init");
+        // El texto queda después del payload del logo
+        let expected = 2 /*ESC@*/ + 8 /*cabecera GS v 0*/ + payload.len() + 4 + 2 /*HOLA CR LF*/ + 3 /*ESC d 5*/ + 3 /*GS V B*/;
+        assert_eq!(bytes.len(), expected, "init+logo+texto+feed+corte");
+        assert!(bytes.ends_with(b"\x1D\x56\x42"), "corte final");
+        // Sin logo se comporta como build_escpos
+        let plain = build_escpos(&lines);
+        assert_eq!(build_escpos_with_logo(&lines, None, None), plain);
+        // Raster inválido + ancho 0 → se ignora sin romper el ticket
+        assert_eq!(build_escpos_with_logo(&lines, Some(&[9, 9]), Some(0)), plain);
     }
 
     #[test]
@@ -436,10 +633,10 @@ mod tests {
     #[test]
     fn test_print_to_windows_printer_errors() {
         // Impresora vacía → error amigable (nunca panica ni toca el spooler)
-        let err = print_to_windows_printer("", "hola").unwrap_err();
+        let err = print_to_windows_printer("", "hola", None, None).unwrap_err();
         assert!(err.contains("No hay impresora"), "error: {err}");
         // Impresora inexistente → error amigable (o en su defecto cualquier error/ok
         // controlado, NUNCA panic)
-        let _ = print_to_windows_printer("_impresora_que_no_existe_12345_", "hola");
+        let _ = print_to_windows_printer("_impresora_que_no_existe_12345_", "hola", Some(&[0x00; 48]), Some(384));
     }
 }

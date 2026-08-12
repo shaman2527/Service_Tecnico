@@ -234,8 +234,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
         <DialogFooter className="shrink-0 flex-wrap gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
           {service && (
-            <Button variant="outline" onClick={() => setPrintOpen(true)} title="Imprimir factura del servicio">
-              <Printer className="size-4" /> Imprimir factura
+            <Button variant="outline" onClick={() => setPrintOpen(true)} title="Imprimir orden de servicio del equipo">
+              <Printer className="size-4" /> Imprimir orden
             </Button>
           )}
           <Button onClick={doAddPayment} disabled={savingPay || payAmount <= 0 || dayOpen === false}>

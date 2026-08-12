@@ -35,7 +35,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../registro.db": "registro.default.db"
+      "../registro.db": "registro.default.db",
+      "../tools/export_libro_diario.py": "export_libro_diario.py"
     },
     "windows": {
       "webviewInstallMode": {

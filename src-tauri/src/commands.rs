@@ -92,8 +92,9 @@ pub fn add_service(db: State<Database>, order_num: String, client: String, phone
                    fault: String, service_type: String, service_types: String, amount: f64, payment_method: String, observations: String,
                    bank_fee_percent: f64, zelle_reference: String, currency: String,
                    client_ci: String, client_address: String, device_checklist: String,
-                   client_id: Option<i64>, technician: String, technician_id: Option<i64>) -> Result<i64, String> {
-    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id, &technician, technician_id)
+                   client_id: Option<i64>, technician: String, technician_id: Option<i64>,
+                   color: String, screen_product_id: Option<i64>) -> Result<i64, String> {
+    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id, &technician, technician_id, &color, screen_product_id)
         .map_err(|e| e.to_string())
 }
 
@@ -111,9 +112,15 @@ pub fn update_service(db: State<Database>, id: i64, client: String, phone: Strin
                       service_type: String, service_types: String, amount: f64, payment_method: String, date_out: String, status: String, observations: String,
                       bank_fee_percent: f64, zelle_reference: String, currency: String,
                       client_ci: String, client_address: String, device_checklist: String,
-                      technician: String, technician_id: Option<i64>) -> Result<(), String> {
-    db.update_service(id, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, &technician, technician_id)
+                      technician: String, technician_id: Option<i64>, color: String,
+                      screen_product_id: Option<i64>) -> Result<(), String> {
+    db.update_service(id, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, &technician, technician_id, &color, screen_product_id)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn mark_service_printed(db: State<Database>, id: i64) -> Result<(), String> {
+    db.mark_service_printed(id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -372,8 +379,13 @@ pub fn list_com_ports() -> Result<Vec<crate::printer::ComPortInfo>, String> {
 }
 
 #[tauri::command]
-pub fn print_receipt(port: String, baud: u32, text: String) -> Result<(), String> {
-    crate::printer::print_receipt(&port, baud, &text)
+pub fn probe_com_port(port: String, baud: u32) -> Result<(), String> {
+    crate::printer::probe_com_port(&port, baud)
+}
+
+#[tauri::command]
+pub fn print_receipt(port: String, baud: u32, text: String, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
+    crate::printer::print_receipt(&port, baud, &text, raster.as_deref(), raster_width)
 }
 
 #[tauri::command]
@@ -382,8 +394,8 @@ pub fn list_windows_printers() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub fn print_to_windows_printer(printer: String, text: String) -> Result<(), String> {
-    crate::printer::print_to_windows_printer(&printer, &text)
+pub fn print_to_windows_printer(printer: String, text: String, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
+    crate::printer::print_to_windows_printer(&printer, &text, raster.as_deref(), raster_width)
 }
 
 #[tauri::command]
@@ -392,8 +404,14 @@ pub fn get_printer_settings(db: State<Database>) -> Result<crate::db::PrinterSet
 }
 
 #[tauri::command]
-pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32, windows_printer: String) -> Result<(), String> {
-    db.set_printer_settings(&port, baud, width, &windows_printer).map_err(|e| e.to_string())
+pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32, windows_printer: String,
+                            business_name: String, business_line: String, logo: String) -> Result<(), String> {
+    db.set_printer_settings(&port, baud, width, &windows_printer, &business_name, &business_line, &logo).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_windows_printer_status(printer: String) -> Result<String, String> {
+    crate::printer::get_windows_printer_status(&printer)
 }
 
 // --- Updates (respaldo / rollback / salud — módulo updates.rs) ---
@@ -448,4 +466,9 @@ pub fn get_pago_movil_detail(db: State<Database>, date: String) -> Result<Vec<cr
 #[tauri::command]
 pub fn export_daily_report(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
     db.export_daily_report(&start_date, &end_date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn export_daily_report_xlsx(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
+    db.export_daily_report_xlsx(&start_date, &end_date).map_err(|e| e.to_string())
 }

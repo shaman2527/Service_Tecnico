@@ -177,14 +177,15 @@ const sections = [
     bg: 'bg-slate-100',
     content: (
       <div className="space-y-2">
-        <p>Las <span className="font-medium text-foreground">facturas de servicio</span> se imprimen en una impresora térmica. Funciona de dos formas: con el <span className="font-medium text-foreground">driver de Windows</span> (recomendado, ej. HPRT MPT-II) o por <span className="font-medium text-foreground">puerto COM directo</span> (impresoras USB/Bluetooth).</p>
+        <p>Las <span className="font-medium text-foreground">órdenes de servicio</span> se imprimen en una impresora térmica. Funciona de dos formas: con el <span className="font-medium text-foreground">driver de Windows</span> (recomendado, ej. HPRT MPT-II) o por <span className="font-medium text-foreground">puerto COM directo</span> (impresoras USB/Bluetooth).</p>
         <div className="space-y-1.5">
           <p className="font-medium text-foreground">Instalar el driver HPRT MPT-II (una vez por PC):</p>
           <ol className="list-decimal list-inside space-y-1">
             <li>Conecta la impresora por <span className="font-medium text-foreground">USB</span> y enciéndela.</li>
             <li>Instala el driver oficial de HPRT que viene con la impresora (MPT-II / "IMPRESORA USB"). Windows crea una impresora llamada <code className="rounded bg-muted px-1.5 py-0.5 text-xs">HPRT MPT-II</code>.</li>
             <li>Abre la app → botón <Badge variant="outline">Impresora</Badge> (en Servicio Técnico) → en <span className="font-medium text-foreground">"Impresora de Windows"</span> verás el nombre y puedes pulsar <Badge variant="outline">Imprimir prueba</Badge>.</li>
-            <li>Si el ticket sale, listo: cada orden tendrá su botón <Badge variant="outline">Factura</Badge> para imprimir el recibo del servicio (32/48 columnas según el ancho 58/80 mm, con falla completa, abonos y garantía).</li>
+            <li>Si el ticket sale, listo: cada orden tendrá su botón <Badge variant="outline">Orden</Badge> para imprimir el recibo del servicio — parte superior para el cliente y talón recortable ("CORTA TIJERA") con los mismos datos para pegar detrás del teléfono.</li>
+            <li>¿Logo arriba del ticket? En <Badge variant="outline">Impresora</Badge> → <span className="font-medium text-foreground">Logo del ticket</span>: pulsa <Badge variant="outline">Logo de prueba</Badge> (se genera uno solo para probar) o <Badge variant="outline">Subir imagen</Badge> con tu logo (ej. el diseño con la mano y el rayo). Se imprime en negro sobre blanco, sin degradados.</li>
           </ol>
         </div>
         <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-700">
@@ -255,7 +256,8 @@ const sections = [
         </div>
         <div className="space-y-1.5">
           <p className="font-medium text-foreground">Exportar Excel (día específico o mes completo):</p>
-          <p><Badge variant="outline">Exportar Excel</Badge> genera un reporte (CSV compatible con Excel) en <code className="rounded bg-muted px-1.5 py-0.5 text-xs">Documentos\Registro</code> con el rango <Badge variant="outline">Desde / Hasta</Badge> visible arriba: pon la misma fecha en ambos para un día exacto, o deja el rango del mes para el mes completo. Incluye por día: ventas, pagos de servicios, pago móvil, totales por método y, si el día está cerrado, el cierre completo (apertura, monto impreso del Punto, arqueo real, diferencia y notas) — tu respaldo del libro.</p>
+          <p><Badge variant="outline">Exportar Excel</Badge> genera un Excel profesional (<code className="rounded bg-muted px-1.5 py-0.5 text-xs">.xlsx</code>) en <code className="rounded bg-muted px-1.5 py-0.5 text-xs">Documentos\Registro</code> con el rango <Badge variant="outline">Desde / Hasta</Badge> visible arriba: pon la misma fecha en ambos para un día exacto, o deja el rango del mes para el mes completo. Contiene 6 hojas con filtros (clic en las flechas de las columnas): <span className="font-medium text-foreground">Resumen</span> (totales por día y por método), <span className="font-medium text-foreground">Cierres</span> (apertura, arqueo, diferencia), <span className="font-medium text-foreground">Ventas</span> (cliente, cédula, producto, monto, método), <span className="font-medium text-foreground">Servicios</span> (técnico, trabajos, saldo, pantalla instalada), <span className="font-medium text-foreground">Pagos y Abonos</span> y <span className="font-medium text-foreground">Movimientos</span>. Las filas <span className="font-medium text-foreground">TOTAL (filtrado)</span> se recalculan al filtrar (ej. un solo cliente).</p>
+          <p><span className="font-medium text-foreground">Requisito:</span> la PC necesita Python 3 con <code className="rounded bg-muted px-1.5 py-0.5 text-xs">pip install openpyxl</code> (una sola vez). Si no está, la app genera el CSV clásico como respaldo automático.</p>
         </div>
       </div>
     ),

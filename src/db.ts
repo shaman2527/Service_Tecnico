@@ -3,7 +3,7 @@ import type {
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
-  ServiceDeviceInput, DaySummary
+  ServiceDeviceInput, DaySummary, ExportResult
 } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -97,8 +97,8 @@ export const api = {
     fault: string, serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
-    clientId: number | null = null, technician: string = '', technicianId: number | null = null) =>
-    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId }),
+    clientId: number | null = null, technician: string = '', technicianId: number | null = null, color: string = '') =>
+    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId, color }),
 
   addServiceOrder: (client: string, phone: string, clientCi: string, clientAddress: string,
     clientId: number | null, technician: string, technicianId: number | null,
@@ -109,10 +109,14 @@ export const api = {
     serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
-    technician: string = '', technicianId: number | null = null) =>
-    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, technician, technicianId }),
+    technician: string = '', technicianId: number | null = null, color: string = '', screenProductId: number | null = null) =>
+    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, technician, technicianId, color, screenProductId }),
 
   deleteService: (id: number) => tauriInvoke<void>('delete_service', { id }),
+
+  markServicePrinted: (id: number) =>
+    tauriInvoke<void>('mark_service_printed', { id }).catch(() =>
+      mock<void>(undefined)),
 
   getServices: (search: string = '', status: string = '', startDate: string = '', endDate: string = '') =>
     tauriInvoke<Service[]>('get_services', { search, status, startDate, endDate }),
@@ -287,13 +291,26 @@ export const api = {
     tauriInvoke<string>('export_daily_report', { startDate, endDate }).catch(() =>
       mock<string>('mock/report.csv')),
 
+  exportDailyReportXlsx: async (startDate: string, endDate: string) => {
+    const raw = await tauriInvoke<string>('export_daily_report_xlsx', { startDate, endDate });
+    try {
+      return JSON.parse(raw) as ExportResult;
+    } catch {
+      return { ok: false, format: 'csv' as const, path: '', note: raw };
+    }
+  },
+
   // --- Impresora térmica (facturas de servicio por puerto COM) ---
   listComPorts: () =>
     tauriInvoke<ComPort[]>('list_com_ports').catch(() =>
       mock<ComPort[]>([{ name: 'COM3', description: 'Impresora térmica (simulada en browser mode)' }])),
 
-  printReceipt: (port: string, baud: number, text: string) =>
-    tauriInvoke<void>('print_receipt', { port, baud, text }).catch(() =>
+  probeComPort: (port: string, baud: number) =>
+    tauriInvoke<void>('probe_com_port', { port, baud }).catch(() =>
+      mock<void>(undefined)),
+
+  printReceipt: (port: string, baud: number, text: string, raster?: number[], rasterWidth?: number) =>
+    tauriInvoke<void>('print_receipt', { port, baud, text, raster, rasterWidth }).catch(() =>
       mock<void>(undefined)),
 
   // --- Impresoras de Windows (spooler, driver instalado ej. HPRT MPT-II) ---
@@ -301,17 +318,21 @@ export const api = {
     tauriInvoke<string[]>('list_windows_printers').catch(() =>
       mock<string[]>([])),
 
-  printToWindowsPrinter: (printer: string, text: string) =>
-    tauriInvoke<void>('print_to_windows_printer', { printer, text }).catch(() =>
+  printToWindowsPrinter: (printer: string, text: string, raster?: number[], rasterWidth?: number) =>
+    tauriInvoke<void>('print_to_windows_printer', { printer, text, raster, rasterWidth }).catch(() =>
       mock<void>(undefined)),
 
   getPrinterSettings: () =>
     tauriInvoke<PrinterSettings>('get_printer_settings').catch(() =>
-      mock<PrinterSettings>({ port: '', baud: 9600, width: 58, windowsPrinter: '' })),
+      mock<PrinterSettings>({ port: '', baud: 9600, width: 58, windowsPrinter: '', businessName: 'SERVICIO TECNICO', businessLine: 'WILIAM SALGADO', logo: '' })),
 
-  setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string) =>
-    tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter }).catch(() =>
+  setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string, businessName: string, businessLine: string, logo: string) =>
+    tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter, businessName, businessLine, logo }).catch(() =>
       mock<void>(undefined)),
+
+  getWindowsPrinterStatus: (printer: string) =>
+    tauriInvoke<string>('get_windows_printer_status', { printer }).catch(() =>
+      mock<string>('')),
 
   // --- Actualizaciones (respaldo / rollback / chequeo de salud) ---
   backupBeforeUpdate: (newVersion: string, previousVersion: string) =>
