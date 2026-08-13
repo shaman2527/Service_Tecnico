@@ -263,11 +263,15 @@ pub fn list_windows_printers() -> Result<Vec<String>, String> {
 
 /// Imprime un ticket ESC/POS a una impresora de Windows (spooler, datatype RAW).
 /// Ideal para impresoras instaladas con driver oficial (ej. HPRT MPT-II en USB001).
+/// `terms` = bloque de letra pequeña (font B) que se imprime entre `text` y `footer`
+/// (talón recortable "CORTA TIJERA") — las condiciones quedan en la PRIMERA copia.
 /// `raster` = logo monocromo empaquetado (1 bit por píxel, 1 = negro), `raster_width` = ancho en píxeles
 /// (384 para 58 mm, 576 para 80 mm). El logo se imprime al inicio, antes del texto.
 pub fn print_to_windows_printer(
     printer: &str,
     text: &str,
+    terms: Option<&str>,
+    footer: Option<&str>,
     raster: Option<&[u8]>,
     raster_width: Option<u32>,
 ) -> Result<(), String> {
@@ -275,7 +279,9 @@ pub fn print_to_windows_printer(
         return Err("No hay impresora de Windows seleccionada.".to_string());
     }
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let bytes = build_escpos_with_logo(&lines, raster, raster_width);
+    let foot_lines: Vec<String> = footer.unwrap_or("").lines().map(|l| l.to_string()).collect();
+    let foot = (!foot_lines.is_empty()).then_some(foot_lines);
+    let bytes = build_escpos_with_logo(&lines, terms, foot.as_deref(), raster, raster_width);
     winspool::print_raw(printer, &bytes)
 }
 
@@ -285,6 +291,11 @@ pub fn print_to_windows_printer(
 pub fn get_windows_printer_status(printer: &str) -> Result<String, String> {
     if printer.trim().is_empty() {
         return Ok("Sin impresora seleccionada".to_string());
+    }
+    // Nombres con comillas romperían el script PowerShell interpolado (inyección WQL):
+    // estado no consultable, sin tocar el spooler. Nombres así son exóticos (nunca vistos).
+    if printer.contains('\'') || printer.contains('"') {
+        return Ok("Estado no consultable (el nombre de la impresora tiene caracteres especiales)".to_string());
     }
     let out = std::process::Command::new("powershell.exe")
         .args([
@@ -359,8 +370,15 @@ pub fn escpos_raster(width_px: u16, payload: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Construye el flujo ESC/POS completo para el ticket, con logo raster opcional:
-/// init → logo (GS v 0) → líneas (CR LF) → alimentación → corte de papel.
-pub fn build_escpos_with_logo(lines: &[String], raster: Option<&[u8]>, raster_width: Option<u32>) -> Vec<u8> {
+/// init → logo (GS v 0) → cuerpo (CR LF) → [ESC d 2 → ESC M 1 (font B) → términos →
+/// ESC M 0] → talón (font A, ej. CORTA TIJERA) → alimentación → corte.
+pub fn build_escpos_with_logo(
+    lines: &[String],
+    terms: Option<&str>,
+    footer: Option<&[String]>,
+    raster: Option<&[u8]>,
+    raster_width: Option<u32>,
+) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"\x1B\x40"); // ESC @ — inicializar impresora
     if let (Some(r), Some(w)) = (raster, raster_width) {
@@ -374,6 +392,24 @@ pub fn build_escpos_with_logo(lines: &[String], raster: Option<&[u8]>, raster_wi
         out.extend_from_slice(&cp850_encode(line));
         out.extend_from_slice(b"\x0D\x0A"); // CR LF
     }
+    if let Some(terms) = terms {
+        let term_lines: Vec<&str> = terms.lines().collect();
+        if !term_lines.is_empty() {
+            out.extend_from_slice(b"\x1B\x64\x02"); // ESC d 2 — separar del cuerpo
+            out.extend_from_slice(b"\x1B\x4D\x01"); // ESC M 1 — letra pequeña (font B)
+            for line in term_lines {
+                out.extend_from_slice(&cp850_encode(line));
+                out.extend_from_slice(b"\x0D\x0A");
+            }
+            out.extend_from_slice(b"\x1B\x4D\x00"); // ESC M 0 — restaurar font A
+        }
+    }
+    if let Some(footer) = footer {
+        for line in footer {
+            out.extend_from_slice(&cp850_encode(line));
+            out.extend_from_slice(b"\x0D\x0A");
+        }
+    }
     out.extend_from_slice(b"\x1B\x64\x05"); // ESC d 5 — alimentar 5 líneas antes del corte
     out.extend_from_slice(b"\x1D\x56\x42"); // GS V B — corte parcial (papel no vuela)
     out
@@ -382,12 +418,12 @@ pub fn build_escpos_with_logo(lines: &[String], raster: Option<&[u8]>, raster_wi
 /// Construye el flujo ESC/POS completo para el ticket:
 /// init → líneas (CR LF) → alimentación → corte de papel.
 pub fn build_escpos(lines: &[String]) -> Vec<u8> {
-    build_escpos_with_logo(lines, None, None)
+    build_escpos_with_logo(lines, None, None, None, None)
 }
 
 /// Imprime un ticket en el puerto COM indicado.
 /// `text` es texto plano con saltos de línea; se codifica a CP850 y se envía con
-/// el protocolo ESC/POS (init + logo opcional + líneas + corte).
+/// el protocolo ESC/POS (init + logo opcional + líneas + términos en font B + corte).
 /// Tope duro de 10 s: el driver de puertos Bluetooth puede bloquear Open/Write
 /// más allá del timeout serial y dejar la UI "pensando" — aquí el hilo se
 /// abandona en segundo plano y la app responde con un error claro.
@@ -395,6 +431,8 @@ pub fn print_receipt(
     port: &str,
     baud: u32,
     text: &str,
+    terms: Option<&str>,
+    footer: Option<&str>,
     raster: Option<&[u8]>,
     raster_width: Option<u32>,
 ) -> Result<(), String> {
@@ -403,10 +441,12 @@ pub fn print_receipt(
     }
     let port_owned = port.to_string();
     let text_owned = text.to_string();
+    let terms_owned = terms.map(|t| t.to_string());
+    let footer_owned = footer.map(|t| t.to_string());
     let raster_owned = raster.map(|r| r.to_vec());
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        let _ = tx.send(print_receipt_inner(&port_owned, baud, &text_owned, raster_owned.as_deref(), raster_width));
+        let _ = tx.send(print_receipt_inner(&port_owned, baud, &text_owned, terms_owned.as_deref(), footer_owned.as_deref(), raster_owned.as_deref(), raster_width));
     });
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(res) => res,
@@ -430,6 +470,8 @@ fn print_receipt_inner(
     port: &str,
     baud: u32,
     text: &str,
+    terms: Option<&str>,
+    footer: Option<&str>,
     raster: Option<&[u8]>,
     raster_width: Option<u32>,
 ) -> Result<(), String> {
@@ -445,7 +487,9 @@ fn print_receipt_inner(
             }
         })?;
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let bytes = build_escpos_with_logo(&lines, raster, raster_width);
+    let foot_lines: Vec<String> = footer.unwrap_or("").lines().map(|l| l.to_string()).collect();
+    let foot = (!foot_lines.is_empty()).then_some(foot_lines);
+    let bytes = build_escpos_with_logo(&lines, terms, foot.as_deref(), raster, raster_width);
     serial
         .write_all(&bytes)
         .and_then(|_| serial.flush())
@@ -560,7 +604,7 @@ mod tests {
     fn test_build_escpos_with_logo_order() {
         let lines = vec!["HOLA".to_string()];
         let payload = vec![0x00; 48 * 2];
-        let bytes = build_escpos_with_logo(&lines, Some(&payload), Some(384));
+        let bytes = build_escpos_with_logo(&lines, None, None, Some(&payload), Some(384));
         assert!(bytes.starts_with(b"\x1B\x40"), "ESC @ primero");
         assert_eq!(&bytes[2..8], &[0x1D, 0x76, 0x30, 0x00, 48, 0], "logo raster tras init");
         // El texto queda después del payload del logo
@@ -569,9 +613,36 @@ mod tests {
         assert!(bytes.ends_with(b"\x1D\x56\x42"), "corte final");
         // Sin logo se comporta como build_escpos
         let plain = build_escpos(&lines);
-        assert_eq!(build_escpos_with_logo(&lines, None, None), plain);
+        assert_eq!(build_escpos_with_logo(&lines, None, None, None, None), plain);
         // Raster inválido + ancho 0 → se ignora sin romper el ticket
-        assert_eq!(build_escpos_with_logo(&lines, Some(&[9, 9]), Some(0)), plain);
+        assert_eq!(build_escpos_with_logo(&lines, None, None, Some(&[9, 9]), Some(0)), plain);
+    }
+
+    #[test]
+    fn test_escpos_terms_font_b() {
+        // El bloque de términos se imprime en letra pequeña (ESC M 1 font B),
+        // ENTRE el cuerpo y el talón (footer), y se restaura la font A (ESC M 0).
+        let lines = vec!["BODY".to_string()];
+        let terms = Some("CONDICIONES DEL SERVICIO\nLINEA PEQUEÑA");
+        let footer = vec!["--- CORTA TIJERA ---".to_string(), "FIRMA SALIDA".to_string()];
+        let bytes = build_escpos_with_logo(&lines, terms, Some(&footer), None, None);
+        let start = bytes.windows(3).position(|w| w == b"\x1B\x4D\x01").expect("ESC M 1 (font B)");
+        let end = bytes.windows(3).position(|w| w == b"\x1B\x4D\x00").expect("ESC M 0 (font A)");
+        assert!(end > start, "font B antes de restaurar font A");
+        let block = &bytes[start + 3..end];
+        assert!(block.windows(8).any(|w| w == "CONDICIO".as_bytes()), "términos dentro del bloque");
+        assert!(block.windows(2).any(|w| w == b"\x0D\x0A"), "líneas CR LF");
+        // El talón va DESPUÉS de los términos y en font A (sin ESC M 1 entre medias)
+        let tail = &bytes[end + 3..];
+        assert!(tail.windows(7).any(|w| w == "CORTA T".as_bytes()), "talón tras los términos");
+        assert!(!tail.windows(3).any(|w| w == b"\x1B\x4D\x01"), "talón en font A");
+        assert!(bytes.ends_with(b"\x1D\x56\x42"), "corte al final");
+        // Sin términos ni talón → sin secuencias de font B
+        let plain = build_escpos_with_logo(&lines, None, None, None, None);
+        assert!(!plain.windows(3).any(|w| w == b"\x1B\x4D\x01"));
+        // Términos vacíos (solo líneas en blanco) → tampoco inyecta font B
+        let empty_terms = build_escpos_with_logo(&lines, Some(""), None, None, None);
+        assert_eq!(empty_terms, plain);
     }
 
     #[test]
@@ -633,10 +704,10 @@ mod tests {
     #[test]
     fn test_print_to_windows_printer_errors() {
         // Impresora vacía → error amigable (nunca panica ni toca el spooler)
-        let err = print_to_windows_printer("", "hola", None, None).unwrap_err();
+        let err = print_to_windows_printer("", "hola", None, None, None, None).unwrap_err();
         assert!(err.contains("No hay impresora"), "error: {err}");
         // Impresora inexistente → error amigable (o en su defecto cualquier error/ok
         // controlado, NUNCA panic)
-        let _ = print_to_windows_printer("_impresora_que_no_existe_12345_", "hola", Some(&[0x00; 48]), Some(384));
+        let _ = print_to_windows_printer("_impresora_que_no_existe_12345_", "hola", None, None, Some(&[0x00; 48]), Some(384));
     }
 }

@@ -5,6 +5,7 @@ import type {
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
   ServiceDeviceInput, DaySummary, ExportResult
 } from './types';
+import { DEFAULT_PRINTER_SETTINGS } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
   ((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ !== undefined ||
@@ -309,8 +310,8 @@ export const api = {
     tauriInvoke<void>('probe_com_port', { port, baud }).catch(() =>
       mock<void>(undefined)),
 
-  printReceipt: (port: string, baud: number, text: string, raster?: number[], rasterWidth?: number) =>
-    tauriInvoke<void>('print_receipt', { port, baud, text, raster, rasterWidth }).catch(() =>
+  printReceipt: (port: string, baud: number, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) =>
+    tauriInvoke<void>('print_receipt', { port, baud, text, terms, footer, raster, rasterWidth }).catch(() =>
       mock<void>(undefined)),
 
   // --- Impresoras de Windows (spooler, driver instalado ej. HPRT MPT-II) ---
@@ -318,13 +319,13 @@ export const api = {
     tauriInvoke<string[]>('list_windows_printers').catch(() =>
       mock<string[]>([])),
 
-  printToWindowsPrinter: (printer: string, text: string, raster?: number[], rasterWidth?: number) =>
-    tauriInvoke<void>('print_to_windows_printer', { printer, text, raster, rasterWidth }).catch(() =>
+  printToWindowsPrinter: (printer: string, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) =>
+    tauriInvoke<void>('print_to_windows_printer', { printer, text, terms, footer, raster, rasterWidth }).catch(() =>
       mock<void>(undefined)),
 
   getPrinterSettings: () =>
     tauriInvoke<PrinterSettings>('get_printer_settings').catch(() =>
-      mock<PrinterSettings>({ port: '', baud: 9600, width: 58, windowsPrinter: '', businessName: 'SERVICIO TECNICO', businessLine: 'WILIAM SALGADO', logo: '' })),
+      mock<PrinterSettings>(DEFAULT_PRINTER_SETTINGS)),
 
   setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string, businessName: string, businessLine: string, logo: string) =>
     tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter, businessName, businessLine, logo }).catch(() =>

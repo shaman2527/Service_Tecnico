@@ -7,13 +7,12 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { api } from '../db';
-import { logoToRaster, makeTestLogoPng, printerWidthChars } from '@/lib/utils';
+import { logoToRaster, makeTestLogoPng, printerWidthChars, buildReceiptTerms } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { ComPort, PrinterSettings } from '../types';
+import { DEFAULT_PRINTER_SETTINGS } from '../types';
 
 const BAUD_RATES = [9600, 19200, 38400, 115200];
-
-const DEFAULT_SETTINGS: PrinterSettings = { port: '', baud: 9600, width: 58, windowsPrinter: '', businessName: 'SERVICIO TECNICO', businessLine: 'WILIAM SALGADO', logo: '' };
 
 export default function PrinterSettingsDialog({ open, onOpenChange }: {
   open: boolean;
@@ -21,7 +20,7 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 }) {
   const [ports, setPorts] = useState<ComPort[]>([]);
   const [winPrinters, setWinPrinters] = useState<string[]>([]);
-  const [settings, setSettings] = useState<PrinterSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<PrinterSettings>(DEFAULT_PRINTER_SETTINGS);
   const [scanning, setScanning] = useState(false);
   const [testing, setTesting] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
@@ -29,6 +28,13 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
   const [probes, setProbes] = useState<Record<string, 'ok' | 'fail'>>({});
   const [probing, setProbing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Ref con la config ACTUAL en cada momento (el closure de probePorts puede estar
+  // stale): fuente de verdad para merges y auto-detección.
+  const settingsRef = useRef<PrinterSettings>(settings);
+  // Fail-closed: solo se auto-guarda el puerto si la config REAL ya fue cargada
+  // de la DB. Si la carga falla (IPC frío) el auto-save queda bloqueado — jamás
+  // escribe los defaults encima de logo/cabecera/windowsPrinter guardados.
+  const loadedRef = useRef(false);
 
   // Prueba cada puerto COM en vivo (tope 3s por puerto, en paralelo) y marca los que responden.
   // Si el puerto seleccionado no responde y otro sí, lo cambia solo (con aviso).
@@ -36,9 +42,10 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
     if (list.length === 0) { setProbes({}); return; }
     setProbing(true);
     setProbes({});
+    const current = settingsRef.current;
     const results = await Promise.all(list.map(async p => {
       try {
-        await api.probeComPort(p.name, settings.baud);
+        await api.probeComPort(p.name, current.baud);
         return [p.name, 'ok' as const];
       } catch {
         return [p.name, 'fail' as const];
@@ -48,8 +55,8 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
     setProbes(next);
     setProbing(false);
     const responding = list.filter(p => next[p.name] === 'ok').map(p => p.name);
-    if (responding.length > 0 && !responding.includes(settings.port)) {
-      save({ ...settings, port: responding[0] });
+    if (responding.length > 0 && !responding.includes(current.port) && loadedRef.current) {
+      save({ ...current, port: responding[0] });
       toast.success(`Impresora detectada en ${responding[0]} — responde a la prueba.`);
     }
   };
@@ -72,13 +79,32 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 
   useEffect(() => {
     if (!open) return;
-    api.getPrinterSettings().then(s => setSettings(s || DEFAULT_SETTINGS)).catch(() => {});
-    refreshPorts();
+    let alive = true;
+    (async () => {
+      // 1) Cargar la config REAL primero; 2) recién entonces detectar puertos.
+      // Antes la carga y el probe corrían en paralelo y el auto-save del probe
+      // podía guardar los DEFAULTS encima de la config guardada (bug de borrado).
+      loadedRef.current = false;
+      try {
+        const s = await api.getPrinterSettings();
+        if (!alive) return;
+        if (s) {
+          setSettings(s);
+          settingsRef.current = s;
+          loadedRef.current = true;
+        }
+      } catch {
+        // IPC frío fallido: settings quedan en default, auto-save bloqueado
+      }
+      if (alive) refreshPorts();
+    })();
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const save = (next: PrinterSettings) => {
     setSettings(next);
+    settingsRef.current = next;
     api.setPrinterSettings(next.port, next.baud, next.width, next.windowsPrinter, next.businessName, next.businessLine, next.logo).catch(() => {});
   };
 
@@ -150,10 +176,11 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 
   const testPrint = async () => {
     const { raster, rasterWidth } = await rasterArgs();
+    const terms = buildReceiptTerms(settings.width);
     if (settings.windowsPrinter) {
       setTesting(true);
       try {
-        await api.printToWindowsPrinter(settings.windowsPrinter, testText('Windows'), raster, rasterWidth);
+        await api.printToWindowsPrinter(settings.windowsPrinter, testText('Windows'), terms, undefined, raster, rasterWidth);
         toast.success(`Prueba enviada a "${settings.windowsPrinter}". La impresora debe sacar un ticket.`);
       } catch (e) {
         toast.error(e instanceof Error ? e.message : String(e));
@@ -168,7 +195,7 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
     }
     setTesting(true);
     try {
-      await api.printReceipt(settings.port, settings.baud, testText(settings.port), raster, rasterWidth);
+      await api.printReceipt(settings.port, settings.baud, testText(settings.port), terms, undefined, raster, rasterWidth);
       toast.success('Prueba enviada. La impresora debe sacar un ticket.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));

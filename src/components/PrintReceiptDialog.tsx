@@ -3,9 +3,10 @@ import { Printer, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { buildServiceReceipt, logoToRaster } from '@/lib/utils';
+import { buildReceiptTerms, buildServiceReceiptParts, logoToRaster } from '@/lib/utils';
 import { toast } from 'sonner';
-import type { PrinterSettings, Service, ServicePayment } from '../types';
+import type { PrinterSettings, Service, ServicePayment, ComPort } from '../types';
+import { DEFAULT_PRINTER_SETTINGS } from '../types';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
 
 export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPrinted }: {
@@ -16,10 +17,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
 }) {
   const [service, setService] = useState<Service | null>(null);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
-  const [settings, setSettings] = useState<PrinterSettings>({
-    port: '', baud: 9600, width: 58, windowsPrinter: '',
-    businessName: 'SERVICIO TECNICO', businessLine: 'WILIAM SALGADO', logo: '',
-  });
+  const [settings, setSettings] = useState<PrinterSettings>(DEFAULT_PRINTER_SETTINGS);
   const [printing, setPrinting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -39,11 +37,15 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     return () => { alive = false; };
   }, [open, serviceId]);
 
-  const receipt = buildServiceReceipt(service, payments, {
+  // Primera copia (cliente) + talón recortable; los términos legales en letra
+  // pequeña (font B) se imprimen ENTRE ambos — quedan en la primera copia,
+  // antes de cortar el talón.
+  const { main, stub } = buildServiceReceiptParts(service, payments, {
     width: settings.width,
     businessName: settings.businessName,
     businessLine: settings.businessLine,
   });
+  const terms = buildReceiptTerms(settings.width);
 
   const markPrinted = async () => {
     if (!serviceId) return;
@@ -53,6 +55,52 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     } catch { /* el badge es informativo, no bloquea */ }
   };
 
+  // Al cerrar el dialog de configuración se recarga la config guardada:
+  // antes quedaba stale y "Imprimir" iba al puerto/impresora VIEJOS.
+  const closeSettings = async (o: boolean) => {
+    setShowSettings(o);
+    if (!o) {
+      try {
+        const st = await api.getPrinterSettings();
+        if (st) setSettings(st);
+      } catch { /* mantiene la config actual */ }
+    }
+  };
+
+  // Fallback tras fallo de impresión: Windows puede reasignar el número de COM
+  // entre reinicios (COM7 → COM5). Si el puerto guardado ya no responde, se
+  // detecta el que sí responde y se reconfigura automáticamente.
+  const tryAutoDetect = async (args: { raster?: number[]; rasterWidth?: number }) => {
+    setPrinting(true);
+    try {
+      const ports = await api.listComPorts().catch(() => [] as ComPort[]);
+      let responding: string[] = [];
+      if (ports.length > 0) {
+        const results = await Promise.all(ports.map(async p => {
+          try { await api.probeComPort(p.name, settings.baud); return p.name; } catch { return null; }
+        }));
+        responding = results.filter((r): r is string => r !== null);
+      }
+      if (responding.length === 0) return false;
+      const target = responding.includes(settings.port) ? settings.port : responding[0];
+      await api.printReceipt(target, settings.baud, main, terms, stub, args.raster, args.rasterWidth);
+      if (target !== settings.port) {
+        api.setPrinterSettings(target, settings.baud, settings.width, settings.windowsPrinter, settings.businessName, settings.businessLine, settings.logo)
+          .catch(() => {});
+        setSettings(s => ({ ...s, port: target }));
+        toast.success(`Impresora detectada en ${target} — puerto actualizado automáticamente.`);
+      } else {
+        toast.success('Orden enviada a la impresora');
+      }
+      return true;
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      return true; // error ya informado — no repetir el original
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   const doPrint = async () => {
     const widthPx = (settings.width ?? 58) >= 80 ? 576 : 384;
     const raster = settings.logo ? await logoToRaster(settings.logo, widthPx).catch(() => null) : null;
@@ -60,7 +108,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     if (settings.windowsPrinter) {
       setPrinting(true);
       try {
-        await api.printToWindowsPrinter(settings.windowsPrinter, receipt, printArgs.raster, printArgs.rasterWidth);
+        await api.printToWindowsPrinter(settings.windowsPrinter, main, terms, stub, printArgs.raster, printArgs.rasterWidth);
         await markPrinted();
         toast.success(`Orden enviada a "${settings.windowsPrinter}"`);
       } catch (e) {
@@ -77,11 +125,13 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     }
     setPrinting(true);
     try {
-      await api.printReceipt(settings.port, settings.baud, receipt, printArgs.raster, printArgs.rasterWidth);
+      await api.printReceipt(settings.port, settings.baud, main, terms, stub, printArgs.raster, printArgs.rasterWidth);
       await markPrinted();
       toast.success('Orden enviada a la impresora');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch (firstErr) {
+      const ok = await tryAutoDetect(printArgs);
+      if (ok) await markPrinted();
+      else toast.error(firstErr instanceof Error ? firstErr.message : String(firstErr));
     } finally {
       setPrinting(false);
     }
@@ -103,7 +153,13 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
                 className="max-h-24 w-auto rounded bg-white p-1 object-contain [filter:grayscale(1)_contrast(150%)]" />
             )}
             <div className="bg-white text-black rounded-md shadow-lg px-3 py-4 font-mono text-[11px] leading-[1.45] whitespace-pre-wrap break-words w-fit max-w-full">
-              {receipt || 'Cargando orden de servicio...'}
+              {main || 'Cargando orden de servicio...'}
+              {terms && (
+                <span className="block mt-2 text-[8px] leading-[1.35]">{terms}</span>
+              )}
+              {stub && (
+                <span className="block mt-2">{stub}</span>
+              )}
             </div>
           </div>
 
@@ -118,7 +174,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
         </DialogContent>
       </Dialog>
 
-      <PrinterSettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+      <PrinterSettingsDialog open={showSettings} onOpenChange={closeSettings} />
     </>
   );
 }

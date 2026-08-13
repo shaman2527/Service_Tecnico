@@ -384,8 +384,8 @@ pub fn probe_com_port(port: String, baud: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn print_receipt(port: String, baud: u32, text: String, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
-    crate::printer::print_receipt(&port, baud, &text, raster.as_deref(), raster_width)
+pub fn print_receipt(port: String, baud: u32, text: String, terms: Option<String>, footer: Option<String>, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
+    crate::printer::print_receipt(&port, baud, &text, terms.as_deref(), footer.as_deref(), raster.as_deref(), raster_width)
 }
 
 #[tauri::command]
@@ -394,8 +394,8 @@ pub fn list_windows_printers() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub fn print_to_windows_printer(printer: String, text: String, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
-    crate::printer::print_to_windows_printer(&printer, &text, raster.as_deref(), raster_width)
+pub fn print_to_windows_printer(printer: String, text: String, terms: Option<String>, footer: Option<String>, raster: Option<Vec<u8>>, raster_width: Option<u32>) -> Result<(), String> {
+    crate::printer::print_to_windows_printer(&printer, &text, terms.as_deref(), footer.as_deref(), raster.as_deref(), raster_width)
 }
 
 #[tauri::command]

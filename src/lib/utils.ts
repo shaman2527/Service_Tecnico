@@ -197,6 +197,34 @@ export function printerWidthChars(widthMm: number | null | undefined): number {
   return (widthMm ?? 58) >= 80 ? 48 : 32;
 }
 
+// Ancho de la LETRA PEQUEÑA (font B ESC/POS, más estrecha): 58mm ≈ 42 chars, 80mm ≈ 64 chars.
+export function printerSmallWidthChars(widthMm: number | null | undefined): number {
+  return (widthMm ?? 58) >= 80 ? 64 : 42;
+}
+
+// Condiciones del servicio impresas en letra pequeña en la PRIMERA copia de la
+// orden (antes del talón CORTA TIJERA) — resguardo legal del técnico: aceptación
+// y conformidad al firmar/retirar el comprobante.
+export const RECEIPT_TERMS_LINES: string[] = [
+  'Estado inicial: Equipos que no encienden o presentan fallas de software/hardware se reciben bajo riesgo del cliente; fallas ocultas o posteriores no están cubiertas.',
+  'Garantía: Se invalida si el equipo es manipulado por terceros o presenta sellos rotos.',
+  'Abandono: Pasados 60 días sin retirar o pagar el saldo, el equipo pasa a disposición del taller para cubrir gastos operativos.',
+  'Responsabilidad: No nos hacemos responsables por SIMs, memorias MicroSD o accesorios no anotados en este recibo, ni por pérdida de datos.',
+  'La firma o retiro del comprobante implica la aceptación total de estos términos.',
+];
+
+/**
+ * Construye el bloque de términos (letra pequeña) para la orden de servicio:
+ * cabecera "ACEPTACIÓN DE CONDICIONES Y CONFORMIDAD" + párrafos envueltos al
+ * ancho de la font B. Se imprime en el backend con ESC M 1 (font B) entre el
+ * cuerpo (primera copia) y el talón CORTA TIJERA.
+ */
+export function buildReceiptTerms(width: number | null | undefined, lines: string[] = RECEIPT_TERMS_LINES): string {
+  const w = printerSmallWidthChars(width);
+  const wrapped = lines.map(l => wrapText(l, w).join('\n')).join('\n');
+  return ['ACEPTACIÓN DE CONDICIONES Y CONFORMIDAD', '', wrapped].join('\n');
+}
+
 const fmtUsd = (n: number) => `$ ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // Recorta a caracteres sin cortar el texto por la mitad de una manera fea (wrap limpio)
@@ -248,12 +276,21 @@ function kv(label: string, value: string, w: number): string[] {
  * mismos datos para pegar detrás del teléfono. NO es factura fiscal (sin RIF).
  * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
  */
-export function buildServiceReceipt(
+/**
+ * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico),
+ * en DOS partes imprimibles en orden: `main` = PRIMERA copia (para el cliente) y
+ * `stub` = talón recortable "CORTA TIJERA" (para pegar detrás del teléfono).
+ * Entre `main` y `stub` el backend imprime los términos legales en letra pequeña
+ * (font B) — así la copia del cliente lleva las condiciones ANTES del corte.
+ * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
+ */
+export function buildServiceReceiptParts(
   service: Service | null | undefined,
   _payments: ServicePayment[] = [],
   opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string } = {},
-): string {
-  if (!service) return '';
+): { main: string; stub: string } {
+  const empty = { main: '', stub: '' };
+  if (!service) return empty;
   const w = printerWidthChars(opts.width);
   const dash = '-'.repeat(w);
   const lines: string[] = [];
@@ -312,20 +349,32 @@ export function buildServiceReceipt(
   lines.push('');
 
   // === Talón recortable: los mismos datos, para pegar detrás del teléfono ===
-  lines.push(dash);
-  lines.push(center('CORTA TIJERA', w));
-  lines.push(dash);
-  for (const l of kv('ORDEN', service.order_num ?? '', w)) lines.push(l);
-  if (service.client) for (const l of kv('CLIENTE', service.client, w)) lines.push(l);
-  if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) lines.push(l);
-  if (service.color) for (const l of kv('COLOR', service.color, w)) lines.push(l);
-  if (service.model) for (const l of kv('MODELO', service.model, w)) lines.push(l);
-  if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
-  lines.push(dash);
-  lines.push('');
-  lines.push(center('FIRMA SALIDA', w));
+  const stub: string[] = [dash, center('CORTA TIJERA', w), dash];
+  for (const l of kv('ORDEN', service.order_num ?? '', w)) stub.push(l);
+  if (service.client) for (const l of kv('CLIENTE', service.client, w)) stub.push(l);
+  if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) stub.push(l);
+  if (service.color) for (const l of kv('COLOR', service.color, w)) stub.push(l);
+  if (service.model) for (const l of kv('MODELO', service.model, w)) stub.push(l);
+  if (logo) for (const l of kv('SERVICIO', logo, w)) stub.push(l);
+  stub.push(dash);
+  stub.push('');
+  stub.push(center('FIRMA SALIDA', w));
 
-  return lines.join('\n');
+  return { main: lines.join('\n'), stub: stub.join('\n') };
+}
+
+/**
+ * Versión completa del recibo (cuerpo + talón en UNA cadena) — compatibilidad:
+ * previews/textos que no distinguen partes. Para IMPRIMIR usar buildServiceReceiptParts
+ * (el backend inserta los términos en letra pequeña entre main y stub).
+ */
+export function buildServiceReceipt(
+  service: Service | null | undefined,
+  payments: ServicePayment[] = [],
+  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string } = {},
+): string {
+  const { main, stub } = buildServiceReceiptParts(service, payments, opts);
+  return [main, stub].filter(Boolean).join('\n');
 }
 
 // ============================================================================

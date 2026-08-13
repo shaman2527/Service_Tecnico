@@ -368,6 +368,17 @@ export interface PrinterSettings {
   logo: string;
 }
 
+/** Config por defecto de la impresora — fuente única compartida por db.ts (mock), PrinterSettingsDialog y PrintReceiptDialog. */
+export const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
+  port: '',
+  baud: 9600,
+  width: 58,
+  windowsPrinter: '',
+  businessName: 'SERVICIO TECNICO',
+  businessLine: 'WILIAM SALGADO',
+  logo: '',
+};
+
 export interface UpdateState {
   previous_version: string;
   new_version: string;

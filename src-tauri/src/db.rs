@@ -3314,7 +3314,7 @@ impl Database {
     // --- Export/Import ---
     pub fn export_data(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings"];
         let mut map = serde_json::Map::new();
         for table in &tables {
             let sql = format!("SELECT * FROM {}", table);
@@ -3345,7 +3345,7 @@ impl Database {
             rusqlite::Error::ToSqlConversionFailure(Box::new(e))
         })?;
         // Orden respeta las FK: catálogos → productos → clientes → ventas/servicios → pagos → movimientos → pedidos → cierres
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings"];
 
         // Validar columnas del JSON contra el schema real (anti inyección SQL por nombre de columna)
         let valid_columns: std::collections::HashMap<String, Vec<String>> = tables.iter().map(|t| {
@@ -3411,7 +3411,11 @@ impl Database {
                         }
 
                         let placeholders: Vec<String> = cols.iter().map(|_| "?".to_string()).collect();
-                        let sql = format!("INSERT INTO {} ({}) VALUES ({})", table, cols.join(", "), placeholders.join(", "));
+                        // settings no tiene columna `id` (PK = key): el merge por id no la captura
+                        // y un INSERT plano chocaría con claves existentes (pin, printer_port...).
+                        // OR REPLACE = semántica de actualización por key (idempotente).
+                        let verb = if *table == "settings" { "INSERT OR REPLACE INTO" } else { "INSERT INTO" };
+                        let sql = format!("{} {} ({}) VALUES ({})", verb, table, cols.join(", "), placeholders.join(", "));
                         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
                         for c in &cols { values.push(val_to_sql(&obj[&**c])); }
                         let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
