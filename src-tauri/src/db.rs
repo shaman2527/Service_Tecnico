@@ -256,6 +256,7 @@ pub struct PagoMovilDetail {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct PrinterSettings {
     pub port: String,
     pub baud: u32,
@@ -3567,6 +3568,35 @@ fn val_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // Regresión 2026-08-13: la serialización de PrinterSettings DEBE usar claves
+    // camelCase (windowsPrinter/businessName/businessLine) porque el frontend las
+    // lee así. Antes (snake_case) la selección de impresora "nunca se guardaba":
+    // el frontend leía undefined → el save mandaba campos faltantes → el invoke
+    // fallaba en silencio y la BD conservaba el valor viejo.
+    #[test]
+    fn test_printer_settings_serializes_camel_case() {
+        let s = PrinterSettings {
+            port: "COM16".into(),
+            baud: 9600,
+            width: 58,
+            windows_printer: "POS-58-Series USB".into(),
+            business_name: "Mi Negocio".into(),
+            business_line: "Linea".into(),
+            logo: "".into(),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["port"], "COM16");
+        assert_eq!(v["baud"], 9600);
+        assert_eq!(v["width"], 58);
+        assert_eq!(v["windowsPrinter"], "POS-58-Series USB");
+        assert_eq!(v["businessName"], "Mi Negocio");
+        assert_eq!(v["businessLine"], "Linea");
+        assert_eq!(v["logo"], "");
+        // NUNCA deben aparecer claves snake_case en la respuesta (bug persistencia)
+        assert!(v.get("windows_printer").is_none());
+        assert!(v.get("business_name").is_none());
+    }
 
     // Ejecuta un cierre tomando el lock de la conexión una sola vez
     fn conn_query<T, F: FnOnce() -> T>(f: F) -> T {

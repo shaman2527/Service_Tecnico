@@ -442,6 +442,14 @@ pub fn mark_update_ok() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn mark_update_failed() -> Result<(), String> {
+    // Limpia un estado "pending" colgado (update que nunca se aplicó) SIN tocar
+    // el exe — rollback_update restauraría la versión anterior sobre la actual,
+    // lo que bajaría la versión en vez de solo reconciliar el estado.
+    crate::updates::set_status(&crate::updates::install_dir(), "rolled_back")
+}
+
+#[tauri::command]
 pub fn get_update_state() -> Result<Option<crate::updates::UpdateState>, String> {
     Ok(crate::updates::read_state(&crate::updates::install_dir()))
 }

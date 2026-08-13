@@ -389,4 +389,6 @@ export interface UpdateState {
 export interface HealthReport {
   ok: boolean;
   issues: string[];
+  /** Avisos NO críticos (ej. BCV sin internet) — no disparan rollback. */
+  warnings: string[];
 }

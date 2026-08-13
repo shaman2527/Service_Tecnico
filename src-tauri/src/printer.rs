@@ -502,7 +502,27 @@ fn print_receipt_inner(
             } else {
                 format!("Error al imprimir en {port}: {e}. Revisa que la impresora esté conectada.")
             }
-        })
+        })?;
+    // Verificación de entrega en Bluetooth (2026-08-13): el driver BT acepta la
+    // escritura "exitosamente" aunque los bytes nunca lleguen a la impresora (la
+    // MP58-04 no imprime nada). Sin esta comprobación el ticket se daba por
+    // enviado y la orden quedaba marcada printed=1 sin haberse impreso.
+    if is_bt {
+        serial
+            .set_timeout(Duration::from_secs(2))
+            .map_err(|e| format!("No se pudo ajustar el timeout de {port}: {e}"))?;
+        let mut buf = [0u8; 8];
+        match serial.read(&mut buf) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(format!(
+                "La impresora Bluetooth ({port}) no confirmó la recepción del ticket. \
+                 Verifica que esté ENCENDIDA y cerca de la PC, y que no esté conectada a otro equipo. \
+                 Sugerencia: usa la impresora de Windows (cable USB), es la vía confiable."
+            )),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 /// Prueba de conexión de un puerto COM sin imprimir nada visible: abre el puerto
@@ -525,6 +545,7 @@ pub fn probe_com_port(port: &str, baud: u32) -> Result<(), String> {
 }
 
 fn probe_com_port_inner(port: &str, baud: u32) -> Result<(), String> {
+    let is_bt = bluetooth_friendly_names().contains_key(port);
     let mut serial = serialport::new(port, baud)
         .timeout(Duration::from_secs(2))
         .open()
@@ -533,7 +554,21 @@ fn probe_com_port_inner(port: &str, baud: u32) -> Result<(), String> {
         .write_all(b"\x1B\x40")
         .and_then(|_| serial.flush())
         .map_err(|e| format!("La impresora no respondió: {e}"))?;
-    Ok(())
+    if is_bt {
+        // Bluetooth: un write "exitoso" a nivel driver NO prueba que la impresora
+        // esté recibiendo (MP58-04: acepta bytes pero no imprime). El puerto solo
+        // se marca "Responde" si la impresora confirma con datos.
+        let mut buf = [0u8; 8];
+        match serial.read(&mut buf) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(format!(
+                "Bluetooth sin confirmación ({port}): la impresora no responde. \
+                 Verifica que esté ENCENDIDA y cerca, o usa el cable USB."
+            )),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 /// Ticket de prueba corto (configuración del puerto).

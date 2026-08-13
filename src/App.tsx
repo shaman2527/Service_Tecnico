@@ -75,12 +75,22 @@ function App() {
   // 1) Chequeo de salud post-actualización: solo cuando hay un estado "pending"
   // (primer arranque tras una actualización). Si algo crítico falla → rollback
   // automático a la versión anterior + relanzar. Si pasa → marca ok.
+  // Nota: los warnings (ej. BCV sin internet) NO disparan rollback — una PC
+  // offline no es una app rota (bug 2026-08-13: actualizaciones tumbadas por el scrape).
   useEffect(() => {
     if (role === 'loading') return;
     let cancelled = false;
     (async () => {
       const state = await api.getUpdateState().catch(() => null);
       if (cancelled || !state || state.status !== 'pending') return;
+      // Estado pending colgado de un update que NUNCA se aplicó (instalación
+      // fallida + watchdog viejo que no marcaba rolled_back): la versión instalada
+      // no es la nueva → limpiar el estado sin tocar el exe (rollback restauraría
+      // la versión anterior SOBRE la actual instalada).
+      if (appVersion && appVersion !== `v${state.new_version}`) {
+        await api.markUpdateFailed().catch(() => {});
+        return;
+      }
       const report = await api.runHealthCheck().catch(() => ({ ok: false, issues: ['run_health_check no disponible'] }));
       if (report.ok) {
         await api.markUpdateOk().catch(() => {});
@@ -91,11 +101,12 @@ function App() {
           if (!cancelled) setUpdateNotice('La actualización falló la verificación — se restauró la versión anterior. Tus datos están intactos.');
           const { relaunch } = await import('@tauri-apps/plugin-process');
           await relaunch();
-        } catch { /* sin versión anterior: seguir con la actual */}
+        } catch { /* sin versión anterior: seguir con la actual */ }
       }
     })();
     return () => { cancelled = true; };
-  }, [role]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role, appVersion]);
 
   // 2) Buscar actualización al arrancar (5s máx; sin internet = silencio).
   // "Ver más tarde" ya NO descarta la versión: si la descargó, al reiniciar

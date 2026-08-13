@@ -481,9 +481,9 @@ export default function Services() {
                     </Tooltip>
                   </TooltipProvider>
                 )}
-                <Button variant="outline" size="sm" className="flex-1" title="Imprimir orden de servicio"
+                <Button variant="outline" size="sm" className="flex-1" title={s.printed ? 'Reimprimir orden de servicio' : 'Imprimir orden de servicio'}
                   onClick={() => setPrintFor(s)}>
-                  <Printer className="size-3.5" /> Orden
+                  <Printer className="size-3.5" /> {s.printed ? 'Reimprimir' : 'Orden'}
                 </Button>
                 <Button variant="outline" size="sm" className="flex-1" onClick={() => { setEditing(s); setShowForm(true); }}>
                   Editar

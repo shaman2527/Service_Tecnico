@@ -37,6 +37,8 @@ pub struct UpdateState {
 pub struct HealthReport {
     pub ok: bool,
     pub issues: Vec<String>,
+    /// Avisos NO críticos (ej. scrape BCV sin internet): no disparan rollback.
+    pub warnings: Vec<String>,
 }
 
 // --- Rutas (siempre derivadas, sin hardcodear) ---
@@ -164,6 +166,15 @@ pub fn write_watchdog(install_dir: &Path) -> Result<(), String> {
          # Timeout sin confirmacion: restaurar la version anterior\n\
          if (Test-Path $prevExe) {{\n\
          \x20 Copy-Item $prevExe $curExe -Force -ErrorAction SilentlyContinue\n\
+         \x20 # Marcar rolled_back (bug 2026-08-13): sin esto el estado quedaba\n\
+         \x20 # en 'pending' PARA SIEMPRE y la app seguía con el flujo colgado\n\
+         \x20 if (Test-Path $state) {{\n\
+         \x20   try {{\n\
+         \x20     $s = Get-Content $state -Raw | ConvertFrom-Json\n\
+         \x20     $s.status = 'rolled_back'\n\
+         \x20     $s | ConvertTo-Json | Set-Content $state\n\
+         \x20   }} catch {{}}\n\
+         \x20 }}\n\
          \x20 Try-Launch\n\
          }}\n\
          exit 1",
@@ -219,6 +230,7 @@ pub fn has_previous_version(install_dir: &Path) -> bool {
 /// disparan rollback (la entrada manual es el fallback oficial), solo se reportan.
 pub fn run_health_check(db: &crate::db::Database, include_bcv: bool) -> HealthReport {
     let mut issues: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // 1. Integridad de la base de datos
     let integrity = {
@@ -250,17 +262,21 @@ pub fn run_health_check(db: &crate::db::Database, include_bcv: bool) -> HealthRe
         issues.push(format!("get_daily_totals: {e}"));
     }
 
-    // 5. BCV (warning solamente — falla si la página externa cambió)
+    // 5. BCV (warning solamente — falla si la página externa cambió o no hay
+    // internet; la entrada manual es el fallback oficial). NUNCA dispara rollback:
+    // una PC sin internet no es una app rota (bug 2026-08-13: un scrape fallido
+    // tumbaba la actualización recién instalada).
     if include_bcv {
         match crate::bcv::obtener_tasas() {
             Ok(_) => {}
-            Err(e) => issues.push(format!("BCV (warning, fallback manual): {e}")),
+            Err(e) => warnings.push(format!("BCV (warning, fallback manual): {e}")),
         }
     }
 
     HealthReport {
         ok: issues.is_empty(),
         issues,
+        warnings,
     }
 }
 

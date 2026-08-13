@@ -306,30 +306,42 @@ export const api = {
     tauriInvoke<ComPort[]>('list_com_ports').catch(() =>
       mock<ComPort[]>([{ name: 'COM3', description: 'Impresora térmica (simulada en browser mode)' }])),
 
-  probeComPort: (port: string, baud: number) =>
-    tauriInvoke<void>('probe_com_port', { port, baud }).catch(() =>
-      mock<void>(undefined)),
+  probeComPort: (port: string, baud: number) => {
+    if (!isTauri) return mock<void>(undefined);
+    // Tauri mode: propagar el error real (el frontend muestra "Sin respuesta").
+    return tauriInvoke<void>('probe_com_port', { port, baud });
+  },
 
-  printReceipt: (port: string, baud: number, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) =>
-    tauriInvoke<void>('print_receipt', { port, baud, text, terms, footer, raster, rasterWidth }).catch(() =>
-      mock<void>(undefined)),
+  printReceipt: (port: string, baud: number, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) => {
+    if (!isTauri) return mock<void>(undefined);
+    // Tauri mode: NUNCA tragar el error de impresión — si falla el envío, el
+    // frontend debe saberlo para no marcar printed=1 (bug órdenes quemadas).
+    return tauriInvoke<void>('print_receipt', { port, baud, text, terms, footer, raster, rasterWidth });
+  },
 
   // --- Impresoras de Windows (spooler, driver instalado ej. HPRT MPT-II) ---
   listWindowsPrinters: () =>
     tauriInvoke<string[]>('list_windows_printers').catch(() =>
       mock<string[]>([])),
 
-  printToWindowsPrinter: (printer: string, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) =>
-    tauriInvoke<void>('print_to_windows_printer', { printer, text, terms, footer, raster, rasterWidth }).catch(() =>
-      mock<void>(undefined)),
+  printToWindowsPrinter: (printer: string, text: string, terms?: string, footer?: string, raster?: number[], rasterWidth?: number) => {
+    if (!isTauri) return mock<void>(undefined);
+    // Tauri mode: propagar el error (mismo motivo que printReceipt).
+    return tauriInvoke<void>('print_to_windows_printer', { printer, text, terms, footer, raster, rasterWidth });
+  },
 
-  getPrinterSettings: () =>
-    tauriInvoke<PrinterSettings>('get_printer_settings').catch(() =>
-      mock<PrinterSettings>(DEFAULT_PRINTER_SETTINGS)),
+  getPrinterSettings: () => {
+    if (!isTauri) return mock<PrinterSettings>(DEFAULT_PRINTER_SETTINGS);
+    // Tauri mode: propagar el error (la UI decide: defaults + auto-save bloqueado).
+    return tauriInvoke<PrinterSettings>('get_printer_settings');
+  },
 
-  setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string, businessName: string, businessLine: string, logo: string) =>
-    tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter, businessName, businessLine, logo }).catch(() =>
-      mock<void>(undefined)),
+  setPrinterSettings: (port: string, baud: number, width: number, windowsPrinter: string, businessName: string, businessLine: string, logo: string) => {
+    if (!isTauri) return mock<void>(undefined);
+    // Tauri mode: propagar el error — la selección de impresora DEBE persistir
+    // (bug 2026-08-13: fallaba en silencio y la BD nunca se actualizaba).
+    return tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter, businessName, businessLine, logo });
+  },
 
   getWindowsPrinterStatus: (printer: string) =>
     tauriInvoke<string>('get_windows_printer_status', { printer }).catch(() =>
@@ -344,8 +356,17 @@ export const api = {
     tauriInvoke<HealthReport>('run_health_check').catch(() =>
       Promise.reject(new Error('run_health_check no disponible'))),
 
-  markUpdateOk: () =>
-    tauriInvoke<void>('mark_update_ok').catch(() => mock<void>(undefined)),
+  markUpdateOk: () => {
+    if (!isTauri) return mock<void>(undefined);
+    return tauriInvoke<void>('mark_update_ok');
+  },
+
+  // Limpia un estado "pending" colgado (update que nunca se aplicó) SIN tocar el
+  // exe — rollback_update restauraría la versión anterior sobre la actual.
+  markUpdateFailed: () => {
+    if (!isTauri) return mock<void>(undefined);
+    return tauriInvoke<void>('mark_update_failed');
+  },
 
   getUpdateState: () =>
     tauriInvoke<UpdateState | null>('get_update_state').catch(() =>

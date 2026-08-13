@@ -105,7 +105,10 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
   const save = (next: PrinterSettings) => {
     setSettings(next);
     settingsRef.current = next;
-    api.setPrinterSettings(next.port, next.baud, next.width, next.windowsPrinter, next.businessName, next.businessLine, next.logo).catch(() => {});
+    // El guardado es la fuente de verdad de la persistencia: si falla, se avisa
+    // (antes fallaba en silencio y la selección se perdía al cerrar el dialog).
+    api.setPrinterSettings(next.port, next.baud, next.width, next.windowsPrinter, next.businessName, next.businessLine, next.logo)
+      .catch(() => toast.error('No se pudo guardar la configuración de la impresora. Intenta de nuevo.'));
   };
 
   const onLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
