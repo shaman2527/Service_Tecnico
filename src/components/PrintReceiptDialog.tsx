@@ -3,7 +3,7 @@ import { Printer, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { buildReceiptTerms, buildServiceReceiptParts, logoToRaster } from '@/lib/utils';
+import { buildServiceReceiptParts, logoToRaster } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { PrinterSettings, Service, ServicePayment, ComPort } from '../types';
 import { DEFAULT_PRINTER_SETTINGS } from '../types';
@@ -20,6 +20,8 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
   const [settings, setSettings] = useState<PrinterSettings>(DEFAULT_PRINTER_SETTINGS);
   const [printing, setPrinting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [stubNote, setStubNote] = useState('');
+  const [tasaBcv, setTasaBcv] = useState(0);
 
   useEffect(() => {
     if (!open || !serviceId) return;
@@ -28,24 +30,27 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
       api.getService(serviceId),
       api.getServicePayments(serviceId),
       api.getPrinterSettings(),
-    ]).then(([s, p, st]) => {
+      api.getActiveDay(),
+    ]).then(([s, p, st, day]) => {
       if (!alive) return;
       setService(s);
       setPayments(p);
       setSettings(st);
+      setStubNote(s?.observations ?? '');
+      setTasaBcv(day?.tasa_bcv ?? 0);
     }).catch(() => {});
     return () => { alive = false; };
   }, [open, serviceId]);
 
-  // Primera copia (cliente) + talón recortable; los términos legales en letra
-  // pequeña (font B) se imprimen ENTRE ambos — quedan en la primera copia,
-  // antes de cortar el talón.
+  // Primera copia (cliente) + talón recortable con el pago (método/abono) para
+  // la salida del equipo.
   const { main, stub } = buildServiceReceiptParts(service, payments, {
     width: settings.width,
     businessName: settings.businessName,
     businessLine: settings.businessLine,
+    stubNote,
+    tasaBcv,
   });
-  const terms = buildReceiptTerms(settings.width);
 
   const markPrinted = async () => {
     if (!serviceId) return;
@@ -83,7 +88,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
       }
       if (responding.length === 0) return false;
       const target = responding.includes(settings.port) ? settings.port : responding[0];
-      await api.printReceipt(target, settings.baud, main, terms, stub, args.raster, args.rasterWidth);
+      await api.printReceipt(target, settings.baud, main, undefined, stub, args.raster, args.rasterWidth);
       if (target !== settings.port) {
         api.setPrinterSettings(target, settings.baud, settings.width, settings.windowsPrinter, settings.businessName, settings.businessLine, settings.logo)
           .catch(() => {});
@@ -108,7 +113,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     if (settings.windowsPrinter) {
       setPrinting(true);
       try {
-        await api.printToWindowsPrinter(settings.windowsPrinter, main, terms, stub, printArgs.raster, printArgs.rasterWidth);
+        await api.printToWindowsPrinter(settings.windowsPrinter, main, undefined, stub, printArgs.raster, printArgs.rasterWidth);
         await markPrinted();
         toast.success(`Orden enviada a "${settings.windowsPrinter}"`);
       } catch (e) {
@@ -125,7 +130,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
     }
     setPrinting(true);
     try {
-      await api.printReceipt(settings.port, settings.baud, main, terms, stub, printArgs.raster, printArgs.rasterWidth);
+      await api.printReceipt(settings.port, settings.baud, main, undefined, stub, printArgs.raster, printArgs.rasterWidth);
       await markPrinted();
       toast.success('Orden enviada a la impresora');
     } catch (firstErr) {
@@ -147,18 +152,38 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
             </DialogTitle>
           </DialogHeader>
 
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-md bg-muted/50 p-4 flex flex-col items-center gap-2">
+          <div className="shrink-0 px-4 pb-3">
+            <label className="text-xs font-medium text-muted-foreground">
+              Observación para el talón (se imprime en la nota CORTA TIJERA)
+            </label>
+            <textarea
+              value={stubNote}
+              onChange={e => setStubNote(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doPrint(); } }}
+              rows={2}
+              placeholder="Ej: pantalla incell, quedó pendiente cristal..."
+              className="mt-1 w-full rounded-md border bg-background px-2.5 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md bg-muted/50 p-4 flex flex-col items-center gap-3">
             {settings.logo && (
               <img src={settings.logo} alt="Logo del ticket"
                 className="max-h-24 w-auto rounded bg-white p-1 object-contain [filter:grayscale(1)_contrast(150%)]" />
             )}
-            <div className="bg-white text-black rounded-md shadow-lg px-3 py-4 font-mono text-[11px] leading-[1.45] whitespace-pre-wrap break-words w-fit max-w-full">
-              {main || 'Cargando orden de servicio...'}
-              {terms && (
-                <span className="block mt-2 text-[8px] leading-[1.35]">{terms}</span>
-              )}
+            <div className="flex flex-col items-center gap-2 w-fit max-w-full">
+              <div className="bg-white text-black rounded-md shadow-lg px-3 py-4 font-mono text-[11px] leading-[1.45] whitespace-pre-wrap break-words w-fit max-w-full">
+                {main || 'Cargando orden de servicio...'}
+              </div>
               {stub && (
-                <span className="block mt-2">{stub}</span>
+                <>
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground border border-dashed border-muted-foreground/40 rounded px-2 py-0.5">
+                    ── Corte aquÍ: talón para pegar detrás del teléfono ──
+                  </span>
+                  <div className="bg-white text-black rounded-md shadow-lg px-3 py-4 font-mono text-[11px] leading-[1.45] whitespace-pre-wrap break-words w-fit max-w-full border-t-2 border-dashed border-black">
+                    {stub}
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -167,7 +192,7 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
             <Button variant="outline" onClick={() => setShowSettings(true)}>
               <Settings2 className="size-4" /> Configurar impresora
             </Button>
-            <Button onClick={doPrint} disabled={printing}>
+            <Button onClick={doPrint} disabled={printing} title="Ctrl+Enter">
               <Printer className="size-4" /> {printing ? 'Imprimiendo...' : 'Imprimir'}
             </Button>
           </DialogFooter>

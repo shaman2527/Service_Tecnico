@@ -89,16 +89,19 @@ ensureCol('services', 'technician_id', 'INTEGER');
 ensureCol('services', 'paid_amount', 'REAL DEFAULT 0');
 ensureCol('services', 'group_id', 'TEXT');
 ensureCol('services', 'screen_product_id', 'INTEGER');
+ensureCol('services', 'discount_amount', 'REAL DEFAULT 0');
 ensureCol('services', 'bank_fee_percent', 'REAL DEFAULT 0');
 ensureCol('services', 'bank_fee_amount', 'REAL DEFAULT 0');
 ensureCol('services', 'net_amount', 'REAL');
 ensureCol('services', 'zelle_reference', 'TEXT');
 ensureCol('sales', 'client_id', 'INTEGER REFERENCES clients(id)');
+ensureCol('sales', 'discount_amount', 'REAL DEFAULT 0');
 ensureCol('sales', 'bank_fee_percent', 'REAL DEFAULT 0');
 ensureCol('sales', 'bank_fee_amount', 'REAL DEFAULT 0');
 ensureCol('sales', 'net_amount', 'REAL');
 ensureCol('sales', 'zelle_reference', 'TEXT');
 ensureCol('sales', 'currency', "TEXT DEFAULT 'USD'");
+ensureCol('products', 'price_usd', 'REAL DEFAULT 0');
 
 // 3) Limpiar datos de negocio (se conserva catálogo, técnicos, PIN, settings)
 db.exec('PRAGMA foreign_keys = OFF');
@@ -138,25 +141,25 @@ ins('INSERT INTO daily_closings (close_date, tasa_bcv, tasa_eur, opened_at, is_c
 // 6) Servicios
 const CHECK = '{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}';
 const svc = (order, dateIn, clientId, clientName, model, fault, types, amount, status, extra = {}) =>
-  ins('INSERT INTO services (order_num, date_in, client, phone, model, fault, amount, payment_method, date_out, status, observations, service_type, service_types, currency, client_id, client_ci, client_address, device_checklist, technician, technician_id, paid_amount, group_id, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  ins('INSERT INTO services (order_num, date_in, client, phone, model, fault, amount, payment_method, date_out, status, observations, service_type, service_types, currency, client_id, client_ci, client_address, device_checklist, technician, technician_id, paid_amount, group_id, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, discount_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     order, dateIn, clientName, extra.phone ?? '', model, fault, amount, extra.method ?? 'Efectivo Bs',
     extra.dateOut ?? null, status, extra.obs ?? null,
     types[0], JSON.stringify(types), extra.currency ?? 'USD', clientId,
     extra.ci ?? null, extra.addr ?? null, extra.checklist ?? null,
     extra.tech ?? null, extra.techId ?? null, extra.paid ?? 0, extra.groupId ?? null,
-    extra.feePct ?? 0, extra.feeAmt ?? 0, extra.net ?? 0, extra.ref ?? null).lastInsertRowid;
+    extra.feePct ?? 0, extra.feeAmt ?? 0, extra.net ?? 0, extra.ref ?? null, extra.discount ?? 0).lastInsertRowid;
 
 // DEV-0001: ayer, en taller, técnico Aldri
 const s1 = svc('DEV-0001', tsYday('09:15:00'), cRob, 'roberth silva', 'Samsung A32', 'No enciende, se queda en logo',
   ['Cambio batería'], 30, 'En reparación', { phone: '0412-5559999', ci: 'V-24906999', addr: 'Barrio San José', tech: 'Aldri', techId: 1, checklist: CHECK, obs: 'Probable batería hinchada' });
 
-// DEV-0002: ayer, por entregar, abono de $10 hoy
+// DEV-0002: ayer, por entregar, abono de $10 hoy, con DESCUENTO en efectivo (precio lista 45 → paga 40)
 const s2 = svc('DEV-0002', tsYday('10:30:00'), cPedro, 'pedro martinez', 'Tecno SPARK 10 PRO', 'Pantalla rota en caída',
-  ['Cambio pantalla'], 45, 'Por entregar', { phone: '0414-7778888', ci: 'V-11999999', method: 'Divisas (USD Cash)', paid: 10, obs: 'Pantalla pedida' });
+  ['Cambio pantalla'], 40, 'Por entregar', { phone: '0414-7778888', ci: 'V-11999999', method: 'Divisas (USD Cash)', paid: 10, discount: 5, obs: 'Pantalla pedida' });
 
 // DEV-0003 + DEV-0003-A: orden multi-equipo de hoy (maria, 2 teléfonos)
 const s3 = svc('DEV-0003', tsToday('08:45:00'), cMaria, 'maria fernandez', 'Xiaomi Redmi Note 11', 'No carga; conector flojo',
-  ['Cambio conector / puerto', 'Cambio batería'], 25, 'Recibido', { phone: '0412-5551234', ci: 'V-18000123', addr: 'Urb. Las Acacias, Av. 2', checklist: CHECK, groupId: 'DEV-0003' });
+  ['Pin de Carga', 'Cambio batería'], 25, 'Recibido', { phone: '0412-5551234', ci: 'V-18000123', addr: 'Urb. Las Acacias, Av. 2', checklist: CHECK, groupId: 'DEV-0003' });
 const s3b = svc('DEV-0003-A', tsToday('08:45:00'), cMaria, 'maria fernandez', 'Samsung Galaxy A14', 'Se apaga sola con batería baja',
   ['Cambio batería'], 20, 'Recibido', { phone: '0412-5551234', ci: 'V-18000123', addr: 'Urb. Las Acacias, Av. 2', checklist: CHECK, groupId: 'DEV-0003' });
 
@@ -179,8 +182,8 @@ ins('INSERT INTO service_payments (service_id, amount, payment_method, bank_fee_
   s5, 7490, 'Pago Móvil', 0, 0, 7490, 'REF-PM-001', 'VES', tsYday('16:05:00'), 'Pago móvil del banco');
 
 // 8) Ventas
-ins('INSERT INTO sales (date, product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?,NULL,?,?,?,?,?,?,?,?,0,0,?,?,?)',
-  tsToday('09:00:00'), 'Funda Silicona Samsung A32', 1, 5, 5, 'Divisas (USD Cash)', 'roberth silva', cRob, 'Funda negra', 5, '', 'USD');
+ins('INSERT INTO sales (date, product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount) VALUES (?,NULL,?,?,?,?,?,?,?,?,0,0,?,?,?,?)',
+  tsToday('09:00:00'), 'Funda Silicona Samsung A32', 1, 4, 4, 'Divisas (USD Cash)', 'roberth silva', cRob, 'Funda negra', 4, '', 'USD', 1);
 ins('INSERT INTO sales (date, product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?,NULL,?,?,?,?,?,?,?,?,0,0,?,?,?)',
   tsToday('11:30:00'), 'Cargador Rápido 33W', 1, 10, 7487.9, 'Pago Móvil', 'maria fernandez', cMaria, '', 7487.9, 'REF-VENTA-01', 'VES');
 ins('INSERT INTO sales (date, product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?,NULL,?,?,?,?,?,?,?,?,0,0,?,?,?)',

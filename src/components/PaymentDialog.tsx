@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { methodCurrency, currencySymbol } from '@/lib/utils';
+import { methodCurrency, currencySymbol, isRefund } from '@/lib/utils';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import type { Service, ServicePayment } from '../types';
 
@@ -112,7 +112,10 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md max-h-[88vh] flex flex-col overflow-hidden">
+      <DialogContent className="sm:max-w-md max-h-[88vh] flex flex-col overflow-hidden"
+        onKeyDown={e => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') doAddPayment();
+        }}>
         <DialogHeader className="shrink-0">
           <DialogTitle>Registrar Pago / Abono {service ? `· ${service.order_num}` : ''}</DialogTitle>
         </DialogHeader>
@@ -213,9 +216,15 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                       <TableRow key={p.id}>
                         <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
                         <TableCell className="text-right font-medium">
-                          {currencySymbol(p.currency)}{p.amount.toFixed(2)}
+                          {isRefund(p) ? (
+                            <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
+                          ) : (
+                            <>{currencySymbol(p.currency)}{p.amount.toFixed(2)}</>
+                          )}
                         </TableCell>
-                        <TableCell className="text-xs">{p.payment_method ?? '-'}</TableCell>
+                        <TableCell className="text-xs">
+                          {isRefund(p) ? <span className="font-medium text-danger">Devolución</span> : (p.payment_method ?? '-')}
+                        </TableCell>
                         <TableCell>
                           <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
                             onClick={() => doDeletePayment(p.id)}>
@@ -238,7 +247,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               <Printer className="size-4" /> Imprimir orden
             </Button>
           )}
-          <Button onClick={doAddPayment} disabled={savingPay || payAmount <= 0 || dayOpen === false}>
+          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || dayOpen === false}>
             {savingPay ? 'Guardando...' : 'Guardar Pago'}
           </Button>
         </DialogFooter>

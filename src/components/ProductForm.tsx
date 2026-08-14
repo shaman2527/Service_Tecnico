@@ -21,6 +21,7 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
   const [compatibility, setCompatibility] = useState('');
   const [priceCost, setPriceCost] = useState(product?.price_cost ?? 0);
   const [priceSale, setPriceSale] = useState(product?.price_sale ?? 0);
+  const [priceUsd, setPriceUsd] = useState(product?.price_usd ?? 0);
   const [stock, setStock] = useState(product?.stock ?? 0);
   const [minStock, setMinStock] = useState(product?.min_stock ?? 2);
   const [saving, setSaving] = useState(false);
@@ -43,9 +44,9 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
       const compatList = compatibility.split('/').map(s => s.trim()).filter(Boolean);
       const compatJson = JSON.stringify(compatList);
       if (product) {
-        await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock);
+        await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
       } else {
-        await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock);
+        await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
       }
       onSaved();
     } finally {
@@ -107,7 +108,7 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
               placeholder="Redmi Note 11 / Redmi Note 11S / Redmi Note 11 Pro" />
           </div>
 
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Costo ($)</label>
               <Input type="number" step={0.01} min={0} value={priceCost}
@@ -117,6 +118,12 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
               <label className="text-sm font-medium">Venta ($)</label>
               <Input type="number" step={0.01} min={0} value={priceSale}
                 onChange={e => setPriceSale(Number(e.target.value))} />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Efectivo ($)</label>
+              <Input type="number" step={0.01} min={0} value={priceUsd}
+                onChange={e => setPriceUsd(Number(e.target.value))} />
+              <p className="text-xs text-muted-foreground">Precio contado / descuento</p>
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Stock</label>

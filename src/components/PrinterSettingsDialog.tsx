@@ -7,7 +7,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { api } from '../db';
-import { logoToRaster, makeTestLogoPng, printerWidthChars, buildReceiptTerms } from '@/lib/utils';
+import { logoToRaster, makeTestLogoPng, printerWidthChars } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { ComPort, PrinterSettings } from '../types';
 import { DEFAULT_PRINTER_SETTINGS } from '../types';
@@ -179,11 +179,10 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
 
   const testPrint = async () => {
     const { raster, rasterWidth } = await rasterArgs();
-    const terms = buildReceiptTerms(settings.width);
     if (settings.windowsPrinter) {
       setTesting(true);
       try {
-        await api.printToWindowsPrinter(settings.windowsPrinter, testText('Windows'), terms, undefined, raster, rasterWidth);
+        await api.printToWindowsPrinter(settings.windowsPrinter, testText('Windows'), undefined, undefined, raster, rasterWidth);
         toast.success(`Prueba enviada a "${settings.windowsPrinter}". La impresora debe sacar un ticket.`);
       } catch (e) {
         toast.error(e instanceof Error ? e.message : String(e));
@@ -198,7 +197,7 @@ export default function PrinterSettingsDialog({ open, onOpenChange }: {
     }
     setTesting(true);
     try {
-      await api.printReceipt(settings.port, settings.baud, testText(settings.port), terms, undefined, raster, rasterWidth);
+      await api.printReceipt(settings.port, settings.baud, testText(settings.port), undefined, undefined, raster, rasterWidth);
       toast.success('Prueba enviada. La impresora debe sacar un ticket.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));

@@ -56,6 +56,7 @@ pub struct Product {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub category_name: Option<String>,
+    pub price_usd: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,6 +78,7 @@ pub struct Sale {
     pub zelle_reference: Option<String>,
     pub currency: Option<String>,
     pub client_ci: Option<String>,
+    pub discount_amount: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -120,6 +122,7 @@ pub struct Service {
     pub color: Option<String>,
     pub printed: i64,
     pub screen_product_id: Option<i64>,
+    pub discount_amount: f64,
 }
 
 // Un equipo dentro de una orden multi-equipo (add_service_order)
@@ -138,6 +141,7 @@ pub struct ServiceDeviceInput {
     pub device_checklist: String,
     pub color: String,
     pub screen_product_id: Option<i64>,
+    pub discount_amount: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -721,6 +725,21 @@ impl Database {
         if !has_screen_product_id {
             let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN screen_product_id INTEGER;");
         }
+        // Migration: PRECIO DOBLE (precio en divisa / efectivo $) — 2026-08-14.
+        // products.price_usd = precio sugerido cuando el cliente paga en efectivo $ (con descuento);
+        // services/sales.discount_amount = descuento total aplicado (amount/total guardan lo REALMENTE cobrado).
+        let has_price_usd: bool = conn.prepare("SELECT price_usd FROM products LIMIT 1").is_ok();
+        if !has_price_usd {
+            let _ = conn.execute_batch("ALTER TABLE products ADD COLUMN price_usd REAL NOT NULL DEFAULT 0;");
+        }
+        let has_svc_discount: bool = conn.prepare("SELECT discount_amount FROM services LIMIT 1").is_ok();
+        if !has_svc_discount {
+            let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;");
+        }
+        let has_sale_discount: bool = conn.prepare("SELECT discount_amount FROM sales LIMIT 1").is_ok();
+        if !has_sale_discount {
+            let _ = conn.execute_batch("ALTER TABLE sales ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;");
+        }
         // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
         // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
         if conn.prepare("SELECT id FROM service_payments LIMIT 1").is_ok() {
@@ -964,22 +983,22 @@ impl Database {
     // --- Products ---
     pub fn add_product(&self, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                        variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
-                       stock: i64, min_stock: i64) -> SqlResult<i64> {
+                       stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock],
+            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd],
         )?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn update_product(&self, id: i64, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                           variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
-                          stock: i64, min_stock: i64) -> SqlResult<()> {
+                          stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE products SET name=?1, category_id=?2, brand=?3, model=?4, variant=?5, compatibility=?6, price_cost=?7, price_sale=?8, stock=?9, min_stock=?10, updated_at=datetime('now','localtime') WHERE id=?11",
-            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, id],
+            "UPDATE products SET name=?1, category_id=?2, brand=?3, model=?4, variant=?5, compatibility=?6, price_cost=?7, price_sale=?8, stock=?9, min_stock=?10, price_usd=?11, updated_at=datetime('now','localtime') WHERE id=?12",
+            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd, id],
         )?;
         Ok(())
     }
@@ -1032,7 +1051,8 @@ impl Database {
                 min_stock: r.get(10)?,
                 created_at: r.get(11)?,
                 updated_at: r.get(12)?,
-                category_name: r.get(13)?,
+                category_name: r.get(14)?,
+                price_usd: r.get(13)?,
             })
         })?;
         let mut products = Vec::new();
@@ -1053,7 +1073,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
             })
         })?;
         let mut products = Vec::new();
@@ -1079,7 +1099,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
             })
         })?;
         let mut products = Vec::new();
@@ -1090,7 +1110,7 @@ impl Database {
     // --- Sales ---
     pub fn add_sale(&self, product_id: Option<i64>, product_name: &str, quantity: i64, unit_price: f64,
                     total: f64, payment_method: &str, client_name: &str, client_id: Option<i64>, notes: &str,
-                    bank_fee_percent: f64, zelle_reference: &str, currency: &str) -> SqlResult<()> {
+                    bank_fee_percent: f64, zelle_reference: &str, currency: &str, discount_amount: f64) -> SqlResult<()> {
         if quantity <= 0 || unit_price < 0.0 || total < 0.0 {
             return Err(day_shift_error("Cantidad y montos deben ser positivos."));
         }
@@ -1101,8 +1121,8 @@ impl Database {
         self.require_open_day(&conn)?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency],
+            "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, discount_amount],
         )?;
         let sale_id = tx.last_insert_rowid();
         if let Some(pid) = product_id {
@@ -1125,7 +1145,7 @@ impl Database {
 
     pub fn get_sales(&self, search: &str, days: Option<i64>, start_date: &str, end_date: &str) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -1162,6 +1182,7 @@ impl Database {
                 zelle_reference: r.get(14).unwrap_or(None),
                 currency: r.get(15).unwrap_or(Some("USD".into())),
                 client_ci: r.get(16).unwrap_or(None),
+                discount_amount: r.get(17).unwrap_or(0.0),
             })
         })?;
         let mut sales = Vec::new();
@@ -1193,10 +1214,10 @@ impl Database {
                        bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                        client_ci: &str, client_address: &str, device_checklist: &str,
                        client_id: Option<i64>, technician: &str, technician_id: Option<i64>,
-                       color: &str, screen_product_id: Option<i64>) -> SqlResult<i64> {
+                       color: &str, screen_product_id: Option<i64>, discount_amount: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
-        Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id, color, screen_product_id)
+        Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id, color, screen_product_id, discount_amount)
     }
 
     // Insert transaccional conn-level (sin lock: lo comparte add_service y add_service_order).
@@ -1207,13 +1228,13 @@ impl Database {
                           bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                           client_ci: &str, client_address: &str, device_checklist: &str,
                           client_id: Option<i64>, technician: &str, technician_id: Option<i64>,
-                          color: &str, screen_product_id: Option<i64>) -> SqlResult<i64> {
+                          color: &str, screen_product_id: Option<i64>, discount_amount: f64) -> SqlResult<i64> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let client = title_case(client.trim());
         conn.execute(
-            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id, color, screen_product_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22,?23,?24)",
-            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id],
+            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id, color, screen_product_id, discount_amount) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22,?23,?24,?25)",
+            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id, discount_amount],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -1248,7 +1269,7 @@ impl Database {
                                      &d.service_type, &d.service_types, d.amount, &d.payment_method, &d.observations,
                                      d.bank_fee_percent, &d.zelle_reference, &d.currency,
                                      client_ci, client_address, &d.device_checklist,
-                                     client_id, technician, technician_id, &d.color, d.screen_product_id)?;
+                                     client_id, technician, technician_id, &d.color, d.screen_product_id, d.discount_amount)?;
         }
         tx.commit()?;
         Ok(base)
@@ -1259,7 +1280,7 @@ impl Database {
                           bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                           client_ci: &str, client_address: &str, device_checklist: &str,
                           technician: &str, technician_id: Option<i64>, color: &str,
-                          screen_product_id: Option<i64>) -> SqlResult<()> {
+                          screen_product_id: Option<i64>, discount_amount: f64) -> SqlResult<()> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let client = title_case(client.trim());
@@ -1296,8 +1317,8 @@ impl Database {
         };
 
         conn.execute(
-            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, service_types=?20, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19, technician=?21, technician_id=?22, color=?23, screen_product_id=?24 WHERE id=?10",
-            params![client, phone, model, fault, amount, payment_method, if effective_date_out.is_empty() { None } else { Some(effective_date_out.as_str()) }, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, if service_types.trim().is_empty() { None } else { Some(service_types) }, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id],
+            "UPDATE services SET client=?1, phone=?2, model=?3, fault=?4, service_type=?16, service_types=?20, amount=?5, payment_method=?6, date_out=?7, status=?8, observations=?9, bank_fee_percent=?11, bank_fee_amount=?12, net_amount=?13, zelle_reference=?14, currency=?15, client_ci=?17, client_address=?18, device_checklist=?19, technician=?21, technician_id=?22, color=?23, screen_product_id=?24, discount_amount=?25 WHERE id=?10",
+            params![client, phone, model, fault, amount, payment_method, if effective_date_out.is_empty() { None } else { Some(effective_date_out.as_str()) }, status, observations, id, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, service_type, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, if service_types.trim().is_empty() { None } else { Some(service_types) }, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id, discount_amount],
         )?;
         Ok(())
     }
@@ -1465,6 +1486,50 @@ impl Database {
         Ok(())
     }
 
+    /// Reembolso al cliente: inserta un pago NEGATIVO en service_payments (resta
+    /// del paid_amount del servicio y de los totales del día en el Libro Diario).
+    /// Requiere día abierto (movimiento de caja) y monto > 0.
+    pub fn add_service_refund(&self, service_id: i64, amount: f64, payment_method: &str,
+                              zelle_reference: &str, currency: &str, notes: &str) -> SqlResult<i64> {
+        if amount <= 0.0 {
+            return Err(day_shift_error("El monto a devolver debe ser mayor a 0."));
+        }
+        let conn = self.conn.lock().unwrap();
+        self.require_open_day(&conn)?;
+        let currency = normalize_payment_currency(payment_method, currency);
+        // Guard anti-abuso (el backend es el respaldo real del límite de la UI):
+        // la devolución en USD equivalente no puede exceder lo abonado. La tasa usa
+        // la MISMA lógica de recalc_paid_amount (cierre del día del pago = hoy →
+        // día abierto → 1) para que la conversión coincida.
+        let paid: f64 = conn.query_row(
+            "SELECT COALESCE(paid_amount, 0) FROM services WHERE id=?1", params![service_id], |r| r.get(0),
+        ).optional()?.ok_or_else(|| day_shift_error("El servicio no existe."))?;
+        let equiv_usd = if currency == "VES" {
+            let tasa: f64 = conn.query_row(
+                "SELECT COALESCE((SELECT dc.tasa_bcv FROM daily_closings dc WHERE dc.close_date = date('now','localtime') AND dc.tasa_bcv > 0 ORDER BY dc.id DESC LIMIT 1), (SELECT dc2.tasa_bcv FROM daily_closings dc2 WHERE dc2.is_closed = 0 AND dc2.tasa_bcv > 0 LIMIT 1), 1)",
+                [], |r| r.get(0),
+            )?;
+            amount / tasa
+        } else {
+            amount
+        };
+        if equiv_usd > paid + 0.5 {
+            return Err(day_shift_error(&format!("Solo puedes devolver hasta lo abonado (${:.2}).", paid)));
+        }
+        let final_notes = if notes.trim().is_empty() {
+            "Devolución".to_string()
+        } else {
+            format!("Devolución: {}", notes.trim())
+        };
+        conn.execute(
+            "INSERT INTO service_payments (service_id, amount, payment_method, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, notes) VALUES (?1,?2,?3,0,0,?2,?4,?5,?6)",
+            params![service_id, -amount, payment_method, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, final_notes],
+        )?;
+        let pid = conn.last_insert_rowid();
+        self.recalc_paid_amount(&conn, service_id)?;
+        Ok(pid)
+    }
+
     // Recalcula paid_amount del servicio en USD equivalente:
     // pagos en Bs se convierten con la tasa BCV del día del pago (cierre del día)
     // o la tasa del día abierto actual; pagos USD se suman directo.
@@ -1597,7 +1662,7 @@ impl Database {
 
     pub fn get_services(&self, search: &str, status: &str, start_date: &str, end_date: &str) -> SqlResult<Vec<Service>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id FROM services s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount FROM services s WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -1651,6 +1716,7 @@ impl Database {
                 color: r.get(27).unwrap_or(None),
                 printed: r.get(28).unwrap_or(0),
                 screen_product_id: r.get(29).unwrap_or(None),
+                discount_amount: r.get(30).unwrap_or(0.0),
             })
         })?;
         let mut services = Vec::new();
@@ -1661,7 +1727,7 @@ impl Database {
     pub fn get_service_by_id(&self, id: i64) -> SqlResult<Option<Service>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id FROM services s WHERE s.id=?1",
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount FROM services s WHERE s.id=?1",
             params![id],
             |r| Ok(Service {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
@@ -1686,6 +1752,7 @@ impl Database {
                 color: r.get(27).unwrap_or(None),
                 printed: r.get(28).unwrap_or(0),
                 screen_product_id: r.get(29).unwrap_or(None),
+                discount_amount: r.get(30).unwrap_or(0.0),
             }),
         ).optional()?;
         Ok(row)
@@ -2184,7 +2251,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Try by client_id first, fallback to name match
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Service {
@@ -2210,6 +2277,7 @@ impl Database {
                 color: r.get(27).unwrap_or(None),
                 printed: r.get(28).unwrap_or(0),
                 screen_product_id: r.get(29).unwrap_or(None),
+                discount_amount: r.get(30).unwrap_or(0.0),
             })
         })?;
         let mut services = Vec::new();
@@ -2223,7 +2291,7 @@ impl Database {
         ).ok();
         if let Some(ref name) = client_name {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
+                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
             )?;
             let rows = stmt.query_map(params![name], |r| {
                 Ok(Service {
@@ -2249,6 +2317,7 @@ impl Database {
                 color: r.get(27).unwrap_or(None),
                 printed: r.get(28).unwrap_or(0),
                 screen_product_id: r.get(29).unwrap_or(None),
+                discount_amount: r.get(30).unwrap_or(0.0),
             })
         })?;
             let mut services = Vec::new();
@@ -2261,7 +2330,7 @@ impl Database {
     pub fn get_client_sales(&self, client_id: i64) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE s.client_id = ?1 ORDER BY s.date DESC"
+            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE s.client_id = ?1 ORDER BY s.date DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Sale {
@@ -2275,6 +2344,7 @@ impl Database {
                 zelle_reference: r.get(14).unwrap_or(None),
                 currency: r.get(15).unwrap_or(Some("USD".into())),
                 client_ci: r.get(16).unwrap_or(None),
+                discount_amount: r.get(17).unwrap_or(0.0),
             })
         })?;
         let mut sales = Vec::new();
@@ -2297,7 +2367,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
             })
         })?;
         let mut products = Vec::new();
@@ -2307,8 +2377,11 @@ impl Database {
 
     pub fn suggest_clients(&self, query: &str, limit: i64) -> SqlResult<Vec<Client>> {
         let conn = self.conn.lock().unwrap();
+        // La coincidencia por CÉDULA va PRIMERO (el técnico escribe la cédula y
+        // el cliente aparece arriba); luego por nombre.
         let mut stmt = conn.prepare(
-            "SELECT c.* FROM clients c WHERE c.name LIKE ?1 OR c.phone LIKE ?1 OR c.ci LIKE ?1 ORDER BY c.name LIMIT ?2"
+            "SELECT c.* FROM clients c WHERE c.name LIKE ?1 OR c.phone LIKE ?1 OR c.ci LIKE ?1 \
+             ORDER BY CASE WHEN c.ci LIKE ?1 THEN 0 ELSE 1 END, c.name LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![format!("%{}%", query), limit], |r| {
             Ok(Client {
@@ -3611,7 +3684,7 @@ mod tests {
         let db = Database::new(&test_path).expect("Failed to create test DB");
 
         // Blocking: sales/services require an open day
-        let blocked = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD");
+        let blocked = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD", 0.0);
         assert!(blocked.is_err(), "add_sale must fail without an open day");
 
         // Open day (shift) with BCV rate
@@ -3630,7 +3703,7 @@ mod tests {
 
         // Add product
         let pid = db.add_product("Pantalla Test", Some(1), "Xiaomi", "Red Note 11",
-            "Incell", "[\"Red Note 11\",\"Note 11S\"]", 8.0, 15.0, 5, 2).unwrap();
+            "Incell", "[\"Red Note 11\",\"Note 11S\"]", 8.0, 15.0, 5, 2, 0.0).unwrap();
         assert!(pid > 0);
 
         // Get products
@@ -3657,7 +3730,7 @@ mod tests {
         assert!(!suggestions.is_empty());
 
         // Add sale
-        db.add_sale(Some(pid), "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", Some(cid), "", 0.0, "", "USD").unwrap();
+        db.add_sale(Some(pid), "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", Some(cid), "", 0.0, "", "USD", 0.0).unwrap();
         let sales = db.get_sales("", None, "", "").unwrap();
         assert_eq!(sales.len(), 1);
 
@@ -3668,17 +3741,17 @@ mod tests {
         // Add service (linked to client id)
         let sid = db.add_service("ORD-TEST-1", "Juan Perez", "0412-1234567",
             "Samsung A32", "No enciende", "Cambio batería", "[\"Cambio batería\"]", 25.0, "Efectivo Bs", "", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#, Some(cid), "", None, "", None).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"si","bandeja_sim":"si","botones":"si","boton_home":"na","camara":"si","puerto_carga":"si","parlante":"si","contrasena":"no","accesorios":"no"}"#, Some(cid), "", None, "", None, 0.0).unwrap();
         assert!(sid > 0);
 
         // Auto-inventory: create Samsung A32 screen product (stock 2) before delivering
         let a32_pid = db.add_product("Pantalla Samsung A32", Some(1), "Samsung", "A32",
-            "", "[\"Samsung A32\"]", 12.0, 15.0, 2, 0).unwrap();
+            "", "[\"Samsung A32\"]", 12.0, 15.0, 2, 0, 0.0).unwrap();
 
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
             "No enciende - reparado", "Cambio pantalla", "[\"Cambio pantalla\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Entregado", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None, 0.0).unwrap();
 
         let stock_before: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -3689,7 +3762,7 @@ mod tests {
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
             "No enciende - reparado", "Cambio pantalla", "[\"Cambio pantalla\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Por entregar", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None, 0.0).unwrap();
         let stock_back: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![a32_pid], |r| r.get(0)).unwrap()
@@ -3699,13 +3772,13 @@ mod tests {
         db.update_service(sid, "Juan Perez", "0412-1234567", "Samsung A32",
             "No enciende - reparado", "Cambio pantalla", "[\"Cambio pantalla\"]", 25.0, "Efectivo Bs", "2026-07-30",
             "Entregado", "Garantía 15 días", 0.0, "", "USD",
-            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None).unwrap();
+            "V-12345678", "Av. Principal", r#"{"chip_sim":"si","tapa_trasera":"no"}"#, "", None, "", None, 0.0).unwrap();
 
         // SIN auto-create: modelo sin pantalla en catálogo → al entregar NO se crea producto
         // ni se descuenta (regla 2026-08-12: aviso sin descuento, no fantasmas).
         db.add_service("ORD-TEST-2", "Maria Lopez", "0412-7654321",
             "Pantalla Inexistente XYZ", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]", 20.0, "Efectivo Bs", "", 0.0, "", "USD",
-            "V-99999999", "", "", None, "", None, "", None).unwrap();
+            "V-99999999", "", "", None, "", None, "", None, 0.0).unwrap();
         let sid2 = db.get_services("", "", "", "").unwrap().iter().find(|s| s.order_num.as_deref() == Some("ORD-TEST-2")).unwrap().id;
         let new_prod: Option<i64> = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -3715,7 +3788,7 @@ mod tests {
         let movs_before = db.get_inventory_movements(None).unwrap().len();
         db.update_service(sid2, "Maria Lopez", "0412-7654321", "Pantalla Inexistente XYZ",
             "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]", 20.0, "Efectivo Bs", "2026-07-30", "Entregado", "", 0.0, "", "USD",
-            "V-99999999", "", "", "", None, "", None).unwrap();
+            "V-99999999", "", "", "", None, "", None, 0.0).unwrap();
         let phantom: Option<i64> = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT id FROM products WHERE name LIKE '%Inexistente XYZ%'", [], |r| r.get(0)).ok()
@@ -3861,7 +3934,7 @@ mod tests {
 
         // After closing, no active day and sales blocked again
         assert!(db.get_active_day().unwrap().is_none());
-        let blocked_after = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD");
+        let blocked_after = db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Efectivo Bs", "Test Client", None, "", 0.0, "", "USD", 0.0);
         assert!(blocked_after.is_err(), "add_sale must fail after closing");
 
         // Reopen day → active again
@@ -3903,6 +3976,12 @@ mod tests {
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0].ci.as_deref(), Some("V-100"));
         assert_eq!(suggestions[0].address.as_deref(), Some("Av 2"));
+
+        // La cédula va PRIMERO que un nombre que también matchee el texto
+        let idc = db.add_or_find_client("Alex Centro 100", "", "", "").unwrap();
+        let by_digits = db.suggest_clients("100", 5).unwrap();
+        assert_eq!(by_digits[0].ci.as_deref(), Some("V-100"), "cédula primero que nombre");
+        assert!(by_digits.iter().any(|c| c.id == idc), "el nombre también aparece");
 
         // get_clients busca por ci y lo incluye en el resumen
         let list = db.get_clients("V-200").unwrap();
@@ -3957,7 +4036,7 @@ mod tests {
         db.open_day(0.0, 0.0, 0.0).unwrap();
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Cliente PM", None, "", 0.0, "REF-1234", "Bs").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Cliente PM", None, "", 0.0, "REF-1234", "Bs", 0.0).unwrap();
 
         let detail = db.get_pago_movil_detail(&today).unwrap();
         assert_eq!(detail.len(), 1, "una fila de pago móvil hoy");
@@ -4000,7 +4079,8 @@ mod tests {
                 bank_fee_amount REAL DEFAULT 0,
                 net_amount REAL,
                 zelle_reference TEXT,
-                currency TEXT
+                currency TEXT,
+                discount_amount REAL DEFAULT 0
             )",
             [],
         ).unwrap();
@@ -4008,7 +4088,7 @@ mod tests {
 
         db.open_day(0.0, 0.0, 0.0).unwrap();
         let cid = db.add_or_find_client("Ana", "0412-111", "V-100", "Av 1").unwrap();
-        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Ana", Some(cid), "nota de prueba", 0.0, "REF-99", "Bs").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 15.0, 15.0, "Pago Móvil", "Ana", Some(cid), "nota de prueba", 0.0, "REF-99", "Bs", 0.0).unwrap();
 
         let sales = db.get_sales("", None, "", "").unwrap();
         assert_eq!(sales.len(), 1, "get_sales con orden físico legacy");
@@ -4034,8 +4114,8 @@ mod tests {
 
         db.open_day(0.0, 0.0, 0.0).unwrap();
         let cid = db.add_or_find_client("Roberto", "0414-222", "V-24906999", "Av 2").unwrap();
-        db.add_sale(None, "Pantalla Samsung A15", 1, 15.0, 15.0, "Divisas (USD Cash)", "Roberto", Some(cid), "", 0.0, "", "USD").unwrap();
-        db.add_sale(None, "Funda iPhone", 1, 5.0, 5.0, "Pago Móvil", "Cliente Suelto", None, "", 0.0, "", "Bs").unwrap();
+        db.add_sale(None, "Pantalla Samsung A15", 1, 15.0, 15.0, "Divisas (USD Cash)", "Roberto", Some(cid), "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(None, "Funda iPhone", 1, 5.0, 5.0, "Pago Móvil", "Cliente Suelto", None, "", 0.0, "", "Bs", 0.0).unwrap();
 
         // Búsqueda por cédula (con y sin formato) → encuentra la venta vinculada
         assert_eq!(db.get_sales("24906999", None, "", "").unwrap().len(), 1, "venta por cédula sin formato");
@@ -4057,7 +4137,7 @@ mod tests {
 
         // Rango de fechas en servicios (date_in)
         let sid = db.add_service("ORD-2001", "Roberto", "0414-222", "Samsung A15 A155", "Pantalla rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            20.0, "Efectivo Bs", "", 0.0, "", "Bs", "V-24906999", "", "{}", Some(cid), "", None, "", None).unwrap();
+            20.0, "Efectivo Bs", "", 0.0, "", "Bs", "V-24906999", "", "{}", Some(cid), "", None, "", None, 0.0).unwrap();
         assert_eq!(db.get_services("", "", &today, &today).unwrap().len(), 1, "servicio de hoy en rango");
         assert_eq!(db.get_services("", "", &yesterday, &yesterday).unwrap().len(), 0, "servicio no aparece ayer");
         assert_eq!(db.get_services("24906999", "", "", "").unwrap().len(), 1, "servicio por cédula");
@@ -4077,9 +4157,9 @@ mod tests {
 
         // Producto con categoría Pantalla
         let pid = db.add_product("Pantalla Samsung A15", Some(1), "Samsung", "A15 A155",
-            "Incell", "[\"A15 A155\"]", 14.0, 17.5, 10, 2).unwrap();
-        db.add_sale(Some(pid), "Pantalla Samsung A15", 2, 17.5, 35.0, "Divisas (USD Cash)", "Ana", None, "", 0.0, "", "USD").unwrap();
-        db.add_sale(Some(pid), "Pantalla Samsung A15", 1, 17.5, 17.5, "Pago Móvil", "Ana", None, "", 0.0, "REF-1", "Bs").unwrap();
+            "Incell", "[\"A15 A155\"]", 14.0, 17.5, 10, 2, 0.0).unwrap();
+        db.add_sale(Some(pid), "Pantalla Samsung A15", 2, 17.5, 35.0, "Divisas (USD Cash)", "Ana", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(Some(pid), "Pantalla Samsung A15", 1, 17.5, 17.5, "Pago Móvil", "Ana", None, "", 0.0, "REF-1", "Bs", 0.0).unwrap();
 
         let a = db.get_dashboard_analytics().unwrap();
         assert_eq!(a.today_usd, 35.0, "venta USD de hoy");
@@ -4116,14 +4196,14 @@ mod tests {
         db.open_day(10.0, 40.5, 45.0).unwrap();
 
         // Venta en Bs (Pago Móvil) — el frontend guarda total en Bs con currency 'VES'
-        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Pago Móvil", "Cliente", None, "", 0.0, "", "VES").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Pago Móvil", "Cliente", None, "", 0.0, "", "VES", 0.0).unwrap();
         // Punto de Venta en Bs (cobro real de Bs 35.000 con comisión 2%) → neto Bs 34.300
-        db.add_sale(None, "Venta Punto Bs", 1, 35000.0, 35000.0, "Punto de Venta (Bs)", "Cliente", None, "", 2.0, "", "VES").unwrap();
+        db.add_sale(None, "Venta Punto Bs", 1, 35000.0, 35000.0, "Punto de Venta (Bs)", "Cliente", None, "", 2.0, "", "VES", 0.0).unwrap();
         // Punto de Venta en USD (cobro real de $100) → neto $100
-        db.add_sale(None, "Venta Punto USD", 1, 100.0, 100.0, "Punto de Venta ($)", "Cliente", None, "", 0.0, "", "USD").unwrap();
+        db.add_sale(None, "Venta Punto USD", 1, 100.0, 100.0, "Punto de Venta ($)", "Cliente", None, "", 0.0, "", "USD", 0.0).unwrap();
         // Abono en Bs (Efectivo Bs) + abono en USD (Divisas)
         let sid = db.add_service("ORD-TEST-LEDGER", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None, "", None, "", None).unwrap();
+            50.0, "Pago Móvil", "", 0.0, "", "VES", "", "", "", None, "", None, "", None, 0.0).unwrap();
         db.add_service_payment(sid, 100.0, "Efectivo Bs", 0.0, "", "USD", "abono bs").unwrap();
         db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono usd").unwrap();
 
@@ -4167,7 +4247,7 @@ mod tests {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
-        db.add_sale(None, "Venta OK", 1, 5.0, 5.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD").unwrap();
+        db.add_sale(None, "Venta OK", 1, 5.0, 5.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD", 0.0).unwrap();
         // Simular la fila corrupta del seed: net_amount con texto (INSERT directo)
         let conn = db.conn.lock().unwrap();
         conn.execute(
@@ -4189,6 +4269,173 @@ mod tests {
     }
 
     #[test]
+    fn test_service_refund() {
+        // Reembolso: pago NEGATIVO en service_payments → resta del paid_amount,
+        // del Libro Diario (método del día) y del saldo visible del servicio.
+        let test_path = PathBuf::from("test_refund.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        // Servicio de $100 con $60 abonados en Divisas (USD)
+        let sid = db.add_service("ORD-REF-1", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            100.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 60.0, "Divisas (USD Cash)", 0.0, "", "USD", "Abono").unwrap();
+        let paid_before: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert_eq!(paid_before, 60.0);
+
+        // Reembolso de $20 en Divisas → paid_amount baja a 40
+        let rpid = db.add_service_refund(sid, 20.0, "Divisas (USD Cash)", "", "USD", "Cliente devolvió").unwrap();
+        assert!(rpid > 0);
+        let payments = db.get_service_payments(sid).unwrap();
+        assert_eq!(payments.len(), 2);
+        assert_eq!(payments[1].amount, -20.0, "reembolso se guarda NEGATIVO");
+        assert_eq!(payments[1].notes.as_deref(), Some("Devolución: Cliente devolvió"), "nota con prefijo");
+        assert_eq!(payments[1].currency.as_deref(), Some("USD"), "moneda del método");
+        let paid_after: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid_after - 40.0).abs() < 1e-9, "paid_amount resta el reembolso: {paid_after}");
+
+        // Libro Diario: el reembolso resta del método del día (Divisas 60 - 20 = 40)
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].usd_cash_total, 40.0, "reembolso resta del total del día");
+        assert_eq!(totals[0].grand_usd, 40.0);
+
+        // Reembolso en Bs: resta también (conversión Bs→USD con la tasa del día)
+        let pid_bs = db.add_service_payment(sid, 1000.0, "Efectivo Bs", 0.0, "", "USD", "abono bs").unwrap();
+        assert!(pid_bs > 0);
+        db.add_service_refund(sid, 400.0, "Efectivo Bs", "", "USD", "").unwrap();
+        let paid_final: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        let expected: f64 = 40.0 + (1000.0 - 400.0) / 40.5;
+        assert!((paid_final - expected).abs() < 1e-9, "paid_final={paid_final} expected={expected}");
+        assert_eq!(payments[1].amount, -20.0, "el reembolso Bs queda negativo en service_payments");
+
+        // Validaciones: monto 0 o negativo → error; día cerrado → error
+        let err = db.add_service_refund(sid, 0.0, "Divisas (USD Cash)", "", "USD", "").unwrap_err().to_string();
+        assert!(err.contains("mayor a 0"), "monto inválido rechazado: {err}");
+        db.close_day(&today, "cierre", 0.0, 40.5, 45.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let err2 = db.add_service_refund(sid, 5.0, "Divisas (USD Cash)", "", "USD", "").unwrap_err().to_string();
+        assert!(err2.contains("Debe abrir el día"), "día cerrado bloquea reembolso: {err2}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_refund_ledger_full() {
+        // Flujo COMPLETO devolución + Libro Diario (2026-08-14):
+        // día abierto → servicio con pantalla exacta → entregar (descuenta stock) →
+        // abonos USD + Bs → reembolsos (USD + Bs) → totals del día → cerrar día
+        // cuadra → transición a Devuelto devuelve el stock.
+        let test_path = PathBuf::from("test_refund_ledger.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        // Producto pantalla con stock 5 + servicio con screen_product_id
+        let pid = db.add_product("Pantalla Test", Some(1), "Samsung", "A15", "Incell",
+            "[\"Samsung A15\"]", 8.0, 15.0, 5, 2, 0.0).unwrap();
+        let sid = db.add_service("ORD-REF2", "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]",
+            100.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "V-1", "", "",
+            None, "", None, "", Some(pid), 0.0).unwrap();
+
+        // 1) Entregar → descuenta la pantalla exacta (stock 5 → 4)
+        db.update_service(sid, "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]",
+            100.0, "Divisas (USD Cash)", "", "Entregado", "", 0.0, "", "USD",
+            "V-1", "", "", "", None, "", Some(pid), 0.0).unwrap();
+        let stock: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 4, "entregar descuenta la pantalla exacta");
+
+        // 2) Abonos: $30 Divisas + Bs 810 Efectivo Bs (= $20 @ 40.5) → paid = 50
+        db.add_service_payment(sid, 30.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono usd").unwrap();
+        db.add_service_payment(sid, 810.0, "Efectivo Bs", 0.0, "", "USD", "abono bs").unwrap();
+        let paid: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid - 50.0).abs() < 1e-9, "paid=50 tras abonos, got {paid}");
+
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals[0].usd_cash_total, 30.0, "divisas del día = 30");
+        assert_eq!(totals[0].cash_bs, 810.0, "efectivo bs del día = 810");
+        assert_eq!(totals[0].grand_usd, 30.0);
+        assert_eq!(totals[0].grand_bs, 810.0);
+
+        // 3) GUARD backend: no se puede devolver más de lo abonado (USD directo y Bs)
+        let err = db.add_service_refund(sid, 60.0, "Divisas (USD Cash)", "", "USD", "").unwrap_err().to_string();
+        assert!(err.contains("hasta lo abonado"), "devuelve más de lo abonado → rechazado: {err}");
+        let err2 = db.add_service_refund(sid, 2500.0, "Efectivo Bs", "", "USD", "").unwrap_err().to_string();
+        assert!(err2.contains("hasta lo abonado"), "refund Bs excedente → rechazado: {err2}");
+
+        // 4) Reembolso total: Bs 810 (→0) y $30 (→0); paid_amount termina en 0
+        db.add_service_refund(sid, 810.0, "Efectivo Bs", "", "USD", "todo el efectivo").unwrap();
+        db.add_service_refund(sid, 30.0, "Divisas (USD Cash)", "", "USD", "todo en divisas").unwrap();
+        let paid_final: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!(paid_final.abs() < 1e-9, "paid_amount 0 tras devolver todo, got {paid_final}");
+
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals[0].usd_cash_total, 0.0, "refunds restan por método USD");
+        assert_eq!(totals[0].cash_bs, 0.0, "refunds restan por método Bs");
+        assert_eq!(totals[0].grand_usd, 0.0);
+        assert_eq!(totals[0].grand_bs, 0.0);
+
+        // 5) Marcar Devuelto (transición Entregado → Devuelto) → devuelve el stock y limpia date_out
+        db.update_service(sid, "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]",
+            100.0, "Divisas (USD Cash)", "2026-08-13", "Devuelto", "", 0.0, "", "USD",
+            "V-1", "", "", "", None, "", Some(pid), 0.0).unwrap();
+        let stock2: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(stock2, 5, "Devuelto devuelve el stock de la pantalla");
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.status.as_deref(), Some("Devuelto"), "status → Devuelto");
+        assert!(svc.date_out.is_none(), "date_out limpio al devolver (fuera de garantía)");
+
+        // 6) Cerrar el día: sin movimientos netos → arqueo 0 cuadra (difference ≈ 0)
+        let close_id = db.close_day(&today, "cierre con devoluciones", 0.0, 40.5, 45.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let closing: crate::db::DailyClosing = db.conn.lock().unwrap()
+            .query_row(
+                "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, pos_settled_bs,
+                        cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total,
+                        grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at,
+                        initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
+                        actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs
+                 FROM daily_closings WHERE id=?1",
+                params![close_id],
+                |r| Ok(crate::db::DailyClosing {
+                    id: r.get(0)?, close_date: r.get(1)?, pos_charged: r.get(2)?, pos_fees: r.get(3)?,
+                    pos_net: r.get(4)?, pos_settled: r.get(5)?, pos_settled_bs: r.get(6)?,
+                    cash_usd: r.get(7)?, cash_bs: r.get(8)?, zelle_total: r.get(9)?,
+                    pago_movil_total: r.get(10)?, transfer_bs_total: r.get(11)?, usd_cash_total: r.get(12)?,
+                    grand_total: r.get(13)?, is_closed: r.get(14)?, closed_at: r.get(15)?, notes: r.get(16)?,
+                    tasa_bcv: r.get(17)?, tasa_eur: r.get(18)?, opened_at: r.get(19)?,
+                    initial_cash_usd: r.get(20)?, actual_cash_usd: r.get(21)?, actual_cash_bs: r.get(22)?,
+                    actual_punto_usd: r.get(23)?, actual_punto_bs: r.get(24)?, actual_zelle: r.get(25)?,
+                    actual_pago_movil: r.get(26)?, actual_transfer_bs: r.get(27)?, difference: r.get(28)?,
+                    total_usd: r.get(29)?, total_bs: r.get(30)?,
+                })).unwrap();
+        assert_eq!(closing.total_usd, 0.0, "total_usd del cierre refleja las devoluciones");
+        assert_eq!(closing.total_bs, 0.0, "total_bs del cierre refleja las devoluciones");
+        assert!(closing.difference.abs() < 1e-9, "arqueo 0 cuadra tras devolver todo, diff={}", closing.difference);
+        assert_eq!(closing.grand_total, 0.0);
+
+        // 7) Reembolso con día cerrado → bloqueado
+        let err3 = db.add_service_refund(sid, 5.0, "Divisas (USD Cash)", "", "USD", "").unwrap_err().to_string();
+        assert!(err3.contains("Debe abrir el día"), "día cerrado bloquea reembolso: {err3}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
     fn test_service_warranty_dates() {
         // Garantía: al entregar sin fecha → date_out = hoy; al reabrir → se limpia;
         // al re-entregar → nueva fecha (garantía de 7 días reinicia).
@@ -4198,30 +4445,30 @@ mod tests {
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
         let sid = db.add_service("ORD-WARR-1", "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            25.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "", None, "", None, "", None).unwrap();
+            25.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "", None, "", None, "", None, 0.0).unwrap();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // 1) Entregar sin fecha → se asigna hoy
         db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None).unwrap();
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "date_out auto = hoy al entregar");
 
         // 2) Reabrir (garantía / reclamo) → date_out se limpia
         db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            25.0, "Efectivo Bs", "2026-07-30", "Recibido", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None).unwrap();
+            25.0, "Efectivo Bs", "2026-07-30", "Recibido", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert!(svc.date_out.is_none(), "date_out limpio al reabrir, got {:?}", svc.date_out);
 
         // 3) Re-entregar sin fecha → nueva fecha de hoy
         db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None).unwrap();
+            25.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "V-100", "", "", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "nueva entrega → fecha nueva");
 
         // 4) Editar sin cambiar de Entregado → conserva la fecha
         db.update_service(sid, "Ana", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            30.0, "Efectivo Bs", "", "Entregado", "nota", 0.0, "", "USD", "V-100", "", "", "", None, "", None).unwrap();
+            30.0, "Efectivo Bs", "", "Entregado", "nota", 0.0, "", "USD", "V-100", "", "", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.date_out.as_deref(), Some(today.as_str()), "sigue entregado → conserva fecha");
 
@@ -4241,7 +4488,7 @@ mod tests {
         db.open_day(50.0, 40.5, 45.0).unwrap();
 
         // Venta real de $30
-        db.add_sale(None, "Pantalla Test", 1, 30.0, 30.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 30.0, 30.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD", 0.0).unwrap();
 
         // Totales del día = SOLO la venta, la apertura no cuenta
         let totals = db.get_daily_totals(&today, &today).unwrap();
@@ -4277,7 +4524,7 @@ mod tests {
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         db.open_day(0.0, 40.5, 45.0).unwrap();
-        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Punto de Venta (Bs)", "Cliente", None, "", 0.0, "", "VES").unwrap();
+        db.add_sale(None, "Pantalla Test", 1, 100.0, 100.0, "Punto de Venta (Bs)", "Cliente", None, "", 0.0, "", "VES", 0.0).unwrap();
 
         let closing_id = db.close_day(&today, "cierre", 0.0, 40.5, 45.0,
             0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 100.0, 35000.0).unwrap();
@@ -4310,7 +4557,7 @@ mod tests {
         let sid = db.add_service("ORD-MULTI-1", "Luis", "0412-1", "Tecno SPARK 10 PRO",
             "Pantalla rota y puerto de carga flojo", "Cambio pantalla",
             r#"["Cambio pantalla","Cambio conector / puerto"]"#,
-            45.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "{}", None, "", None, "", None).unwrap();
+            45.0, "Efectivo Bs", "", 0.0, "", "USD", "V-100", "", "{}", None, "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.service_type.as_deref(), Some("Cambio pantalla"), "primario = primer tipo");
         assert_eq!(svc.service_types.as_deref(), Some(r#"["Cambio pantalla","Cambio conector / puerto"]"#), "guarda TODOS los tipos");
@@ -4319,7 +4566,7 @@ mod tests {
         db.update_service(sid, "Luis", "0932-000", "Tecno SPARK 10 PRO",
             "Parlante muerto", "Cambio parlante / micrófono",
             r#"["Cambio parlante / micrófono","Cambio batería"]"#,
-            30.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "V-100", "", "{}", "", None, "", None).unwrap();
+            30.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "V-100", "", "{}", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.service_types.as_deref(), Some(r#"["Cambio parlante / micrófono","Cambio batería"]"#));
 
@@ -4330,7 +4577,7 @@ mod tests {
 
         // NULL si no se manda lista
         let sid2 = db.add_service("ORD-MULTI-2", "Ana", "0933-000", "Samsung A32", "Rota", "Cambio pantalla",
-            "", 15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "", 15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         let svc2 = db.get_service_by_id(sid2).unwrap().unwrap();
         assert!(svc2.service_types.is_none(), "service_types NULL si la lista va vacía");
 
@@ -4407,7 +4654,7 @@ mod tests {
         // Borrar → se limpia technician_id de los servicios pero el nombre persiste
         db.open_day(0.0, 40.5, 45.0).unwrap();
         let sid = db.add_service("ORD-TECH-1", "Cliente", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None).unwrap();
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
         db.delete_technician(aldri.id).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.technician.as_deref(), Some("Aldri"), "nombre snapshot persiste tras borrar técnico");
@@ -4430,7 +4677,7 @@ mod tests {
 
         // Crear servicio asignado a Aldri
         let sid = db.add_service("ORD-TEC-1", "Cliente", "0412-1", "Samsung A32", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", 0.0, "", "USD", "1", "", "", None, "Aldri", Some(aldri.id), "", None).unwrap();
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "1", "", "", None, "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.technician.as_deref(), Some("Aldri"));
         assert_eq!(svc.technician_id, Some(aldri.id));
@@ -4444,21 +4691,21 @@ mod tests {
         // Cambiar de técnico con update_service (limpiar → otra persona)
         let will = techs.iter().find(|t| t.name == "William").unwrap();
         db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "William", Some(will.id), "", None).unwrap();
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "William", Some(will.id), "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.technician.as_deref(), Some("William"));
         assert_eq!(svc.technician_id, Some(will.id));
 
         // Sin técnico asignado → ambos NULL
         db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "", None, "", None).unwrap();
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "", None, "", None, 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert!(svc.technician.is_none() && svc.technician_id.is_none());
 
         // get_client_services también lo devuelve
         let cid = db.add_or_find_client("Cliente", "0412-1", "1", "").unwrap();
         db.update_service(sid, "Cliente", "0412-1", "Samsung A11", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "Aldri", Some(aldri.id), "", None).unwrap();
+            10.0, "Efectivo Bs", "", "Recibido", "", 0.0, "", "USD", "1", "", "", "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
         let cs = db.get_client_services(cid).unwrap();
         let s = cs.iter().find(|x| x.id == sid).unwrap();
         assert_eq!(s.technician.as_deref(), Some("Aldri"));
@@ -4480,21 +4727,21 @@ mod tests {
 
         // Dos pantallas distintas compatibles con el MISMO teléfono (variantes Incell / FHD)
         let p_incell = db.add_product("Pantalla Tecno SPARK 10 PRO Incell", Some(1), "Tecno",
-            "SPARK 10 PRO", "Incell", r#"["Tecno SPARK 10 PRO"]"#, 10.0, 15.0, 2, 0).unwrap();
+            "SPARK 10 PRO", "Incell", r#"["Tecno SPARK 10 PRO"]"#, 10.0, 15.0, 2, 0, 0.0).unwrap();
         let p_fhd = db.add_product("Pantalla Tecno SPARK 10 PRO FHD", Some(1), "Tecno",
-            "SPARK 10 PRO", "FHD", r#"["Tecno SPARK 10 PRO"]"#, 11.0, 16.0, 5, 0).unwrap();
+            "SPARK 10 PRO", "FHD", r#"["Tecno SPARK 10 PRO"]"#, 11.0, 16.0, 5, 0, 0.0).unwrap();
 
         // El técnico elige la variante FHD → descuento EXACTO de la FHD
         let sid = db.add_service("DEV-0001", "Luis", "0412-1", "Tecno SPARK 10 PRO",
             "Pantalla rota", "Cambio pantalla", r#"["Cambio pantalla"]"#,
             16.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "V-1", "", "{}", None, "", None, "",
-            Some(p_fhd)).unwrap();
+            Some(p_fhd), 0.0).unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert_eq!(svc.screen_product_id, Some(p_fhd), "la orden guarda la pantalla exacta elegida");
 
         db.update_service(sid, "Luis", "0412-1", "Tecno SPARK 10 PRO", "Pantalla rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 16.0, "Divisas (USD Cash)", "", "Entregado", "",
-            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd)).unwrap();
+            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd), 0.0).unwrap();
 
         let fhd_stock: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -4510,7 +4757,7 @@ mod tests {
         // Reabrir → devuelve a la MISMA pantalla exacta
         db.update_service(sid, "Luis", "0412-1", "Tecno SPARK 10 PRO", "Pantalla rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 16.0, "Divisas (USD Cash)", "", "Recibido", "",
-            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd)).unwrap();
+            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd), 0.0).unwrap();
         let fhd_stock2: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![p_fhd], |r| r.get(0)).unwrap()
@@ -4520,7 +4767,7 @@ mod tests {
         // Borrar un servicio ENTREGADO → devuelve a la pantalla exacta
         db.update_service(sid, "Luis", "0412-1", "Tecno SPARK 10 PRO", "Pantalla rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 16.0, "Divisas (USD Cash)", "", "Entregado", "",
-            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd)).unwrap();
+            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p_fhd), 0.0).unwrap();
         db.delete_service(sid).unwrap();
         let fhd_stock3: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -4543,23 +4790,23 @@ mod tests {
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
         let pid = db.add_product("Pantalla Samsung A32", Some(1), "Samsung", "A32",
-            "", r#"["Samsung A32"]"#, 12.0, 15.0, 2, 0).unwrap();
+            "", r#"["Samsung A32"]"#, 12.0, 15.0, 2, 0, 0.0).unwrap();
 
         // 1) Batería con screen_product_id seteado (dato defensivo) → NO descuenta
         let s1 = db.add_service("DEV-0001", "Ana", "1", "Samsung A32", "Batería mala",
             "Cambio batería", r#"["Cambio batería"]"#,
-            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", Some(pid)).unwrap();
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", Some(pid), 0.0).unwrap();
         db.update_service(s1, "Ana", "1", "Samsung A32", "Batería mala",
             "Cambio batería", r#"["Cambio batería"]"#, 10.0, "Efectivo Bs", "", "Entregado", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
 
         // 2) Software / Formateo sin screen id → NO descuenta
         let s2 = db.add_service("DEV-0002", "Beto", "2", "Samsung A32", "Se traba",
             "Software / Formateo", r#"["Software / Formateo"]"#,
-            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         db.update_service(s2, "Beto", "2", "Samsung A32", "Se traba",
             "Software / Formateo", r#"["Software / Formateo"]"#, 10.0, "Efectivo Bs", "", "Entregado", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
 
         let stock: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -4573,7 +4820,7 @@ mod tests {
         // Reabrir un servicio no-pantalla tampoco "devuelve" nada (simétrico)
         db.update_service(s2, "Beto", "2", "Samsung A32", "Se traba",
             "Software / Formateo", r#"["Software / Formateo"]"#, 10.0, "Efectivo Bs", "", "Recibido", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         let stock2: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap()
@@ -4596,20 +4843,20 @@ mod tests {
 
         // "SPARK 10 PRO" y "SPARK 10" y "SPARK 10 PRO FHD" — subcadenas que confunden al LIKE
         let p_pro = db.add_product("Pantalla Tecno SPARK 10 PRO", Some(1), "Tecno", "SPARK 10 PRO",
-            "", r#"["Tecno SPARK 10 PRO"]"#, 10.0, 15.0, 3, 0).unwrap();
+            "", r#"["Tecno SPARK 10 PRO"]"#, 10.0, 15.0, 3, 0, 0.0).unwrap();
         let p_base = db.add_product("Pantalla Tecno SPARK 10", Some(1), "Tecno", "SPARK 10",
-            "", r#"["Tecno SPARK 10"]"#, 10.0, 15.0, 3, 0).unwrap();
+            "", r#"["Tecno SPARK 10"]"#, 10.0, 15.0, 3, 0, 0.0).unwrap();
         let _p_fhd = db.add_product("Pantalla Tecno SPARK 10 PRO FHD", Some(1), "Tecno", "SPARK 10 PRO",
-            "FHD", r#"["Tecno SPARK 10 PRO"]"#, 11.0, 16.0, 3, 0).unwrap();
+            "FHD", r#"["Tecno SPARK 10 PRO"]"#, 11.0, 16.0, 3, 0, 0.0).unwrap();
 
         // 1) Modelo con marca y compat exacta → descuenta la PRIMERA pantalla por id que
         //    matchea la compatibilidad (sin screen id, orden legacy). p_pro es la más antigua.
         let s1 = db.add_service("DEV-0001", "Ana", "1", "Tecno SPARK 10 PRO", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#,
-            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         db.update_service(s1, "Ana", "1", "Tecno SPARK 10 PRO", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Efectivo Bs", "", "Entregado", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         let pro_stock: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![p_pro], |r| r.get(0)).unwrap()
@@ -4621,10 +4868,10 @@ mod tests {
         //    determinista (id ASC) → p_pro (la primera que contiene la cadena), NO p_fhd ni p_base.
         let s2 = db.add_service("DEV-0002", "Beto", "2", "SPARK 10 PRO", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#,
-            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         db.update_service(s2, "Beto", "2", "SPARK 10 PRO", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Efectivo Bs", "", "Entregado", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         let pro_stock2: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT stock FROM products WHERE id=?1", params![p_pro], |r| r.get(0)).unwrap()
@@ -4635,11 +4882,11 @@ mod tests {
         // 3) Modelo con detalles que NO matchea nada → sin descuento, sin fantasma
         let s3 = db.add_service("DEV-0003", "Carla", "3", "SPARK 10 PRO 4/128 GB", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#,
-            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            15.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         let movs_before = db.get_inventory_movements(None).unwrap().len();
         db.update_service(s3, "Carla", "3", "SPARK 10 PRO 4/128 GB", "Rota",
             "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Efectivo Bs", "", "Entregado", "",
-            0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         let movs_after = db.get_inventory_movements(None).unwrap().len();
         assert_eq!(movs_after, movs_before, "modelo sin pantalla en catálogo: sin movimiento");
         let phantom: i64 = conn_query(|| {
@@ -4662,9 +4909,9 @@ mod tests {
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
         let p_a15 = db.add_product("Pantalla Samsung A15", Some(1), "Samsung", "A15",
-            "", r#"["Samsung A15"]"#, 10.0, 15.0, 4, 0).unwrap();
+            "", r#"["Samsung A15"]"#, 10.0, 15.0, 4, 0, 0.0).unwrap();
         let p_spark = db.add_product("Pantalla Tecno SPARK 10", Some(1), "Tecno", "SPARK 10",
-            "", r#"["Tecno SPARK 10"]"#, 10.0, 15.0, 4, 0).unwrap();
+            "", r#"["Tecno SPARK 10"]"#, 10.0, 15.0, 4, 0, 0.0).unwrap();
 
         let dev = |model: &str, screen: Option<i64>| ServiceDeviceInput {
             model: model.into(), fault: "Rota".into(), service_type: "Cambio pantalla".into(),
@@ -4672,6 +4919,7 @@ mod tests {
             observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
             currency: "VES".into(), device_checklist: String::new(), color: "Negro".into(),
             screen_product_id: screen,
+discount_amount: 0.0,
         };
         db.add_service_order("Cliente", "0412", "", "", None, "", None,
             &[dev("Samsung A15", Some(p_a15)), dev("Tecno SPARK 10", Some(p_spark))]).unwrap();
@@ -4683,7 +4931,7 @@ mod tests {
         for s in &svcs {
             db.update_service(s.id, "Cliente", "0412", s.model.as_deref().unwrap(), "Rota",
                 "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Efectivo Bs", "", "Entregado", "",
-                0.0, "", "USD", "", "", "", "", None, "", s.screen_product_id).unwrap();
+                0.0, "", "USD", "", "", "", "", None, "", s.screen_product_id, 0.0).unwrap();
         }
         let stock_a15: i64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
@@ -4713,21 +4961,21 @@ mod tests {
 
         // Aldri: 1 activo (Recibido) + 1 entregado ($50) → ingresos 50
         let s1 = db.add_service("ORD-STA-1", "C1", "1", "M1", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            50.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None).unwrap();
+            50.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
         db.add_service("ORD-STA-2", "C2", "2", "M2", "F", "Cambio batería", "[\"Cambio batería\"]",
-            30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None).unwrap();
+            30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
         db.update_service(s1, "C1", "1", "M1", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            50.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "", "", "", "Aldri", Some(aldri.id), "", None).unwrap();
+            50.0, "Efectivo Bs", "", "Entregado", "", 0.0, "", "USD", "", "", "", "Aldri", Some(aldri.id), "", None, 0.0).unwrap();
 
         // William: 1 cancelado (no cuenta como activo ni ingresos)
         let s3 = db.add_service("ORD-STA-3", "C3", "3", "M3", "F", "Software / Formateo", "[\"Software / Formateo\"]",
-            20.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "William", Some(will.id), "", None).unwrap();
+            20.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "William", Some(will.id), "", None, 0.0).unwrap();
         db.update_service(s3, "C3", "3", "M3", "F", "Software / Formateo", "[\"Software / Formateo\"]",
-            20.0, "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "William", Some(will.id), "", None).unwrap();
+            20.0, "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "William", Some(will.id), "", None, 0.0).unwrap();
 
         // Sin asignar: 1 servicio
         db.add_service("ORD-STA-4", "C4", "4", "M4", "F", "Cambio pantalla", "[\"Cambio pantalla\"]",
-            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
 
         let stats = db.get_technician_stats().unwrap();
         let aldri_s = stats.iter().find(|s| s.technician == "Aldri").unwrap();
@@ -4765,7 +5013,7 @@ mod tests {
         assert_eq!(n, "DEV-0001", "Sin servicios debe generar DEV-0001 (no crashear)");
         db.open_day(0.0, 40.5, 45.0).unwrap();
         let sid = db.add_service("DEV-0001", "Cliente", "", "Samsung A1", "Rota", "Cambio pantalla",
-            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         assert!(sid > 0);
         let n2 = db.next_order_num().unwrap();
         assert_eq!(n2, "DEV-0002", "Debe continuar monotónicamente");
@@ -4786,6 +5034,7 @@ mod tests {
             observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
             currency: "USD".into(), device_checklist: String::new(), color: "Negro".into(),
             screen_product_id: None,
+discount_amount: 0.0,
         };
         let base = db.add_service_order("Cliente 1", "0412-1", "V-1", "Dir", None, "", None,
             &[dev("Samsung A15", "Pantalla rota", 50.0), dev("Tecno SPARK 10", "No carga", 30.0), dev("Apple 11 PRO", "Sin señal", 40.0)]).unwrap();
@@ -4797,6 +5046,50 @@ mod tests {
         assert!(svcs.iter().all(|s| s.group_id.as_deref() == Some("DEV-0001")), "Todas las filas comparten group_id");
         assert_eq!(svcs.iter().map(|s| s.amount).sum::<f64>(), 120.0, "Total de la orden = suma de equipos");
         assert_eq!(db.next_order_num().unwrap(), "DEV-0002", "El siguiente número ignora las filas grupales");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_discount_amount_roundtrip() {
+        // Precio doble (2026-08-14): amount = lo cobrado real; discount_amount = rebaja en efectivo.
+        // El recibo muestra PRECIO (amount+discount) / DESCUENTO / TOTAL (amount).
+        let test_path = PathBuf::from("test_discount_roundtrip.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        // Producto con precio doble: price_sale (Bs/lista) = 30, price_usd (efectivo) = 20
+        let pid = db.add_product("Pantalla Samsung A15", Some(1), "Samsung", "A15 A155",
+            "", r#"["Samsung A15","Samsung A155"]"#, 12.0, 30.0, 5, 2, 20.0).unwrap();
+        let prod = db.get_products("A15", None).unwrap().into_iter().find(|p| p.id == pid).unwrap();
+        assert_eq!(prod.price_sale, 30.0);
+        assert_eq!(prod.price_usd, 20.0);
+
+        // Servicio con descuento: precio real 30, cobrado 20 (descuento 10)
+        let sid = db.add_service("DEV-0001", "Juan", "0412-1", "Samsung A15 A155", "Rota",
+            "Cambio pantalla", r#"["Cambio pantalla"]"#, 20.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", Some(pid), 10.0).unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc.amount, 20.0, "amount = cobrado");
+        assert_eq!(svc.discount_amount, 10.0, "descuento guardado");
+        assert_eq!(svc.amount + svc.discount_amount, 30.0, "precio real = amount + discount");
+
+        // update_service conserva/actualiza el descuento
+        db.update_service(sid, "Juan", "0412-1", "Samsung A15 A155", "Rota",
+            "Cambio pantalla", r#"["Cambio pantalla"]"#, 25.0, "Divisas (USD Cash)", "", "Entregado", "",
+            0.0, "", "USD", "", "", "", "", None, "", Some(pid), 5.0).unwrap();
+        let svc2 = db.get_service_by_id(sid).unwrap().unwrap();
+        assert_eq!(svc2.amount, 25.0);
+        assert_eq!(svc2.discount_amount, 5.0);
+
+        // Venta con descuento: total = cobrado, discount_amount aparte
+        db.add_sale(Some(pid), "Pantalla Samsung A15", 1, 20.0, 20.0, "Divisas (USD Cash)", "Ana",
+            None, "", 0.0, "", "USD", 10.0).unwrap();
+        let sales = db.get_sales("", None, "", "").unwrap();
+        assert_eq!(sales[0].total, 20.0, "total = cobrado en efectivo");
+        assert_eq!(sales[0].discount_amount, 10.0);
+
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }
@@ -4814,6 +5107,7 @@ mod tests {
             observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
             currency: "VES".into(), device_checklist: String::new(), color: "Negro".into(),
             screen_product_id: None,
+discount_amount: 0.0,
         };
         let base = db.add_service_order("Cliente", "0412", "", "", None, "", None, &[d]).unwrap();
         assert_eq!(base, "DEV-0001");
@@ -4837,6 +5131,7 @@ mod tests {
             observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
             currency: "VES".into(), device_checklist: String::new(), color: "Negro".into(),
             screen_product_id: None,
+discount_amount: 0.0,
         };
         // Sin día abierto → error de negocio (gate require_open_day)
         let err = db.add_service_order("C", "1", "", "", None, "", None, &[d.clone()]).unwrap_err();
@@ -4874,7 +5169,7 @@ mod tests {
         // Con FULL, una escritura persiste y es legible con una conexión nueva (fsync real)
         db.open_day(0.0, 40.5, 45.0).unwrap();
         let sid = db.add_service("ORD-DUR-1", "Cliente", "", "Samsung A1", "Rota", "Cambio pantalla",
-            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         drop(db);
 
         let db2 = Database::new(&test_path).expect("Failed to reopen test DB");
@@ -4955,9 +5250,9 @@ mod tests {
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
         let cid = db.save_client(None, "juan perez", "0412-3333333", "V-222", "Calle 2", "", "").unwrap();
-        db.add_sale(None, "P1", 1, 10.0, 10.0, "Efectivo Bs", "Juan Perez", Some(cid), "", 0.0, "", "VES").unwrap();
+        db.add_sale(None, "P1", 1, 10.0, 10.0, "Efectivo Bs", "Juan Perez", Some(cid), "", 0.0, "", "VES", 0.0).unwrap();
         let sid = db.add_service("REN-1", "Juan Perez", "0412-3333333", "M1", "f", "Cambio batería",
-            "[\"Cambio batería\"]", 20.0, "Efectivo Bs", "", 0.0, "", "USD", "V-222", "", "", Some(cid), "", None, "", None).unwrap();
+            "[\"Cambio batería\"]", 20.0, "Efectivo Bs", "", 0.0, "", "USD", "V-222", "", "", Some(cid), "", None, "", None, 0.0).unwrap();
 
         // Renombrar el cliente → los snapshots se propagan
         db.save_client(Some(cid), "JUAN PÉREZ R.", "0412-3333333", "V-222", "Calle 2", "", "").unwrap();
@@ -4980,19 +5275,19 @@ mod tests {
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let sid = db.add_service("SUM-1", "Cliente", "", "M1", "f", "Cambio batería",
-            "[\"Cambio batería\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Cambio batería\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         // Entregado hoy → delivered
         db.update_service(sid, "Cliente", "", "M1", "f", "Cambio batería", "[\"Cambio batería\"]", 50.0,
-            "Divisas (USD Cash)", &today, "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            "Divisas (USD Cash)", &today, "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         // En taller (recibido hoy, sin entregar)
         let sid2 = db.add_service("SUM-2", "Cliente2", "", "M2", "g", "Cambio pantalla",
-            "[\"Cambio pantalla\"]", 30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Cambio pantalla\"]", 30.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         // Abono hoy: $10 USD + Bs 2025 (≈ $50 a tasa 40.5)
         db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
         db.add_service_payment(sid2, 2025.0, "Efectivo Bs", 0.0, "", "USD", "").unwrap();
         // Venta hoy: $15 USD + 1 en Bs (VES 405)
-        db.add_sale(None, "P1", 1, 15.0, 15.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD").unwrap();
-        db.add_sale(None, "P2", 1, 10.0, 405.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES").unwrap();
+        db.add_sale(None, "P1", 1, 15.0, 15.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(None, "P2", 1, 10.0, 405.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES", 0.0).unwrap();
 
         let s = db.get_day_summary(&today).unwrap();
         assert_eq!(s.received, 2, "2 equipos recibidos hoy");
@@ -5015,18 +5310,18 @@ mod tests {
         db.open_day(0.0, 40.5, 45.0).unwrap();
 
         db.add_service("ACT-1", "Cliente A", "", "M1", "f", "Cambio batería",
-            "[\"Cambio batería\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap(); // Recibido
+            "[\"Cambio batería\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap(); // Recibido
         db.add_service("ACT-2", "Cliente B", "", "M2", "g", "Cambio pantalla",
-            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap(); // Recibido
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap(); // Recibido
         let sid3 = db.add_service("ACT-3", "Cliente C", "", "M3", "h", "Software / Formateo",
-            "[\"Software / Formateo\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Software / Formateo\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         let sid4 = db.add_service("ACT-4", "Cliente D", "", "M4", "i", "Cambio pantalla",
-            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None).unwrap();
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
         // Terminar dos: Entregado y Cancelado
         db.update_service(sid3, "Cliente C", "", "M3", "h", "Software / Formateo", "[\"Software / Formateo\"]", 10.0,
-            "Efectivo Bs", "2026-08-07", "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            "Efectivo Bs", "2026-08-07", "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
         db.update_service(sid4, "Cliente D", "", "M4", "i", "Cambio pantalla", "[\"Cambio pantalla\"]", 10.0,
-            "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "", None, "", None).unwrap();
+            "Efectivo Bs", "", "Cancelado", "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
 
         let activos = db.get_services("", "__activos__", "", "").unwrap();
         assert_eq!(activos.len(), 2, "solo los equipos en taller");

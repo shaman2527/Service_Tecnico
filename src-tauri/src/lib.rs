@@ -55,6 +55,7 @@ commands::get_sales_stats,
             commands::get_service_payments,
             commands::add_service_payment,
             commands::delete_service_payment,
+            commands::add_service_refund,
             commands::add_purchase_order,
             commands::get_purchase_orders,
             commands::get_purchase_order_items,
@@ -225,3 +226,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild
 // force rebuild 2026-08-12
 // force rebuild 2026-08-12 v2
+// force rebuild frontend embed (2026-08-14)

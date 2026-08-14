@@ -57,16 +57,16 @@ export const api = {
 
   addProduct: (name: string, categoryId: number | null, brand: string, model: string,
     variant: string, compatibility: string, priceCost: number, priceSale: number,
-    stock: number, minStock: number) =>
+    stock: number, minStock: number, priceUsd: number = 0) =>
     tauriInvoke<number>('add_product', {
-      name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock
+      name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock, priceUsd
     }),
 
   updateProduct: (id: number, name: string, categoryId: number | null, brand: string, model: string,
     variant: string, compatibility: string, priceCost: number, priceSale: number,
-    stock: number, minStock: number) =>
+    stock: number, minStock: number, priceUsd: number = 0) =>
     tauriInvoke<void>('update_product', {
-      id, name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock
+      id, name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock, priceUsd
     }),
 
   deleteProduct: (id: number) => tauriInvoke<void>('delete_product', { id }),
@@ -83,10 +83,10 @@ export const api = {
   addSale: (productId: number | null, productName: string, quantity: number,
     unitPrice: number, total: number, paymentMethod: string, clientName: string,
     clientId: number | null, notes: string,
-    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD') =>
+    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD', discountAmount: number = 0) =>
     tauriInvoke<void>('add_sale', {
       productId, productName, quantity, unitPrice, total, paymentMethod, clientName, clientId, notes,
-      bankFeePercent, zelleReference, currency
+      bankFeePercent, zelleReference, currency, discountAmount
     }),
 
   getSales: (search: string = '', days: number | null = null, startDate: string = '', endDate: string = '') =>
@@ -98,8 +98,9 @@ export const api = {
     fault: string, serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
-    clientId: number | null = null, technician: string = '', technicianId: number | null = null, color: string = '') =>
-    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId, color }),
+    clientId: number | null = null, technician: string = '', technicianId: number | null = null, color: string = '',
+    screenProductId: number | null = null, discountAmount: number = 0) =>
+    tauriInvoke<number>('add_service', { orderNum, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, clientId, technician, technicianId, color, screenProductId, discountAmount }),
 
   addServiceOrder: (client: string, phone: string, clientCi: string, clientAddress: string,
     clientId: number | null, technician: string, technicianId: number | null,
@@ -110,8 +111,9 @@ export const api = {
     serviceType: string, serviceTypes: string = '', amount: number, paymentMethod: string, dateOut: string, status: string, observations: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
     clientCi: string = '', clientAddress: string = '', deviceChecklist: string = '',
-    technician: string = '', technicianId: number | null = null, color: string = '', screenProductId: number | null = null) =>
-    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, technician, technicianId, color, screenProductId }),
+    technician: string = '', technicianId: number | null = null, color: string = '', screenProductId: number | null = null,
+    discountAmount: number = 0) =>
+    tauriInvoke<void>('update_service', { id, client, phone, model, fault, serviceType, serviceTypes, amount, paymentMethod, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, deviceChecklist, technician, technicianId, color, screenProductId, discountAmount }),
 
   deleteService: (id: number) => tauriInvoke<void>('delete_service', { id }),
 
@@ -132,6 +134,10 @@ export const api = {
 
   deleteServicePayment: (id: number) =>
     tauriInvoke<void>('delete_service_payment', { id }),
+
+  addServiceRefund: (serviceId: number, amount: number, paymentMethod: string,
+    zelleReference: string = '', currency: string = 'USD', notes: string = '') =>
+    tauriInvoke<number>('add_service_refund', { serviceId, amount, paymentMethod, zelleReference, currency, notes }),
 
   getTechnicians: () => tauriInvoke<Technician[]>('get_technicians'),
   getTechnicianStats: () => tauriInvoke<TechnicianStat[]>('get_technician_stats'),

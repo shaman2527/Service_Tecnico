@@ -26,16 +26,16 @@ pub fn next_order_num(db: State<Database>) -> Result<String, String> {
 #[tauri::command]
 pub fn add_product(db: State<Database>, name: String, category_id: Option<i64>, brand: String, model: String,
                    variant: String, compatibility: String, price_cost: f64, price_sale: f64,
-                   stock: i64, min_stock: i64) -> Result<i64, String> {
-    db.add_product(&name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock)
+                   stock: i64, min_stock: i64, price_usd: f64) -> Result<i64, String> {
+    db.add_product(&name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock, price_usd)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_product(db: State<Database>, id: i64, name: String, category_id: Option<i64>, brand: String, model: String,
                       variant: String, compatibility: String, price_cost: f64, price_sale: f64,
-                      stock: i64, min_stock: i64) -> Result<(), String> {
-    db.update_product(id, &name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock)
+                      stock: i64, min_stock: i64, price_usd: f64) -> Result<(), String> {
+    db.update_product(id, &name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock, price_usd)
         .map_err(|e| e.to_string())
 }
 
@@ -70,8 +70,8 @@ pub fn suggest_products(db: State<Database>, query: String, limit: i64) -> Resul
 pub fn add_sale(db: State<Database>, product_id: Option<i64>, product_name: String, quantity: i64,
                 unit_price: f64, total: f64, payment_method: String, client_name: String,
                 client_id: Option<i64>, notes: String,
-                bank_fee_percent: f64, zelle_reference: String, currency: String) -> Result<(), String> {
-    db.add_sale(product_id, &product_name, quantity, unit_price, total, &payment_method, &client_name, client_id, &notes, bank_fee_percent, &zelle_reference, &currency)
+                bank_fee_percent: f64, zelle_reference: String, currency: String, discount_amount: f64) -> Result<(), String> {
+    db.add_sale(product_id, &product_name, quantity, unit_price, total, &payment_method, &client_name, client_id, &notes, bank_fee_percent, &zelle_reference, &currency, discount_amount)
         .map_err(|e| e.to_string())
 }
 
@@ -93,8 +93,8 @@ pub fn add_service(db: State<Database>, order_num: String, client: String, phone
                    bank_fee_percent: f64, zelle_reference: String, currency: String,
                    client_ci: String, client_address: String, device_checklist: String,
                    client_id: Option<i64>, technician: String, technician_id: Option<i64>,
-                   color: String, screen_product_id: Option<i64>) -> Result<i64, String> {
-    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id, &technician, technician_id, &color, screen_product_id)
+                   color: String, screen_product_id: Option<i64>, discount_amount: f64) -> Result<i64, String> {
+    db.add_service(&order_num, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, client_id, &technician, technician_id, &color, screen_product_id, discount_amount)
         .map_err(|e| e.to_string())
 }
 
@@ -113,8 +113,8 @@ pub fn update_service(db: State<Database>, id: i64, client: String, phone: Strin
                       bank_fee_percent: f64, zelle_reference: String, currency: String,
                       client_ci: String, client_address: String, device_checklist: String,
                       technician: String, technician_id: Option<i64>, color: String,
-                      screen_product_id: Option<i64>) -> Result<(), String> {
-    db.update_service(id, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, &technician, technician_id, &color, screen_product_id)
+                      screen_product_id: Option<i64>, discount_amount: f64) -> Result<(), String> {
+    db.update_service(id, &client, &phone, &model, &fault, &service_type, &service_types, amount, &payment_method, &date_out, &status, &observations, bank_fee_percent, &zelle_reference, &currency, &client_ci, &client_address, &device_checklist, &technician, technician_id, &color, screen_product_id, discount_amount)
         .map_err(|e| e.to_string())
 }
 
@@ -193,6 +193,14 @@ pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, pa
 #[tauri::command]
 pub fn delete_service_payment(db: State<Database>, id: i64) -> Result<(), String> {
     db.delete_service_payment(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_service_refund(db: State<Database>, service_id: i64, amount: f64, payment_method: String,
+                          zelle_reference: String, currency: String,
+                          notes: String) -> Result<i64, String> {
+    db.add_service_refund(service_id, amount, &payment_method, &zelle_reference, &currency, &notes)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

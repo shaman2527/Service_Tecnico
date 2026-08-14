@@ -182,7 +182,11 @@ export default function Sales() {
                     <TableCell className="font-medium">{s.product_name ?? '-'}</TableCell>
                     <TableCell className="text-right">{s.quantity}</TableCell>
                     <TableCell className="text-right">${s.unit_price.toFixed(2)}</TableCell>
-                    <TableCell className="text-right font-bold">{currencySymbol(s.currency)}{s.total.toFixed(2)}</TableCell>
+                    <TableCell className="text-right font-bold">{currencySymbol(s.currency)}{s.total.toFixed(2)}
+                      {s.discount_amount > 0.005 && (
+                        <div className="text-[11px] font-normal text-amber-600">desc. ${(s.discount_amount * s.quantity).toFixed(2)}</div>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{s.payment_method ?? '-'}</Badge>
                       {((s.payment_method ?? '').includes('Móvil') || (s.payment_method ?? '').includes('Movil') || (s.payment_method ?? '').includes('Zelle')) && s.zelle_reference && (
@@ -237,6 +241,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const [productName, setProductName] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [price, setPrice] = useState(0);
+  const [discount, setDiscount] = useState(0);
   const [method, setMethod] = useState(methods[0]?.name ?? '');
   const [clientName, setClientName] = useState('');
   const [clientCi, setClientCi] = useState('');
@@ -251,6 +256,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const [saveError, setSaveError] = useState<string | null>(null);
   const productPicked = useRef(false);
   const clientPicked = useRef(false);
+  const discountTouched = useRef(false);
 
   useEffect(() => {
     api.getProducts('', null).then(setCatalog);
@@ -286,7 +292,15 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
     productPicked.current = true;
     setProductId(p.id);
     setProductName(p.name);
-    setPrice(p.price_sale);
+    if (method === 'Divisas (USD Cash)' && p.price_usd > 0) {
+      // En efectivo se cobra el precio contado (price_usd) y se muestra el descuento vs precio lista
+      setPrice(p.price_usd);
+      if (!discountTouched.current && p.price_sale > p.price_usd) {
+        setDiscount(p.price_sale - p.price_usd);
+      }
+    } else {
+      setPrice(p.price_sale);
+    }
     setProductQuery(p.name);
     setProductOpen(false);
   };
@@ -303,6 +317,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const isRef = method.includes('Móvil') || method.includes('Movil') || method.includes('Zelle');
   const saleCurrency = methodCurrency(method);
   const isBs = saleCurrency === 'VES';
+  const isDivisas = method === 'Divisas (USD Cash)';
   const totalUsdTmp = quantity * price;
   const totalFinal = isBs ? totalUsdTmp * tasaBcv : totalUsdTmp;
 
@@ -323,7 +338,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
         cid = await api.addOrFindClient(finalName, '', clientCi);
       }
       const total = quantity * price;
-      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, finalName, cid, notes, 0, reference, saleCurrency);
+      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, finalName, cid, notes, 0, reference, saleCurrency, discount);
       onSaved();
     } finally {
       setSaving(false);
@@ -332,7 +347,9 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg" onKeyDown={e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') save();
+      }}>
         <DialogHeader>
           <DialogTitle>Nueva Venta</DialogTitle>
         </DialogHeader>
@@ -385,10 +402,25 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          {isDivisas && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Descuento ($)</label>
+              <Input type="number" step={0.01} min={0} value={discount}
+                onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
+              <p className="text-xs text-muted-foreground">
+                {discount > 0.005 ? (
+                  <>Precio lista ${((price + discount) * quantity).toFixed(2)} → el cliente paga ${(price * quantity).toFixed(2)} en efectivo</>
+                ) : (
+                  <>Se sugiere automáticamente al elegir el producto: precio lista − precio contado (efectivo).</>
+                )}
+              </p>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Método de Pago</label>
-              <Select value={method} onValueChange={m => { setMethod(m); setSaveError(null); if (!m.includes('Móvil') && !m.includes('Movil') && !m.includes('Zelle')) setReference(''); }}>
+              <Select value={method} onValueChange={m => { setMethod(m); setSaveError(null); if (!m.includes('Móvil') && !m.includes('Movil') && !m.includes('Zelle')) setReference(''); if (m !== 'Divisas (USD Cash)') setDiscount(0); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {methods.map(m => (
@@ -442,7 +474,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving || dayOpen === false || !productName || price <= 0}>
+          <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !productName || price <= 0}>
             {saving ? 'Guardando...' : `Guardar Venta (${isBs ? `Bs. ${totalFinal.toFixed(2)}` : `$${totalUsdTmp.toFixed(2)}`})`}
           </Button>
         </DialogFooter>

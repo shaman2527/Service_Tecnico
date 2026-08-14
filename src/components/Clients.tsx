@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf } from '@/lib/utils';
+import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf, isRefund } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import type { ClientSummary, Service, Sale, ServicePayment, Technician } from '../types';
 
@@ -529,10 +529,11 @@ function ServiceDetail({ s, payments, techs, warranty }: {
             {items.length > 0 ? (
               <div className="grid grid-cols-1 gap-1">
                 {items.map(([k, v]) => {
-                  const label = CHECKLIST_ITEMS.find(i => i.key === k)?.label ?? k.replace(/_/g, ' ');
+                  const it = CHECKLIST_ITEMS.find(i => i.key === k);
+                  const label = it?.label ?? k.replace(/_/g, ' ');
                   return (
                     <div key={k} className="flex items-center gap-2 text-xs">
-                      <span className={`inline-block size-2 rounded-full shrink-0 ${v === 'si' ? 'bg-emerald-500' : 'bg-destructive'}`} />
+                      <span className={`inline-block size-2 rounded-full shrink-0 ${it?.dot ?? (v === 'si' ? 'bg-emerald-500' : 'bg-destructive')}`} />
                       <span className="text-muted-foreground">{label}</span>
                     </div>
                   );
@@ -574,10 +575,18 @@ function ServiceDetail({ s, payments, techs, warranty }: {
                   <TableRow key={p.id}>
                     <TableCell className="text-xs whitespace-nowrap">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
                     <TableCell className="text-xs">
-                      <Badge variant="outline">{p.payment_method ?? '-'}</Badge>
+                      {isRefund(p) ? (
+                        <Badge className="bg-destructive text-destructive-foreground">Devolución</Badge>
+                      ) : (
+                        <Badge variant="outline">{p.payment_method ?? '-'}</Badge>
+                      )}
                     </TableCell>
                     <TableCell className="text-right font-medium whitespace-nowrap">
-                      {currencySymbol(p.currency)}{p.amount.toFixed(2)}
+                      {isRefund(p) ? (
+                        <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
+                      ) : (
+                        <>{currencySymbol(p.currency)}{p.amount.toFixed(2)}</>
+                      )}
                     </TableCell>
                     <TableCell className="text-right text-xs text-muted-foreground whitespace-nowrap">
                       {p.bank_fee_percent > 0 ? (

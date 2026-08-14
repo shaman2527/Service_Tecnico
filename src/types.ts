@@ -48,6 +48,8 @@ export interface Product {
   compatibility: string | null;
   price_cost: number;
   price_sale: number;
+  /** Precio contado en efectivo (Divisas USD Cash) — descuento automático vs price_sale */
+  price_usd: number;
   stock: number;
   min_stock: number;
   created_at: string | null;
@@ -73,6 +75,8 @@ export interface Sale {
   zelle_reference: string | null;
   currency: string | null;
   client_ci: string | null;
+  /** Rebaja por pago en efectivo: total = cobrado real, precio de lista = total + discount_amount */
+  discount_amount: number;
 }
 
 export interface Service {
@@ -106,6 +110,8 @@ export interface Service {
   screen_product_id: number | null;
   color: string | null;
   printed: number;
+  /** Rebaja por pago en efectivo: amount = cobrado real, precio de lista = amount + discount_amount */
+  discount_amount: number;
 }
 
 export interface ServiceDeviceInput {
@@ -122,6 +128,7 @@ export interface ServiceDeviceInput {
   device_checklist: string;
   color: string;
   screen_product_id: number | null;
+  discount_amount: number;
 }
 
 export interface Technician {

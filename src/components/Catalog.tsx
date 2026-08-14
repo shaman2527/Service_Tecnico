@@ -91,6 +91,7 @@ export default function Catalog() {
                 <TableHead>Modelo</TableHead>
                 <TableHead>Variante</TableHead>
                 <TableHead className="text-right">Venta</TableHead>
+                <TableHead className="text-right">Efectivo ($)</TableHead>
                 <TableHead className="text-right">Stock</TableHead>
                 <TableHead>Modelos Compatibles</TableHead>
                 <TableHead className="w-20"></TableHead>
@@ -99,7 +100,7 @@ export default function Catalog() {
             <TableBody>
               {shown.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                     Sin resultados. Prueba otro término de búsqueda.
                   </TableCell>
                 </TableRow>
@@ -113,6 +114,7 @@ export default function Catalog() {
                       <TableCell>{p.model ?? '-'}</TableCell>
                       <TableCell className="text-xs">{p.variant ?? '-'}</TableCell>
                       <TableCell className="text-right">${p.price_sale.toFixed(2)}</TableCell>
+                      <TableCell className="text-right">{p.price_usd > 0 ? `$${p.price_usd.toFixed(2)}` : '—'}</TableCell>
                       <TableCell className="text-right">
                         <span className={p.stock <= p.min_stock ? 'text-danger font-bold' : ''}>
                           {p.stock}

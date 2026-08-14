@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,9 +13,10 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
+import RefundDialog from './RefundDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -38,11 +39,15 @@ function isMovilOrZelle(m: string | null | undefined): boolean {
 // Estados "en taller": el equipo aún no se entrega
 const ACTIVE_STATUSES = ['Recibido', 'En reparación', 'Esperando repuesto', 'Reparado / Pendiente Pago', 'Por entregar'];
 
-function SectionTitle({ step, title }: { step: number; title: string }) {
+function SectionTitle({ step, title, tone = 'primary' }: { step: number; title: string; tone?: 'primary' | 'orange' }) {
   return (
     <div className="flex items-center gap-2 pt-1">
-      <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-bold">{step}</span>
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+      <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-bold',
+        tone === 'orange' ? 'bg-orange-500/10 text-orange-600' : 'bg-primary/10 text-primary')}>
+        {step}
+      </span>
+      <h3 className={cn('text-xs font-semibold uppercase tracking-wider',
+        tone === 'orange' ? 'text-orange-700' : 'text-muted-foreground')}>{title}</h3>
       <div className="h-px flex-1 bg-border/70" />
     </div>
   );
@@ -196,6 +201,7 @@ export default function Services() {
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
   const [payFor, setPayFor] = useState<Service | null>(null);
+  const [refundFor, setRefundFor] = useState<Service | null>(null);
   const [printFor, setPrintFor] = useState<Service | null>(null);
   const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [delivering, setDelivering] = useState<Service | null>(null);
@@ -203,6 +209,26 @@ export default function Services() {
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // Atajos de teclado: N/F2 = Nuevo Servicio, / = enfocar el buscador.
+  // Solo cuando NO se está escribiendo en un campo (o el dialog está cerrado).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+      if ((e.key === 'n' || e.key === 'N' || e.key === 'F2') && !typing && !showForm) {
+        e.preventDefault();
+        setEditing(null);
+        setShowForm(true);
+      } else if (e.key === '/' && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showForm]);
 
   // Pantalla exacta → etiqueta del repuesto para el chip de la tarjeta
   const screenProductById = useMemo(() => {
@@ -335,9 +361,11 @@ export default function Services() {
     const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
     return (
       <Card key={s.id} className={cn(
-        'overflow-hidden transition-shadow hover:shadow-md',
-        entregado && 'border-emerald-500/40 bg-emerald-500/5',
-        porEntregar && 'border-amber-500/40 bg-amber-500/5'
+        'overflow-hidden transition-shadow hover:shadow-md border-l-4',
+        entregado && 'border-emerald-500/40 bg-emerald-500/5 border-l-emerald-500',
+        porEntregar && 'border-amber-500/40 bg-amber-500/5 border-l-amber-500',
+        !entregado && !porEntregar && ['Cancelado', 'Devuelto', 'Cancelado / Devuelto'].includes(s.status ?? '')
+          && 'border-red-500/40 bg-red-500/5 border-l-red-500/70'
       )}>
         <CardHeader className="pb-3 pt-4 px-4 flex flex-row items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -394,7 +422,14 @@ export default function Services() {
 
             <div className="rounded-md bg-muted/50 px-3 py-2">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
+                {s.discount_amount > 0.005 ? (
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-xs text-muted-foreground line-through">${(s.amount + s.discount_amount).toFixed(2)}</span>
+                    <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
+                  </div>
+                ) : (
+                  <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
+                )}
                 {balance <= 0.005 ? (
                   <Badge variant="outline" className="text-success">Cancelado</Badge>
                 ) : (
@@ -417,6 +452,11 @@ export default function Services() {
                 {parseServiceTypes(s).map(t => (
                   <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
                 ))}
+                {s.discount_amount > 0.005 && (
+                  <Badge variant="outline" className="text-xs text-amber-600 border-amber-500/40 bg-amber-500/10 whitespace-nowrap">
+                    Descuento ${s.discount_amount.toFixed(2)}
+                  </Badge>
+                )}
                 {s.screen_product_id != null && screenProductById.has(s.screen_product_id) && (
                   <Badge variant="outline" className="text-xs whitespace-nowrap bg-primary/5 border-primary/30 text-primary">
                     <Smartphone className="size-3 mr-1" /> {screenProductById.get(s.screen_product_id)}
@@ -459,11 +499,17 @@ export default function Services() {
                   onClick={() => setPayFor(s)}>
                   <Banknote className="size-3.5" /> Pago / Abono
                 </Button>
+                {(s.paid_amount ?? 0) > 0.005 && (
+                  <Button size="sm" variant="outline" className="flex-1 text-danger border-danger/40 hover:bg-danger/10"
+                    onClick={() => setRefundFor(s)}>
+                    <Undo2 className="size-3.5" /> Devolución
+                  </Button>
+                )}
                 {hasChecklist && (
                   <TooltipProvider delayDuration={100}>
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Button variant="ghost" size="icon" className="text-emerald-600"
+                        <Button variant="ghost" size="icon" className="text-orange-600 hover:bg-orange-500/10"
                           onClick={() => { setEditing(s); setShowForm(true); }}>
                           <ShieldCheck className="size-4" />
                         </Button>
@@ -521,7 +567,7 @@ export default function Services() {
           <Button variant="outline" onClick={() => setShowPrinterSettings(true)} title="Configurar impresora de tickets">
             <Printer className="size-4" /> Impresora
           </Button>
-          <Button onClick={() => { setEditing(null); setShowForm(true); }}>
+          <Button onClick={() => { setEditing(null); setShowForm(true); }} title="Nuevo Servicio (N o F2)">
             <Plus className="size-4" /> Nuevo Servicio
           </Button>
         </div>
@@ -546,7 +592,7 @@ export default function Services() {
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input placeholder="Buscar cliente, cédula, modelo, orden..." className="pl-9"
-            value={search} onChange={e => setSearch(e.target.value)} />
+            ref={searchRef} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
         <div className="flex items-center gap-2">
           <Input type="date" className="w-36" value={dateStart}
@@ -655,6 +701,14 @@ export default function Services() {
         onSaved={load}
       />
 
+      <RefundDialog
+        service={refundFor}
+        open={!!refundFor}
+        onOpenChange={(o) => { if (!o) setRefundFor(null); }}
+        dayOpen={dayOpen}
+        onSaved={load}
+      />
+
       <PrintReceiptDialog
         serviceId={printFor?.id ?? null}
         open={!!printFor}
@@ -716,11 +770,13 @@ interface FormDevice {
   serviceTypes: string[];
   otherFault: string;
   amount: number;
+  discount: number;
   payment: string;
   bankFeePercent: number;
   zelleReference: string;
   checklist: Record<string, string>;
   amountTouched: boolean;
+  discountTouched: boolean;
   modelPicked: boolean;
   screenProductId: number | null;
 }
@@ -728,9 +784,37 @@ interface FormDevice {
 function emptyDevice(): FormDevice {
   return {
     model: '', color: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
-    payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: {},
-    amountTouched: false, modelPicked: false, screenProductId: null,
+    discount: 0, payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: {},
+    amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null,
   };
+}
+
+// Auto-precio al elegir un modelo del catálogo (compartido por DeviceFields y ServiceForm):
+// - En efectivo (Divisas USD Cash): monto = price_usd (si existe) y descuento = price_sale - price_usd.
+// - En cualquier otro método: monto = price_sale (si todos los repuestos coinciden y > 0).
+// NUNCA pisa un monto/descuento que el usuario ya tocó (refs amountTouched/discountTouched).
+function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouched: boolean, discountTouched: boolean): Partial<FormDevice> {
+  const patch: Partial<FormDevice> = {};
+  const prices = new Set(sugg.products.map(p => p.price_sale));
+  if (!amountTouched) {
+    if (isDivisas) {
+      const withUsd = sugg.products.filter(p => p.price_usd > 0);
+      if (withUsd.length > 0) {
+        const usdPrice = Math.min(...withUsd.map(p => p.price_usd));
+        patch.amount = usdPrice;
+        if (!discountTouched) {
+          const base = prices.size === 1 ? [...prices][0] : withUsd[0].price_sale;
+          patch.discount = Math.max(0, base - usdPrice);
+        }
+        return patch;
+      }
+    }
+    if (prices.size === 1) {
+      const only = [...prices][0];
+      if (only > 0) patch.amount = only;
+    }
+  }
+  return patch;
 }
 
 // Pantallas (categoría 1) compatibles con un modelo, para el desplegable de pantalla EXACTA.
@@ -854,6 +938,7 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
   const isPos = device.payment.includes('Punto');
   const isZelle = device.payment.includes('Zelle');
   const isPagoMovil = device.payment.includes('Móvil') || device.payment.includes('Movil');
+  const isDivisas = device.payment === 'Divisas (USD Cash)';
 
   useEffect(() => {
     const q = normPhoneModel(device.model);
@@ -872,15 +957,23 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
 
   const selectModel = (sugg: PhoneModelEntry) => {
     onChange({ model: sugg.label, modelPicked: true });
-    // Auto-precio SOLO si el teléfono matchea UN ÚNICO repuesto (o todos al mismo precio)
-    // Y el precio es > 0: inventario sin precio NO debe fijar el monto del servicio en $0.
-    const prices = new Set(sugg.products.map(p => p.price_sale));
-    if (!device.amountTouched && prices.size === 1) {
-      const only = [...prices][0];
-      if (only > 0) onChange({ amount: only });
-    }
+    onChange(applyModelPrice(sugg, isDivisas, device.amountTouched, device.discountTouched));
     setModelOpen(false);
   };
+
+  const divHints = useMemo(() => {
+    if (!isDivisas || !device.model.trim()) return null;
+    const q = normPhoneModel(device.model);
+    const entry = phoneModels.find(e => e.norm === q);
+    if (!entry) return null;
+    const withUsd = entry.products.filter(p => p.price_usd > 0);
+    if (withUsd.length === 0) return null;
+    const usdPrice = Math.min(...withUsd.map(p => p.price_usd));
+    const base = new Set(entry.products.map(p => p.price_sale)).size === 1
+      ? [...new Set(entry.products.map(p => p.price_sale))][0]
+      : withUsd[0].price_sale;
+    return { base, usdPrice, suggested: Math.max(0, base - usdPrice) };
+  }, [isDivisas, device.model, phoneModels]);
 
   return (
     <div className="rounded-xl border border-border/70 p-4 space-y-3">
@@ -935,12 +1028,32 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           <label className="text-sm font-medium">Monto ($)</label>
           <Input type="number" step={0.01} min={0} value={device.amount}
             onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
+          {isDivisas && divHints && (
+            <p className="text-xs text-muted-foreground">
+              Precio lista ${divHints.base.toFixed(2)} · Efectivo sugerido ${divHints.usdPrice.toFixed(2)}
+            </p>
+          )}
         </div>
         <div className="space-y-2">
           <label className="text-sm font-medium">Color del equipo</label>
           <ColorSelect value={device.color} onChange={c => onChange({ color: c })} />
         </div>
       </div>
+
+      {isDivisas && (
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Descuento ($)</label>
+          <Input type="number" step={0.01} min={0} value={device.discount}
+            onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
+          <p className="text-xs text-muted-foreground">
+            {device.discount > 0.005 ? (
+              <>Precio ${(device.amount + device.discount).toFixed(2)} → cliente paga ${device.amount.toFixed(2)} en efectivo</>
+            ) : (
+              <>Sin descuento: el cliente paga el precio completo en efectivo. Se sugiere automáticamente al elegir el modelo (precio lista − precio contado).</>
+            )}
+          </p>
+        </div>
+      )}
 
       <div className="space-y-2">
         <label className="text-sm font-medium">
@@ -990,7 +1103,7 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
       </div>
 
       <div className="space-y-2">
-        <Button type="button" variant="outline" size="sm" className="w-full"
+        <Button type="button" variant="outline" size="sm" className="w-full bg-orange-500/10 border-orange-500/60 text-orange-700 hover:bg-orange-500/20 hover:text-orange-800"
           onClick={() => setShowChecklist(v => !v)}>
           <ShieldCheck className="size-3.5" /> Blindaje del equipo
           <span className="text-muted-foreground text-xs">
@@ -1014,7 +1127,10 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
                 const val = device.checklist[item.key] ?? '';
                 return (
                   <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
-                    <span className="text-sm">{item.label}</span>
+                    <span className="text-sm flex items-center gap-1.5">
+                      <span className={cn('size-2.5 rounded-full shrink-0', item.dot)} />
+                      {item.label}
+                    </span>
                     <ToggleGroup type="single" size="sm" value={val}
                       onValueChange={v => onChange({ checklist: { ...device.checklist, [item.key]: v } })}
                       className="shrink-0">
@@ -1043,6 +1159,8 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           <Select value={device.payment} onValueChange={v => {
             const patch: Partial<FormDevice> = { payment: v };
             if (v.includes('Punto')) patch.bankFeePercent = 3.5;
+            // El descuento SOLO aplica en efectivo (Divisas USD Cash)
+            if (v !== 'Divisas (USD Cash)') patch.discount = 0;
             onChange(patch);
           }}>
             <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1121,14 +1239,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [clientOpen, setClientOpen] = useState(false);
   const [clientSugs, setClientSugs] = useState<Client[]>([]);
   const [clientId, setClientId] = useState<number | null>(null);
-  const [ciSearch, setCiSearch] = useState('');
-  const [ciLookup, setCiLookup] = useState<Client | null>(null);
-  const [ciSearched, setCiSearched] = useState(false);
   const [clientHistory, setClientHistory] = useState<Service[]>([]);
-  const [ciError, setCiError] = useState<string | null>(null);
   const modelPicked = useRef(false);
   const clientPicked = useRef(false);
   const amountTouched = useRef(false);
+  const discountTouched = useRef(false);
+  const [discount, setDiscount] = useState(0);
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [svc, setSvc] = useState<Service | null>(service);
@@ -1157,6 +1273,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
   const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
+  const isDivisas = payment === 'Divisas (USD Cash)';
 
   const currentTech = technicians.find(t => t.id === Number(techSel));
 
@@ -1194,6 +1311,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setOtherFault(customTypes.join(', '));
       setAmount(service.amount);
       amountTouched.current = true;
+      setDiscount(service.discount_amount ?? 0);
+      discountTouched.current = true;
       setPayment(service.payment_method ?? 'Divisas (USD Cash)');
       setDateOut(service.date_out ?? '');
       setStatus(service.status ?? 'Por entregar');
@@ -1263,49 +1382,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const selectModel = (sugg: PhoneModelEntry) => {
     modelPicked.current = true;
     setModel(sugg.label);
-    // Auto-precio SOLO si el teléfono matchea UN ÚNICO repuesto (o todos al mismo precio);
-    // con varios repuestos de precios distintos NO se inventa el monto, y un precio
-    // de $0 en el inventario NO fija el monto del servicio.
-    const prices = new Set(sugg.products.map(p => p.price_sale));
-    if (!amountTouched.current && prices.size === 1) {
-      const only = [...prices][0];
-      if (only > 0) setAmount(only);
-    }
+    const patch = applyModelPrice(sugg, payment === 'Divisas (USD Cash)', amountTouched.current, discountTouched.current);
+    if ('amount' in patch) setAmount(patch.amount ?? 0);
+    if ('discount' in patch) setDiscount(patch.discount ?? 0);
     setModelOpen(false);
   };
 
   // Normaliza una cédula para buscar: quita prefijo V-/E-, espacios y guiones
   const normCi = (s: string) => s.trim().replace(/^[VvEe]-?\s*/, '').replace(/\D/g, '');
-
-  const lookupByCi = async () => {
-    const q = normCi(ciSearch);
-    if (!q) return;
-    setCiError(null);
-    try {
-      const result = await api.findClientByCi(q);
-      setCiLookup(result);
-      setCiSearched(true);
-    } catch (e) {
-      setCiError(e instanceof Error ? e.message : String(e));
-      setCiSearched(false);
-      setCiLookup(null);
-    }
-  };
-
-  const useCiClient = () => {
-    if (!ciLookup) return;
-    const c = ciLookup;
-    setClient(c.name);
-    setPhone(c.phone ?? '');
-    setClientCi(c.ci ?? '');
-    setClientAddress(c.address ?? '');
-    if (clientId !== c.id) {
-      setClientHistory([]);
-      setClientId(c.id);
-    }
-    setCiSearched(false);
-    setCiLookup(null);
-  };
 
   const needCi = !service && !clientId;
 
@@ -1334,7 +1418,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         const typesArr = [...serviceTypes];
         if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
         const serviceTypesJson = JSON.stringify(typesArr);
-        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId);
+        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId, discount);
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
@@ -1346,6 +1430,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             service_type: d.serviceTypes[0] ?? 'Cambio pantalla',
             service_types: JSON.stringify(typesArr),
             amount: d.amount,
+            discount_amount: d.discount,
             payment_method: d.payment,
             observations: '',
             bank_fee_percent: d.bankFeePercent,
@@ -1388,7 +1473,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden">
+      <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden"
+        onKeyDown={e => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') save();
+        }}>
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
         </DialogHeader>
@@ -1412,55 +1500,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
 
           <SectionTitle step={1} title="Cliente" />
-          {!service && (
-            <div className="rounded-lg border border-border/70 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-semibold">¿Cliente nuevo o existente?</p>
-              <div className="flex gap-2">
-                <Input value={ciSearch}
-                  onChange={e => { setCiSearch(e.target.value); setCiSearched(false); setCiLookup(null); setCiError(null); }}
-                  onKeyDown={e => e.key === 'Enter' && lookupByCi()}
-                  placeholder="V-12345678" />
-                <Button variant="outline" onClick={lookupByCi}>
-                  <Search className="size-4" /> Buscar
-                </Button>
-              </div>
-              {ciError && <p className="text-sm text-danger">{ciError}</p>}
-              {ciSearched && ciLookup && (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-2">
-                  <p className="text-sm font-semibold text-emerald-700 flex items-center gap-1.5">
-                    <CheckCircle2 className="size-4" /> Cliente existente
-                  </p>
-                  <div className="text-sm">
-                    <p className="font-medium">{ciLookup.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {[ciLookup.phone, ciLookup.ci].filter(Boolean).join(' · ') || '—'}
-                    </p>
-                  </div>
-                  <Button size="sm" variant="outline" onClick={useCiClient}>
-                    Usar este cliente
-                  </Button>
-                </div>
-              )}
-              {ciSearched && !ciLookup && (
-                <p className="text-sm bg-amber-500/10 border border-amber-500/30 text-amber-700 rounded-md px-3 py-2">
-                  Cliente nuevo — completa sus datos abajo (la cédula es obligatoria)
-                </p>
-              )}
-            </div>
-          )}
-
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente *</label>
               <Input value={client} onChange={e => { clientPicked.current = false; setClient(e.target.value); setClientId(null); }}
-                onBlur={() => { if (client.trim()) setClient(titleCase(client)); }}
-                placeholder="Buscar o escribir nombre..." />
+                onBlur={() => {
+                  // Cédula de primero: si lo escrito coincide con un cliente EXISTENTE,
+                  // toma sus datos automáticamente; si no, registra nuevo al guardar.
+                  const q = normCi(client);
+                  if (q) {
+                    api.findClientByCi(q).then(c => { if (c) selectClient(c); }).catch(() => {});
+                  }
+                  if (client.trim() && !clientPicked.current) setClient(titleCase(client));
+                }}
+                placeholder="Buscar por nombre o cédula (V-12345678)..." />
               {clientOpen && clientSugs.length > 0 && (
                 <div className="rounded-md border bg-popover shadow-md max-h-48 overflow-y-auto">
                   {clientSugs.map(c => (
                     <button key={c.id} className="w-full text-left px-3 py-2 text-sm hover:bg-accent border-b last:border-0 transition-colors"
                       onClick={() => selectClient(c)}>
                       <span className="font-medium">{c.name}</span>
+                      {c.ci && <span className="text-muted-foreground text-xs ml-2">{c.ci}</span>}
                       {c.phone && <span className="text-muted-foreground text-xs ml-2">{c.phone}</span>}
                     </button>
                   ))}
@@ -1599,11 +1659,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                       <TableRow key={p.id}>
                         <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
                         <TableCell className="text-right font-medium">
-                          {currencySymbol(p.currency)}{p.amount.toFixed(2)}
+                          {isRefund(p) ? (
+                            <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
+                          ) : (
+                            <>{currencySymbol(p.currency)}{p.amount.toFixed(2)}</>
+                          )}
                         </TableCell>
                         <TableCell className="text-xs">
-                          {p.payment_method ?? '-'}
-                          {isMovilOrZelle(p.payment_method) && p.zelle_reference && (
+                          {isRefund(p) ? <span className="font-medium text-danger">Devolución</span> : (p.payment_method ?? '-')}
+                          {!isRefund(p) && isMovilOrZelle(p.payment_method) && p.zelle_reference && (
                             <span className="block text-xs text-muted-foreground">····{p.zelle_reference.slice(-4)}</span>
                           )}
                         </TableCell>
@@ -1668,6 +1732,21 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
+          {isDivisas && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Descuento ($)</label>
+              <Input type="number" step={0.01} min={0} value={discount}
+                onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
+              <p className="text-xs text-muted-foreground">
+                {discount > 0.005 ? (
+                  <>Precio ${(amount + discount).toFixed(2)} → cliente paga ${amount.toFixed(2)} en efectivo</>
+                ) : (
+                  <>Sin descuento: el cliente paga el precio completo en efectivo. Se sugiere automáticamente al elegir el modelo (precio lista − precio contado).</>
+                )}
+              </p>
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-sm font-medium">Color del equipo</label>
             <ColorSelect value={color} onChange={setColor} />
@@ -1718,7 +1797,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
           </div>
 
-          <SectionTitle step={3} title="Blindaje del equipo" />
+          <SectionTitle step={3} title="Blindaje del equipo" tone="orange" />
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs text-muted-foreground">
@@ -1735,7 +1814,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 const val = checklist[item.key] ?? '';
                 return (
                   <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
-                    <span className="text-sm">{item.label}</span>
+                    <span className="text-sm flex items-center gap-1.5">
+                      <span className={cn('size-2.5 rounded-full shrink-0', item.dot)} />
+                      {item.label}
+                    </span>
                     <ToggleGroup type="single" size="sm" value={val}
                       onValueChange={v => setChecklist(prev => ({ ...prev, [item.key]: v }))}
                       className="shrink-0">
@@ -1763,6 +1845,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <Select value={payment} onValueChange={v => {
                 setPayment(v);
                 if (v.includes('Punto')) setBankFeePercent(3.5);
+                // El descuento SOLO aplica en efectivo (Divisas USD Cash)
+                if (v !== 'Divisas (USD Cash)') setDiscount(0);
               }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -1855,7 +1939,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} disabled={saving || dayOpen === false || !client || (service ? (!model || !fault || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+          <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !fault || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
           </Button>
         </DialogFooter>

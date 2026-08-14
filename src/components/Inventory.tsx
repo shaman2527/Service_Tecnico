@@ -104,6 +104,7 @@ export default function Inventory() {
                     <TableHead>Compatibilidad</TableHead>
                     <TableHead className="text-right">Costo</TableHead>
                     <TableHead className="text-right">Venta</TableHead>
+                    <TableHead className="text-right">Efectivo ($)</TableHead>
                     <TableHead className="text-right">Stock</TableHead>
                     <TableHead className="text-right">Stock Mín</TableHead>
                     <TableHead>Agregado</TableHead>
@@ -113,7 +114,7 @@ export default function Inventory() {
                 <TableBody>
                   {products.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
                         Sin productos registrados
                       </TableCell>
                     </TableRow>
@@ -149,6 +150,7 @@ export default function Inventory() {
                         </TableCell>
                         <TableCell className="text-right">${p.price_cost.toFixed(2)}</TableCell>
                         <TableCell className="text-right">${p.price_sale.toFixed(2)}</TableCell>
+                        <TableCell className="text-right">{p.price_usd > 0 ? `$${p.price_usd.toFixed(2)}` : '—'}</TableCell>
                         <TableCell className="text-right">
                           <span className={p.stock <= p.min_stock ? 'text-danger font-bold' : ''}>
                             {p.stock}

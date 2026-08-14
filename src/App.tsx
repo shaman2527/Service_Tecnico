@@ -142,6 +142,22 @@ function App() {
     return () => window.removeEventListener('registro:check-update', onCheck);
   }, []);
 
+  // Navegación rápida: Alt+1..9 cambia de pantalla (orden de la sidebar)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+      const n = Number(e.key);
+      if (n < 1 || n > 9) return;
+      const items = role === 'cashier' ? navItems.filter(i => i.key !== 'dashboard') : navItems;
+      const item = items[n - 1];
+      if (item) setTab(item.key);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [role]);
+
   const enterPin = async () => {
     setPinError(null);
     try {
@@ -225,13 +241,14 @@ function App() {
         </div>
 
         <nav className="flex-1 flex flex-col gap-1.5 px-3 py-5">
-          {visibleItems.map(item => {
+          {visibleItems.map((item, idx) => {
             const Icon = item.icon;
             const active = tab === item.key;
             return (
               <button
                 key={item.key}
                 onClick={() => setTab(item.key)}
+                title={`${item.label} (Alt+${idx + 1})`}
                 className={cn(
                   'relative w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
                   collapsed && 'justify-center px-0',

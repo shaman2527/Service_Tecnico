@@ -77,6 +77,9 @@ const sections = [
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
           <span className="font-semibold">Moneda por método:</span> si el cliente paga en bolívares (Pago Móvil, Efectivo Bs, Transferencia Bs), el total se convierte a Bs. con la tasa BCV del día y así se registra en el Libro Diario. El botón de guardar te muestra el monto final en la moneda del método.
         </div>
+        <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-700">
+          <span className="font-semibold">Descuento por pago en efectivo:</span> al elegir el producto en <Badge variant="outline">Divisas (USD Cash)</Badge>, el sistema sugiere automáticamente el <span className="font-medium">precio contado</span> (el "Efectivo ($)" del producto) y muestra el descuento respecto al precio lista. El recibo/imprimir detalla Precio / Descuento / Total. Si el cliente paga por otro método, se cobra el precio completo.
+        </div>
         <p className="text-sm">Para Punto de Venta puedes indicar el % de comisión y para Zelle/Pago Móvil el número de referencia (últimos 4 dígitos).</p>
       </div>
     ),
@@ -90,14 +93,17 @@ const sections = [
     content: (
       <div className="space-y-2">
         <ol className="list-decimal list-inside space-y-1">
-          <li><Badge variant="outline">Nuevo Servicio</Badge> → ¿cliente nuevo o existente? Puedes <span className="font-medium text-foreground">buscar por cédula</span> (V-12345678): si existe, se rellena todo solo y ves su historial de servicios; si no existe, se marca como cliente nuevo (la cédula es obligatoria).</li>
+          <li><Badge variant="outline">Nuevo Servicio</Badge> → en el campo <span className="font-medium text-foreground">Cliente</span> escribe el nombre o la <span className="font-medium text-foreground">cédula</span> (V-12345678): las sugerencias muestran la cédula primero y, si la cédula existe, se <span className="font-medium text-foreground">autocompleta al salir del campo</span> — con su historial de servicios. Si no existe, se registra como cliente nuevo (la cédula es obligatoria).</li>
           <li>Escribe el modelo del equipo — se sugieren los <span className="font-medium text-foreground">modelos de teléfono</span> del catálogo (una vez cada uno, con sus repuestos y stock debajo).</li>
           <li>Marca los <span className="font-medium text-foreground">trabajos / fallas</span> que se le harán al equipo (puedes elegir varios: pantalla + conector + ...).
-            La opción <Badge variant="outline">Otro</Badge> permite escribir un trabajo libre (ej: "cambio de pin de carga"). El primer trabajo elegido es el tipo principal de la orden.</li>
-          <li>Marca el <span className="font-medium text-foreground">checklist de blindaje</span> (10 ítems Sí/No: chip SIM, tapa trasera, botones, cámara…) — el estado real del equipo al recibirlo te protege de reclamos. Queda visible con el escudo <span className="font-medium text-foreground">ShieldCheck</span> en la orden.</li>
+            La opción <Badge variant="outline">Otro</Badge> permite escribir un trabajo libre. Los más comunes ya están incluidos: <Badge variant="outline">Pin de Carga</Badge> y <Badge variant="outline">Revisión</Badge>. El primer trabajo elegido es el tipo principal de la orden.</li>
+          <li>Marca el <span className="font-medium text-foreground">checklist de blindaje</span> (10 ítems Sí/No: chip SIM, tapa trasera, botones, cámara…) — cada ítem tiene su punto de color. El estado real del equipo al recibirlo te protege de reclamos. Queda visible con el escudo <span className="font-medium text-foreground">ShieldCheck</span> en la orden.</li>
           <li>En <span className="font-medium text-foreground">Técnico responsable</span> (botón <Badge variant="outline">Técnicos</Badge>) asignas quién reparará el equipo: Aldri, William, o agregas uno con su color e iniciales. La orden queda marcada con el círculo de color + iniciales para saber quién la hizo.</li>
           <li>Guarda el servicio. El estado va: Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago → Por entregar → <Badge variant="default" className="bg-success">Entregado</Badge> (o Cancelado / Devuelto).</li>
         </ol>
+        <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-700">
+          <span className="font-semibold">Descuento en efectivo:</span> si el método de pago es <Badge variant="outline">Divisas (USD Cash)</Badge> aparece el campo <span className="font-medium">Descuento ($)</span> — al elegir el modelo del catálogo se sugiere solo (precio lista − precio contado). El monto guardado es lo que el cliente paga de verdad; la orden y el recibo muestran el precio y el descuento. En otros métodos se cobra el precio completo.
+        </div>
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
           <span className="font-semibold">Inventario automático:</span> al marcar <Badge variant="outline">Entregado</Badge> se descuenta 1 de la pantalla correspondiente. Si reabres el servicio, el stock se devuelve. Si el modelo no existe en el catálogo, se crea automáticamente.
         </div>
@@ -123,6 +129,7 @@ const sections = [
           <li>Al abrir el día en <span className="font-medium text-foreground">Libro Diario</span> la caja empieza de cero. Los equipos que quedaron en taller ayer <span className="font-medium text-foreground">siguen activos</span> (se ven al entrar a Servicios: el filtro "Activos en taller").</li>
           <li>Un cliente dejó el teléfono hace 3 días y viene hoy a retirar: búscalo en <span className="font-medium text-foreground">Servicios</span> (por nombre, cédula u orden). La tarjeta muestra si tiene saldo pendiente.</li>
           <li>Si le falta pagar algo → botón <Badge variant="outline">Pago / Abono</Badge>: ese abono se registra <span className="font-medium text-foreground">con la fecha de hoy</span>, aunque el equipo haya entrado hace días. Luego botón <Badge variant="default" className="bg-success">Entregar</Badge> (o entregar con saldo pendiente, si quedó a deber).</li>
+          <li>Si el cliente se arrepiente o reclama y hay que <span className="font-medium text-foreground">devolverle el dinero</span> → botón rojo <Badge variant="outline" className="border-danger/40 text-danger">Devolución</Badge> en la tarjeta (aparece cuando la orden tiene algo abonado): registras el reembolso (total o parcial), el estado pasa a <Badge variant="outline">Devuelto</Badge> y el monto se <span className="font-medium text-foreground">resta del Libro Diario</span> del día — la caja cuadra.</li>
           <li>Todo lo cobrado hoy (ventas + abonos + entregas) cuenta en <span className="font-medium text-foreground">Libro Diario</span> del día de hoy, no en el día en que entró el equipo.</li>
           <li>En <span className="font-medium text-foreground">Ventas</span> el período abre en "Hoy" por defecto: ves lo vendido hoy y nada más. Cambia a "Todo" o una fecha para ver el resto.</li>
         </ol>
@@ -151,6 +158,9 @@ const sections = [
         </ol>
         <div className="rounded-md bg-violet-500/10 border border-violet-500/30 px-3 py-2 text-sm text-violet-700">
           <span className="font-semibold">Cliente inteligente:</span> la primera vez se registra solo. La segunda vez, escribe el nombre o la cédula y sus datos aparecen automáticamente — nunca se duplica.
+        </div>
+        <div className="rounded-md bg-danger/10 border border-danger/30 px-3 py-2 text-sm text-danger">
+          <span className="font-semibold">Devolución de dinero:</span> si hay que devolver lo abonado (cliente que no quiso la reparación, garantía, reclamo), pulsa el botón rojo <Badge variant="outline" className="border-danger/40 text-danger">Devolución</Badge> de la tarjeta. El dialog sugiere devolver <span className="font-medium text-foreground">todo lo abonado</span> (puedes escribir menos), el método de devolución (mismo del cobro por defecto, en Bs. con la tasa BCV si aplica), referencia y nota. Al confirmar: el reembolso aparece en el historial de pagos como <span className="font-medium text-foreground">Devolución</span> en rojo, el estado de la orden pasa a <Badge variant="outline">Devuelto</Badge> y el monto <span className="font-medium text-foreground">se resta del Libro Diario</span> del día (método elegido) — el cierre de caja cuadra. Solo puedes devolver hasta lo abonado y requiere día abierto.
         </div>
       </div>
     ),
@@ -184,7 +194,8 @@ const sections = [
             <li>Conecta la impresora por <span className="font-medium text-foreground">USB</span> y enciéndela.</li>
             <li>Instala el driver oficial de HPRT que viene con la impresora (MPT-II / "IMPRESORA USB"). Windows crea una impresora llamada <code className="rounded bg-muted px-1.5 py-0.5 text-xs">HPRT MPT-II</code>.</li>
             <li>Abre la app → botón <Badge variant="outline">Impresora</Badge> (en Servicio Técnico) → en <span className="font-medium text-foreground">"Impresora de Windows"</span> verás el nombre y puedes pulsar <Badge variant="outline">Imprimir prueba</Badge>.</li>
-            <li>Si el ticket sale, listo: cada orden tendrá su botón <Badge variant="outline">Orden</Badge> para imprimir el recibo del servicio — parte superior para el cliente y talón recortable ("CORTA TIJERA") con los mismos datos para pegar detrás del teléfono.</li>
+            <li>Si el ticket sale, listo: cada orden tendrá su botón <Badge variant="outline">Orden</Badge> (o <Badge variant="outline">Reimprimir</Badge>) para imprimir el recibo del servicio — parte superior para el cliente y talón recortable ("CORTA TIJERA") con los mismos datos para pegar detrás del teléfono.</li>
+            <li><span className="font-medium text-foreground">El recibo siempre refleja la moneda del pago:</span> si el método es en bolívares imprime <span className="font-medium text-foreground">PAGO EN: Bs. X (tasa BCV Y)</span> y el saldo en $ con su equivalente en Bs.; si es en divisas, todo en $. Los abonos aparecen con su moneda real ($ + Bs.) y el checklist de blindaje se imprime en <span className="font-medium text-foreground">2 columnas</span> para aprovechar el papel.</li>
             <li>¿Logo arriba del ticket? En <Badge variant="outline">Impresora</Badge> → <span className="font-medium text-foreground">Logo del ticket</span>: pulsa <Badge variant="outline">Logo de prueba</Badge> (se genera uno solo para probar) o <Badge variant="outline">Subir imagen</Badge> con tu logo (ej. el diseño con la mano y el rayo). Se imprime en negro sobre blanco, sin degradados.</li>
           </ol>
         </div>
@@ -358,6 +369,37 @@ const sections = [
       </div>
     ),
   },
+  {
+    value: 'atajos',
+    icon: Settings2,
+    title: 'Atajos de teclado',
+    color: 'text-slate-600',
+    bg: 'bg-slate-50',
+    content: (
+      <div className="space-y-3">
+        <p>Trabaja sin el mouse en las tareas de todos los días:</p>
+        <ul className="space-y-2 text-sm">
+          <li className="flex items-center gap-2">
+            <Badge variant="outline">N</Badge> o <Badge variant="outline">F2</Badge>
+            <span>— abrir <span className="font-medium text-foreground">Nuevo Servicio</span> (desde la pantalla de Servicios)</span>
+          </li>
+          <li className="flex items-center gap-2">
+            <Badge variant="outline">/</Badge>
+            <span>— enfocar el buscador de <span className="font-medium text-foreground">Servicios</span></span>
+          </li>
+          <li className="flex items-center gap-2">
+            <Badge variant="outline">Ctrl + Enter</Badge>
+            <span>— guardar / registrar (Servicio, Venta, Pago/Abono, imprimir recibo)</span>
+          </li>
+          <li className="flex items-center gap-2">
+            <Badge variant="outline">Alt + 1..9</Badge>
+            <span>— cambiar de pantalla (1 Dashboard, 2 Ventas, 3 Servicios, 4 Inventario, 5 Pantallas, 6 Pedidos, 7 Clientes, 8 Libro Diario, 9 Ayuda)</span>
+          </li>
+        </ul>
+        <p className="text-xs text-muted-foreground">Los atajos no interfieren mientras escribes en un campo.</p>
+      </div>
+    ),
+  },
 ];
 
 const quickActions = [
@@ -372,7 +414,7 @@ const quickActions = [
     bar: 'from-orange-500/70 via-orange-400/30 to-transparent', hover: 'hover:border-orange-500/40 hover:shadow-orange-500/10',
   },
   {
-    icon: Wallet, label: 'Cobrar un abono', desc: 'Servicio → Editar → Pagos y Abonos', target: 'abonos',
+    icon: Wallet, label: 'Cobrar un abono', desc: 'Tarjeta del servicio → Pago / Abono', target: 'abonos',
     color: 'text-violet-600', chip: 'bg-violet-500/15 ring-violet-500/25',
     bar: 'from-violet-500/70 via-violet-400/30 to-transparent', hover: 'hover:border-violet-500/40 hover:shadow-violet-500/10',
   },

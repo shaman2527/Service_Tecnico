@@ -26,7 +26,12 @@ export function methodCurrency(m: string | null | undefined): 'USD' | 'VES' {
 }
 
 export function currencySymbol(c: string | null | undefined): string {
-  return c === 'VES' || c === 'Bs' ? 'Bs.' : '$';
+  return c === 'VES' ? 'Bs. ' : '$';
+}
+
+// Un pago NEGATIVO en service_payments es un REEMBOLSO (devolución al cliente).
+export function isRefund(p: { amount: number }): boolean {
+  return p.amount < 0;
 }
 
 // --- Garantía: 7 días corridos desde la fecha de entrega ---
@@ -53,18 +58,18 @@ export function warrantyStatus(dateOut: string | null | undefined, days = WARRAN
   return new Date(`${end}T00:00:00`).getTime() >= today ? 'activa' : 'vencida';
 }
 
-// --- Checklist de blindaje del equipo (10 ítems) ---
-export const CHECKLIST_ITEMS: { key: string; label: string }[] = [
-  { key: 'chip_sim', label: 'Chip (SIM) presente' },
-  { key: 'tapa_trasera', label: 'Tapa trasera en buen estado' },
-  { key: 'bandeja_sim', label: 'Bandeja SIM presente' },
-  { key: 'botones', label: 'Botones (volumen/encendido) funcionan' },
-  { key: 'boton_home', label: 'Botón home/navegación (si aplica)' },
-  { key: 'camara', label: 'Cámara (lente) sin daños' },
-  { key: 'puerto_carga', label: 'Puerto de carga funciona' },
-  { key: 'parlante', label: 'Parlante/micrófono funcionan' },
-  { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente' },
-  { key: 'accesorios', label: 'Accesorios entregados (funda, protector)' },
+// --- Checklist de blindaje del equipo (10 ítems, cada uno con su punto de color) ---
+export const CHECKLIST_ITEMS: { key: string; label: string; dot: string }[] = [
+  { key: 'chip_sim', label: 'Chip (SIM) presente', dot: 'bg-sky-500' },
+  { key: 'tapa_trasera', label: 'Tapa trasera en buen estado', dot: 'bg-violet-500' },
+  { key: 'bandeja_sim', label: 'Bandeja SIM presente', dot: 'bg-amber-500' },
+  { key: 'botones', label: 'Botones (volumen/encendido) funcionan', dot: 'bg-rose-500' },
+  { key: 'boton_home', label: 'Botón home/navegación (si aplica)', dot: 'bg-emerald-500' },
+  { key: 'camara', label: 'Cámara (lente) sin daños', dot: 'bg-indigo-500' },
+  { key: 'puerto_carga', label: 'Puerto de carga funciona', dot: 'bg-orange-500' },
+  { key: 'parlante', label: 'Parlante/micrófono funcionan', dot: 'bg-teal-500' },
+  { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente', dot: 'bg-fuchsia-500' },
+  { key: 'accesorios', label: 'Accesorios entregados (funda, protector)', dot: 'bg-lime-500' },
 ];
 
 export function parseChecklist(json: string | null | undefined): Record<string, string> {
@@ -84,9 +89,9 @@ export function checklistSummary(json: string | null | undefined): string {
 
 // --- Tipos de trabajo / fallas (múltiples por servicio) ---
 export const SERVICE_TYPES = [
-  'Cambio pantalla', 'Cambio batería', 'Cambio flex', 'Cambio conector / puerto',
+  'Cambio pantalla', 'Cambio batería', 'Cambio flex', 'Pin de Carga',
   'Reparación (placa)', 'Limpieza / Mantenimiento', 'Software / Formateo',
-  'Cambio cámara', 'Cambio parlante / micrófono', 'Otro',
+  'Cambio cámara', 'Cambio parlante / micrófono', 'Revisión', 'Otro',
 ];
 
 // Lista de TODOS los trabajos/fallas de un servicio.
@@ -197,35 +202,15 @@ export function printerWidthChars(widthMm: number | null | undefined): number {
   return (widthMm ?? 58) >= 80 ? 48 : 32;
 }
 
-// Ancho de la LETRA PEQUEÑA (font B ESC/POS, más estrecha): 58mm ≈ 42 chars, 80mm ≈ 64 chars.
-export function printerSmallWidthChars(widthMm: number | null | undefined): number {
-  return (widthMm ?? 58) >= 80 ? 64 : 42;
-}
-
-// Condiciones del servicio impresas en letra pequeña en la PRIMERA copia de la
-// orden (antes del talón CORTA TIJERA) — resguardo legal del técnico: aceptación
-// y conformidad al firmar/retirar el comprobante.
-export const RECEIPT_TERMS_LINES: string[] = [
-  'Estado inicial: Equipos que no encienden o presentan fallas de software/hardware se reciben bajo riesgo del cliente; fallas ocultas o posteriores no están cubiertas.',
-  'Garantía: Se invalida si el equipo es manipulado por terceros o presenta sellos rotos.',
-  'Abandono: Pasados 60 días sin retirar o pagar el saldo, el equipo pasa a disposición del taller para cubrir gastos operativos.',
-  'Responsabilidad: No nos hacemos responsables por SIMs, memorias MicroSD o accesorios no anotados en este recibo, ni por pérdida de datos.',
-  'La firma o retiro del comprobante implica la aceptación total de estos términos.',
-];
-
-/**
- * Construye el bloque de términos (letra pequeña) para la orden de servicio:
- * cabecera "ACEPTACIÓN DE CONDICIONES Y CONFORMIDAD" + párrafos envueltos al
- * ancho de la font B. Se imprime en el backend con ESC M 1 (font B) entre el
- * cuerpo (primera copia) y el talón CORTA TIJERA.
- */
-export function buildReceiptTerms(width: number | null | undefined, lines: string[] = RECEIPT_TERMS_LINES): string {
-  const w = printerSmallWidthChars(width);
-  const wrapped = lines.map(l => wrapText(l, w).join('\n')).join('\n');
-  return ['ACEPTACIÓN DE CONDICIONES Y CONFORMIDAD', '', wrapped].join('\n');
-}
-
 const fmtUsd = (n: number) => `$ ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// Monto en su moneda real ("$ 20.00" o "Bs. 2.246,00") — usada en el desglose de PAGOS del recibo
+const fmtMoney = (n: number, currency: string | null | undefined): string => {
+  const isBs = currency === 'VES' || currency === 'Bs';
+  return isBs
+    ? `Bs. ${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : fmtUsd(n);
+};
 
 // Recorta a caracteres sin cortar el texto por la mitad de una manera fea (wrap limpio)
 function wrapText(text: string, w: number): string[] {
@@ -270,6 +255,38 @@ function kv(label: string, value: string, w: number): string[] {
   return out;
 }
 
+// Etiquetas cortas del blindaje para el ticket (caben 2 por línea)
+const CHECKLIST_SHORT: Record<string, string> = {
+  chip_sim: 'CHIP/SIM', tapa_trasera: 'TAPA', bandeja_sim: 'BANDEJA',
+  botones: 'BOTONES', boton_home: 'HOME', camara: 'CAMARA',
+  puerto_carga: 'PUERTO', parlante: 'PARLANTE', contrasena: 'CLAVE',
+  accesorios: 'ACCESORIOS',
+};
+
+// Blindaje en DOS columnas ("CHIP/SIM:Si  BANDEJA:No") para aprovechar el ancho:
+// 5 líneas en vez de 10 en un ticket de 58mm (13 chars/celda) u 80mm (19 chars/celda).
+function checklistRows(marked: [string, string][], w: number): string[] {
+  if (marked.length === 0) return [];
+  const cellW = w >= 48 ? 19 : 13;
+  const cells = marked.map(([key, v]) => {
+    const label = (CHECKLIST_SHORT[key] ?? key.toUpperCase()).slice(0, cellW - 4);
+    return label.padEnd(cellW - 3) + (v === 'si' ? 'Si' : 'No');
+  });
+  const rows: string[] = [];
+  for (let i = 0; i < cells.length; i += 2) {
+    rows.push('  ' + cells[i] + (cells[i + 1] ? '  ' + cells[i + 1] : ''));
+  }
+  return rows;
+}
+
+// Desglose de montos por moneda real: "$ 20.00 + Bs. 22.464,00" (omite monedas sin movimientos)
+const fmtMix = (usd: number, bs: number): string => {
+  const parts: string[] = [];
+  if (usd > 0.005) parts.push(fmtUsd(usd));
+  if (bs > 0.005) parts.push(`Bs. ${bs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+  return parts.join(' + ');
+};
+
 /**
  * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico):
  * copia superior para el cliente + talón recortable ("CORTA TIJERA") con los
@@ -280,14 +297,14 @@ function kv(label: string, value: string, w: number): string[] {
  * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico),
  * en DOS partes imprimibles en orden: `main` = PRIMERA copia (para el cliente) y
  * `stub` = talón recortable "CORTA TIJERA" (para pegar detrás del teléfono).
- * Entre `main` y `stub` el backend imprime los términos legales en letra pequeña
- * (font B) — así la copia del cliente lleva las condiciones ANTES del corte.
+ * La lógica de pago siempre refleja la moneda real del método (Bs. con tasa BCV
+ * si el método es en bolívares, $ en divisas) en MONTO, PAGO EN, ABONADO y SALDO.
  * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
  */
 export function buildServiceReceiptParts(
   service: Service | null | undefined,
-  _payments: ServicePayment[] = [],
-  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string } = {},
+  payments: ServicePayment[] = [],
+  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string; stubNote?: string } = {},
 ): { main: string; stub: string } {
   const empty = { main: '', stub: '' };
   if (!service) return empty;
@@ -296,12 +313,14 @@ export function buildServiceReceiptParts(
   const lines: string[] = [];
   const tipos = parseServiceTypes(service);
   const logo = tipos.join(', ');
+  const tasa = opts.tasaBcv ?? 0;
+  // Moneda SIEMPRE derivada del método (harness): métodos Bs → bolívares
+  const metodoBs = methodCurrency(service.payment_method) === 'VES';
 
   // Cabecera
   lines.push(center(opts.businessName?.trim() || 'SERVICIO TECNICO', w));
   if (opts.businessLine?.trim()) lines.push(center(opts.businessLine.trim(), w));
   lines.push('='.repeat(w));
-  lines.push(center('SERVICIO', w));
   lines.push(dash);
 
   // Orden y fechas
@@ -327,18 +346,72 @@ export function buildServiceReceiptParts(
   }
   lines.push(dash);
 
-  // Finanzas
-  for (const l of kv('MONTO', fmtUsd(service.amount), w)) lines.push(l);
+  // Blindaje del equipo (solo copia del cliente): ítems marcados Sí/No al recibir,
+  // en DOS columnas para aprovechar el ancho del ticket.
+  const checklist = parseChecklist(service.device_checklist);
+  const marked = Object.entries(checklist).filter(([, v]) => v === 'si' || v === 'no');
+  if (marked.length > 0) {
+    lines.push('BLINDAJE (AL RECIBIR):');
+    for (const row of checklistRows(marked, w)) lines.push(row);
+    lines.push(dash);
+  }
+
+  // Finanzas — desglose honesto cuando hubo rebaja por pago en efectivo:
+  // PRECIO (lista) / DESCUENTO / TOTAL (cobrado). Sin descuento → MONTO simple.
+  // Los montos del servicio SIEMPRE en $ (precio del negocio); si el método de
+  // pago es en bolívares se imprime PAGO EN: Bs. (equivalente con la tasa BCV).
+  const desc = service.discount_amount ?? 0;
+  if (desc > 0.005) {
+    for (const l of kv('PRECIO', fmtUsd(service.amount + desc), w)) lines.push(l);
+    for (const l of kv('DESCUENTO', `-${fmtUsd(desc)}`, w)) lines.push(l);
+    for (const l of kv('TOTAL', fmtUsd(service.amount), w)) lines.push(l);
+  } else {
+    for (const l of kv('MONTO', fmtUsd(service.amount), w)) lines.push(l);
+  }
+  // Pago en la moneda del método: Bs. con tasa BCV (siempre que haya tasa)
+  if (metodoBs) {
+    const pagoBs = tasa > 0 ? service.amount * tasa : 0;
+    if (pagoBs > 0) {
+      for (const l of kv('PAGO EN', `Bs. ${pagoBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV ${tasa.toFixed(2)})`, w)) lines.push(l);
+    } else {
+      for (const l of kv('PAGO EN', 'BOLIVARES (Bs.)', w)) lines.push(l);
+    }
+  }
+  // Abonado en la moneda REAL de cada pago registrado ($ + Bs.); sin pagos
+  // registrados (datos viejos) cae al paid_amount en USD equivalente.
+  // Órdenes devueltas/canceladas: los reembolsos son negativos — no mostrar
+  // ABONADO en negativo ni SALDO falso (el cliente ya no debe).
+  const finalized = service.status === 'Devuelto' || service.status === 'Cancelado' || service.status === 'Cancelado / Devuelto';
+  const abonadoUsd = payments.reduce((a, p) => a + (p.currency !== 'VES' ? p.amount : 0), 0);
+  const abonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
   const abonado = service.paid_amount ?? 0;
   const saldo = service.amount - abonado;
-  if (abonado > 0.005) for (const l of kv('ABONADO', fmtUsd(abonado), w)) lines.push(l);
-  if (saldo <= 0.005) {
-    lines.push(center('CANCELADO', w));
+  const abonadoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (abonado > 0.005 ? fmtUsd(abonado) : '');
+  if (finalized) {
+    lines.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
   } else {
-    for (const l of kv('SALDO', fmtUsd(saldo), w)) lines.push(l);
+    if (abonadoLabel) for (const l of kv('ABONADO', abonadoLabel, w)) lines.push(l);
+    if (saldo <= 0.005) {
+      lines.push(center('CANCELADO', w));
+    } else {
+      for (const l of kv('SALDO', fmtUsd(saldo), w)) lines.push(l);
+      if (metodoBs && tasa > 0) {
+        for (const l of kv('SALDO EN BS', `Bs. ${Math.round(saldo * tasa).toLocaleString('es-VE')}`, w)) lines.push(l);
+      }
+    }
   }
-  if (service.payment_method) for (const l of kv('METODO', service.payment_method, w)) lines.push(l);
+  if (service.payment_method) for (const l of kv('METODO', service.payment_method + (metodoBs ? ' (Bs.)' : ' ($)'), w)) lines.push(l);
   if (service.zelle_reference) for (const l of kv('REF', service.zelle_reference, w)) lines.push(l);
+
+  // Pagos/abonos registrados (método + monto en su moneda real); reembolsos en negativo
+  if (payments.length > 0) {
+    lines.push('PAGOS:');
+    for (const p of payments) {
+      const isRef = p.amount < 0;
+      const label = (isRef ? 'DEVOLUCION' : (p.payment_method ?? 'Pago')).toUpperCase().slice(0, 12);
+      for (const l of kv(label, fmtMoney(Math.abs(p.amount), p.currency), w)) lines.push(l);
+    }
+  }
   lines.push('='.repeat(w));
 
   // Garantía (7 días desde la entrega)
@@ -353,9 +426,35 @@ export function buildServiceReceiptParts(
   for (const l of kv('ORDEN', service.order_num ?? '', w)) stub.push(l);
   if (service.client) for (const l of kv('CLIENTE', service.client, w)) stub.push(l);
   if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) stub.push(l);
+  if (service.phone) for (const l of kv('TELEFONO', service.phone, w)) stub.push(l);
   if (service.color) for (const l of kv('COLOR', service.color, w)) stub.push(l);
   if (service.model) for (const l of kv('MODELO', service.model, w)) stub.push(l);
   if (logo) for (const l of kv('SERVICIO', logo, w)) stub.push(l);
+  // Pago para la salida del equipo: método (con moneda) + pago en Bs/$ + abonado real + saldo.
+  if (service.payment_method) for (const l of kv('METODO', service.payment_method + (metodoBs ? ' (Bs.)' : ' ($)'), w)) stub.push(l);
+  if (metodoBs) {
+    const pagoBs = tasa > 0 ? service.amount * tasa : 0;
+    if (pagoBs > 0) {
+      for (const l of kv('PAGO EN', `Bs. ${pagoBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV ${tasa.toFixed(2)})`, w)) stub.push(l);
+    }
+  } else {
+    for (const l of kv('PAGO EN', fmtUsd(service.amount), w)) stub.push(l);
+  }
+  const stubAbonado = service.paid_amount ?? 0;
+  const stubSaldo = service.amount - stubAbonado;
+  const stubAbonadoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (stubAbonado > 0.005 ? fmtUsd(stubAbonado) : '');
+  if (finalized) {
+    stub.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
+  } else {
+    if (stubAbonadoLabel) for (const l of kv('ABONADO', stubAbonadoLabel, w)) stub.push(l);
+    if (stubSaldo <= 0.005) {
+      stub.push(center('CANCELADO', w));
+    } else {
+      for (const l of kv('SALDO', fmtUsd(stubSaldo), w)) stub.push(l);
+    }
+  }
+  const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
+  if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
   stub.push(dash);
   stub.push('');
   stub.push(center('FIRMA SALIDA', w));
@@ -371,7 +470,7 @@ export function buildServiceReceiptParts(
 export function buildServiceReceipt(
   service: Service | null | undefined,
   payments: ServicePayment[] = [],
-  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string } = {},
+  opts: { width?: number; tasaBcv?: number; businessName?: string; businessLine?: string; stubNote?: string } = {},
 ): string {
   const { main, stub } = buildServiceReceiptParts(service, payments, opts);
   return [main, stub].filter(Boolean).join('\n');
