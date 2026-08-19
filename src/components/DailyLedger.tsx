@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  BookOpen, CheckCircle2, CreditCard, Download, Landmark, Lock, Play, RefreshCw,
-  RotateCcw, DollarSign, TrendingUp, Smartphone, Banknote, Globe, ArrowRightLeft,
+  Activity, BookOpen, CheckCircle2, Clock, CreditCard, Download, Landmark, Lock, Package,
+  Play, Plus, PiggyBank, Receipt, RefreshCw, RotateCcw, DollarSign, TrendingUp, Smartphone,
+  Banknote, Globe, ArrowRightLeft, Trash2, Wallet,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,9 +11,11 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog';
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue } from '../types';
+import { EXPENSE_CATEGORIES } from '../types';
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 const fmtBs = (n: number) => `Bs.${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -79,7 +82,7 @@ const digits = (v: string) => v.replace(/\D/g, '').slice(0, 4);
 export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
   const isOwner = role === 'owner';
   const today = new Date().toISOString().slice(0, 10);
-  const [tab, setTab] = useState<'diario' | 'cierres'>('diario');
+  const [tab, setTab] = useState<'diario' | 'cierres' | 'gastos' | 'salud'>('diario');
   const [startDate, setStartDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 30);
     return d.toISOString().slice(0, 10);
@@ -116,6 +119,22 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [pinError, setPinError] = useState<string | null>(null);
   const [lastTasa, setLastTasa] = useState(0);
   const [daySummary, setDaySummary] = useState<DaySummary | null>(null);
+  // Salud del negocio: gastos, utilidad, por cobrar, inventario
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [todayExpenses, setTodayExpenses] = useState<Expense[]>([]);
+  const [profit, setProfit] = useState<ProfitSummary | null>(null);
+  const [prevProfit, setPrevProfit] = useState<ProfitSummary | null>(null);
+  const [receivables, setReceivables] = useState<ReceivablesSummary | null>(null);
+  const [inventoryValue, setInventoryValue] = useState<InventoryValue | null>(null);
+  const [showExpenseDialog, setShowExpenseDialog] = useState(false);
+  const [expDate, setExpDate] = useState(today);
+  const [expCategory, setExpCategory] = useState<string>('Otro');
+  const [expAmount, setExpAmount] = useState(0);
+  const [expCurrency, setExpCurrency] = useState('USD');
+  const [expNotes, setExpNotes] = useState('');
+  const [expError, setExpError] = useState<string | null>(null);
+  const [expenseMsg, setExpenseMsg] = useState<string | null>(null);
+  const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
 
   const effectiveTab = isOwner ? tab : 'diario';
   const effectiveStart = isOwner ? startDate : today;
@@ -127,6 +146,58 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
 
   const loadClosings = async () => {
     setClosings(await api.getDailyClosings());
+  };
+
+  const loadExpenses = async () => {
+    try { setExpenses(await api.getExpenses(effectiveStart, effectiveEnd)); } catch { setExpenses([]); }
+  };
+
+  const loadTodayExpenses = async () => {
+    try { setTodayExpenses(await api.getExpenses(today, today)); } catch { setTodayExpenses([]); }
+  };
+
+  const loadProfit = async () => {
+    try {
+      const cur = await api.getProfitSummary(effectiveStart, effectiveEnd);
+      // Período anterior del MISMO largo (para el comparativo %)
+      const spanDays = Math.max(1, Math.round((Date.parse(effectiveEnd) - Date.parse(effectiveStart)) / 86400000) + 1);
+      const prevEnd = new Date(Date.parse(effectiveStart) - 86400000).toISOString().slice(0, 10);
+      const prevStart = new Date(Date.parse(prevEnd) - (spanDays - 1) * 86400000).toISOString().slice(0, 10);
+      const prev = await api.getProfitSummary(prevStart, prevEnd);
+      setProfit(cur);
+      setPrevProfit(prev);
+    } catch { setProfit(null); setPrevProfit(null); }
+  };
+
+  const loadSalud = async () => {
+    await loadProfit();
+    try { setReceivables(await api.getReceivables()); } catch { setReceivables(null); }
+    try { setInventoryValue(await api.getInventoryValue()); } catch { setInventoryValue(null); }
+  };
+
+  const doAddExpense = async () => {
+    setExpError(null);
+    if (expAmount <= 0) { setExpError('El monto debe ser mayor que 0.'); return; }
+    try {
+      await api.addExpense(expDate, expCategory, expAmount, expCurrency, expNotes);
+      setShowExpenseDialog(false);
+      setExpAmount(0); setExpNotes('');
+      setExpenseMsg('Gasto registrado.');
+      loadExpenses(); loadTodayExpenses();
+      setTimeout(() => setExpenseMsg(null), 4000);
+    } catch (e) {
+      setExpError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const doDeleteExpense = async (id: number) => {
+    try {
+      await api.deleteExpense(id);
+      loadExpenses(); loadTodayExpenses();
+    } catch (e) {
+      setExpenseMsg(e instanceof Error ? e.message : String(e));
+      setTimeout(() => setExpenseMsg(null), 4000);
+    }
   };
 
   const refreshActiveDay = async () => {
@@ -144,6 +215,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
 
   useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner]);
   useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
+  useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate]);
+  useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate]);
   useEffect(() => { refreshActiveDay(); }, []);
   // Al volver a la ventana (tras facturar/registrar) la tabla diaria se recarga sola
   useEffect(() => {
@@ -192,6 +265,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     setCloseNotes('');
     setCloseError(null);
     setPagoMovilList([]);
+    loadTodayExpenses();
     try {
       const dayTotals = await api.getDailyTotals(activeDay.close_date, activeDay.close_date);
       const t = dayTotals[0] ?? null;
@@ -360,6 +434,16 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               <Lock className="size-4" /> Cierres
             </Button>
           )}
+          {isOwner && (
+            <Button variant={tab === 'gastos' ? 'default' : 'outline'} onClick={() => setTab('gastos')}>
+              <Receipt className="size-4" /> Gastos
+            </Button>
+          )}
+          {isOwner && (
+            <Button variant={tab === 'salud' ? 'default' : 'outline'} onClick={() => setTab('salud')}>
+              <Activity className="size-4" /> Salud
+            </Button>
+          )}
         </div>
       </div>
 
@@ -407,14 +491,14 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
         </div>
       )}
 
-      {isOwner && effectiveTab === 'diario' && (
+      {isOwner && (effectiveTab === 'diario' || effectiveTab === 'gastos') && (
         <div className="flex items-center gap-2">
           <Input type="date" value={startDate}
             onChange={e => setStartDate(e.target.value)} className="w-44" />
           <span className="text-muted-foreground">→</span>
           <Input type="date" value={endDate}
             onChange={e => setEndDate(e.target.value)} className="w-44" />
-          <Button onClick={loadTotals} variant="outline">
+          <Button onClick={() => { if (effectiveTab === 'diario') loadTotals(); else loadExpenses(); }} variant="outline">
             <TrendingUp className="size-4" /> Actualizar
           </Button>
         </div>
@@ -681,6 +765,295 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
         </Card>
       )}
 
+      {effectiveTab === 'gastos' && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">
+              Gastos del negocio registrados entre {startDate} y {endDate} — no afectan el arqueo de caja
+            </p>
+            <Button onClick={() => { setExpDate(today); setExpCategory('Otro'); setExpAmount(0); setExpCurrency('USD'); setExpNotes(''); setExpError(null); setShowExpenseDialog(true); }}>
+              <Plus className="size-4" /> Registrar gasto
+            </Button>
+          </div>
+          {expenseMsg && (
+            <p className="text-sm text-success flex items-center gap-2">
+              <CheckCircle2 className="size-4" /> {expenseMsg}
+            </p>
+          )}
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Fecha</TableHead>
+                    <TableHead>Categoría</TableHead>
+                    <TableHead className="text-right">Monto</TableHead>
+                    <TableHead>Notas</TableHead>
+                    <TableHead className="w-12"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {expenses.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                        Sin gastos en este período
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    expenses.map(e => (
+                      <TableRow key={e.id}>
+                        <TableCell className="font-medium">{e.expense_date}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{e.category}</Badge>
+                        </TableCell>
+                        <TableCell className={`text-right font-semibold tabular-nums ${e.currency === 'USD' ? 'text-success' : 'text-warning'}`}>
+                          {e.currency === 'USD' ? fmtUsd(e.amount) : fmtBs(e.amount)}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">{e.notes || '—'}</TableCell>
+                        <TableCell>
+                          <Button variant="ghost" size="sm" onClick={() => setExpenseToDelete(e)}>
+                            <Trash2 className="size-3.5 text-danger" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                  {expenses.length > 0 && (
+                    <TableRow className="bg-muted/50">
+                      <TableCell className="font-semibold" colSpan={2}>Total del período</TableCell>
+                      <TableCell className="text-right font-bold tabular-nums">
+                        <span className="text-success">{fmtUsd(expenses.filter(e => e.currency === 'USD').reduce((a, e) => a + e.amount, 0))}</span>
+                        {expenses.some(e => e.currency === 'VES') && (
+                          <span className="text-warning"> + {fmtBs(expenses.filter(e => e.currency === 'VES').reduce((a, e) => a + e.amount, 0))}</span>
+                        )}
+                      </TableCell>
+                      <TableCell colSpan={2} />
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {effectiveTab === 'salud' && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Kpi icon={<Wallet className="size-3.5" />} label="Ingresos del período"
+              value={profit ? fmtUsd(profit.income_usd) : '—'} accent="bg-success/10 text-success" className="text-success" />
+            <Kpi icon={<PiggyBank className="size-3.5" />} label="Utilidad bruta"
+              value={profit ? `${fmtUsd(profit.profit_usd)} (${profit.margin_pct.toFixed(1)}%)` : '—'}
+              accent="bg-primary/10 text-primary" />
+            <Kpi icon={<Clock className="size-3.5" />} label="Por cobrar a clientes"
+              value={receivables ? fmtUsd(receivables.total_usd) : '—'}
+              accent={receivables && receivables.total_usd > 0.005 ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}
+              className={receivables && receivables.total_usd > 0.005 ? 'text-warning' : ''} />
+            <Kpi icon={<Package className="size-3.5" />} label="Capital en inventario"
+              value={inventoryValue ? fmtUsd(inventoryValue.cost_usd) : '—'}
+              accent="bg-muted text-muted-foreground" />
+          </div>
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold">Utilidad del período</CardTitle>
+              <CardDescription className="text-xs">
+                Ingresos cobrados − costo de mercancía (precio de costo ACTUAL del producto; Bs convertidos a tasa BCV {profit?.tasa_bcv ? profit.tasa_bcv.toFixed(2) : 'del período'}). Costo de pantallas: solo órdenes con pantalla exacta.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-md border bg-muted/40 p-3">
+                <p className="text-xs font-medium text-muted-foreground">Ventas</p>
+                <p className="text-lg font-bold tabular-nums text-success">{profit ? fmtUsd(profit.sales_income_usd + (profit.sales_income_bs > 0.005 && profit.tasa_bcv > 0 ? profit.sales_income_bs / profit.tasa_bcv : 0)) : '—'}</p>
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  Costo: {fmtUsd(profit?.sales_cost_usd ?? 0)} · Utilidad: <span className="font-semibold text-success">{fmtUsd((profit?.sales_income_usd ?? 0) + ((profit?.sales_income_bs ?? 0) > 0.005 && (profit?.tasa_bcv ?? 0) > 0 ? (profit?.sales_income_bs ?? 0) / (profit?.tasa_bcv ?? 1) : 0) - (profit?.sales_cost_usd ?? 0))}</span>
+                </p>
+              </div>
+              <div className="rounded-md border bg-muted/40 p-3">
+                <p className="text-xs font-medium text-muted-foreground">Servicios</p>
+                <p className="text-lg font-bold tabular-nums">{profit ? fmtUsd(profit.services_income_usd + (profit.services_income_bs > 0.005 && profit.tasa_bcv > 0 ? profit.services_income_bs / profit.tasa_bcv : 0)) : '—'}</p>
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  Costo pantallas: {fmtUsd(profit?.services_cost_usd ?? 0)} · Utilidad: <span className="font-semibold">{fmtUsd((profit?.services_income_usd ?? 0) + ((profit?.services_income_bs ?? 0) > 0.005 && (profit?.tasa_bcv ?? 0) > 0 ? (profit?.services_income_bs ?? 0) / (profit?.tasa_bcv ?? 1) : 0) - (profit?.services_cost_usd ?? 0))}</span>
+                </p>
+              </div>
+              <div className="rounded-md border bg-primary/5 border-primary/20 p-3">
+                <p className="text-xs font-medium text-muted-foreground">Vs. período anterior (mismo largo)</p>
+                {profit && prevProfit && prevProfit.income_usd > 0 ? (
+                  <>
+                    <p className="text-lg font-bold tabular-nums">
+                      {fmtUsd(profit.income_usd - prevProfit.income_usd)}
+                    </p>
+                    <p className={`text-xs font-semibold ${profit.income_usd >= prevProfit.income_usd ? 'text-success' : 'text-danger'}`}>
+                      {((profit.income_usd - prevProfit.income_usd) / prevProfit.income_usd * 100).toFixed(1)}% vs {prevProfit.start}–{prevProfit.end}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Sin datos del período anterior</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-semibold">Cuentas por cobrar</CardTitle>
+                <CardDescription className="text-xs">
+                  {receivables ? `${receivables.count} órdenes activas con saldo pendiente` : 'Cargando…'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                {receivables?.buckets.map(b => (
+                  <div key={b.label} className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium">{b.label}</span>
+                      <Badge variant="outline">{b.count}</Badge>
+                    </div>
+                    <span className={`text-sm font-bold tabular-nums ${b.total_usd > 0.005 ? 'text-warning' : 'text-muted-foreground'}`}>
+                      {b.total_usd > 0.005 ? fmtUsd(b.total_usd) : '—'}
+                    </span>
+                  </div>
+                ))}
+                {receivables && receivables.items.length > 0 && (
+                  <div className="rounded-md border overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Orden</TableHead>
+                          <TableHead>Cliente</TableHead>
+                          <TableHead className="text-right">Saldo</TableHead>
+                          <TableHead className="text-right">Días</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {receivables.items.map((it, i) => (
+                          <TableRow key={i}>
+                            <TableCell className="font-mono text-xs">{it.order_num}</TableCell>
+                            <TableCell className="text-sm">{it.client}</TableCell>
+                            <TableCell className="text-right font-semibold tabular-nums text-warning">{fmtUsd(it.saldo_usd)}</TableCell>
+                            <TableCell className={`text-right tabular-nums ${it.days_open > 30 ? 'text-danger font-semibold' : it.days_open > 7 ? 'text-warning' : 'text-muted-foreground'}`}>{Math.max(0, it.days_open)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+                {receivables && receivables.items.length === 0 && (
+                  <p className="text-sm text-muted-foreground flex items-center gap-2">
+                    <CheckCircle2 className="size-4 text-success" /> Sin deudas pendientes
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-semibold">Inventario</CardTitle>
+                <CardDescription className="text-xs">
+                  {inventoryValue ? `${inventoryValue.units} unidades — capital inmovilizado vs. potencial de venta` : 'Cargando…'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-md border bg-muted/40 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Capital invertido</p>
+                    <p className="text-lg font-bold tabular-nums">{fmtUsd(inventoryValue?.cost_usd ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">stock × costo</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/40 p-3">
+                    <p className="text-xs font-medium text-muted-foreground">Potencial de venta</p>
+                    <p className="text-lg font-bold tabular-nums text-success">{fmtUsd(inventoryValue?.sale_usd ?? 0)}</p>
+                    <p className="text-xs text-muted-foreground">stock × precio de venta</p>
+                  </div>
+                </div>
+                {inventoryValue && inventoryValue.categories.length > 0 && (
+                  <div className="rounded-md border overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Categoría</TableHead>
+                          <TableHead className="text-right">Unidades</TableHead>
+                          <TableHead className="text-right">Capital</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {inventoryValue.categories.map((c, i) => (
+                          <TableRow key={i}>
+                            <TableCell className="text-sm">{c.category_name ?? 'Sin categoría'}</TableCell>
+                            <TableCell className="text-right tabular-nums">{c.units}</TableCell>
+                            <TableCell className="text-right font-semibold tabular-nums">{fmtUsd(c.cost_usd)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </>
+      )}
+
+      <AlertDialog open={expenseToDelete !== null} onOpenChange={o => { if (!o) setExpenseToDelete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Eliminar gasto</AlertDialogTitle>
+            <AlertDialogDescription>
+              Se eliminará el gasto {expenseToDelete ? `${expenseToDelete.category} · ${expenseToDelete.currency === 'USD' ? fmtUsd(expenseToDelete.amount) : fmtBs(expenseToDelete.amount)} (${expenseToDelete.expense_date})` : ''}. Esta acción no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { if (expenseToDelete) doDeleteExpense(expenseToDelete.id); setExpenseToDelete(null); }}>
+              Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog open={showExpenseDialog} onOpenChange={setShowExpenseDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Registrar gasto</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Fecha</label>
+              <Input type="date" value={expDate} onChange={e => setExpDate(e.target.value)} />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Categoría</label>
+              <select className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm" value={expCategory}
+                onChange={e => setExpCategory(e.target.value)}>
+                {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Monto</label>
+              <MoneyInput value={expAmount} onChange={setExpAmount} />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Moneda</label>
+              <div className="flex gap-2">
+                <Button type="button" variant={expCurrency === 'USD' ? 'default' : 'outline'} className="flex-1" onClick={() => setExpCurrency('USD')}>$ Dólares</Button>
+                <Button type="button" variant={expCurrency === 'VES' ? 'default' : 'outline'} className="flex-1" onClick={() => setExpCurrency('VES')}>Bs. Bolívares</Button>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">Notas</label>
+              <Input value={expNotes} onChange={e => setExpNotes(e.target.value)} placeholder="Detalle del gasto..." />
+            </div>
+            {expError && <p className="text-sm text-danger">{expError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowExpenseDialog(false)}>Cancelar</Button>
+            <Button onClick={doAddExpense}>
+              <Plus className="size-4" /> Guardar gasto
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={showOpen} onOpenChange={setShowOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -774,6 +1147,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </div>
               </div>
             </div>
+            {todayExpenses.length > 0 && (
+              <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
+                <span className="font-medium flex items-center gap-2">
+                  <Receipt className="size-4" /> Gastos del día ({todayExpenses.length})
+                </span>
+                <span className="font-semibold tabular-nums">
+                  {fmtUsd(todayExpenses.filter(e => e.currency === 'USD').reduce((a, e) => a + e.amount, 0))}
+                  {todayExpenses.some(e => e.currency === 'VES') && (
+                    <> + {fmtBs(todayExpenses.filter(e => e.currency === 'VES').reduce((a, e) => a + e.amount, 0))}</>
+                  )}
+                </span>
+              </div>
+            )}
             <div className="flex flex-col gap-2">
               <p className="text-sm font-semibold">Punto de Venta — monto impreso</p>
               <p className="text-xs text-muted-foreground">

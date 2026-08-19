@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { methodCurrency, currencySymbol, isRefund } from '@/lib/utils';
+import { methodCurrency, currencySymbol, isRefund, isFinalized } from '@/lib/utils';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import type { Service, ServicePayment } from '../types';
 
@@ -122,10 +122,14 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
         <div className="min-h-0 flex-1 overflow-y-auto flex flex-col gap-4 pr-1">
           <div className="text-sm flex flex-col gap-1 rounded-md bg-muted/60 px-3 py-2">
             <p>Total: <strong>${(service?.amount ?? 0).toFixed(2)}</strong></p>
-            {saldoUsd > 0.005 ? (
-              <p>Saldo pendiente: <strong className="text-danger">${saldoUsd.toFixed(2)}</strong></p>
+            {isFinalized(service?.status) ? (
+              <p className="text-muted-foreground">Orden {service?.status === 'Devuelto' ? 'devuelta' : 'cancelada'} — no acepta más pagos.</p>
             ) : saldoUsd < -0.005 ? (
               <p>Excedente: <strong className="text-warning">${excedenteUsd.toFixed(2)}</strong> (se cobró más que el monto del servicio)</p>
+            ) : payments.length === 0 ? (
+              <p>Por pagar: <strong className="text-amber-600">${saldoUsd.toFixed(2)}</strong></p>
+            ) : saldoUsd > 0.005 ? (
+              <p>Saldo pendiente: <strong className="text-danger">${saldoUsd.toFixed(2)}</strong></p>
             ) : (
               <p>Saldo: <strong className="text-success">Cancelado</strong></p>
             )}

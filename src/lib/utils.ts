@@ -34,6 +34,31 @@ export function isRefund(p: { amount: number }): boolean {
   return p.amount < 0;
 }
 
+// Órdenes en estado FINAL: no esperan pago, entrega ni trabajo (nunca "pendiente").
+export function isFinalized(status: string | null | undefined): boolean {
+  return status === 'Devuelto' || status === 'Cancelado' || status === 'Cancelado / Devuelto';
+}
+
+// Etiqueta CORTA de un método de pago (58mm: cabe sin truncar). Fuente única:
+// recibo, PAGOS del recibo y chips de la tarjeta de servicios.
+export function shortMethodLabel(m: string | null | undefined): string {
+  const s = (m ?? '').trim();
+  if (!s) return 'PAGO';
+  const map: Record<string, string> = {
+    'Divisas (USD Cash)': 'EFECTIVO $',
+    'Punto de Venta ($)': 'PUNTO $',
+    'Punto de Venta (Bs)': 'PUNTO Bs',
+    'Punto de Venta': 'PUNTO',
+    'Pago Móvil': 'PAGO MOVIL',
+    'Pago Movil': 'PAGO MOVIL',
+    'Efectivo Bs': 'EFECTIVO Bs',
+    'Transferencia Zelle': 'ZELLE',
+    'Zelle': 'ZELLE',
+    'Transferencia Bs': 'TRANSF Bs',
+  };
+  return map[s] ?? s.toUpperCase().slice(0, 12);
+}
+
 // --- Garantía: 7 días corridos desde la fecha de entrega ---
 export const WARRANTY_DAYS = 7;
 
@@ -313,9 +338,7 @@ export function buildServiceReceiptParts(
   const lines: string[] = [];
   const tipos = parseServiceTypes(service);
   const logo = tipos.join(', ');
-  const tasa = opts.tasaBcv ?? 0;
   // Moneda SIEMPRE derivada del método (harness): métodos Bs → bolívares
-  const metodoBs = methodCurrency(service.payment_method) === 'VES';
 
   // Cabecera
   lines.push(center(opts.businessName?.trim() || 'SERVICIO TECNICO', w));
@@ -356,60 +379,45 @@ export function buildServiceReceiptParts(
     lines.push(dash);
   }
 
-  // Finanzas — desglose honesto cuando hubo rebaja por pago en efectivo:
-  // PRECIO (lista) / DESCUENTO / TOTAL (cobrado). Sin descuento → MONTO simple.
-  // Los montos del servicio SIEMPRE en $ (precio del negocio); si el método de
-  // pago es en bolívares se imprime PAGO EN: Bs. (equivalente con la tasa BCV).
-  const desc = service.discount_amount ?? 0;
-  if (desc > 0.005) {
-    for (const l of kv('PRECIO', fmtUsd(service.amount + desc), w)) lines.push(l);
-    for (const l of kv('DESCUENTO', `-${fmtUsd(desc)}`, w)) lines.push(l);
-    for (const l of kv('TOTAL', fmtUsd(service.amount), w)) lines.push(l);
-  } else {
-    for (const l of kv('MONTO', fmtUsd(service.amount), w)) lines.push(l);
-  }
-  // Pago en la moneda del método: Bs. con tasa BCV (siempre que haya tasa)
-  if (metodoBs) {
-    const pagoBs = tasa > 0 ? service.amount * tasa : 0;
-    if (pagoBs > 0) {
-      for (const l of kv('PAGO EN', `Bs. ${pagoBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV ${tasa.toFixed(2)})`, w)) lines.push(l);
-    } else {
-      for (const l of kv('PAGO EN', 'BOLIVARES (Bs.)', w)) lines.push(l);
-    }
-  }
-  // Abonado en la moneda REAL de cada pago registrado ($ + Bs.); sin pagos
-  // registrados (datos viejos) cae al paid_amount en USD equivalente.
-  // Órdenes devueltas/canceladas: los reembolsos son negativos — no mostrar
-  // ABONADO en negativo ni SALDO falso (el cliente ya no debe).
-  const finalized = service.status === 'Devuelto' || service.status === 'Cancelado' || service.status === 'Cancelado / Devuelto';
-  const abonadoUsd = payments.reduce((a, p) => a + (p.currency !== 'VES' ? p.amount : 0), 0);
-  const abonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+  // Finanzas — minimalista y entendible: TOTAL / PAGADO / FALTA / CANCELADO.
+  // El descuento es INTERNO (se decide en el mostrador, no se imprime
+  // PRECIO/DESCUENTO): TOTAL = lo que el cliente debe pagar.
+  // PAGADO y METODO salen de los PAGOS REALES registrados (no del form).
+  const finalized = isFinalized(service.status);
+  const totalUsd = service.amount ?? 0;
+  const abonadoUsd = payments.reduce((a, p) => a + (p.amount > 0 && p.currency !== 'VES' ? p.amount : 0), 0);
+  const abonadoBs = payments.reduce((a, p) => a + (p.amount > 0 && p.currency === 'VES' ? p.amount : 0), 0);
   const abonado = service.paid_amount ?? 0;
-  const saldo = service.amount - abonado;
-  const abonadoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (abonado > 0.005 ? fmtUsd(abonado) : '');
+  const saldo = totalUsd - abonado;
+  const pagoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (abonado > 0.005 ? fmtUsd(abonado) : '');
+  for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) lines.push(l);
   if (finalized) {
     lines.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
   } else {
-    if (abonadoLabel) for (const l of kv('ABONADO', abonadoLabel, w)) lines.push(l);
+    if (pagoLabel) for (const l of kv('PAGADO', pagoLabel, w)) lines.push(l);
     if (saldo <= 0.005) {
       lines.push(center('CANCELADO', w));
     } else {
-      for (const l of kv('SALDO', fmtUsd(saldo), w)) lines.push(l);
-      if (metodoBs && tasa > 0) {
-        for (const l of kv('SALDO EN BS', `Bs. ${Math.round(saldo * tasa).toLocaleString('es-VE')}`, w)) lines.push(l);
-      }
+      for (const l of kv('FALTA', fmtUsd(saldo), w)) lines.push(l);
     }
   }
-  if (service.payment_method) for (const l of kv('METODO', service.payment_method + (metodoBs ? ' (Bs.)' : ' ($)'), w)) lines.push(l);
-  if (service.zelle_reference) for (const l of kv('REF', service.zelle_reference, w)) lines.push(l);
+  const methods = payments.length > 0
+    ? [...new Set(payments.map(p => p.payment_method ?? '').filter(Boolean))].map(shortMethodLabel)
+    : [shortMethodLabel(service.payment_method)];
+  for (const l of kv('METODO', methods.join(' + '), w)) lines.push(l);
+  const ref = service.zelle_reference || payments.find(p => p.zelle_reference)?.zelle_reference;
+  if (ref) for (const l of kv('REF', ref, w)) lines.push(l);
 
-  // Pagos/abonos registrados (método + monto en su moneda real); reembolsos en negativo
-  if (payments.length > 0) {
+  // Pagos/abonos registrados. Con UN solo pago, METODO ya lo dice (no se repite);
+  // con varios pagos o reembolsos se desglosa: MONTO a la izquierda, MÉTODO a la derecha.
+  const showPayments = payments.length > 1 || payments.some(isRefund);
+  if (showPayments) {
     lines.push('PAGOS:');
     for (const p of payments) {
-      const isRef = p.amount < 0;
-      const label = (isRef ? 'DEVOLUCION' : (p.payment_method ?? 'Pago')).toUpperCase().slice(0, 12);
-      for (const l of kv(label, fmtMoney(Math.abs(p.amount), p.currency), w)) lines.push(l);
+      const money = fmtMoney(Math.abs(p.amount), p.currency);
+      const methodLabel = isRefund(p) ? 'DEVOLUCION' : shortMethodLabel(p.payment_method ?? 'Pago');
+      const pad = w - money.length - methodLabel.length;
+      lines.push(pad >= 2 ? `${money}${' '.repeat(pad)}${methodLabel}` : `${methodLabel}: ${money}`);
     }
   }
   lines.push('='.repeat(w));
@@ -430,29 +438,20 @@ export function buildServiceReceiptParts(
   if (service.color) for (const l of kv('COLOR', service.color, w)) stub.push(l);
   if (service.model) for (const l of kv('MODELO', service.model, w)) stub.push(l);
   if (logo) for (const l of kv('SERVICIO', logo, w)) stub.push(l);
-  // Pago para la salida del equipo: método (con moneda) + pago en Bs/$ + abonado real + saldo.
-  if (service.payment_method) for (const l of kv('METODO', service.payment_method + (metodoBs ? ' (Bs.)' : ' ($)'), w)) stub.push(l);
-  if (metodoBs) {
-    const pagoBs = tasa > 0 ? service.amount * tasa : 0;
-    if (pagoBs > 0) {
-      for (const l of kv('PAGO EN', `Bs. ${pagoBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV ${tasa.toFixed(2)})`, w)) stub.push(l);
-    }
-  } else {
-    for (const l of kv('PAGO EN', fmtUsd(service.amount), w)) stub.push(l);
-  }
-  const stubAbonado = service.paid_amount ?? 0;
-  const stubSaldo = service.amount - stubAbonado;
-  const stubAbonadoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (stubAbonado > 0.005 ? fmtUsd(stubAbonado) : '');
+  // Pago para la salida del equipo: TOTAL / PAGADO / FALTA — mismo bloque minimalista.
+  for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) stub.push(l);
   if (finalized) {
     stub.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
   } else {
-    if (stubAbonadoLabel) for (const l of kv('ABONADO', stubAbonadoLabel, w)) stub.push(l);
+    if (pagoLabel) for (const l of kv('PAGADO', pagoLabel, w)) stub.push(l);
+    const stubSaldo = totalUsd - (service.paid_amount ?? 0);
     if (stubSaldo <= 0.005) {
       stub.push(center('CANCELADO', w));
     } else {
-      for (const l of kv('SALDO', fmtUsd(stubSaldo), w)) stub.push(l);
+      for (const l of kv('FALTA', fmtUsd(stubSaldo), w)) stub.push(l);
     }
   }
+  for (const l of kv('METODO', methods.join(' + '), w)) stub.push(l);
   const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
   if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
   stub.push(dash);

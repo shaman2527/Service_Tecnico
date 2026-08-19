@@ -2,7 +2,7 @@
 
 > Fuente de verdad viva del proyecto. Se actualiza automáticamente
 > después de cada ciclo de gobernanza o sesión del agente.
-> **Última actualización:** 2026-08-07T01:55:39.784Z
+> **Última actualización:** 2026-08-19T05:07:03.412Z
 
 ## Estado del Proyecto
 
@@ -15,7 +15,7 @@
 | Endpoints fallidos | 0 |
 | Endpoints saltados | 0 |
 | Alineación MVP | 0% |
-| Tests unitarios | 29/0 ✅ |
+| Tests unitarios | 59/0 ✅ |
 
 
 
@@ -36,9 +36,9 @@
 |---|---|
 | Estado | ✅ |
 | Total | 0 |
-| Pasados | 29 |
+| Pasados | 59 |
 | Fallidos | 0 |
-| Duración | 28.3s |
+| Duración | 36.0s |
 
 
 ## Métricas de Alineación
@@ -53,4 +53,4 @@
 
 | Fecha | Evento | Resultado |
 |---|---|---|
-| 2026-08-07T01:55:39.784Z | Truth cycle | ✅ PASS |
+| 2026-08-19T05:07:03.412Z | Truth cycle | ✅ PASS |

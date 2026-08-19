@@ -33,7 +33,8 @@ SUB_FONT = Font(bold=True, size=11)
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 TAB_COLORS = {"Resumen": "1F4E79", "Ventas": "2E7D32", "Servicios": "E65100",
-              "Pagos y Abonos": "6A1B9A", "Movimientos": "00695C", "Cierres": "B71C1C"}
+              "Pagos y Abonos": "6A1B9A", "Movimientos": "00695C", "Cierres": "B71C1C",
+              "Gastos": "8E44AD"}
 
 
 def write_table(ws, start_row, headers, rows, widths, money_cols=None, tab="", row_height=None):
@@ -231,6 +232,32 @@ def main():
             ws.cell(row=r, column=6).number_format = FMT_USD if cur != "Bs." else FMT_BS
         subtotal_row(ws, end, 10, "TOTAL (filtrado)",
                      {6: {"value": f"=SUBTOTAL(9,F4:F{last})", "fmt": FMT_USD}})
+
+    # ============ HOJA GASTOS ============
+    expenses = data.get("expenses", [])
+    if expenses:
+        ws = wb.create_sheet("Gastos")
+        ws.sheet_properties.tabColor = TAB_COLORS["Gastos"]
+        headers = ["Fecha", "Categoría", "Monto", "Moneda", "Notas"]
+        rows = []
+        for e in expenses:
+            rows.append([e.get("date", ""), e.get("category", ""), money(e.get("amount")),
+                         "Bs." if e.get("currency") == "VES" else "$", e.get("notes", "")])
+        ws.merge_cells("A1:E1")
+        ws["A1"] = f"GASTOS DEL NEGOCIO — {data.get('start', '')} → {data.get('end', '')}"
+        ws["A1"].font = TITLE_FONT
+        end = write_table(ws, 3, headers, rows, [12, 20, 12, 8, 44], {3: "mix"}, "Gastos")
+        if rows:
+            last = end - 1
+            for r in range(4, end):
+                cur = ws.cell(row=r, column=4).value
+                ws.cell(row=r, column=3).number_format = FMT_USD if cur != "Bs." else FMT_BS
+            # Dos totales separados por moneda (NUNCA sumar USD + Bs en bruto)
+            for label, cur, fmt, offset in (("TOTAL USD (rango)", "$", FMT_USD, 0),
+                                            ("TOTAL Bs. (rango)", "Bs.", FMT_BS, 1)):
+                r = end + offset
+                subtotal_row(ws, r, 5, label,
+                             {3: {"value": f'=SUMIFS(C4:C{last},D4:D{last},"{cur}")', "fmt": fmt}})
 
     # ============ HOJA MOVIMIENTOS ============
     ws = wb.create_sheet("Movimientos")

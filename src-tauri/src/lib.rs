@@ -77,6 +77,12 @@ commands::get_sales_stats,
             commands::import_data,
             commands::get_daily_totals,
             commands::get_day_summary,
+            commands::add_expense,
+            commands::get_expenses,
+            commands::delete_expense,
+            commands::get_profit_summary,
+            commands::get_receivables,
+            commands::get_inventory_value,
             commands::get_daily_closings,
             commands::get_bcv_rate,
             commands::open_day,
@@ -227,3 +233,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-12
 // force rebuild 2026-08-12 v2
 // force rebuild frontend embed (2026-08-14)
+// force rebuild

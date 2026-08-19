@@ -3,7 +3,8 @@ import type {
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
-  ServiceDeviceInput, DaySummary, ExportResult
+  ServiceDeviceInput, DaySummary, ExportResult, Expense, ProfitSummary,
+  ReceivablesSummary, InventoryValue
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -189,6 +190,31 @@ export const api = {
         date, received: 0, delivered: 0, workshop: 0, payments_count: 0,
         payments_usd: 0, payments_bs: 0, sales_usd: 0, sales_bs: 0,
       })),
+
+  addExpense: (expenseDate: string, category: string, amount: number, currency: string, notes: string) =>
+    tauriInvoke<number>('add_expense', { expenseDate, category, amount, currency, notes }),
+
+  getExpenses: (startDate: string, endDate: string) =>
+    tauriInvoke<Expense[]>('get_expenses', { startDate, endDate }).catch(() => mock<Expense[]>([])),
+
+  deleteExpense: (id: number) => tauriInvoke<void>('delete_expense', { id }),
+
+  getProfitSummary: (startDate: string, endDate: string) =>
+    tauriInvoke<ProfitSummary>('get_profit_summary', { startDate, endDate }).catch(() =>
+      mock<ProfitSummary>({
+        start: startDate, end: endDate, income_usd: 0, income_bs: 0, cost_usd: 0,
+        profit_usd: 0, margin_pct: 0, sales_income_usd: 0, sales_income_bs: 0,
+        sales_cost_usd: 0, services_income_usd: 0, services_income_bs: 0,
+        services_cost_usd: 0, tasa_bcv: 0,
+      })),
+
+  getReceivables: () =>
+    tauriInvoke<ReceivablesSummary>('get_receivables').catch(() =>
+      mock<ReceivablesSummary>({ total_usd: 0, count: 0, buckets: [], items: [] })),
+
+  getInventoryValue: () =>
+    tauriInvoke<InventoryValue>('get_inventory_value').catch(() =>
+      mock<InventoryValue>({ units: 0, cost_usd: 0, sale_usd: 0, categories: [] })),
 
   getClients: (search: string = '') =>
     tauriInvoke<ClientSummary[]>('get_clients', { search }),

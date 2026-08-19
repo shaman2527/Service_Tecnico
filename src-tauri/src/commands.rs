@@ -321,6 +321,38 @@ pub fn get_day_summary(db: State<Database>, date: String) -> Result<crate::db::D
     db.get_day_summary(&date).map_err(|e| e.to_string())
 }
 
+// --- Salud del negocio (gastos, utilidad, por cobrar, inventario) ---
+
+#[tauri::command]
+pub fn add_expense(db: State<Database>, expense_date: String, category: String, amount: f64, currency: String, notes: String) -> Result<i64, String> {
+    db.add_expense(&expense_date, &category, amount, &currency, &notes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_expenses(db: State<Database>, start_date: String, end_date: String) -> Result<Vec<crate::db::Expense>, String> {
+    db.get_expenses(&start_date, &end_date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_expense(db: State<Database>, id: i64) -> Result<(), String> {
+    db.delete_expense(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_profit_summary(db: State<Database>, start_date: String, end_date: String) -> Result<crate::db::ProfitSummary, String> {
+    db.get_profit_summary(&start_date, &end_date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_receivables(db: State<Database>) -> Result<crate::db::ReceivablesSummary, String> {
+    db.get_receivables().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_inventory_value(db: State<Database>) -> Result<crate::db::InventoryValue, String> {
+    db.get_inventory_value().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_daily_closings(db: State<Database>) -> Result<Vec<crate::db::DailyClosing>, String> {
     db.get_daily_closings().map_err(|e| e.to_string())

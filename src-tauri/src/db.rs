@@ -320,6 +320,91 @@ pub struct DaySummary {
     pub sales_bs: f64,
 }
 
+// Gastos del negocio (Libro Diario → tab Gastos, harness 2026-08-19)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Expense {
+    pub id: i64,
+    pub expense_date: String,
+    pub category: String,
+    pub amount: f64,
+    pub currency: String,
+    pub notes: Option<String>,
+}
+
+// Utilidad bruta del período: ingresos (ventas + servicios cobrados) − costo de mercancía.
+// Costo = price_cost ACTUAL del producto (decisión del dueño: no se congela en la venta).
+// Los Bs se convierten con la tasa BCV del período (misma convención del Libro Diario).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProfitSummary {
+    pub start: String,
+    pub end: String,
+    /// Ingresos totales del período en USD (incluye Bs convertidos a tasa BCV)
+    pub income_usd: f64,
+    /// Ingresos brutos en Bs (sin convertir — para mostrar el desglose)
+    pub income_bs: f64,
+    /// Costo de mercancía (USD): ventas con product_id + pantallas instaladas con screen_product_id
+    pub cost_usd: f64,
+    /// Utilidad bruta en USD equivalente
+    pub profit_usd: f64,
+    /// Margen bruto % (profit/income)
+    pub margin_pct: f64,
+    pub sales_income_usd: f64,
+    pub sales_income_bs: f64,
+    pub sales_cost_usd: f64,
+    pub services_income_usd: f64,
+    pub services_income_bs: f64,
+    pub services_cost_usd: f64,
+    /// Tasa BCV usada para convertir Bs (cierre del último día del período, fallback día abierto/último cierre)
+    pub tasa_bcv: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReceivableItem {
+    pub order_num: Option<String>,
+    pub client: Option<String>,
+    pub model: Option<String>,
+    /// Saldo pendiente en USD equivalente (amount − paid_amount)
+    pub saldo_usd: f64,
+    /// Días desde que entró la orden (date_in)
+    pub days_open: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReceivableBucket {
+    pub label: String,
+    pub count: i64,
+    pub total_usd: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReceivablesSummary {
+    /// Total pendiente por cobrar (USD equiv)
+    pub total_usd: f64,
+    pub count: i64,
+    pub buckets: Vec<ReceivableBucket>,
+    /// Top 15 órdenes morosas por saldo
+    pub items: Vec<ReceivableItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CategoryValue {
+    pub category_name: Option<String>,
+    pub units: i64,
+    pub cost_usd: f64,
+    pub sale_usd: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InventoryValue {
+    pub units: i64,
+    /// Capital inmovilizado: stock × price_cost
+    pub cost_usd: f64,
+    /// Potencial de venta: stock × price_sale
+    pub sale_usd: f64,
+    /// Top 5 categorías por capital
+    pub categories: Vec<CategoryValue>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DailyClosing {
     pub id: i64,
@@ -558,6 +643,15 @@ impl Database {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expense_date TEXT NOT NULL DEFAULT (date('now','localtime')),
+                category TEXT NOT NULL DEFAULT 'Otro',
+                amount REAL NOT NULL DEFAULT 0,
+                currency TEXT NOT NULL DEFAULT 'USD',
+                notes TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
             );
         ")?;
 
@@ -1536,7 +1630,7 @@ impl Database {
     fn recalc_paid_amount(&self, conn: &rusqlite::Connection, service_id: i64) -> SqlResult<()> {
         conn.execute(
             "UPDATE services SET paid_amount = (
-                SELECT COALESCE(SUM(CASE
+                SELECT ROUND(COALESCE(SUM(CASE
                     WHEN sp.currency IS NULL OR sp.currency = 'USD' THEN sp.amount
                     ELSE sp.amount / COALESCE((
                         SELECT dc.tasa_bcv FROM daily_closings dc
@@ -1546,7 +1640,7 @@ impl Database {
                         SELECT dc2.tasa_bcv FROM daily_closings dc2
                         WHERE dc2.is_closed = 0 AND dc2.tasa_bcv > 0 LIMIT 1
                     ), 1)
-                END), 0)
+                END), 0), 4)
                 FROM service_payments sp WHERE sp.service_id = services.id
             ) WHERE id = ?1",
             params![service_id],
@@ -1969,10 +2063,10 @@ impl Database {
         {
             let mut stmt = conn.prepare(
                 "SELECT method, amount, currency FROM (
-                    SELECT payment_method as method, amount, COALESCE(currency,'USD') as currency
+                    SELECT payment_method as method, CAST(COALESCE(net_amount, amount) AS REAL) as amount, COALESCE(currency,'USD') as currency
                     FROM service_payments WHERE date(payment_date)=date('now','localtime')
                     UNION ALL
-                    SELECT payment_method, amount, COALESCE(currency,'USD')
+                    SELECT payment_method, CAST(COALESCE(net_amount, amount) AS REAL), COALESCE(currency,'USD')
                     FROM services WHERE status='Entregado' AND date(date_out)=date('now','localtime')
                       AND NOT EXISTS (SELECT 1 FROM service_payments sp WHERE sp.service_id=services.id)
                 )"
@@ -2015,8 +2109,8 @@ impl Database {
         )?;
         let (payments_usd, payments_bs) = {
             let row = conn.query_row(
-                "SELECT COALESCE(SUM(CASE WHEN currency='USD' THEN amount ELSE 0 END),0),
-                        COALESCE(SUM(CASE WHEN currency!='USD' THEN amount ELSE 0 END),0)
+                "SELECT COALESCE(SUM(CASE WHEN currency='USD' THEN CAST(COALESCE(net_amount, amount) AS REAL) ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN currency!='USD' THEN CAST(COALESCE(net_amount, amount) AS REAL) ELSE 0 END),0)
                  FROM service_payments WHERE date(payment_date)=?1",
                 params![date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
             )?;
@@ -2035,6 +2129,200 @@ impl Database {
             date: date.to_string(), received, delivered, workshop,
             payments_count, payments_usd, payments_bs, sales_usd, sales_bs,
         })
+    }
+
+    // --- Salud del negocio (harness 2026-08-19): gastos, utilidad, por cobrar, inventario ---
+
+    /// Tasa BCV del período: cierre del último día del rango con tasa > 0,
+    /// fallback día abierto, fallback último cierre con tasa (misma cadena que compute_daily_totals).
+    fn period_tasa(&self, conn: &rusqlite::Connection, start_date: &str, end_date: &str) -> f64 {
+        let r = conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE close_date >= ?1 AND close_date <= ?2 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            params![start_date, end_date], |r| r.get(0),
+        ).optional();
+        if let Ok(Some(t)) = r {
+            if t > 0.0 { return t; }
+        }
+        let r2 = conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE is_closed=0 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional();
+        if let Ok(Some(t)) = r2 {
+            if t > 0.0 { return t; }
+        }
+        conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional().ok().flatten().unwrap_or(0.0)
+    }
+
+    /// Registra un gasto del negocio. NO requiere día abierto (los gastos se anotan
+    /// cuando ocurren; la caja física es independiente del registro).
+    pub fn add_expense(&self, expense_date: &str, category: &str, amount: f64, currency: &str, notes: &str) -> SqlResult<i64> {
+        if amount <= 0.0 {
+            return Err(day_shift_error("El monto del gasto debe ser mayor que 0."));
+        }
+        let cur = if currency == "VES" { "VES" } else { "USD" };
+        if expense_date.len() != 10 {
+            return Err(day_shift_error("Fecha inválida (use AAAA-MM-DD)."));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO expenses (expense_date, category, amount, currency, notes) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![expense_date, category, amount, cur, notes],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_expenses(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<Expense>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, expense_date, category, amount, currency, notes FROM expenses
+             WHERE date(expense_date) >= ?1 AND date(expense_date) <= ?2 ORDER BY expense_date DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![start_date, end_date], |r| {
+            Ok(Expense {
+                id: r.get(0)?, expense_date: r.get(1)?, category: r.get(2)?,
+                amount: r.get(3)?, currency: r.get(4)?, notes: r.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_expense(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM expenses WHERE id=?1", params![id])?;
+        if n == 0 {
+            return Err(day_shift_error("El gasto ya no existe."));
+        }
+        Ok(())
+    }
+
+    /// Utilidad bruta del período. Ingresos = MISMA definición del Libro Diario
+    /// (compute_daily_totals: ventas netas + pagos de servicios + entregados sin pago).
+    /// Costo = price_cost ACTUAL del producto (decisión del dueño) × cantidad vendida,
+    /// + pantalla instalada (screen_product_id) de servicios ENTREGADOS en el período.
+    pub fn get_profit_summary(&self, start_date: &str, end_date: &str) -> SqlResult<ProfitSummary> {
+        let conn = self.conn.lock().unwrap();
+        let totals = self.compute_daily_totals(&conn, start_date, end_date)?;
+        let mut income_usd = 0.0;
+        let mut income_bs = 0.0;
+        for t in &totals {
+            income_usd += t.grand_usd;
+            income_bs += t.grand_bs;
+        }
+        let tasa = self.period_tasa(&conn, start_date, end_date);
+        // Equivalente USD del período: tasas PER-DÍA del libro (mismo criterio que grand_total del Libro Diario)
+        let income_total_usd: f64 = totals.iter().map(|t| t.grand_total).sum();
+        let income_total_usd = if income_total_usd > 0.0 { income_total_usd } else { income_usd + if tasa > 0.0 { income_bs / tasa } else { 0.0 } };
+        // Ingresos de VENTAS por moneda (neto, mismo criterio del libro)
+        let (sales_income_usd, sales_income_bs) = conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')='USD' THEN CAST(COALESCE(net_amount,total) AS REAL) ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')!='USD' THEN CAST(COALESCE(net_amount,total) AS REAL) ELSE 0 END),0)
+             FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2",
+            params![start_date, end_date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+        )?;
+        // Costo de la mercancía vendida (ventas con producto referenciado; sin producto → 0)
+        let sales_cost: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(p.price_cost,0) * s.quantity),0) FROM sales s
+             LEFT JOIN products p ON p.id = s.product_id
+             WHERE date(s.date) >= ?1 AND date(s.date) <= ?2",
+            params![start_date, end_date], |r| r.get(0),
+        )?;
+        // Costo de pantallas: se reconoce en el MISMO período que su ingreso (regla del libro).
+        // 1) Servicios con pagos en el rango (no devueltos/cancelados) → costo en el rango del pago.
+        // 2) Entregados en el rango SIN pagos en el rango → costo en el rango de la entrega (dedupe con NOT EXISTS).
+        let services_cost_paid: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(p.price_cost,0)),0) FROM service_payments sp
+             JOIN services s ON s.id = sp.service_id AND s.screen_product_id IS NOT NULL
+             LEFT JOIN products p ON p.id = s.screen_product_id
+             WHERE date(sp.payment_date) >= ?1 AND date(sp.payment_date) <= ?2
+               AND s.status NOT IN ('Devuelto','Cancelado','Cancelado / Devuelto')
+               AND sp.amount > 0",
+            params![start_date, end_date], |r| r.get(0),
+        )?;
+        let services_cost_delivered: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(p.price_cost,0)),0) FROM services s
+             LEFT JOIN products p ON p.id = s.screen_product_id
+             WHERE s.status='Entregado' AND s.screen_product_id IS NOT NULL
+               AND date(s.date_out) >= ?1 AND date(s.date_out) <= ?2
+               AND NOT EXISTS (SELECT 1 FROM service_payments sp
+                               WHERE sp.service_id = s.id AND sp.amount > 0
+                                 AND date(sp.payment_date) >= ?1 AND date(sp.payment_date) <= ?2)",
+            params![start_date, end_date], |r| r.get(0),
+        )?;
+        let services_cost = services_cost_paid + services_cost_delivered;
+        // Ingresos de servicios = totales − ventas (misma base UNION del libro)
+        let services_income_usd = (income_usd - sales_income_usd).max(0.0);
+        let services_income_bs = (income_bs - sales_income_bs).max(0.0);
+        let cost_usd = sales_cost + services_cost;
+        let profit_usd = income_total_usd - cost_usd;
+        let margin_pct = if income_total_usd > 0.0 { profit_usd / income_total_usd * 100.0 } else { 0.0 };
+        Ok(ProfitSummary {
+            start: start_date.to_string(), end: end_date.to_string(),
+            income_usd: income_total_usd, income_bs, cost_usd, profit_usd, margin_pct,
+            sales_income_usd, sales_income_bs, sales_cost_usd: sales_cost,
+            services_income_usd, services_income_bs, services_cost_usd: services_cost,
+            tasa_bcv: tasa,
+        })
+    }
+
+    /// Cuentas por cobrar: servicios activos (no finalizados) con saldo pendiente.
+    /// Saldo = amount − paid_amount (paid_amount ya está en USD equivalente).
+    pub fn get_receivables(&self) -> SqlResult<ReceivablesSummary> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT order_num, client, model, (amount - COALESCE(paid_amount,0)) AS saldo,
+                    CAST(julianday('now','localtime') - julianday(date_in) AS INTEGER) AS days
+             FROM services
+             WHERE status NOT IN ('Cancelado','Devuelto','Cancelado / Devuelto')
+               AND (amount - COALESCE(paid_amount,0)) > 0.005
+             ORDER BY saldo DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ReceivableItem {
+                order_num: r.get(0)?, client: r.get(1)?, model: r.get(2)?,
+                saldo_usd: r.get(3)?, days_open: r.get(4)?,
+            })
+        })?;
+        let items: Vec<ReceivableItem> = rows.collect::<Result<Vec<_>, _>>()?;
+        let count = items.len() as i64;
+        let total_usd: f64 = items.iter().map(|i| i.saldo_usd).sum();
+        let bucket = |lo: i64, hi: i64| -> ReceivableBucket {
+            let label = if hi == 7 { "0-7 dias".to_string() } else if hi == 30 { "8-30 dias".to_string() } else { "mas de 30 dias".to_string() };
+            let (c, t) = items.iter().fold((0i64, 0f64), |acc, i| {
+                let d = if i.days_open < 0 { 0 } else { i.days_open };
+                if d >= lo && d <= hi { (acc.0 + 1, acc.1 + i.saldo_usd) } else { acc }
+            });
+            ReceivableBucket { label, count: c, total_usd: t }
+        };
+        let buckets = vec![bucket(0, 7), bucket(8, 30), bucket(31, i64::MAX)];
+        Ok(ReceivablesSummary {
+            total_usd, count, buckets,
+            items: items.into_iter().take(15).collect(),
+        })
+    }
+
+    /// Valor del inventario: capital inmovilizado (stock × costo) y potencial de venta (stock × precio).
+    pub fn get_inventory_value(&self) -> SqlResult<InventoryValue> {
+        let conn = self.conn.lock().unwrap();
+        let (units, cost_usd, sale_usd) = conn.query_row(
+            "SELECT COALESCE(SUM(stock),0), COALESCE(SUM(stock * price_cost),0), COALESCE(SUM(stock * price_sale),0) FROM products WHERE stock > 0",
+            [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?)),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT c.name, COALESCE(SUM(p.stock),0), COALESCE(SUM(p.stock * p.price_cost),0), COALESCE(SUM(p.stock * p.price_sale),0)
+             FROM products p LEFT JOIN categories c ON c.id = p.category_id
+             WHERE p.stock > 0 GROUP BY c.name ORDER BY 3 DESC LIMIT 5",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CategoryValue {
+                category_name: r.get(0)?, units: r.get(1)?,
+                cost_usd: r.get(2)?, sale_usd: r.get(3)?,
+            })
+        })?;
+        let categories: Vec<CategoryValue> = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(InventoryValue { units, cost_usd, sale_usd, categories })
     }
 
     // --- Clients ---
@@ -2966,6 +3254,7 @@ impl Database {
         let pm_rows;
         let service_rows;
         let movement_rows;
+        let expense_rows;
         let mut day_dates;
         {
             let conn = self.conn.lock().unwrap();
@@ -3081,6 +3370,25 @@ impl Database {
                 v
             };
 
+            // Gastos del negocio del rango
+            expense_rows = {
+                let mut stmt = conn.prepare(
+                    "SELECT e.expense_date, e.category, e.amount, e.currency, COALESCE(e.notes, '')
+                     FROM expenses e
+                     WHERE date(e.expense_date) >= ?1 AND date(e.expense_date) <= ?2 ORDER BY e.expense_date ASC"
+                )?;
+                let rows = stmt.query_map(params![start_date, end_date], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?, r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?;
+                let mut v = Vec::new();
+                for row in rows { v.push(row?); }
+                v
+            };
+
             // Días del rango: unión de fechas con movimientos + fechas con cierre
             day_dates = totals.iter().map(|t| t.date.clone()).collect::<Vec<String>>();
             for c in &closings {
@@ -3157,10 +3465,15 @@ impl Database {
             "type": r.2.clone(), "qty": r.3, "reason": r.4.clone(), "ref": r.5.clone(),
         })).collect::<Vec<_>>();
 
+        let expenses = expense_rows.iter().map(|r| serde_json::json!({
+            "date": r.0.clone().unwrap_or_default(), "category": r.1.clone(),
+            "amount": r.2, "currency": r.3.clone(), "notes": r.4.clone(),
+        })).collect::<Vec<_>>();
+
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
         let data = serde_json::json!({
             "start": start_date, "end": end_date, "generado": now,
-            "days": days, "services": services, "movements": movements,
+            "days": days, "services": services, "movements": movements, "expenses": expenses,
         });
 
         let mut dir = std::env::var("USERPROFILE")
@@ -3388,7 +3701,7 @@ impl Database {
     // --- Export/Import ---
     pub fn export_data(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings", "expenses"];
         let mut map = serde_json::Map::new();
         for table in &tables {
             let sql = format!("SELECT * FROM {}", table);
@@ -3419,7 +3732,7 @@ impl Database {
             rusqlite::Error::ToSqlConversionFailure(Box::new(e))
         })?;
         // Orden respeta las FK: catálogos → productos → clientes → ventas/servicios → pagos → movimientos → pedidos → cierres
-        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings"];
+        let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings", "expenses"];
 
         // Validar columnas del JSON contra el schema real (anti inyección SQL por nombre de columna)
         let valid_columns: std::collections::HashMap<String, Vec<String>> = tables.iter().map(|t| {
@@ -3853,8 +4166,8 @@ mod tests {
         assert_eq!(payments[0].amount, 10.0);
         // La moneda se deriva del método: Efectivo Bs → VES aunque el frontend mande 'USD'
         assert_eq!(payments[0].currency.as_deref(), Some("VES"), "moneda derivada del método Bs");
-        // paid_amount convierte Bs→USD con la tasa del día (40.5) => 10/40.5 ≈ 0.2469
-        let expected_bs: f64 = 10.0 / 40.5;
+        // paid_amount convierte Bs→USD con la tasa del día (40.5) => 10/40.5 ≈ 0.2469 (ROUND 4 dp, D3)
+        let expected_bs: f64 = (10.0_f64 / 40.5 * 10000.0).round() / 10000.0;
         let paid: f64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap()
@@ -4184,6 +4497,59 @@ mod tests {
     }
 
     #[test]
+    fn test_dashboard_analytics_punto_neto() {
+        // D1 (2026-08-18): "Cobrado Servicios Hoy" debe usar el NETO del punto
+        // (mismo criterio que el Libro Diario) — antes sumaba el BRUTO ($70 vs $69.30).
+        let test_path = PathBuf::from("test_dash_punto_neto.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        // Pago de $100 por Punto (comisión 3.5%) → neto $96.50
+        let sid = db.add_service("NET-1", "Cliente", "", "M1", "f", "Cambio batería",
+            "[\"Cambio batería\"]", 100.0, "Punto de Venta ($)", "", 3.5, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 100.0, "Punto de Venta ($)", 3.5, "", "USD", "").unwrap();
+        // Pago directo de $20 en efectivo → neto $20 (sin comisión)
+        let sid2 = db.add_service("NET-2", "Cliente2", "", "M2", "g", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 20.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid2, 20.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
+
+        let a = db.get_dashboard_analytics().unwrap();
+        assert!((a.service_income_today_usd - 116.5).abs() < 1e-9,
+            "cobrado servicios HOY debe ser NETO (96.5 + 20), got {}", a.service_income_today_usd);
+
+        // Coherencia con el Libro: pos_net del día = 96.5
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let totals = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(totals[0].pos_net_usd, 96.5, "el libro usa neto");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_paid_amount_rounded_no_float_noise() {
+        // D3 (2026-08-18): paid_amount no debe arrastrar ruido flotante
+        // (60.000323284571245) al convertir Bs→USD — ROUND(...,4).
+        let test_path = PathBuf::from("test_paid_rounded.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 773.3125, 0.0).unwrap();
+
+        let sid = db.add_service("RND-1", "Cliente", "", "M1", "f", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 60.0, "Pago Móvil", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        // Bs 46.399 @ 773.3125 = $60.00032328... → ROUND(...,4) = $60.0003 (sin ruido flotante)
+        db.add_service_payment(sid, 46399.0, "Pago Móvil", 0.0, "", "USD", "").unwrap();
+
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert!((svc.paid_amount - 60.0003).abs() < 1e-9,
+            "paid_amount redondeado a 4 decimales (60.0003, sin 60.000323284571245), got {}", svc.paid_amount);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
     fn test_daily_totals_currency() {
         // Regresión: grand_total sumaba Bs como USD (bug 2026-08-02: "$2076" falsos).
         // Verifica el desglose por moneda (grand_usd/grand_bs), la tasa BCV por día,
@@ -4310,7 +4676,7 @@ mod tests {
         db.add_service_refund(sid, 400.0, "Efectivo Bs", "", "USD", "").unwrap();
         let paid_final: f64 = db.conn.lock().unwrap()
             .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
-        let expected: f64 = 40.0 + (1000.0 - 400.0) / 40.5;
+        let expected: f64 = ((40.0_f64 + (1000.0 - 400.0) / 40.5) * 10000.0).round() / 10000.0;
         assert!((paid_final - expected).abs() < 1e-9, "paid_final={paid_final} expected={expected}");
         assert_eq!(payments[1].amount, -20.0, "el reembolso Bs queda negativo en service_payments");
 
@@ -5285,6 +5651,8 @@ discount_amount: 0.0,
         // Abono hoy: $10 USD + Bs 2025 (≈ $50 a tasa 40.5)
         db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
         db.add_service_payment(sid2, 2025.0, "Efectivo Bs", 0.0, "", "USD", "").unwrap();
+        // Punto hoy: $100 cargado con comisión 3.5% → NETO $96.5 (D2: igual que la tabla del Libro)
+        db.add_service_payment(sid, 100.0, "Punto de Venta ($)", 3.5, "", "USD", "").unwrap();
         // Venta hoy: $15 USD + 1 en Bs (VES 405)
         db.add_sale(None, "P1", 1, 15.0, 15.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
         db.add_sale(None, "P2", 1, 10.0, 405.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES", 0.0).unwrap();
@@ -5293,8 +5661,8 @@ discount_amount: 0.0,
         assert_eq!(s.received, 2, "2 equipos recibidos hoy");
         assert_eq!(s.delivered, 1, "1 entregado hoy");
         assert_eq!(s.workshop, 1, "1 en taller");
-        assert_eq!(s.payments_count, 2);
-        assert!((s.payments_usd - 10.0).abs() < 1e-9, "pago USD directo: {}", s.payments_usd);
+        assert_eq!(s.payments_count, 3);
+        assert!((s.payments_usd - 106.5).abs() < 1e-9, "pago USD directo + punto NETO (10 + 96.5): {}", s.payments_usd);
         assert!((s.payments_bs - 2025.0).abs() < 1e-9, "pago Bs por método Bs: {}", s.payments_bs);
         assert!((s.sales_usd - 15.0).abs() < 1e-9, "venta USD: {}", s.sales_usd);
         assert!((s.sales_bs - 405.0).abs() < 1e-9, "venta Bs: {}", s.sales_bs);
@@ -5329,6 +5697,149 @@ discount_amount: 0.0,
         assert!(activos.iter().all(|s| s.status.as_deref() != Some("Cancelado")));
         let todos = db.get_services("", "", "", "").unwrap();
         assert_eq!(todos.len(), 4, "sin filtro sigue devolviendo todo");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_expenses_crud() {
+        let test_path = PathBuf::from("test_expenses.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        // Sin día abierto: los gastos NO requieren día (decisión de diseño)
+        let e1 = db.add_expense("2026-08-19", "Alquiler", 100.0, "USD", "Local").unwrap();
+        let _e2 = db.add_expense("2026-08-19", "Servicios", 2500.0, "VES", "Luz").unwrap();
+        let e3 = db.add_expense("2026-08-18", "Retiro del dueño", 20.0, "USD", "").unwrap();
+        let err = db.add_expense("2026-08-19", "Otro", 0.0, "USD", "").unwrap_err();
+        assert!(err.to_string().contains("mayor que 0"), "monto 0 rechazado");
+
+        let todos = db.get_expenses("2026-08-01", "2026-08-31").unwrap();
+        assert_eq!(todos.len(), 3);
+        assert!((todos.iter().filter(|e| e.currency == "USD").map(|e| e.amount).sum::<f64>() - 120.0).abs() < 1e-9);
+        assert!((todos.iter().filter(|e| e.currency == "VES").map(|e| e.amount).sum::<f64>() - 2500.0).abs() < 1e-9);
+
+        let solo_ayer = db.get_expenses("2026-08-18", "2026-08-18").unwrap();
+        assert_eq!(solo_ayer.len(), 1);
+        assert_eq!(solo_ayer[0].id, e3);
+
+        db.delete_expense(e1).unwrap();
+        assert!(db.delete_expense(9999).is_err(), "borrar inexistente falla");
+        assert_eq!(db.get_expenses("2026-08-01", "2026-08-31").unwrap().len(), 2);
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_profit_summary() {
+        let test_path = PathBuf::from("test_profit.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // Producto con costo 30, venta $80 (USD) + venta Bs 405 (≈$10 a tasa 40.5)
+        let pid = db.add_product("Repuesto A", Some(1), "Marca", "M1", "", "[]", 30.0, 80.0, 5, 0, 90.0).unwrap();
+        db.add_sale(Some(pid), "Repuesto A", 1, 80.0, 80.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(None, "Repuesto B", 1, 10.0, 405.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES", 0.0).unwrap();
+
+        // Servicio con pantalla exacta (costo 15), cobrado $50 USD, entregado hoy
+        let screen = db.add_product("Pantalla X", Some(1), "Marca", "M2", "", "[]", 15.0, 40.0, 3, 0, 45.0).unwrap();
+        let sid = db.add_service("PRF-1", "Cliente", "", "M2", "f", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.update_service(sid, "Cliente", "", "M2", "f", "Cambio pantalla", "[\"Cambio pantalla\"]", 50.0,
+            "Divisas (USD Cash)", &today, "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", Some(screen), 0.0).unwrap();
+        db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
+
+        let p = db.get_profit_summary(&today, &today).unwrap();
+        // Ingresos: $80 + $50 (USD) + Bs 405→$10 = $140
+        assert!((p.income_usd - 140.0).abs() < 1e-6, "ingresos USD equiv: {}", p.income_usd);
+        assert!((p.income_bs - 405.0).abs() < 1e-6);
+        // Costo: 30 (venta) + 15 (pantalla) = 45
+        assert!((p.cost_usd - 45.0).abs() < 1e-6, "costo: {}", p.cost_usd);
+        // Utilidad: 140 − 45 = 95; margen ≈ 67.86%
+        assert!((p.profit_usd - 95.0).abs() < 1e-6, "utilidad: {}", p.profit_usd);
+        assert!((p.margin_pct - 95.0 / 140.0 * 100.0).abs() < 1e-6);
+        assert!((p.sales_income_usd - 80.0).abs() < 1e-6);
+        assert!((p.sales_income_bs - 405.0).abs() < 1e-6);
+        assert!((p.sales_cost_usd - 30.0).abs() < 1e-6);
+        assert!((p.services_income_usd - 50.0).abs() < 1e-6);
+        assert!((p.services_cost_usd - 15.0).abs() < 1e-6);
+        assert!(p.tasa_bcv > 0.0);
+        // Rango vacío → todo 0, sin pánico
+        let vacio = db.get_profit_summary("2026-01-01", "2026-01-02").unwrap();
+        assert_eq!(vacio.income_usd, 0.0);
+        assert_eq!(vacio.profit_usd, 0.0);
+        assert_eq!(vacio.margin_pct, 0.0);
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_receivables_buckets() {
+        let test_path = PathBuf::from("test_receivables.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let days_ago = |n: i64| {
+            (chrono::Local::now() - chrono::Duration::days(n)).format("%Y-%m-%d").to_string()
+        };
+        let mk = |order: &str, amount: f64, status: &str| {
+            let sid = db.add_service(order, "Cliente", "", "M", "f", "Cambio batería",
+                "[\"Cambio batería\"]", amount, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+            db.update_service(sid, "Cliente", "", "M", "f", "Cambio batería", "[\"Cambio batería\"]", amount,
+                "Divisas (USD Cash)", "", status, "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
+            sid
+        };
+        // Sin pagos, entrado hoy → 0-7 días
+        mk("REC-1", 100.0, "Recibido");
+        // Abonó 20 de 50, entrado hace 10 días → 8-30
+        let s2 = mk("REC-2", 50.0, "Recibido");
+        let old2 = days_ago(10);
+        db.conn.lock().unwrap().execute("UPDATE services SET date_in=?1 WHERE id=?2", params![old2, s2]).unwrap();
+        db.add_service_payment(s2, 20.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
+        // Entrado hace 40 días, sin pagos → +30 días
+        let s3 = mk("REC-3", 40.0, "Por entregar");
+        let old3 = days_ago(40);
+        db.conn.lock().unwrap().execute("UPDATE services SET date_in=?1 WHERE id=?2", params![old3, s3]).unwrap();
+        // Entregado con saldo SÍ cuenta (entrega con saldo es válida)
+        let s4 = mk("REC-4", 60.0, "Recibido");
+        db.update_service(s4, "Cliente", "", "M", "f", "Cambio batería", "[\"Cambio batería\"]", 60.0,
+            "Divisas (USD Cash)", &today, "Entregado", "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0).unwrap();
+        // Cancelado/Devuelto NO cuentan
+        mk("REC-5", 999.0, "Cancelado");
+        mk("REC-6", 999.0, "Devuelto");
+
+        let r = db.get_receivables().unwrap();
+        assert_eq!(r.count, 4, "solo activos con saldo: {}", r.count);
+        assert!((r.total_usd - 230.0).abs() < 1e-6, "total: {}", r.total_usd);
+        assert_eq!(r.buckets[0].count, 2, "0-7 días: REC-1 + REC-4");
+        assert_eq!(r.buckets[1].count, 1, "8-30 días: REC-2");
+        assert_eq!(r.buckets[2].count, 1, "+30 días: REC-3");
+        assert!((r.buckets[0].total_usd - 160.0).abs() < 1e-6);
+        assert!((r.buckets[1].total_usd - 30.0).abs() < 1e-6);
+        assert!((r.buckets[2].total_usd - 40.0).abs() < 1e-6);
+        assert_eq!(r.items.len(), 4);
+        assert_eq!(r.items[0].order_num.as_deref(), Some("REC-1"), "top por saldo");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_inventory_value() {
+        let test_path = PathBuf::from("test_inventory_value.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.add_product("A", Some(1), "M1", "X", "", "[]", 10.0, 25.0, 5, 0, 30.0).unwrap();  // 50 costo, 125/150
+        db.add_product("B", Some(2), "M2", "Y", "", "[]", 100.0, 200.0, 2, 0, 220.0).unwrap(); // 200 costo
+        db.add_product("C", Some(1), "M3", "Z", "", "[]", 0.0, 5.0, 10, 0, 5.0).unwrap();     // stock sí, costo 0
+        db.add_product("D", Some(1), "M4", "W", "", "[]", 10.0, 25.0, 0, 0, 30.0).unwrap();   // stock 0 → no cuenta
+
+        let v = db.get_inventory_value().unwrap();
+        assert_eq!(v.units, 17, "5+2+10, el de stock 0 no cuenta");
+        assert!((v.cost_usd - 250.0).abs() < 1e-6, "50+200+0: {}", v.cost_usd);
+        assert!((v.sale_usd - 575.0).abs() < 1e-6, "125+400+50: {}", v.sale_usd);
+        assert!(!v.categories.is_empty(), "top categorías poblado");
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

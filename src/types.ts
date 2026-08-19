@@ -338,6 +338,69 @@ export interface DaySummary {
   sales_bs: number;
 }
 
+export interface Expense {
+  id: number;
+  expense_date: string;
+  category: string;
+  amount: number;
+  currency: string;
+  notes: string | null;
+}
+
+export interface ProfitSummary {
+  start: string;
+  end: string;
+  income_usd: number;
+  income_bs: number;
+  cost_usd: number;
+  profit_usd: number;
+  margin_pct: number;
+  sales_income_usd: number;
+  sales_income_bs: number;
+  sales_cost_usd: number;
+  services_income_usd: number;
+  services_income_bs: number;
+  services_cost_usd: number;
+  tasa_bcv: number;
+}
+
+export interface ReceivableItem {
+  order_num: string | null;
+  client: string | null;
+  model: string | null;
+  saldo_usd: number;
+  days_open: number;
+}
+
+export interface ReceivableBucket {
+  label: string;
+  count: number;
+  total_usd: number;
+}
+
+export interface ReceivablesSummary {
+  total_usd: number;
+  count: number;
+  buckets: ReceivableBucket[];
+  items: ReceivableItem[];
+}
+
+export interface CategoryValue {
+  category_name: string | null;
+  units: number;
+  cost_usd: number;
+  sale_usd: number;
+}
+
+export interface InventoryValue {
+  units: number;
+  cost_usd: number;
+  sale_usd: number;
+  categories: CategoryValue[];
+}
+
+export const EXPENSE_CATEGORIES = ['Alquiler', 'Servicios', 'Salario', 'Retiro del dueño', 'Compra de repuestos', 'Otro'] as const;
+
 export interface InventoryMovement {
   id: number;
   date: string | null;

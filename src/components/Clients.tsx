@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf, isRefund } from '@/lib/utils';
+import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf, isRefund, isFinalized } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import type { ClientSummary, Service, Sale, ServicePayment, Technician } from '../types';
 
@@ -439,7 +439,11 @@ function ServiceRow({ s, expanded, payments, techs, onToggle }: {
           )}
         </TableCell>
         <TableCell className="text-right">
-          {s.amount - s.paid_amount > 0.005 ? (
+          {isFinalized(s.status) ? (
+            <Badge variant="outline" className="text-muted-foreground">{s.status === 'Devuelto' ? 'Devuelto' : 'Cancelado'}</Badge>
+          ) : (s.paid_amount ?? 0) <= 0.005 ? (
+            <span className="text-amber-600 text-xs font-semibold">Por pagar ${(s.amount - s.paid_amount).toFixed(2)}</span>
+          ) : s.amount - s.paid_amount > 0.005 ? (
             <span className="text-danger text-xs font-semibold">${(s.amount - s.paid_amount).toFixed(2)}</span>
           ) : s.paid_amount - s.amount > 0.005 ? (
             <span className="text-warning text-xs font-semibold">Excedente ${(s.paid_amount - s.amount).toFixed(2)}</span>

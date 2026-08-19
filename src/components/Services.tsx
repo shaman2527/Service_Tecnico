@@ -16,7 +16,7 @@ import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -237,6 +237,9 @@ export default function Services() {
     return m;
   }, [catalog]);
 
+  // Pagos reales por servicio (para el chip de método honesto en las tarjetas)
+  const [paymentsMap, setPaymentsMap] = useState<Record<number, ServicePayment[]>>({});
+
   const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
   const load = async () => {
@@ -248,6 +251,16 @@ export default function Services() {
     setServices(s);
     setStatuses(st);
     setTechnicians(techs);
+    // Métodos REALES de pago por tarjeta (chip honesto: si pagó por Pago Móvil,
+    // la tarjeta no debe decir "Divisas"). Cap 120 filas para no disparar N queries.
+    if (s.length > 0 && s.length <= 120) {
+      const entries = await Promise.all(s.map(async sv =>
+        [sv.id, await api.getServicePayments(sv.id).catch(() => [] as ServicePayment[])] as const,
+      ));
+      setPaymentsMap(Object.fromEntries(entries));
+    } else {
+      setPaymentsMap({});
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -359,6 +372,12 @@ export default function Services() {
     const entregado = s.status === 'Entregado';
     const porEntregar = s.status === 'Por entregar';
     const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
+    const finalized = isFinalized(s.status);
+    // Métodos REALES usados en los pagos (chip honesto); fallback al método del form
+    const pays = paymentsMap[s.id] ?? [];
+    const realMethods = pays.length > 0
+      ? [...new Set(pays.map(p => p.payment_method).filter(Boolean))].map(shortMethodLabel)
+      : null;
     return (
       <Card key={s.id} className={cn(
         'overflow-hidden transition-shadow hover:shadow-md border-l-4',
@@ -430,20 +449,24 @@ export default function Services() {
                 ) : (
                   <span className="text-sm font-bold">${s.amount.toFixed(2)}</span>
                 )}
-                {balance <= 0.005 ? (
+                {finalized ? (
+                  <Badge variant="outline" className="text-danger">{s.status === 'Devuelto' ? 'Devuelto' : 'Cancelado'}</Badge>
+                ) : balance <= 0.005 ? (
                   <Badge variant="outline" className="text-success">Cancelado</Badge>
+                ) : (s.paid_amount ?? 0) <= 0.005 ? (
+                  <Badge variant="outline" className="text-amber-600 border-amber-500/40 bg-amber-500/10">Por pagar ${balance.toFixed(2)}</Badge>
                 ) : (
                   <Badge variant="outline" className="text-danger">${balance.toFixed(2)} pendiente</Badge>
                 )}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
                 <span className="truncate">
-                  {s.payment_method ?? '-'}
-                  {isMovilOrZelle(s.payment_method) && s.zelle_reference && (
+                  {realMethods ? realMethods.join(' + ') : (s.payment_method ?? '-')}
+                  {!realMethods && isMovilOrZelle(s.payment_method) && s.zelle_reference && (
                     <span className="text-[11px] text-muted-foreground"> · ref ····{s.zelle_reference.slice(-4)}</span>
                   )}
                 </span>
-                {s.paid_amount > 0 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
+                {s.paid_amount > 0.005 && <span className="text-emerald-600 font-medium shrink-0">abonado ${s.paid_amount.toFixed(2)}</span>}
               </div>
             </div>
 
@@ -495,16 +518,18 @@ export default function Services() {
                     <CheckCircle2 className="size-3.5" /> {delivering?.id === s.id ? 'Entregando...' : 'Entregar'}
                   </Button>
                 )}
-                <Button size="sm" className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
-                  onClick={() => setPayFor(s)}>
-                  <Banknote className="size-3.5" /> Pago / Abono
-                </Button>
-                {(s.paid_amount ?? 0) > 0.005 && (
+                {!finalized && (
+                  <Button size="sm" className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+                    onClick={() => setPayFor(s)}>
+                    <Banknote className="size-3.5" /> Pago / Abono
+                  </Button>
+                )}
+                {!finalized && ((s.paid_amount ?? 0) > 0.005 || (entregado && (s.amount ?? 0) > 0.005)) ? (
                   <Button size="sm" variant="outline" className="flex-1 text-danger border-danger/40 hover:bg-danger/10"
                     onClick={() => setRefundFor(s)}>
                     <Undo2 className="size-3.5" /> Devolución
                   </Button>
-                )}
+                ) : null}
                 {hasChecklist && (
                   <TooltipProvider delayDuration={100}>
                     <Tooltip>
@@ -653,9 +678,12 @@ export default function Services() {
           {groupItems.map(item => {
             if (item.type === 'group') {
               const svcs = item.services;
-              const total = svcs.reduce((a, s) => a + s.amount, 0);
-              const abonado = svcs.reduce((a, s) => a + s.paid_amount, 0);
+              // Las órdenes finalizadas (Devuelto/Cancelado) ya no deben: se excluyen del saldo
+              const activas = svcs.filter(s => !isFinalized(s.status));
+              const total = activas.reduce((a, s) => a + s.amount, 0);
+              const abonado = activas.reduce((a, s) => a + s.paid_amount, 0);
               const saldo = total - abonado;
+              const allFinalized = activas.length === 0;
               return (
                 <Fragment key={`g-${item.groupId}`}>
                   <div className="col-span-full rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -667,8 +695,8 @@ export default function Services() {
                     </span>
                     <span className="text-xs text-muted-foreground truncate max-w-[200px]">{svcs[0]?.client ?? '-'}</span>
                     <span className="text-xs font-semibold">Total ${total.toFixed(2)}</span>
-                    <span className={cn('text-xs font-semibold', saldo <= 0.005 ? 'text-success' : 'text-danger')}>
-                      {saldo <= 0.005 ? 'Cancelado' : `Abonado $${abonado.toFixed(2)} · Saldo $${saldo.toFixed(2)}`}
+                    <span className={cn('text-xs font-semibold', allFinalized ? 'text-muted-foreground' : saldo <= 0.005 ? 'text-success' : 'text-danger')}>
+                      {allFinalized ? 'Finalizado' : saldo <= 0.005 ? 'Cancelado' : `Abonado $${abonado.toFixed(2)} · Saldo $${saldo.toFixed(2)}`}
                     </span>
                     <span className="ml-auto text-[11px] text-muted-foreground hidden lg:block">
                       Cada equipo se paga y entrega por separado
@@ -939,6 +967,8 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
   const isZelle = device.payment.includes('Zelle');
   const isPagoMovil = device.payment.includes('Móvil') || device.payment.includes('Movil');
   const isDivisas = device.payment === 'Divisas (USD Cash)';
+  // Monto = PRECIO del servicio; Total a pagar = Monto − Descuento (lo que se guarda)
+  const deviceNet = Math.max(0, device.amount - device.discount);
 
   useEffect(() => {
     const q = normPhoneModel(device.model);
@@ -974,6 +1004,14 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
       : withUsd[0].price_sale;
     return { base, usdPrice, suggested: Math.max(0, base - usdPrice) };
   }, [isDivisas, device.model, phoneModels]);
+
+  // Catálogo sin precios para este modelo (carga de inventario real): el descuento se escribe a mano
+  const noCatalogPrice = useMemo(() => {
+    if (!device.model.trim()) return false;
+    const q = normPhoneModel(device.model);
+    const entry = phoneModels.find(e => e.norm === q);
+    return !!entry && entry.products.every(p => p.price_sale <= 0);
+  }, [device.model, phoneModels]);
 
   return (
     <div className="rounded-xl border border-border/70 p-4 space-y-3">
@@ -1025,13 +1063,16 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           )}
         </div>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Monto ($)</label>
+          <label className="text-sm font-medium">Monto ($) — precio del servicio</label>
           <Input type="number" step={0.01} min={0} value={device.amount}
             onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
           {isDivisas && divHints && (
             <p className="text-xs text-muted-foreground">
               Precio lista ${divHints.base.toFixed(2)} · Efectivo sugerido ${divHints.usdPrice.toFixed(2)}
             </p>
+          )}
+          {device.discount > 0.005 && (
+            <p className="text-xs font-semibold text-emerald-700">Total a pagar: ${deviceNet.toFixed(2)}</p>
           )}
         </div>
         <div className="space-y-2">
@@ -1040,20 +1081,20 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
         </div>
       </div>
 
-      {isDivisas && (
-        <div className="space-y-2">
-          <label className="text-sm font-medium">Descuento ($)</label>
-          <Input type="number" step={0.01} min={0} value={device.discount}
-            onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
-          <p className="text-xs text-muted-foreground">
-            {device.discount > 0.005 ? (
-              <>Precio ${(device.amount + device.discount).toFixed(2)} → cliente paga ${device.amount.toFixed(2)} en efectivo</>
-            ) : (
-              <>Sin descuento: el cliente paga el precio completo en efectivo. Se sugiere automáticamente al elegir el modelo (precio lista − precio contado).</>
-            )}
-          </p>
-        </div>
-      )}
+      <div className="space-y-2">
+        <label className="text-sm font-medium">Descuento ($)</label>
+        <Input type="number" step={0.01} min={0} value={device.discount}
+          onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
+        <p className="text-xs text-muted-foreground">
+          {device.discount > 0.005 ? (
+            <>Precio ${device.amount.toFixed(2)} − Descuento ${device.discount.toFixed(2)} → <span className="font-semibold text-emerald-700">Total ${deviceNet.toFixed(2)}</span></>
+          ) : noCatalogPrice ? (
+            <>Sin precios en el catálogo para este modelo: escribe el precio y el descuento a mano (el total se calcula solo).</>
+          ) : (
+            <>Sin descuento: el cliente paga el precio completo. El descuento aplica con cualquier método de pago.</>
+          )}
+        </p>
+      </div>
 
       <div className="space-y-2">
         <label className="text-sm font-medium">
@@ -1177,7 +1218,7 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
             <Input type="number" step={0.1} min={0} max={100} value={device.bankFeePercent}
               onChange={e => onChange({ bankFeePercent: Number(e.target.value) })} />
             <p className="text-xs text-muted-foreground">
-              Comisión: ${((device.amount * device.bankFeePercent) / 100).toFixed(2)} · Neto: ${(device.amount - (device.amount * device.bankFeePercent) / 100).toFixed(2)}
+              Comisión: ${((deviceNet * device.bankFeePercent) / 100).toFixed(2)} · Neto: ${(deviceNet - (deviceNet * device.bankFeePercent) / 100).toFixed(2)}
             </p>
           </div>
         )}
@@ -1273,7 +1314,6 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
   const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
-  const isDivisas = payment === 'Divisas (USD Cash)';
 
   const currentTech = technicians.find(t => t.id === Number(techSel));
 
@@ -1309,7 +1349,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       const customTypes = parsedTypes.filter(t => !SERVICE_TYPES.includes(t));
       setServiceTypes(knownTypes.length > 0 ? knownTypes : ['Cambio pantalla']);
       setOtherFault(customTypes.join(', '));
-      setAmount(service.amount);
+      setAmount(service.amount + (service.discount_amount ?? 0));
       amountTouched.current = true;
       setDiscount(service.discount_amount ?? 0);
       discountTouched.current = true;
@@ -1395,6 +1435,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   // Pantalla exacta en edición: opciones compatibles + si quedó sin elegir (bloquea guardar)
   const screenOptions = useMemo(() => compatibleScreens(phoneModels, model), [phoneModels, model]);
+
+  // Catálogo sin precios para este modelo: el descuento se escribe a mano (hint honesto)
+  const editNoCatalogPrice = useMemo(() => {
+    if (!model.trim()) return false;
+    const q = normPhoneModel(model);
+    const entry = phoneModels.find(e => e.norm === q);
+    return !!entry && entry.products.every(p => p.price_sale <= 0);
+  }, [model, phoneModels]);
   const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions) === false
     ? 'Elige la pantalla exacta a instalar (o el modelo debe estar en el catálogo)'
     : null;
@@ -1418,7 +1466,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         const typesArr = [...serviceTypes];
         if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
         const serviceTypesJson = JSON.stringify(typesArr);
-        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, amount, payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId, discount);
+        await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, Math.max(0, amount - discount), payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId, discount);
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
@@ -1429,7 +1477,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             fault: d.fault,
             service_type: d.serviceTypes[0] ?? 'Cambio pantalla',
             service_types: JSON.stringify(typesArr),
-            amount: d.amount,
+            // Monto = precio; Total a pagar (guardado) = Monto − Descuento
+            amount: Math.max(0, d.amount - d.discount),
             discount_amount: d.discount,
             payment_method: d.payment,
             observations: '',
@@ -1634,10 +1683,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 </div>
                 <div className="rounded-md px-3 py-2 border">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
-                  {saldoUsd > 0.005 ? (
-                    <p className="font-bold text-danger">${saldoUsd.toFixed(2)} pendiente</p>
+                  {isFinalized(service?.status) ? (
+                    <p className="font-bold text-muted-foreground">{service?.status === 'Devuelto' ? 'Devuelto' : 'Cancelado'}</p>
                   ) : saldoUsd < -0.005 ? (
                     <p className="font-bold text-warning">Excedente ${excedenteUsd.toFixed(2)}</p>
+                  ) : payments.length === 0 ? (
+                    <p className="font-bold text-amber-600">Por pagar ${saldoUsd.toFixed(2)}</p>
+                  ) : saldoUsd > 0.005 ? (
+                    <p className="font-bold text-danger">${saldoUsd.toFixed(2)} pendiente</p>
                   ) : (
                     <p className="font-bold text-success">Cancelado</p>
                   )}
@@ -1732,20 +1785,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           </div>
 
-          {isDivisas && (
-            <div className="space-y-2">
+          <div className="space-y-2">
               <label className="text-sm font-medium">Descuento ($)</label>
               <Input type="number" step={0.01} min={0} value={discount}
                 onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
               <p className="text-xs text-muted-foreground">
                 {discount > 0.005 ? (
-                  <>Precio ${(amount + discount).toFixed(2)} → cliente paga ${amount.toFixed(2)} en efectivo</>
+                  <>Precio ${amount.toFixed(2)} − Descuento ${discount.toFixed(2)} → <span className="font-semibold text-emerald-700">Total ${Math.max(0, amount - discount).toFixed(2)}</span></>
+                ) : editNoCatalogPrice ? (
+                  <>Sin precios en el catálogo para este modelo: escribe el precio y el descuento a mano (el total se calcula solo).</>
                 ) : (
-                  <>Sin descuento: el cliente paga el precio completo en efectivo. Se sugiere automáticamente al elegir el modelo (precio lista − precio contado).</>
+                  <>Sin descuento: el cliente paga el precio completo. El descuento aplica con cualquier método de pago.</>
                 )}
               </p>
             </div>
-          )}
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Color del equipo</label>

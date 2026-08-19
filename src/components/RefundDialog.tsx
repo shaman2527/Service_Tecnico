@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Undo2 } from 'lucide-react';
+import { Undo2, AlertTriangle, CheckCircle2, CircleX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { methodCurrency, currencySymbol } from '@/lib/utils';
+import { methodCurrency, currencySymbol, isFinalized } from '@/lib/utils';
 import type { Service } from '../types';
 
 export default function RefundDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
@@ -24,6 +24,7 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
   const [saving, setSaving] = useState(false);
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [tasaBcv, setTasaBcv] = useState(0);
+  const [confirmNoMoney, setConfirmNoMoney] = useState(false);
   const amountTouched = useRef(false);
 
   const refundIsBs = refundCurrency === 'VES';
@@ -31,6 +32,8 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
 
   const abonadoUsd = service?.paid_amount ?? 0;
   const maxUsd = abonadoUsd;
+  // Entregado sin que el cliente haya pagado: devolución SIN dinero (solo estado Devuelto)
+  const noMoney = maxUsd <= 0.005 && !isFinalized(service?.status);
 
   useEffect(() => {
     api.getPaymentMethods().then(setMethods).catch(() => {});
@@ -64,19 +67,24 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
   }, [open, service, refundMethod, tasaBcv, suggestAmount]);
 
   const doRefund = async () => {
-    if (!service || refundAmount <= 0) return;
+    if (!service) return;
     setRefundError(null);
-    // Validación: no se puede devolver más de lo abonado (en USD equivalente)
-    const equivUsd = refundIsBs
-      ? (tasaBcv > 0 ? refundAmount / tasaBcv : refundAmount)
-      : refundAmount;
-    if (equivUsd > maxUsd + 0.01) {
-      setRefundError(`Solo puedes devolver hasta lo abonado: ${currencySymbol(refundCurrency)}${maxUsd.toFixed(2)} ${refundIsBs ? `(≈ Bs. ${Math.round(maxUsd * tasaBcv)})` : ''}`);
-      return;
+    if (!confirmNoMoney) {
+      if (refundAmount <= 0) return;
+      // Validación: no se puede devolver más de lo abonado (en USD equivalente)
+      const equivUsd = refundIsBs
+        ? (tasaBcv > 0 ? refundAmount / tasaBcv : refundAmount)
+        : refundAmount;
+      if (equivUsd > maxUsd + 0.01) {
+        setRefundError(`Solo puedes devolver hasta lo abonado: ${currencySymbol(refundCurrency)}${maxUsd.toFixed(2)} ${refundIsBs ? `(≈ Bs. ${Math.round(maxUsd * tasaBcv)})` : ''}`);
+        return;
+      }
     }
     setSaving(true);
     try {
-      await api.addServiceRefund(service.id, refundAmount, refundMethod, refundZelle, refundCurrency, refundNotes);
+      if (!confirmNoMoney) {
+        await api.addServiceRefund(service.id, refundAmount, refundMethod, refundZelle, refundCurrency, refundNotes);
+      }
       // El equipo se devuelve al cliente: estado → Devuelto (reabre stock si estaba entregado)
       if (service.status !== 'Devuelto' && service.status !== 'Cancelado') {
         await api.updateService(
@@ -165,15 +173,36 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
           <p className="text-xs text-muted-foreground">
             El reembolso se resta del Libro Diario del día (método elegido) y del abonado de la orden.
           </p>
+          {noMoney && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="size-4 text-warning shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs">
+                  Este equipo se entregó <span className="font-semibold">sin que el cliente haya pagado</span>:
+                  no hay dinero que devolver.
+                </p>
+                <Button variant="outline" size="sm" className="w-fit border-amber-500/50 text-warning hover:bg-amber-500/10"
+                  onClick={() => setConfirmNoMoney(c => !c)}>
+                  {confirmNoMoney ? (
+                    <><CheckCircle2 className="size-3.5" /> Confirmado: devolver sin reembolso</>
+                  ) : (
+                    <><CircleX className="size-3.5" /> Marcar como Devuelto sin reembolso</>
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
           {refundError && <p className="text-sm text-danger">{refundError}</p>}
         </div>
         <DialogFooter className="shrink-0 flex-wrap gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
           <Button variant="destructive" onClick={doRefund}
             title="Ctrl+Enter"
-            disabled={saving || refundAmount <= 0 || dayOpen === false}>
+            disabled={saving || (dayOpen === false && !confirmNoMoney) || (refundAmount <= 0 && !confirmNoMoney)}>
             <Undo2 className="size-4" />
-            {saving ? 'Devolviendo...' : `Devolver ${currencySymbol(refundCurrency)}${refundAmount.toFixed(2)} y marcar Devuelto`}
+            {saving ? 'Procesando...' : confirmNoMoney
+              ? 'Devolver sin reembolso (marcar Devuelto)'
+              : `Devolver ${currencySymbol(refundCurrency)}${refundAmount.toFixed(2)} y marcar Devuelto`}
           </Button>
         </DialogFooter>
       </DialogContent>
