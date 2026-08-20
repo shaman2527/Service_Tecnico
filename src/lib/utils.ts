@@ -280,6 +280,16 @@ function kv(label: string, value: string, w: number): string[] {
   return out;
 }
 
+// Fecha de ticket en formato "19-08-2026 07:40" (dd-mm-aaaa hh:mm) — talón del recibo
+function formatTicketDate(iso: string | null | undefined): string {
+  const d = (iso ?? '').slice(0, 10);
+  const t = (iso ?? '').slice(11, 16);
+  if (d.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}${t ? ' ' + t : ''}`;
+  }
+  return (d + (t ? ' ' + t : '')).trim();
+}
+
 // Etiquetas cortas del blindaje para el ticket (caben 2 por línea)
 const CHECKLIST_SHORT: Record<string, string> = {
   chip_sim: 'CHIP/SIM', tapa_trasera: 'TAPA', bandeja_sim: 'BANDEJA',
@@ -429,14 +439,17 @@ export function buildServiceReceiptParts(
   lines.push(center('Gracias por su preferencia', w));
   lines.push('');
 
-  // === Talón recortable: los mismos datos, para pegar detrás del teléfono ===
+  // === Talón recortable: identificación compacta para pegar detrás del teléfono.
+  // Orden lógico: QUIÉN (orden/fecha) → CLIENTE → QUÉ (equipo/servicio) → CUÁNTO (total/pago).
   const stub: string[] = [dash, center('CORTA TIJERA', w), dash];
   for (const l of kv('ORDEN', service.order_num ?? '', w)) stub.push(l);
+  const stubDate = formatTicketDate(service.date_in);
+  if (stubDate) for (const l of kv('FECHA', stubDate, w)) stub.push(l);
   if (service.client) for (const l of kv('CLIENTE', service.client, w)) stub.push(l);
-  if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) stub.push(l);
-  if (service.phone) for (const l of kv('TELEFONO', service.phone, w)) stub.push(l);
-  if (service.color) for (const l of kv('COLOR', service.color, w)) stub.push(l);
-  if (service.model) for (const l of kv('MODELO', service.model, w)) stub.push(l);
+  const stubContact = [service.client_ci, service.phone].filter(Boolean).join(' · ');
+  if (stubContact) for (const l of kv('CONTACTO', stubContact, w)) stub.push(l);
+  const stubModel = service.color ? `${service.model} (${service.color})` : service.model;
+  if (stubModel) for (const l of kv('EQUIPO', stubModel, w)) stub.push(l);
   if (logo) for (const l of kv('SERVICIO', logo, w)) stub.push(l);
   // Pago para la salida del equipo: TOTAL / PAGADO / FALTA — mismo bloque minimalista.
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) stub.push(l);
@@ -455,7 +468,6 @@ export function buildServiceReceiptParts(
   const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
   if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
   stub.push(dash);
-  stub.push('');
   stub.push(center('FIRMA SALIDA', w));
 
   return { main: lines.join('\n'), stub: stub.join('\n') };

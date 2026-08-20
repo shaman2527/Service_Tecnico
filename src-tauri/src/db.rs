@@ -1343,8 +1343,8 @@ impl Database {
             return Err(day_shift_error("Debe agregar al menos un equipo."));
         }
         for (i, d) in devices.iter().enumerate() {
-            if d.model.trim().is_empty() || d.fault.trim().is_empty() {
-                return Err(day_shift_error(&format!("Equipo {}: el modelo y la falla son obligatorios.", i + 1)));
+            if d.model.trim().is_empty() {
+                return Err(day_shift_error(&format!("Equipo {}: el modelo es obligatorio.", i + 1)));
             }
         }
         let conn = self.conn.lock().unwrap();
@@ -5506,12 +5506,18 @@ discount_amount: 0.0,
         let err2 = db.add_service_order("C", "1", "", "", None, "", None, &[]).unwrap_err();
         assert!(err2.to_string().contains("al menos un equipo"));
         db.open_day(0.0, 40.5, 45.0).unwrap();
-        // Equipo 2 con falla vacía → rollback TOTAL (ninguna fila queda)
-        let bad = ServiceDeviceInput { fault: String::new(), ..d.clone() };
+        // Equipo 2 con modelo vacío → rollback TOTAL (ninguna fila queda)
+        let bad = ServiceDeviceInput { model: String::new(), ..d.clone() };
         let err3 = db.add_service_order("C", "1", "", "", None, "", None, &[d.clone(), bad]).unwrap_err();
         assert!(err3.to_string().contains("Equipo 2"), "El error indica qué equipo falló");
         assert_eq!(db.get_services("", "", "", "").unwrap().len(), 0, "Rollback: no queda ninguna fila");
         assert_eq!(db.next_order_num().unwrap(), "DEV-0001", "Los números no se consumen al hacer rollback");
+        // Falla vacía es OPCIONAL: la orden de 2 equipos se guarda normal (la falla queda '')
+        let noFault = ServiceDeviceInput { fault: String::new(), ..d.clone() };
+        db.add_service_order("C", "1", "", "", None, "", None, &[d.clone(), noFault]).unwrap();
+        let saved = db.get_services("", "", "", "").unwrap();
+        assert_eq!(saved.len(), 2, "Falla vacía no bloquea la orden");
+        assert!(saved.iter().any(|s| s.fault.as_deref().unwrap_or("").is_empty()), "La falla vacía se guarda tal cual");
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

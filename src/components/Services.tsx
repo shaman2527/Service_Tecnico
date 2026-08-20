@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2 } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
@@ -186,6 +187,94 @@ function TechniciansDialog({ open, technicians, onOpenChange, onChanged }: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function UnpaidBanner({ neverPaid, balance, amount, paid }: {
+  neverPaid: boolean;
+  balance: number;
+  amount: number;
+  paid: number;
+}) {
+  const pct = amount > 0.005 ? Math.min(100, Math.max(0, (paid / amount) * 100)) : 0;
+  return (
+    <Alert className="border-destructive/25 bg-gradient-to-b from-destructive/10 to-destructive/5 shadow-sm [&>svg]:hidden">
+      <AlertDescription className="flex items-center gap-3">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive text-white shadow-sm">
+          <AlertTriangle className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <AlertTitle className="mb-0.5 text-[10px] font-bold uppercase tracking-widest text-destructive">
+            {neverPaid ? 'Sin pagar' : 'Saldo pendiente'}
+          </AlertTitle>
+          <p className="text-sm leading-tight text-foreground">
+            <span className="font-bold text-destructive">Falta ${balance.toFixed(2)}</span>
+            {!neverPaid && (
+              <span className="text-muted-foreground"> de ${amount.toFixed(2)}</span>
+            )}
+          </p>
+        </div>
+        {!neverPaid && (
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <span className="text-[10px] font-semibold text-muted-foreground">Abonado ${paid.toFixed(2)}</span>
+            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-destructive/15">
+              <div className="h-full rounded-full bg-destructive" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+// Indicador de progreso paso a paso del formulario de servicio: círculos numerados
+// conectados por una línea que se colorea conforme completas cada etapa + barra de avance.
+function FormStepper({ steps, current }: {
+  steps: { label: string; done: boolean }[];
+  current: number;
+}) {
+  const doneCount = steps.filter(s => s.done).length;
+  const pct = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
+  return (
+    <div className="shrink-0 space-y-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5">
+      <div className="flex items-center gap-1.5">
+        {steps.map((s, i) => {
+          const lineDone = i > 0 && steps[i - 1].done;
+          return (
+            <Fragment key={s.label}>
+              {i > 0 && (
+                <div className={cn('h-0.5 min-w-2 flex-1 rounded-full transition-colors', lineDone ? 'bg-primary' : 'bg-border')} />
+              )}
+              <div className="flex flex-col items-center gap-1">
+                <span className={cn(
+                  'flex size-7 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-bold transition-colors',
+                  s.done
+                    ? 'border-primary bg-primary text-primary-foreground'
+                    : i === current
+                      ? 'border-primary text-primary'
+                      : 'border-border bg-background text-muted-foreground'
+                )}>
+                  {s.done ? <Check className="size-3.5" /> : i + 1}
+                </span>
+                <span className={cn('text-[10px] font-medium leading-none', i === current ? 'text-foreground' : 'text-muted-foreground')}>
+                  {s.label}
+                </span>
+              </div>
+            </Fragment>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="h-1 flex-1 overflow-hidden rounded-full bg-border">
+          <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="shrink-0 text-[10px] font-semibold text-muted-foreground">
+          {current >= steps.length
+            ? `¡Listo! ${pct}%`
+            : `Paso ${current + 1} de ${steps.length} · ${steps[current].label} · ${pct}%`}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -415,6 +504,16 @@ export default function Services() {
           </div>
           <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
         </CardHeader>
+        {!finalized && balance > 0.005 && (
+          <div className="px-4 pt-1">
+            <UnpaidBanner
+              neverPaid={(s.paid_amount ?? 0) <= 0.005}
+              balance={balance}
+              amount={s.amount}
+              paid={s.paid_amount ?? 0}
+            />
+          </div>
+        )}
         <CardContent className="px-4 pb-4 pt-0">
           <div className="flex flex-col gap-3">
             <div className="flex items-start gap-2.5">
@@ -702,6 +801,16 @@ export default function Services() {
                       Cada equipo se paga y entrega por separado
                     </span>
                   </div>
+                  {!allFinalized && saldo > 0.005 && (
+                    <div className="col-span-full">
+                      <UnpaidBanner
+                        neverPaid={abonado <= 0.005}
+                        balance={saldo}
+                        amount={total}
+                        paid={abonado}
+                      />
+                    </div>
+                  )}
                   {svcs.map((s, i) => renderServiceCard(s, item.groupId, i + 1, svcs.length))}
                 </Fragment>
               );
@@ -1138,7 +1247,7 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
       )}
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
+        <label className="text-sm font-medium">Falla / Trabajo realizado <span className="font-normal text-muted-foreground">(opcional)</span></label>
         <Textarea value={device.fault} onChange={e => onChange({ fault: e.target.value })}
           placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
       </div>
@@ -1308,7 +1417,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const phoneModels = useMemo(() => buildPhoneModels(catalog), [catalog]);
 
   const devicesValid = devices.length > 0 &&
-    devices.every(d => d.model.trim() && d.fault.trim() && d.serviceTypes.length > 0 &&
+    devices.every(d => d.model.trim() && d.serviceTypes.length > 0 &&
       screenOk(d.serviceTypes, d.screenProductId, compatibleScreens(phoneModels, d.model)));
 
   const isPos = payment.includes('Punto');
@@ -1449,7 +1558,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   const save = async () => {
     if (service) {
-      if (!client || !model || !fault || serviceTypes.length === 0 || screenMissing) return;
+      if (!client || !model || serviceTypes.length === 0 || screenMissing) return;
     } else if (!client || !devicesValid) return;
     setSaving(true);
     try {
@@ -1520,6 +1629,24 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     onSaved();
   };
 
+  // Progreso paso a paso del formulario: cada sección completada = paso en verde.
+  // La falla y el blindaje son opcionales: no bloquean el avance del stepper.
+  const steps = service
+    ? [
+        { label: 'Cliente', done: client.trim().length > 0 },
+        { label: 'Equipo', done: !!model },
+        { label: 'Trabajos', done: serviceTypes.length > 0 },
+        { label: 'Finanzas', done: amount > 0 },
+        { label: 'Cierre', done: !!observations.trim() || !!dateOut || status !== 'Recibido' },
+      ]
+    : [
+        { label: 'Cliente', done: client.trim().length > 0 },
+        { label: 'Equipo', done: devices.length > 0 && devices.every(d => d.model.trim()) },
+        { label: 'Trabajos', done: devices.every(d => d.serviceTypes.length > 0) },
+        { label: 'Finanzas', done: devices.every(d => d.amount > 0) },
+      ];
+  const stepCurrent = steps.findIndex(s => !s.done);
+
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden"
@@ -1543,6 +1670,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <span>Garantía vencida el {warrantyEnd(service.date_out)}</span>
           </div>
         )}
+        <FormStepper steps={steps} current={stepCurrent === -1 ? steps.length : stepCurrent} />
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           <div className="text-sm text-muted-foreground">
             Orden: <strong>{orderNum}</strong>
@@ -1845,7 +1973,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           )}
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Falla / Trabajo realizado *</label>
+            <label className="text-sm font-medium">Falla / Trabajo realizado <span className="font-normal text-muted-foreground">(opcional)</span></label>
             <Textarea value={fault} onChange={e => setFault(e.target.value)}
               placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
           </div>
@@ -1992,7 +2120,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !fault || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+          <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
             {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
           </Button>
         </DialogFooter>
