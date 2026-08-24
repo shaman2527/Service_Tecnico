@@ -416,8 +416,8 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-23
-- **Build: ✅ PASS (10.0s)**
+- **Date:** 2026-08-24
+- **Build: ✅ PASS (12.65s)**
 - **Errors:** 0
 - **Warnings:** 0 (2 pre-existing: p_base, noFault)
 
