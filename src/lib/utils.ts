@@ -471,6 +471,7 @@ export function buildServiceReceiptParts(
   if (methods.length > 0) for (const l of kv('METODO', methods.join(' + '), w)) stub.push(l);
   const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
   if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
+  if (warrantyEnd(service.date_out)) stub.push(center('GARANTIA 7 DIAS', w));
   stub.push(dash);
   stub.push(center('FIRMA SALIDA', w));
 
