@@ -52,7 +52,9 @@ export default function Clients() {
     }
   };
 
-  const pendienteTotal = clientServices.reduce((a, s) => a + Math.max(0, (s.amount ?? 0) - (s.paid_amount ?? 0)), 0);
+  const pendienteTotal = clientServices
+    .filter(s => !isFinalized(s.status))
+    .reduce((a, s) => a + Math.max(0, (s.amount ?? 0) - (s.paid_amount ?? 0)), 0);
 
   return (
     <div className="flex flex-col gap-6">

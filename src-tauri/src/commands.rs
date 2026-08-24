@@ -520,3 +520,16 @@ pub fn export_daily_report(db: State<Database>, start_date: String, end_date: St
 pub fn export_daily_report_xlsx(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
     db.export_daily_report_xlsx(&start_date, &end_date).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn search_payments(db: State<Database>, start_date: Option<String>, end_date: Option<String>,
+                       method: Option<String>, client: Option<String>,
+                       reference: Option<String>, currency: Option<String>) -> Result<Vec<crate::db::PaymentSearchResult>, String> {
+    db.search_payments(start_date.as_deref(), end_date.as_deref(), method.as_deref(), client.as_deref(), reference.as_deref(), currency.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_payment_daily_detail(db: State<Database>, date: String, method: Option<String>) -> Result<Vec<crate::db::PaymentSearchResult>, String> {
+    db.get_payment_daily_detail(&date, method.as_deref()).map_err(|e| e.to_string())
+}

@@ -92,17 +92,15 @@ const sections = [
     bg: 'bg-orange-50',
     content: (
       <div className="space-y-2">
+        <p className="text-sm">El registro es un <span className="font-medium text-foreground">asistente paso a paso</span>: un paso por pantalla con botones <Badge variant="outline">Siguiente</Badge> / <Badge variant="outline">Anterior</Badge>, y la barra superior te muestra en qué paso vas (los pasos ya completados se pueden tocar para volver).</p>
         <ol className="list-decimal list-inside space-y-1">
-          <li><Badge variant="outline">Nuevo Servicio</Badge> → en el campo <span className="font-medium text-foreground">Cliente</span> escribe el nombre o la <span className="font-medium text-foreground">cédula</span> (V-12345678): las sugerencias muestran la cédula primero y, si la cédula existe, se <span className="font-medium text-foreground">autocompleta al salir del campo</span> — con su historial de servicios. Si no existe, se registra como cliente nuevo (la cédula es obligatoria).</li>
-          <li>Escribe el modelo del equipo — se sugieren los <span className="font-medium text-foreground">modelos de teléfono</span> del catálogo (una vez cada uno, con sus repuestos y stock debajo).</li>
-          <li>Marca los <span className="font-medium text-foreground">trabajos / fallas</span> que se le harán al equipo (puedes elegir varios: pantalla + conector + ...).
-            La opción <Badge variant="outline">Otro</Badge> permite escribir un trabajo libre. Los más comunes ya están incluidos: <Badge variant="outline">Pin de Carga</Badge> y <Badge variant="outline">Revisión</Badge>. El primer trabajo elegido es el tipo principal de la orden.</li>
-          <li>Marca el <span className="font-medium text-foreground">checklist de blindaje</span> (10 ítems Sí/No: chip SIM, tapa trasera, botones, cámara…) — cada ítem tiene su punto de color. El estado real del equipo al recibirlo te protege de reclamos. Queda visible con el escudo <span className="font-medium text-foreground">ShieldCheck</span> en la orden.</li>
-          <li>En <span className="font-medium text-foreground">Técnico responsable</span> (botón <Badge variant="outline">Técnicos</Badge>) asignas quién reparará el equipo: Aldri, William, o agregas uno con su color e iniciales. La orden queda marcada con el círculo de color + iniciales para saber quién la hizo.</li>
-          <li>Guarda el servicio. El estado va: Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago → Por entregar → <Badge variant="default" className="bg-success">Entregado</Badge> (o Cancelado / Devuelto).</li>
+          <li><span className="font-medium text-foreground">Paso Cliente:</span> escribe el nombre o la <span className="font-medium text-foreground">cédula</span> (V-12345678): las sugerencias muestran la cédula primero y, si la cédula existe, se <span className="font-medium text-foreground">autocompleta al salir del campo</span> — con su historial de servicios. Si no existe, se registra como cliente nuevo (la cédula es obligatoria). Aquí también asignas el <span className="font-medium text-foreground">técnico responsable</span> (botón <Badge variant="outline">Técnicos</Badge>).</li>
+          <li><span className="font-medium text-foreground">Paso Equipos:</span> escribe el modelo (se sugieren los <span className="font-medium text-foreground">modelos del catálogo</span> con repuestos y stock), el monto (precio del servicio), color y marca los <span className="font-medium text-foreground">trabajos / fallas</span> (puedes elegir varios). Términos del taller ya incluidos: <Badge variant="outline">Placa de carga</Badge>, <Badge variant="outline">Pegado de pantalla</Badge>, <Badge variant="outline">Reemplazo de botones</Badge>, <Badge variant="outline">Preparación de carcasa</Badge>, <Badge variant="outline">Cambio de bandeja SIM</Badge>, <Badge variant="outline">Pin de Carga</Badge>, <Badge variant="outline">Revisión</Badge> y <Badge variant="outline">Otro</Badge> (trabajo libre). Puedes registrar hasta 10 equipos en una sola orden.</li>
+          <li><span className="font-medium text-foreground">Paso Blindaje:</span> checklist Sí/No del estado del equipo al recibirlo (protege de reclamos). <span className="font-medium text-foreground">Chip (SIM)</span> y <span className="font-medium text-foreground">Forro / funda</span> vienen marcados en <Badge variant="outline" className="border-danger/40 text-danger">No</Badge> (normalmente se le entregan al cliente) — cámbialos a "Sí" solo si los deja en el equipo. Los demás ítems quedan sin marcar: los decide el operario. El recibo deja todo por escrito.</li>
+          <li><span className="font-medium text-foreground">Paso Revisar y guardar:</span> resumen de la orden (cliente, equipos, trabajos, descuentos, total) antes de guardar. Al editar una orden hay 5 pasos: Cliente, Equipo, Blindaje, Finanzas (método/estado) y Cierre (fecha de salida, observaciones y pagos).</li>
         </ol>
         <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-700">
-          <span className="font-semibold">Descuento:</span> escribe el <span className="font-medium">precio del servicio</span> en "Monto ($)" y lo que le rebajas en <span className="font-medium">Descuento ($)</span> — el <span className="font-medium text-foreground">total a pagar se calcula solo</span> (Precio − Descuento) y es lo que queda guardado, en el recibo y en el saldo. El descuento aplica con <span className="font-medium text-foreground">cualquier método de pago</span> (efectivo, Pago Móvil, Punto, Zelle...). Al elegir un modelo del catálogo se sugiere solo cuando hay precios cargados.
+          <span className="font-semibold">Descuento:</span> escribe el <span className="font-medium">precio del servicio</span> en "Monto ($)" y lo que le rebajas en <span className="font-medium">Descuento ($)</span> — el <span className="font-medium text-foreground">total a pagar se calcula solo</span> (Precio − Descuento) y es lo que queda guardado, en el recibo y en el saldo. El descuento aplica con <span className="font-medium text-foreground">cualquier método de pago</span> (efectivo, Pago Móvil, Punto, Zelle...) y se conserva aunque cambies el método.
         </div>
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
           <span className="font-semibold">Inventario automático:</span> al marcar <Badge variant="outline">Entregado</Badge> se descuenta 1 de la pantalla correspondiente. Si reabres el servicio, el stock se devuelve. Si el modelo no existe en el catálogo, se crea automáticamente.
@@ -151,7 +149,8 @@ const sections = [
         <ol className="list-decimal list-inside space-y-1">
           <li>Abre el servicio en edición → panel <Badge variant="outline">Pagos y Abonos</Badge>.</li>
           <li>Pulsa <Badge variant="outline">Registrar Pago / Abono</Badge> — monto, método de pago, referencia y notas.</li>
-          <li>El campo de monto cambia según el método: si eliges Pago Móvil/Efectivo Bs/Transferencia Bs el monto es <span className="font-medium text-foreground">en bolívares</span> (te muestra la equivalencia en $ con la tasa del día); si eliges Divisas/Zelle/Punto ($) es en dólares.</li>
+          <li>El campo de monto tiene un selector <Badge variant="outline">$ / Bs.</Badge>: escribe el monto en la moneda que dice el cliente. Si el método es en bolívares (Punto Bs, Pago Móvil...) y el cliente dice <span className="font-medium text-foreground">"7000 Bs."</span>, déjalo en Bs. y escribe 7000 (verás ≈ $); si dice <span className="font-medium text-foreground">"$20"</span>, toca $ y escribe 20. Al cambiar de método o de moneda, el valor se convierte solo con la tasa BCV del día. Botones rápidos $5/$10/$15/$20 (o Bs. 5.000/10.000/15.000/20.000) y <Badge variant="outline">Todo el saldo</Badge>.</li>
+          <li>Si el día se abrió <span className="font-medium text-foreground">sin tasa BCV</span>, el dialog de abono te lo avisa y bloquea el pago en Bs (evita errores de conversión). Solución: en <Badge variant="outline">Libro Diario</Badge> el banner verde tiene el botón <Badge variant="outline">Actualizar día</Badge> — escribe la tasa y guarda, sin cerrar el día.</li>
           <li>El saldo pendiente se calcula convirtiendo lo abonado en Bs. a $ con la tasa del día del pago: verás <span className="font-medium text-foreground">"Abonado $2.68 + Bs. 2010.00 · Saldo $47.32 pendiente"</span>.</li>
           <li>Cada abono cuenta en el Libro Diario el día que se recibe, en su moneda. Los abonos se pueden eliminar (el saldo se recalcula).</li>
           <li>Puedes entregar el equipo con saldo pendiente: la deuda queda visible en rojo en la orden y en el historial del cliente.</li>
@@ -266,9 +265,18 @@ const sections = [
           <p><span className="font-medium text-foreground">Punto de Venta:</span> el sistema te muestra cuánto cobraste por Punto ("Monto impreso") y tú escribes el monto total que imprimió la máquina al cerrarla — <span className="font-medium text-foreground">tiene que dar el mismo</span>; si no, se marca la diferencia en rojo. Si luego el banco liquida distinto, corrígelo con <Badge variant="outline">Liquidar</Badge> en la pestaña Cierres.</p>
         </div>
         <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Buscar y conciliar pagos:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>En la pestaña <Badge variant="outline">Pagos</Badge> puedes buscar por rango de fechas, método de pago, cliente/cédula, referencia o moneda. Se muestra una tabla con todos los pagos que coinciden, incluyendo orden, cliente, modelo, monto y referencia.</li>
+            <li>En la pestaña <Badge variant="outline">Diario</Badge>, las celdas de monto de cada método son <span className="font-medium text-foreground">clickeables</span> — al hacer clic se abre un desglose con cada pago individual de ese día y método (hora, orden, cliente, equipo, monto, referencia).</li>
+            <li>Para <span className="font-medium text-foreground">conciliar</span>: compara lo que imprime la máquina con lo que dice el sistema. Si hay diferencia, revisa el desglose del día/método afectado línea por línea.</li>
+          </ol>
+        </div>
+        <div className="space-y-1.5">
           <p className="font-medium text-foreground">Exportar Excel (día específico o mes completo):</p>
           <p><Badge variant="outline">Exportar Excel</Badge> genera un Excel profesional (<code className="rounded bg-muted px-1.5 py-0.5 text-xs">.xlsx</code>) en <code className="rounded bg-muted px-1.5 py-0.5 text-xs">Documentos\Registro</code> con el rango <Badge variant="outline">Desde / Hasta</Badge> visible arriba: pon la misma fecha en ambos para un día exacto, o deja el rango del mes para el mes completo. Contiene 6 hojas con filtros (clic en las flechas de las columnas): <span className="font-medium text-foreground">Resumen</span> (totales por día y por método), <span className="font-medium text-foreground">Cierres</span> (apertura, arqueo, diferencia), <span className="font-medium text-foreground">Ventas</span> (cliente, cédula, producto, monto, método), <span className="font-medium text-foreground">Servicios</span> (técnico, trabajos, saldo, pantalla instalada), <span className="font-medium text-foreground">Pagos y Abonos</span> y <span className="font-medium text-foreground">Movimientos</span>. Las filas <span className="font-medium text-foreground">TOTAL (filtrado)</span> se recalculan al filtrar (ej. un solo cliente).</p>
           <p><span className="font-medium text-foreground">Requisito:</span> la PC necesita Python 3 con <code className="rounded bg-muted px-1.5 py-0.5 text-xs">pip install openpyxl</code> (una sola vez). Si no está, la app genera el CSV clásico como respaldo automático.</p>
+          <p className="text-xs text-muted-foreground mt-1">Si tienes otras PCs con la app, necesitan la <span className="font-medium">misma versión</span> o una reinstalación del instalador para tener esta función. La actualización automática lo hace si la versión nueva ya está publicada.</p>
         </div>
       </div>
     ),
@@ -304,7 +312,7 @@ const sections = [
         </div>
         <div>
           <p className="font-medium text-foreground">¿Qué hago si no hay internet para la tasa BCV?</p>
-          <p>Escríbela manualmente al abrir el día. La tasa queda guardada en el cierre y se usa para convertir los pagos en bolívares.</p>
+          <p>Escríbela manualmente al abrir el día. La tasa queda guardada en el cierre y se usa para convertir los pagos en bolívares. Si el día ya está abierto con tasa en 0, no hace falta cerrarlo: pulsa <Badge variant="outline">Actualizar día</Badge> en el banner verde del Libro Diario y corrige la tasa.</p>
         </div>
         <div>
           <p className="font-medium text-foreground">¿Puedo corregir una venta o servicio?</p>
@@ -397,6 +405,28 @@ const sections = [
           </li>
         </ul>
         <p className="text-xs text-muted-foreground">Los atajos no interfieren mientras escribes en un campo.</p>
+      </div>
+    ),
+  },
+  {
+    value: 'pendientes',
+    icon: LifeBuoy,
+    title: 'Pendientes y limitaciones conocidas',
+    color: 'text-rose-600',
+    bg: 'bg-rose-50',
+    content: (
+      <div className="space-y-3">
+        <p className="text-sm">Esto es lo que <span className="font-medium text-foreground">aún no está resuelto</span> o funciona con limitaciones — para que no te tomen por sorpresa:</p>
+        <ul className="list-disc list-inside space-y-1.5 text-sm">
+          <li><span className="font-medium text-foreground">Nueva versión sin publicar:</span> el asistente paso a paso (wizard), los términos nuevos del taller y el aviso de tasa BCV ya están desarrollados y probados, pero <span className="font-medium text-foreground">aún no se han instalado en la tienda</span> — llegan con la próxima actualización (ver <Badge variant="outline">Actualizaciones y versiones</Badge>).</li>
+          <li><span className="font-medium text-foreground">Tasa BCV sin internet:</span> el botón <Badge variant="outline">Auto BCV</Badge> necesita conexión. Sin internet la tasa se escribe a mano al abrir el día, y si el día ya está abierto con tasa 0 se corrige con <Badge variant="outline">Actualizar día</Badge> en el Libro Diario. Hasta corregirla, los pagos en bolívares quedan bloqueados (con aviso).</li>
+          <li><span className="font-medium text-foreground">Respaldo manual:</span> la base de datos no se sincroniza sola a la nube — para respaldar, copia el archivo <code className="rounded bg-muted px-1.5 py-0.5 text-xs">registro.db</code> (junto al programa) a un USB o nube.</li>
+          <li><span className="font-medium text-foreground">Exportar Excel:</span> requiere Python 3 instalado en la computadora con el paquete <code className="rounded bg-muted px-1.5 py-0.5 text-xs">openpyxl</code>. Si no está, el sistema genera el respaldo en CSV.</li>
+          <li><span className="font-medium text-foreground">Impresora por Bluetooth:</span> la impresora BT debe estar <span className="font-medium">encendida y pareada</span> en Windows antes de imprimir; si se conecta por USB con el driver instalado (HPRT MPT-II), funciona directo desde <Badge variant="outline">Impresora</Badge>.</li>
+          <li><span className="font-medium text-foreground">Garantía de 7 días corridos:</span> se calcula desde la fecha de entrega y no se pausa por fines de semana ni días feriados. La garantía cubre el trabajo realizado, no daños físicos nuevos.</li>
+          <li><span className="font-medium text-foreground">Pantalla exacta obligatoria:</span> si un trabajo es "Cambio pantalla" y el modelo tiene pantallas en el catálogo, hay que elegir cuál se instala (Incell, Original…) antes de guardar — es a propósito, para que el inventario nunca se descuente mal.</li>
+          <li><span className="font-medium text-foreground">Sin conexión a otros dispositivos:</span> la app es local a una computadora; si se usa en otra PC, los datos no se comparten (se pueden llevar con respaldo/importación manual).</li>
+        </ul>
       </div>
     ),
   },

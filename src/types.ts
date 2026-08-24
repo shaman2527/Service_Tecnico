@@ -163,6 +163,22 @@ export interface ServicePayment {
   notes: string | null;
 }
 
+export interface PaymentSearchResult {
+  id: number;
+  service_id: number;
+  order_num: string | null;
+  client: string | null;
+  client_ci: string | null;
+  model: string | null;
+  amount: number;
+  currency: string | null;
+  payment_method: string | null;
+  net_amount: number;
+  zelle_reference: string | null;
+  payment_date: string | null;
+  notes: string | null;
+}
+
 export interface PurchaseOrder {
   id: number;
   order_date: string | null;

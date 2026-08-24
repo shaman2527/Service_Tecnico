@@ -4,7 +4,7 @@ import type {
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
   ServiceDeviceInput, DaySummary, ExportResult, Expense, ProfitSummary,
-  ReceivablesSummary, InventoryValue
+  ReceivablesSummary, InventoryValue, PaymentSearchResult
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -140,6 +140,13 @@ export const api = {
     zelleReference: string = '', currency: string = 'USD', notes: string = '') =>
     tauriInvoke<number>('add_service_refund', { serviceId, amount, paymentMethod, zelleReference, currency, notes }),
 
+  searchPayments: (startDate: string = '', endDate: string = '', method: string = '',
+    client: string = '', reference: string = '', currency: string = '') =>
+    tauriInvoke<PaymentSearchResult[]>('search_payments', { startDate, endDate, method, client, reference, currency }),
+
+  getPaymentDailyDetail: (date: string, method: string = '') =>
+    tauriInvoke<PaymentSearchResult[]>('get_payment_daily_detail', { date, method }),
+
   getTechnicians: () => tauriInvoke<Technician[]>('get_technicians'),
   getTechnicianStats: () => tauriInvoke<TechnicianStat[]>('get_technician_stats'),
 
@@ -266,7 +273,23 @@ export const api = {
   openDay: (initialCashUsd: number = 0, tasaBcv: number = 0, tasaEur: number = 0) =>
     tauriInvoke<number>('open_day', { initialCashUsd, tasaBcv, tasaEur }),
 
-  getActiveDay: () => tauriInvoke<DailyClosing | null>('get_active_day'),
+  getActiveDay: async () => {
+    // Reintenta como getPinStatus (2026-08-04): el PRIMER invoke() de WebView2 en
+    // arranque en frío puede rechazar; si el día tenía tasa y el bridge falla,
+    // las conversiones en Bs daban 0 silenciosamente (catch(() => {}) en los dialogs).
+    // Tras 3 intentos fallidos devuelve null (los callers ya lo manejan).
+    if (!isTauri) return null;
+    const { invoke } = await import('@tauri-apps/api/core');
+    for (let i = 0; i < 3; i++) {
+      try {
+        return await invoke<DailyClosing | null>('get_active_day');
+      } catch (e) {
+        if (i === 2) return null;
+        await new Promise(r => setTimeout(r, 400));
+      }
+    }
+    return null;
+  },
 
   closeDay: (closeDate: string, notes: string = '', initialCashUsd: number = 0, tasaBcv: number = 0, tasaEur: number = 0,
              actualCashUsd: number = 0, actualCashBs: number = 0, actualPuntoUsd: number = 0, actualPuntoBs: number = 0,

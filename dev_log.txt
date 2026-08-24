@@ -1,0 +1,85 @@
+     Running BeforeDevCommand (`npm run dev`)
+
+> registro_tmp@0.0.0 dev
+> vite
+
+        Warn Waiting for your frontend dev server to start on http://localhost:5173/...
+
+  [32m[1mVITE[22m v8.1.5[39m  [2mready in [0m[1m4853[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching C:\Users\ROBER\registro\src-tauri for changes...
+[1m[32m   Compiling[0m registro v0.1.14 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 1m 54s
+[1m[32m     Running[0m `target\debug\registro.exe`
+        Info File src-tauri\tauri.conf.json changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+[1m[36m    Blocking[0m waiting for file lock on package cache
+[1m[36m    Blocking[0m waiting for file lock on package cache
+[1m[36m    Blocking[0m waiting for file lock on package cache
+[1m[36m    Blocking[0m waiting for file lock on build directory
+     Running BeforeDevCommand (`npm run dev`)
+
+> registro_tmp@0.0.0 dev
+> vite
+
+        Warn Waiting for your frontend dev server to start on http://localhost:5173/...
+
+  [32m[1mVITE[22m v8.1.5[39m  [2mready in [0m[1m2341[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching C:\Users\ROBER\registro\src-tauri for changes...
+[1m[32m   Compiling[0m registro v0.1.15 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 1m 40s
+[1m[32m     Running[0m `target\debug\registro.exe`
+[1m[31merror[0m[1m:[0m process didn't exit successfully: `target\debug\registro.exe` (exit code: 0xffffffff)
+     Running BeforeDevCommand (`npm run dev`)
+
+> registro_tmp@0.0.0 dev
+> vite
+
+        Warn Waiting for your frontend dev server to start on http://localhost:5173/...
+
+  [32m[1mVITE[22m v8.1.5[39m  [2mready in [0m[1m2584[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching C:\Users\ROBER\registro\src-tauri for changes...
+[1m[32m   Compiling[0m registro v0.1.15 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 40.90s
+[1m[32m     Running[0m `target\debug\registro.exe`
+        Info File src-tauri\tauri.conf.json changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+[1m[36m    Blocking[0m waiting for file lock on package cache
+[1m[36m    Blocking[0m waiting for file lock on shared package cache
+[1m[32m   Compiling[0m registro v0.1.16 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 2m 40s
+[1m[32m     Running[0m `target\debug\registro.exe`
+[0821/231135.240:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1412
+     Running BeforeDevCommand (`npm run dev`)
+
+> registro_tmp@0.0.0 dev
+> vite
+
+
+  [32m[1mVITE[22m v8.1.5[39m  [2mready in [0m[1m2461[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching C:\Users\ROBER\registro\src-tauri for changes...
+[1m[32m   Compiling[0m registro v0.1.16 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 28.58s
+[1m[32m     Running[0m `target\debug\registro.exe`
+        Info File src-tauri\tauri.conf.json changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+[1m[36m    Blocking[0m waiting for file lock on package cache
+[1m[36m    Blocking[0m waiting for file lock on build directory
+[1m[32m   Compiling[0m registro v0.1.17 (C:\Users\ROBER\registro\src-tauri)
+[1m[36m    Building[0m [=======================> ] 447/449: registro[1m[36m    Building[0m [=======================> ] 448/449: regis...                                                            [1m[32m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 2m 04s
+[1m[32m     Running[0m `target\debug\registro.exe`

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Undo2, AlertTriangle, CheckCircle2, CircleX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
@@ -76,7 +77,7 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
         ? (tasaBcv > 0 ? refundAmount / tasaBcv : refundAmount)
         : refundAmount;
       if (equivUsd > maxUsd + 0.01) {
-        setRefundError(`Solo puedes devolver hasta lo abonado: ${currencySymbol(refundCurrency)}${maxUsd.toFixed(2)} ${refundIsBs ? `(≈ Bs. ${Math.round(maxUsd * tasaBcv)})` : ''}`);
+        setRefundError(`Solo puedes devolver hasta lo abonado: $${maxUsd.toFixed(2)}${refundIsBs ? ` (≈ Bs. ${Math.round(maxUsd * tasaBcv)})` : ''}`);
         return;
       }
     }
@@ -128,6 +129,16 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
             <label className="text-sm font-medium">Monto a devolver ({refundIsBs ? 'Bs.' : '$'})</label>
             <Input type="number" step={refundIsBs ? 1 : 0.01} min={0.01} value={refundAmount}
               onChange={e => { amountTouched.current = true; setRefundAmount(Number(e.target.value)); }} />
+            {refundIsBs && tasaBcv <= 0 && !confirmNoMoney && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
+                <AlertTriangle className="size-4" />
+                <AlertDescription className="text-xs text-amber-800">
+                  El día no tiene tasa BCV (está en 0) — la conversión da 0. Actualiza la tasa en
+                  <strong> Libro Diario → banner verde "Día ABIERTO" → Actualizar día</strong> para
+                  poder devolver en bolívares.
+                </AlertDescription>
+              </Alert>
+            )}
             {refundIsBs && maxUsd > 0 && tasaBcv > 0 && (
               <p className="text-xs text-muted-foreground">
                 Abonado ≈ <strong>Bs. {Math.round(maxUsd * tasaBcv).toLocaleString('es-VE')}</strong> (tasa BCV {tasaBcv.toFixed(2)})
@@ -198,7 +209,7 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
           <Button variant="destructive" onClick={doRefund}
             title="Ctrl+Enter"
-            disabled={saving || (dayOpen === false && !confirmNoMoney) || (refundAmount <= 0 && !confirmNoMoney)}>
+            disabled={saving || (dayOpen === false && !confirmNoMoney) || (refundAmount <= 0 && !confirmNoMoney) || (refundIsBs && tasaBcv <= 0 && !confirmNoMoney)}>
             <Undo2 className="size-4" />
             {saving ? 'Procesando...' : confirmNoMoney
               ? 'Devolver sin reembolso (marcar Devuelto)'

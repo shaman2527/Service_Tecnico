@@ -112,6 +112,8 @@ commands::get_sales_stats,
             commands::get_update_state,
             commands::rollback_update,
             commands::has_previous_version,
+            commands::search_payments,
+            commands::get_payment_daily_detail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

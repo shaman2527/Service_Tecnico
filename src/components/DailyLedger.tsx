@@ -2,19 +2,21 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, BookOpen, CheckCircle2, Clock, CreditCard, Download, Landmark, Lock, Package,
   Play, Plus, PiggyBank, Receipt, RefreshCw, RotateCcw, DollarSign, TrendingUp, Smartphone,
-  Banknote, Globe, ArrowRightLeft, Trash2, Wallet,
+  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult } from '../types';
 import { EXPENSE_CATEGORIES } from '../types';
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
@@ -79,10 +81,15 @@ function Kpi({ icon, label, value, accent, className }: {
 
 const digits = (v: string) => v.replace(/\D/g, '').slice(0, 4);
 
+const PAYMENT_METHODS = [
+  '', 'Pago Móvil', 'Efectivo Bs', 'Divisas (USD Cash)', 'Punto de Venta ($)',
+  'Punto de Venta (Bs)', 'Transferencia Zelle', 'Transferencia Bs',
+];
+
 export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
   const isOwner = role === 'owner';
   const today = new Date().toISOString().slice(0, 10);
-  const [tab, setTab] = useState<'diario' | 'cierres' | 'gastos' | 'salud'>('diario');
+  const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud'>('diario');
   const [startDate, setStartDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 30);
     return d.toISOString().slice(0, 10);
@@ -135,6 +142,17 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [expError, setExpError] = useState<string | null>(null);
   const [expenseMsg, setExpenseMsg] = useState<string | null>(null);
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
+  // Pestaña Pagos: búsqueda y drill-down
+  const [payMethodFilter, setPayMethodFilter] = useState('');
+  const [payClientFilter, setPayClientFilter] = useState('');
+  const [payRefFilter, setPayRefFilter] = useState('');
+  const [payCurrencyFilter, setPayCurrencyFilter] = useState('');
+  const [payResults, setPayResults] = useState<PaymentSearchResult[]>([]);
+  const [payLoading, setPayLoading] = useState(false);
+  const [drillDate, setDrillDate] = useState<string | null>(null);
+  const [drillMethod, setDrillMethod] = useState<string>('');
+  const [drillResults, setDrillResults] = useState<PaymentSearchResult[]>([]);
+  const [drillLoading, setDrillLoading] = useState(false);
 
   const effectiveTab = isOwner ? tab : 'diario';
   const effectiveStart = isOwner ? startDate : today;
@@ -217,6 +235,18 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
   useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate]);
   useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate]);
+
+  const loadPayments = async () => {
+    setPayLoading(true);
+    try {
+      const results = await api.searchPayments(startDate, endDate, payMethodFilter, payClientFilter, payRefFilter, payCurrencyFilter);
+      setPayResults(results);
+    } catch {
+      setPayResults([]);
+    }
+    setPayLoading(false);
+  };
+  useEffect(() => { if (tab === 'pagos') loadPayments(); }, [tab, startDate, endDate, payMethodFilter, payClientFilter, payRefFilter, payCurrencyFilter]);
   useEffect(() => { refreshActiveDay(); }, []);
   // Al volver a la ventana (tras facturar/registrar) la tabla diaria se recarga sola
   useEffect(() => {
@@ -234,6 +264,29 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   useEffect(() => {
     api.getPinStatus().then(setPinStatus).catch(() => setPinStatus(false));
   }, []);
+
+  const openDrillDown = async (date: string, method: string) => {
+    setDrillDate(date);
+    setDrillMethod(method);
+    setDrillLoading(true);
+    setDrillResults([]);
+    try {
+      const results = await api.getPaymentDailyDetail(date, method);
+      setDrillResults(results);
+    } catch {
+      setDrillResults([]);
+    }
+    setDrillLoading(false);
+  };
+
+  const openOpenDialog = (prefill: boolean) => {
+    setShowOpen(true);
+    setOpenInitial(prefill && activeDay ? activeDay.initial_cash_usd : 0);
+    setOpenTasaUsd(prefill && activeDay ? activeDay.tasa_bcv : 0);
+    setOpenTasaEur(prefill && activeDay ? activeDay.tasa_eur : 0);
+    setOpenError(null);
+    setBcvError(false);
+  };
 
   const doOpen = async () => {
     setOpenError(null);
@@ -435,6 +488,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             </Button>
           )}
           {isOwner && (
+            <Button variant={tab === 'pagos' ? 'default' : 'outline'} onClick={() => setTab('pagos')}>
+              <CreditCard className="size-4" /> Pagos
+            </Button>
+          )}
+          {isOwner && (
             <Button variant={tab === 'gastos' ? 'default' : 'outline'} onClick={() => setTab('gastos')}>
               <Receipt className="size-4" /> Gastos
             </Button>
@@ -468,9 +526,14 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               <p className="text-sm text-emerald-700/80">Tasa Bs {activeDay.tasa_bcv.toFixed(2)} · Apertura ${activeDay.initial_cash_usd.toFixed(2)} (se guarda, no es venta del día)</p>
             </div>
           </div>
-          <Button variant="default" onClick={openCloseDialog}>
-            <Lock className="size-4" /> Cerrar Día
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => openOpenDialog(true)} title="Corrige la tasa BCV o la apertura sin cerrar el día (útil si se abrió sin tasa)">
+              <Pencil className="size-4" /> Actualizar día
+            </Button>
+            <Button variant="default" onClick={openCloseDialog}>
+              <Lock className="size-4" /> Cerrar Día
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
@@ -478,27 +541,20 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             <Lock className="size-5" />
             <p className="font-semibold">Día CERRADO — no se pueden registrar ventas ni servicios</p>
           </div>
-          <Button variant="default" onClick={() => {
-            setShowOpen(true);
-            setOpenInitial(0);
-            setOpenTasaUsd(0);
-            setOpenTasaEur(0);
-            setOpenError(null);
-            setBcvError(false);
-          }}>
+          <Button variant="default" onClick={() => openOpenDialog(false)}>
             <Play className="size-4" /> Abrir Día
           </Button>
         </div>
       )}
 
-      {isOwner && (effectiveTab === 'diario' || effectiveTab === 'gastos') && (
+      {isOwner && (effectiveTab === 'diario' || effectiveTab === 'gastos' || effectiveTab === 'pagos') && (
         <div className="flex items-center gap-2">
           <Input type="date" value={startDate}
             onChange={e => setStartDate(e.target.value)} className="w-44" />
           <span className="text-muted-foreground">→</span>
           <Input type="date" value={endDate}
             onChange={e => setEndDate(e.target.value)} className="w-44" />
-          <Button onClick={() => { if (effectiveTab === 'diario') loadTotals(); else loadExpenses(); }} variant="outline">
+          <Button onClick={() => { if (effectiveTab === 'diario') loadTotals(); else if (effectiveTab === 'pagos') loadPayments(); else loadExpenses(); }} variant="outline">
             <TrendingUp className="size-4" /> Actualizar
           </Button>
         </div>
@@ -638,11 +694,26 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                             {t.pos_net_usd > 0.005 || t.pos_net_bs > 0.005 ? fmtMix(t.pos_net_usd, t.pos_net_bs) : '—'}
                           </TableCell>
                         )}
-                        <TableCell className="text-right tabular-nums text-warning">{dash(t.pago_movil_total, fmtBs)}</TableCell>
-                        <TableCell className="text-right tabular-nums text-warning">{dash(t.cash_bs, fmtBs)}</TableCell>
-                        <TableCell className="text-right tabular-nums text-success">{dash(t.usd_cash_total + t.cash_usd, fmtUsd)}</TableCell>
-                        {hasZelle && <TableCell className="text-right tabular-nums text-success">{dash(t.zelle_total, fmtUsd)}</TableCell>}
-                        {hasTransf && <TableCell className="text-right tabular-nums text-warning">{dash(t.transfer_bs_total, fmtBs)}</TableCell>}
+                        <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Pago Móvil"
+                          onClick={() => t.pago_movil_total > 0.005 && openDrillDown(t.date, 'Pago Móvil')}>
+                          {dash(t.pago_movil_total, fmtBs)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Efectivo Bs"
+                          onClick={() => t.cash_bs > 0.005 && openDrillDown(t.date, 'Efectivo Bs')}>
+                          {dash(t.cash_bs, fmtBs)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-success cursor-pointer hover:underline" title="Ver detalle Divisas"
+                          onClick={() => (t.usd_cash_total + t.cash_usd) > 0.005 && openDrillDown(t.date, 'Divisas (USD Cash)')}>
+                          {dash(t.usd_cash_total + t.cash_usd, fmtUsd)}
+                        </TableCell>
+                        {hasZelle && <TableCell className="text-right tabular-nums text-success cursor-pointer hover:underline" title="Ver detalle Zelle"
+                          onClick={() => t.zelle_total > 0.005 && openDrillDown(t.date, 'Transferencia Zelle')}>
+                          {dash(t.zelle_total, fmtUsd)}
+                        </TableCell>}
+                        {hasTransf && <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Transf Bs"
+                          onClick={() => t.transfer_bs_total > 0.005 && openDrillDown(t.date, 'Transferencia Bs')}>
+                          {dash(t.transfer_bs_total, fmtBs)}
+                        </TableCell>}
                         <TableCell className="text-right tabular-nums text-muted-foreground">
                           {t.tasa_bcv > 0 ? t.tasa_bcv.toFixed(2) : '—'}
                         </TableCell>
@@ -830,6 +901,138 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                       <TableCell colSpan={2} />
                     </TableRow>
                   )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {effectiveTab === 'pagos' && (
+        <>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Search className="size-4" /> Buscar pagos de servicios
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Busca por método, cliente, referencia o moneda — útil para reconciliar sobrantes/faltantes
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">Método</label>
+                  <Select value={payMethodFilter} onValueChange={setPayMethodFilter}>
+                    <SelectTrigger><SelectValue placeholder="Todos" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Todos</SelectItem>
+                      {PAYMENT_METHODS.filter(Boolean).map(m => (
+                        <SelectItem key={m} value={m}>{m}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">Cliente / Cédula</label>
+                  <Input value={payClientFilter} onChange={e => setPayClientFilter(e.target.value)}
+                    placeholder="Nombre o cédula..." className="h-9" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">Referencia</label>
+                  <Input value={payRefFilter} onChange={e => setPayRefFilter(e.target.value)}
+                    placeholder="Nº referencia..." className="h-9" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">Moneda</label>
+                  <Select value={payCurrencyFilter} onValueChange={setPayCurrencyFilter}>
+                    <SelectTrigger><SelectValue placeholder="Todas" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Todas</SelectItem>
+                      <SelectItem value="USD">USD $</SelectItem>
+                      <SelectItem value="VES">Bs.</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              {(payMethodFilter || payClientFilter || payRefFilter || payCurrencyFilter) && (
+                <Button variant="ghost" size="sm" onClick={() => { setPayMethodFilter(''); setPayClientFilter(''); setPayRefFilter(''); setPayCurrencyFilter(''); }}>
+                  <X className="size-3.5" /> Limpiar filtros
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Fecha</TableHead>
+                    <TableHead>Orden</TableHead>
+                    <TableHead>Cliente</TableHead>
+                    <TableHead>Cédula</TableHead>
+                    <TableHead>Equipo</TableHead>
+                    <TableHead className="text-right">Monto</TableHead>
+                    <TableHead>Método</TableHead>
+                    <TableHead>Referencia</TableHead>
+                    <TableHead>Notas</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {payLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                        Buscando...
+                      </TableCell>
+                    </TableRow>
+                  ) : payResults.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                        Sin pagos que coincidan con los filtros
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    payResults.map(p => (
+                      <TableRow key={p.id}>
+                        <TableCell className="font-medium whitespace-nowrap">{p.payment_date?.slice(0, 16) ?? '—'}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="font-mono text-xs">{p.order_num ?? '—'}</Badge>
+                        </TableCell>
+                        <TableCell>{p.client ?? '—'}</TableCell>
+                        <TableCell className="text-muted-foreground">{p.client_ci || '—'}</TableCell>
+                        <TableCell className="max-w-[200px] truncate">{p.model ?? '—'}</TableCell>
+                        <TableCell className={`text-right font-semibold tabular-nums ${p.currency === 'VES' ? 'text-warning' : 'text-success'}`}>
+                          {p.currency === 'VES' ? fmtBs(p.amount) : fmtUsd(p.amount)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="text-xs">{p.payment_method ?? '—'}</Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {p.zelle_reference ? `····${p.zelle_reference.slice(-6)}` : '—'}
+                        </TableCell>
+                        <TableCell className="max-w-[140px] truncate text-xs text-muted-foreground">{p.notes || '—'}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                  {payResults.length > 0 && (() => {
+                    const totalUsd = payResults.filter(p => p.currency !== 'VES').reduce((a, p) => a + p.amount, 0);
+                    const totalBs = payResults.filter(p => p.currency === 'VES').reduce((a, p) => a + p.amount, 0);
+                    return (
+                      <TableRow className="bg-muted/50">
+                        <TableCell className="font-semibold" colSpan={5}>
+                          Total ({payResults.length} pago{payResults.length !== 1 ? 's' : ''})
+                        </TableCell>
+                        <TableCell className="text-right font-bold tabular-nums">
+                          {totalUsd > 0.005 && <span className="text-success">{fmtUsd(totalUsd)}</span>}
+                          {totalUsd > 0.005 && totalBs > 0.005 && ' + '}
+                          {totalBs > 0.005 && <span className="text-warning">{fmtBs(totalBs)}</span>}
+                          {totalUsd <= 0.005 && totalBs <= 0.005 && '$0.00'}
+                        </TableCell>
+                        <TableCell colSpan={3} />
+                      </TableRow>
+                    );
+                  })()}
                 </TableBody>
               </Table>
             </CardContent>
@@ -1057,9 +1260,25 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       <Dialog open={showOpen} onOpenChange={setShowOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Abrir Día</DialogTitle>
+            <DialogTitle>{activeDay ? 'Actualizar Día (tasa BCV)' : 'Abrir Día'}</DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-4">
+            {activeDay && (
+              <p className="text-xs text-muted-foreground">
+                El día {activeDay.close_date} ya está abierto: guardar actualiza la tasa y la apertura
+                sin cerrarlo (útil si se abrió sin tasa BCV).
+              </p>
+            )}
+            {openTasaUsd <= 0 && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
+                <AlertTriangle className="size-4" />
+                <AlertDescription className="text-xs text-amber-800">
+                  Sin tasa BCV no se puede cobrar en bolívares (las conversiones dan 0 y los pagos en
+                  Bs quedan bloqueados). Puedes guardar igual y corregirla después con
+                  <strong> "Actualizar día"</strong>.
+                </AlertDescription>
+              </Alert>
+            )}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Efectivo de apertura ($)</label>
               <MoneyInput value={openInitial} onChange={setOpenInitial} />
@@ -1092,7 +1311,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowOpen(false)}>Cancelar</Button>
             <Button onClick={doOpen}>
-              <Play className="size-4" /> Abrir Día
+              <Play className="size-4" /> {activeDay ? 'Actualizar Día' : 'Abrir Día'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1364,6 +1583,73 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               </DialogFooter>
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!drillDate} onOpenChange={() => setDrillDate(null)}>
+        <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
+            <DialogTitle className="flex items-center gap-2">
+              <Eye className="size-4" /> Detalle de pagos — {drillDate}
+              {drillMethod && <Badge variant="secondary">{drillMethod}</Badge>}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {drillLoading ? (
+              <p className="text-sm text-muted-foreground text-center py-8">Cargando...</p>
+            ) : drillResults.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">Sin pagos registrados para este día/método</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Hora</TableHead>
+                    <TableHead>Orden</TableHead>
+                    <TableHead>Cliente</TableHead>
+                    <TableHead>Equipo</TableHead>
+                    <TableHead className="text-right">Monto</TableHead>
+                    <TableHead>Método</TableHead>
+                    <TableHead>Referencia</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {drillResults.map(p => (
+                    <TableRow key={p.id}>
+                      <TableCell className="whitespace-nowrap">{p.payment_date?.slice(11, 16) ?? '—'}</TableCell>
+                      <TableCell><Badge variant="outline" className="font-mono text-xs">{p.order_num ?? '—'}</Badge></TableCell>
+                      <TableCell>{p.client ?? '—'}</TableCell>
+                      <TableCell className="max-w-[180px] truncate">{p.model ?? '—'}</TableCell>
+                      <TableCell className={`text-right font-semibold tabular-nums ${p.currency === 'VES' ? 'text-warning' : 'text-success'}`}>
+                        {p.currency === 'VES' ? fmtBs(p.amount) : fmtUsd(p.amount)}
+                      </TableCell>
+                      <TableCell><Badge variant="secondary" className="text-xs">{p.payment_method ?? '—'}</Badge></TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">{p.zelle_reference || '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                  {drillResults.length > 0 && (() => {
+                    const tUsd = drillResults.filter(p => p.currency !== 'VES').reduce((a, p) => a + p.amount, 0);
+                    const tBs = drillResults.filter(p => p.currency === 'VES').reduce((a, p) => a + p.amount, 0);
+                    return (
+                      <TableRow className="bg-muted/50">
+                        <TableCell className="font-semibold" colSpan={4}>
+                          Total ({drillResults.length} pago{drillResults.length !== 1 ? 's' : ''})
+                        </TableCell>
+                        <TableCell className="text-right font-bold tabular-nums">
+                          {tUsd > 0.005 && <span className="text-success">{fmtUsd(tUsd)}</span>}
+                          {tUsd > 0.005 && tBs > 0.005 && ' + '}
+                          {tBs > 0.005 && <span className="text-warning">{fmtBs(tBs)}</span>}
+                        </TableCell>
+                        <TableCell colSpan={2} />
+                      </TableRow>
+                    );
+                  })()}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+          <DialogFooter className="shrink-0 border-t pt-3">
+            <Button variant="outline" onClick={() => setDrillDate(null)}>Cerrar</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

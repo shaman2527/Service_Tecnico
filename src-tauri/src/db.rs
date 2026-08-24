@@ -183,6 +183,23 @@ pub struct ServicePayment {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PaymentSearchResult {
+    pub id: i64,
+    pub service_id: i64,
+    pub order_num: Option<String>,
+    pub client: Option<String>,
+    pub client_ci: Option<String>,
+    pub model: Option<String>,
+    pub amount: f64,
+    pub currency: Option<String>,
+    pub payment_method: Option<String>,
+    pub net_amount: f64,
+    pub zelle_reference: Option<String>,
+    pub payment_date: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PurchaseOrder {
     pub id: i64,
     pub order_date: Option<String>,
@@ -982,6 +999,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
             CREATE INDEX IF NOT EXISTS idx_services_client ON services(client_id);
             CREATE INDEX IF NOT EXISTS idx_daily_closings_closed ON daily_closings(is_closed);
+            CREATE INDEX IF NOT EXISTS idx_service_payments_method ON service_payments(payment_method);
+            CREATE INDEX IF NOT EXISTS idx_service_payments_date ON service_payments(payment_date);
+            CREATE INDEX IF NOT EXISTS idx_service_payments_reference ON service_payments(zelle_reference);
         ")?;
         // PRAGMAs de robustez/rendimiento (idempotentes).
         // synchronous=FULL con WAL: ante un corte de luz/PC no se pierde el último commit
@@ -1554,6 +1574,131 @@ impl Database {
         Ok(payments)
     }
 
+    /// Búsqueda cruzada de pagos de servicios con filtros opcionales.
+    /// Devuelve pagos con info del servicio (orden, cliente, modelo) para UI de búsqueda.
+    pub fn search_payments(&self, start_date: Option<&str>, end_date: Option<&str>,
+                           method: Option<&str>, client: Option<&str>,
+                           reference: Option<&str>, currency: Option<&str>) -> SqlResult<Vec<PaymentSearchResult>> {
+        let conn = self.conn.lock().unwrap();
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        if let Some(sd) = start_date {
+            if !sd.is_empty() {
+                conditions.push(format!("date(sp.payment_date) >= ?{}", idx));
+                param_values.push(Box::new(sd.to_string()));
+                idx += 1;
+            }
+        }
+        if let Some(ed) = end_date {
+            if !ed.is_empty() {
+                conditions.push(format!("date(sp.payment_date) <= ?{}", idx));
+                param_values.push(Box::new(ed.to_string()));
+                idx += 1;
+            }
+        }
+        if let Some(m) = method {
+            if !m.is_empty() {
+                conditions.push(format!("sp.payment_method = ?{}", idx));
+                param_values.push(Box::new(m.to_string()));
+                idx += 1;
+            }
+        }
+        if let Some(c) = client {
+            if !c.is_empty() {
+                let pattern = format!("%{}%", c);
+                conditions.push(format!("(s.client LIKE ?{} OR COALESCE(s.client_ci,'') LIKE ?{})", idx, idx + 1));
+                param_values.push(Box::new(pattern.clone()));
+                param_values.push(Box::new(pattern));
+                idx += 2;
+            }
+        }
+        if let Some(r) = reference {
+            if !r.is_empty() {
+                let pattern = format!("%{}%", r);
+                conditions.push(format!("COALESCE(sp.zelle_reference,'') LIKE ?{}", idx));
+                param_values.push(Box::new(pattern));
+                idx += 1;
+            }
+        }
+        if let Some(cr) = currency {
+            if !cr.is_empty() {
+                conditions.push(format!("sp.currency = ?{}", idx));
+                param_values.push(Box::new(cr.to_string()));
+            }
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT sp.id, sp.service_id, s.order_num, s.client, COALESCE(s.client_ci,''), s.model,
+                    sp.amount, sp.currency, sp.payment_method, sp.net_amount,
+                    sp.zelle_reference, sp.payment_date, sp.notes
+             FROM service_payments sp
+             JOIN services s ON s.id = sp.service_id
+             {} ORDER BY sp.payment_date DESC, sp.id DESC", where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(PaymentSearchResult {
+                id: r.get(0)?, service_id: r.get(1)?, order_num: r.get(2)?,
+                client: r.get(3)?, client_ci: r.get(4)?, model: r.get(5)?,
+                amount: r.get(6)?, currency: r.get(7)?, payment_method: r.get(8)?,
+                net_amount: r.get(9)?, zelle_reference: r.get(10)?,
+                payment_date: r.get(11)?, notes: r.get(12)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows { results.push(row?); }
+        Ok(results)
+    }
+
+    /// Detalle de pagos de un día específico, opcionalmente filtrado por método.
+    /// Para drill-down de reconciliación: el usuario hace clic en una celda de la tabla diaria
+    /// y ve línea por línea qué pagos componen ese total.
+    pub fn get_payment_daily_detail(&self, date: &str, method: Option<&str>) -> SqlResult<Vec<PaymentSearchResult>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match method {
+            Some(m) if !m.is_empty() => (
+                "SELECT sp.id, sp.service_id, s.order_num, s.client, COALESCE(s.client_ci,''), s.model,
+                        sp.amount, sp.currency, sp.payment_method, sp.net_amount,
+                        sp.zelle_reference, sp.payment_date, sp.notes
+                 FROM service_payments sp
+                 JOIN services s ON s.id = sp.service_id
+                 WHERE date(sp.payment_date) = ?1 AND sp.payment_method = ?2
+                 ORDER BY sp.payment_date ASC, sp.id ASC".to_string(),
+                vec![Box::new(date.to_string()), Box::new(m.to_string())],
+            ),
+            _ => (
+                "SELECT sp.id, sp.service_id, s.order_num, s.client, COALESCE(s.client_ci,''), s.model,
+                        sp.amount, sp.currency, sp.payment_method, sp.net_amount,
+                        sp.zelle_reference, sp.payment_date, sp.notes
+                 FROM service_payments sp
+                 JOIN services s ON s.id = sp.service_id
+                 WHERE date(sp.payment_date) = ?1
+                 ORDER BY sp.payment_date ASC, sp.id ASC".to_string(),
+                vec![Box::new(date.to_string())],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(PaymentSearchResult {
+                id: r.get(0)?, service_id: r.get(1)?, order_num: r.get(2)?,
+                client: r.get(3)?, client_ci: r.get(4)?, model: r.get(5)?,
+                amount: r.get(6)?, currency: r.get(7)?, payment_method: r.get(8)?,
+                net_amount: r.get(9)?, zelle_reference: r.get(10)?,
+                payment_date: r.get(11)?, notes: r.get(12)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows { results.push(row?); }
+        Ok(results)
+    }
+
     pub fn add_service_payment(&self, service_id: i64, amount: f64, payment_method: &str,
                                bank_fee_percent: f64, zelle_reference: &str, currency: &str,
                                notes: &str) -> SqlResult<i64> {
@@ -1561,6 +1706,10 @@ impl Database {
         self.require_open_day(&conn)?;
         // La moneda se deriva del método (un pago por Pago Móvil/Efectivo Bs/Transf Bs SIEMPRE es Bs)
         let currency = normalize_payment_currency(payment_method, currency);
+        // Gate anti-corrupción: un pago Bs sin tasa BCV se convertiría a 1:1 en paid_amount
+        if currency == "VES" && !self.has_bcv_rate_for_payment(&conn)? {
+            return Err(day_shift_error("El día no tiene tasa BCV (está en 0). Actualízala en Libro Diario → botón \"Actualizar día\" antes de registrar pagos en bolívares."));
+        }
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         conn.execute(
@@ -1591,6 +1740,11 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         let currency = normalize_payment_currency(payment_method, currency);
+        // Gate anti-corrupción (espejo de add_service_payment): un refund Bs sin tasa se
+        // convertiría a 1:1 y el límite "hasta lo abonado" perdería todo sentido.
+        if currency == "VES" && !self.has_bcv_rate_for_payment(&conn)? {
+            return Err(day_shift_error("El día no tiene tasa BCV (está en 0). Actualízala en Libro Diario → botón \"Actualizar día\" antes de devolver en bolívares."));
+        }
         // Guard anti-abuso (el backend es el respaldo real del límite de la UI):
         // la devolución en USD equivalente no puede exceder lo abonado. La tasa usa
         // la MISMA lógica de recalc_paid_amount (cierre del día del pago = hoy →
@@ -3597,12 +3751,22 @@ impl Database {
     pub fn open_day(&self, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let already_open: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE is_closed=0)",
+        let open_date: Option<String> = conn.query_row(
+            "SELECT close_date FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1",
             [], |r| r.get(0),
-        )?;
-        if already_open {
-            return Err(day_shift_error("Ya hay un día abierto. Ciérralo antes de abrir uno nuevo."));
+        ).optional()?;
+        if let Some(d) = open_date {
+            if d != today {
+                return Err(day_shift_error(&format!("Ya hay un día abierto ({}) — ciérralo antes de abrir uno nuevo.", d)));
+            }
+            // Día de HOY ya abierto: actualiza tasa/apertura sin cerrar (corregir a mitad de día,
+            // ej. se abrió sin tasa BCV y ahora hay internet). Conserva la fila y su id.
+            conn.execute(
+                "UPDATE daily_closings SET initial_cash_usd=?1, tasa_bcv=?2, tasa_eur=?3, opened_at=datetime('now','localtime') WHERE close_date=?4 AND is_closed=0",
+                params![initial_cash_usd, tasa_bcv, tasa_eur, today],
+            )?;
+            let id: i64 = conn.query_row("SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=0", params![today], |r| r.get(0))?;
+            return Ok(id);
         }
         conn.execute(
             "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
@@ -3626,6 +3790,19 @@ impl Database {
             return Err(day_shift_error("Debe abrir el día (Libro Diario) antes de registrar ventas o servicios."));
         }
         Ok(())
+    }
+
+    /// Hay tasa BCV > 0 para convertir pagos en bolívares? Misma lógica de
+    /// recalc_paid_amount: cierre de HOY con tasa > 0 → día abierto con tasa > 0.
+    /// Sin tasa, un pago Bs se convertiría a 1:1 (paid_amount corrupto) — por eso
+    /// add_service_payment/add_service_refund lo rechazan (gate backend).
+    fn has_bcv_rate_for_payment(&self, conn: &rusqlite::Connection) -> SqlResult<bool> {
+        let ok: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE close_date = date('now','localtime') AND tasa_bcv > 0)
+                  OR EXISTS(SELECT 1 FROM daily_closings WHERE is_closed = 0 AND tasa_bcv > 0)",
+            [], |r| r.get(0),
+        )?;
+        Ok(ok)
     }
 
     pub fn close_day(&self, close_date: &str, notes: &str, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
@@ -4006,8 +4183,9 @@ mod tests {
         let active = db.get_active_day().unwrap();
         assert!(active.is_some(), "There must be an active day");
         assert_eq!(active.unwrap().tasa_bcv, 40.5);
-        // Cannot open twice
-        assert!(db.open_day(0.0, 0.0, 0.0).is_err());
+        // Re-abrir HOY actualiza el día (corregir tasa a mitad de día) conservando la fila
+        let day2 = db.open_day(10.0, 40.5, 45.0).unwrap();
+        assert_eq!(day2, day_id, "el update del día conserva la fila");
 
         // Categories
         let cats = db.get_categories().unwrap();
@@ -4255,6 +4433,71 @@ mod tests {
         assert!(db.get_active_day().unwrap().is_some());
 
         // Clean up
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_open_day_updates_today_tasa() {
+        // Caso real de la tienda: se abrió el día SIN tasa (Auto BCV sin internet) →
+        // re-abrir HOY actualiza la tasa a mitad de día sin cerrar (fix conversión a 0).
+        let test_path = PathBuf::from("test_open_day_update.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(10.0, 0.0, 0.0).unwrap(); // abierto sin tasa
+
+        let id2 = db.open_day(15.0, 748.79, 900.0).unwrap();
+        let active = db.get_active_day().unwrap().unwrap();
+        assert_eq!(active.id, id2, "el update conserva la fila");
+        assert_eq!(active.tasa_bcv, 748.79);
+        assert_eq!(active.tasa_eur, 900.0);
+        assert_eq!(active.initial_cash_usd, 15.0);
+        let open_rows: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM daily_closings WHERE is_closed=0", [], |r| r.get(0)).unwrap();
+        assert_eq!(open_rows, 1, "sigue habiendo UN solo día abierto");
+
+        // Cerrar y reabrir el mismo día conserva la fila (comportamiento legacy)
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.close_day(&today, "", 15.0, 748.79, 900.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let id3 = db.open_day(20.0, 750.0, 901.0).unwrap();
+        assert_eq!(id3, id2, "reabrir el mismo día conserva la fila");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_bs_payment_requires_tasa() {
+        // Gate anti-corrupción: día abierto con tasa 0 → pago/refund Bs rechazados
+        // (antes se convertía a 1:1 → paid_amount corrupto). USD sí pasa. Al
+        // actualizar la tasa (open_day HOY), el pago Bs funciona.
+        let test_path = PathBuf::from("test_bs_payment_tasa.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 0.0, 0.0).unwrap(); // el caso real: día sin tasa
+
+        let sid = db.add_service("ORD-TASA-1", "Cliente", "0412-1", "Modelo X", "falla",
+            "Software / Formateo", "[\"Software / Formateo\"]", 100.0, "Divisas (USD Cash)", "",
+            0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+
+        let err = db.add_service_payment(sid, 1000.0, "Pago Móvil", 0.0, "", "USD", "").unwrap_err().to_string();
+        assert!(err.contains("tasa BCV"), "pago Bs sin tasa debe rechazarse: {err}");
+        let err2 = db.add_service_refund(sid, 1000.0, "Pago Móvil", "", "USD", "").unwrap_err().to_string();
+        assert!(err2.contains("tasa BCV"), "refund Bs sin tasa debe rechazarse: {err2}");
+
+        // USD no necesita tasa → pasa
+        db.add_service_payment(sid, 30.0, "Divisas (USD Cash)", 0.0, "", "USD", "").unwrap();
+        let paid: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid - 30.0).abs() < 1e-9, "paid=30 solo USD, got {paid}");
+
+        // Actualizar la tasa del día → el pago Bs ya funciona (30 + 810 @40.5 = 50)
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        db.add_service_payment(sid, 810.0, "Pago Móvil", 0.0, "", "USD", "").unwrap();
+        let paid2: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid2 - 50.0).abs() < 1e-9, "30 USD + 810 Bs @40.5 = 50, got {paid2}");
+
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

@@ -84,18 +84,26 @@ export function warrantyStatus(dateOut: string | null | undefined, days = WARRAN
 }
 
 // --- Checklist de blindaje del equipo (10 ítems, cada uno con su punto de color) ---
+// Labels con el vocabulario del local (keys históricas INTACTAS → datos viejos compatibles).
 export const CHECKLIST_ITEMS: { key: string; label: string; dot: string }[] = [
   { key: 'chip_sim', label: 'Chip (SIM) presente', dot: 'bg-sky-500' },
-  { key: 'tapa_trasera', label: 'Tapa trasera en buen estado', dot: 'bg-violet-500' },
+  { key: 'tapa_trasera', label: 'Carcasa / tapa trasera', dot: 'bg-violet-500' },
   { key: 'bandeja_sim', label: 'Bandeja SIM presente', dot: 'bg-amber-500' },
   { key: 'botones', label: 'Botones (volumen/encendido) funcionan', dot: 'bg-rose-500' },
   { key: 'boton_home', label: 'Botón home/navegación (si aplica)', dot: 'bg-emerald-500' },
   { key: 'camara', label: 'Cámara (lente) sin daños', dot: 'bg-indigo-500' },
-  { key: 'puerto_carga', label: 'Puerto de carga funciona', dot: 'bg-orange-500' },
+  { key: 'puerto_carga', label: 'Placa / puerto de carga funciona', dot: 'bg-orange-500' },
   { key: 'parlante', label: 'Parlante/micrófono funcionan', dot: 'bg-teal-500' },
-  { key: 'contrasena', label: 'Contraseña/patrón entregada por el cliente', dot: 'bg-fuchsia-500' },
-  { key: 'accesorios', label: 'Accesorios entregados (funda, protector)', dot: 'bg-lime-500' },
+  { key: 'contrasena', label: 'Clave del equipo entregada', dot: 'bg-fuchsia-500' },
+  { key: 'accesorios', label: 'Forro / funda entregados', dot: 'bg-lime-500' },
 ];
+
+// Default al CREAR una orden: el chip y el forro/funda normalmente NO vienen con el equipo
+// (se le entregan al cliente) → "No" por defecto; el recibo lo deja escrito y protege al
+// taller. El resto queda SIN marcar: lo decide el operario al recibir.
+export function checklistDefaults(): Record<string, string> {
+  return { chip_sim: 'no', accesorios: 'no' };
+}
 
 export function parseChecklist(json: string | null | undefined): Record<string, string> {
   if (!json) return {};
@@ -113,8 +121,12 @@ export function checklistSummary(json: string | null | undefined): string {
 }
 
 // --- Tipos de trabajo / fallas (múltiples por servicio) ---
+// Términos del local (2026-08-21): "porque llega aquí celulares". La garantía NO es un
+// trabajo: se aplica sola al entregar (7 días) — ver WARRANTY_DAYS.
 export const SERVICE_TYPES = [
   'Cambio pantalla', 'Cambio batería', 'Cambio flex', 'Pin de Carga',
+  'Placa de carga', 'Pegado de pantalla', 'Reemplazo de botones', 'Preparación de carcasa',
+  'Cambio de bandeja SIM',
   'Reparación (placa)', 'Limpieza / Mantenimiento', 'Software / Formateo',
   'Cambio cámara', 'Cambio parlante / micrófono', 'Revisión', 'Otro',
 ];
@@ -292,10 +304,10 @@ function formatTicketDate(iso: string | null | undefined): string {
 
 // Etiquetas cortas del blindaje para el ticket (caben 2 por línea)
 const CHECKLIST_SHORT: Record<string, string> = {
-  chip_sim: 'CHIP/SIM', tapa_trasera: 'TAPA', bandeja_sim: 'BANDEJA',
+  chip_sim: 'CHIP/SIM', tapa_trasera: 'CARCASA', bandeja_sim: 'BANDEJA',
   botones: 'BOTONES', boton_home: 'HOME', camara: 'CAMARA',
-  puerto_carga: 'PUERTO', parlante: 'PARLANTE', contrasena: 'CLAVE',
-  accesorios: 'ACCESORIOS',
+  puerto_carga: 'PLACA', parlante: 'PARLANTE', contrasena: 'CLAVE',
+  accesorios: 'FUNDA',
 };
 
 // Blindaje en DOS columnas ("CHIP/SIM:Si  BANDEJA:No") para aprovechar el ancho:
@@ -323,17 +335,12 @@ const fmtMix = (usd: number, bs: number): string => {
 };
 
 /**
- * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico):
- * copia superior para el cliente + talón recortable ("CORTA TIJERA") con los
- * mismos datos para pegar detrás del teléfono. NO es factura fiscal (sin RIF).
- * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
- */
-/**
  * Construye la ORDEN DE SERVICIO como texto plano de ancho fijo (ticket térmico),
- * en DOS partes imprimibles en orden: `main` = PRIMERA copia (para el cliente) y
- * `stub` = talón recortable "CORTA TIJERA" (para pegar detrás del teléfono).
- * La lógica de pago siempre refleja la moneda real del método (Bs. con tasa BCV
- * si el método es en bolívares, $ en divisas) en MONTO, PAGO EN, ABONADO y SALDO.
+ * en DOS partes imprimibles en orden: `main` = COMPROBANTE DE PAGO (lo esencial:
+ * quién, qué equipo, qué trabajo y las finanzas) y `stub` = talón recortable
+ * "CORTA TIJERA" con la MÁXIMA información del equipo (incl. BLINDAJE AL RECIBIR
+ * y técnico) para pegar detrás del teléfono. "PAGADO" = orden saldada;
+ * "CANCELADO"/"DEVUELTO" solo cuando el estado final lo indica.
  * Pura y sin IO: el frontend la previsualiza y el backend (ESC/POS + CP850) la imprime.
  */
 export function buildServiceReceiptParts(
@@ -362,34 +369,24 @@ export function buildServiceReceiptParts(
   for (const l of kv('HORA', service.date_in?.slice(11, 16) ?? '', w)) lines.push(l);
   lines.push(dash);
 
-  // Cliente
+  // Cliente (el comprobante identifica al cliente; la dirección queda solo en el talón)
   if (service.client) for (const l of kv('CLIENTE', service.client, w)) lines.push(l);
   if (service.client_ci) for (const l of kv('CEDULA', service.client_ci, w)) lines.push(l);
   if (service.phone) for (const l of kv('TELEFONO', service.phone, w)) lines.push(l);
-  if (service.client_address) for (const l of kv('DIRECCION', service.client_address, w)) lines.push(l);
   lines.push(dash);
 
-  // Equipo y diagnóstico
-  if (service.model) for (const l of kv('EQUIPO', service.model, w)) lines.push(l);
-  if (service.color) for (const l of kv('COLOR', service.color, w)) lines.push(l);
-  if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
-  if (service.technician) for (const l of kv('TECNICO', service.technician, w)) lines.push(l);
-  if (service.observations) {
-    for (const l of kv('NOTAS', service.observations, w)) lines.push(l);
-  }
-  lines.push(dash);
-
-  // Blindaje del equipo (solo copia del cliente): ítems marcados Sí/No al recibir,
-  // en DOS columnas para aprovechar el ancho del ticket.
+  // Equipo y trabajo: el comprobante identifica QUÉ se reparó. El detalle completo
+  // (técnico, blindaje, notas) vive en el talón CORTA TIJERA.
   const checklist = parseChecklist(service.device_checklist);
   const marked = Object.entries(checklist).filter(([, v]) => v === 'si' || v === 'no');
-  if (marked.length > 0) {
-    lines.push('BLINDAJE (AL RECIBIR):');
-    for (const row of checklistRows(marked, w)) lines.push(row);
-    lines.push(dash);
-  }
+  const modelWithColor = service.color ? `${service.model} (${service.color})` : service.model;
+  if (modelWithColor) for (const l of kv('EQUIPO', modelWithColor, w)) lines.push(l);
+  if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
+  lines.push(dash);
 
-  // Finanzas — minimalista y entendible: TOTAL / PAGADO / FALTA / CANCELADO.
+  // Finanzas — minimalista y entendible: TOTAL / PAGADO / FALTA.
+  // "PAGADO" = el cliente saldó la orden; "CANCELADO"/"DEVUELTO" SOLO cuando la
+  // orden se anuló (estado final) — nunca "CANCELADO" por estar pagada.
   // El descuento es INTERNO (se decide en el mostrador, no se imprime
   // PRECIO/DESCUENTO): TOTAL = lo que el cliente debe pagar.
   // PAGADO y METODO salen de los PAGOS REALES registrados (no del form).
@@ -406,15 +403,15 @@ export function buildServiceReceiptParts(
   } else {
     if (pagoLabel) for (const l of kv('PAGADO', pagoLabel, w)) lines.push(l);
     if (saldo <= 0.005) {
-      lines.push(center('CANCELADO', w));
+      lines.push(center('PAGADO', w));
     } else {
       for (const l of kv('FALTA', fmtUsd(saldo), w)) lines.push(l);
     }
   }
-  const methods = payments.length > 0
-    ? [...new Set(payments.map(p => p.payment_method ?? '').filter(Boolean))].map(shortMethodLabel)
-    : [shortMethodLabel(service.payment_method)];
-  for (const l of kv('METODO', methods.join(' + '), w)) lines.push(l);
+  // METODO SOLO si hay pagos REALES registrados (nunca el método del form:
+  // una orden sin pagar no tiene método de pago que mostrar).
+  const methods = [...new Set(payments.map(p => p.payment_method ?? '').filter(Boolean))].map(shortMethodLabel);
+  if (methods.length > 0) for (const l of kv('METODO', methods.join(' + '), w)) lines.push(l);
   const ref = service.zelle_reference || payments.find(p => p.zelle_reference)?.zelle_reference;
   if (ref) for (const l of kv('REF', ref, w)) lines.push(l);
 
@@ -439,8 +436,9 @@ export function buildServiceReceiptParts(
   lines.push(center('Gracias por su preferencia', w));
   lines.push('');
 
-  // === Talón recortable: identificación compacta para pegar detrás del teléfono.
-  // Orden lógico: QUIÉN (orden/fecha) → CLIENTE → QUÉ (equipo/servicio) → CUÁNTO (total/pago).
+  // === Talón recortable: MÁXIMA información del equipo para pegar detrás del
+  // teléfono (verificación al devolverlo): quién lo recibió, el blindaje completo
+  // y los datos de la orden. Orden: QUIÉN → CLIENTE → QUÉ → CÓMO VA → CUÁNTO.
   const stub: string[] = [dash, center('CORTA TIJERA', w), dash];
   for (const l of kv('ORDEN', service.order_num ?? '', w)) stub.push(l);
   const stubDate = formatTicketDate(service.date_in);
@@ -448,9 +446,15 @@ export function buildServiceReceiptParts(
   if (service.client) for (const l of kv('CLIENTE', service.client, w)) stub.push(l);
   const stubContact = [service.client_ci, service.phone].filter(Boolean).join(' · ');
   if (stubContact) for (const l of kv('CONTACTO', stubContact, w)) stub.push(l);
-  const stubModel = service.color ? `${service.model} (${service.color})` : service.model;
-  if (stubModel) for (const l of kv('EQUIPO', stubModel, w)) stub.push(l);
+  if (modelWithColor) for (const l of kv('EQUIPO', modelWithColor, w)) stub.push(l);
   if (logo) for (const l of kv('SERVICIO', logo, w)) stub.push(l);
+  if (service.technician) for (const l of kv('TECNICO', service.technician, w)) stub.push(l);
+  // Blindaje (AL RECIBIR) completo en el talón: permite verificar el estado del
+  // equipo tal como entró al taller cuando el cliente lo retira.
+  if (marked.length > 0) {
+    stub.push('BLINDAJE (AL RECIBIR):');
+    for (const row of checklistRows(marked, w)) stub.push(row);
+  }
   // Pago para la salida del equipo: TOTAL / PAGADO / FALTA — mismo bloque minimalista.
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) stub.push(l);
   if (finalized) {
@@ -459,12 +463,12 @@ export function buildServiceReceiptParts(
     if (pagoLabel) for (const l of kv('PAGADO', pagoLabel, w)) stub.push(l);
     const stubSaldo = totalUsd - (service.paid_amount ?? 0);
     if (stubSaldo <= 0.005) {
-      stub.push(center('CANCELADO', w));
+      stub.push(center('PAGADO', w));
     } else {
       for (const l of kv('FALTA', fmtUsd(stubSaldo), w)) stub.push(l);
     }
   }
-  for (const l of kv('METODO', methods.join(' + '), w)) stub.push(l);
+  if (methods.length > 0) for (const l of kv('METODO', methods.join(' + '), w)) stub.push(l);
   const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
   if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
   stub.push(dash);

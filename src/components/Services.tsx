@@ -17,7 +17,7 @@ import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -229,9 +229,10 @@ function UnpaidBanner({ neverPaid, balance, amount, paid }: {
 
 // Indicador de progreso paso a paso del formulario de servicio: círculos numerados
 // conectados por una línea que se colorea conforme completas cada etapa + barra de avance.
-function FormStepper({ steps, current }: {
+function FormStepper({ steps, current, onNavigate }: {
   steps: { label: string; done: boolean }[];
   current: number;
+  onNavigate?: (i: number) => void;
 }) {
   const doneCount = steps.filter(s => s.done).length;
   const pct = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
@@ -240,26 +241,35 @@ function FormStepper({ steps, current }: {
       <div className="flex items-center gap-1.5">
         {steps.map((s, i) => {
           const lineDone = i > 0 && steps[i - 1].done;
+          const navigable = !!onNavigate && i !== current && i < current;
+          const stepEl = (
+            <div className="flex flex-col items-center gap-1">
+              <span className={cn(
+                'flex size-7 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-bold transition-colors',
+                s.done
+                  ? 'border-primary bg-primary text-primary-foreground'
+                  : i === current
+                    ? 'border-primary text-primary'
+                    : 'border-border bg-background text-muted-foreground'
+              )}>
+                {s.done ? <Check className="size-3.5" /> : i + 1}
+              </span>
+              <span className={cn('text-[10px] font-medium leading-none', i === current ? 'text-foreground' : 'text-muted-foreground')}>
+                {s.label}
+              </span>
+            </div>
+          );
           return (
             <Fragment key={s.label}>
               {i > 0 && (
                 <div className={cn('h-0.5 min-w-2 flex-1 rounded-full transition-colors', lineDone ? 'bg-primary' : 'bg-border')} />
               )}
-              <div className="flex flex-col items-center gap-1">
-                <span className={cn(
-                  'flex size-7 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-bold transition-colors',
-                  s.done
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : i === current
-                      ? 'border-primary text-primary'
-                      : 'border-border bg-background text-muted-foreground'
-                )}>
-                  {s.done ? <Check className="size-3.5" /> : i + 1}
-                </span>
-                <span className={cn('text-[10px] font-medium leading-none', i === current ? 'text-foreground' : 'text-muted-foreground')}>
-                  {s.label}
-                </span>
-              </div>
+              {navigable ? (
+                <button type="button" className="rounded-md px-1 py-0.5 hover:bg-accent/60 transition-colors cursor-pointer"
+                  onClick={() => onNavigate!(i)} title={`Ir a: ${s.label}`}>
+                  {stepEl}
+                </button>
+              ) : stepEl}
             </Fragment>
           );
         })}
@@ -398,7 +408,8 @@ export default function Services() {
         s.service_type ?? 'Cambio pantalla', s.service_types ?? '', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
         '', 'Entregado', s.observations ?? '', s.bank_fee_percent ?? 0,
         s.zelle_reference ?? '', s.currency ?? 'USD', s.client_ci ?? '',
-        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null, s.color ?? '', s.screen_product_id ?? null
+        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null, s.color ?? '', s.screen_product_id ?? null,
+        s.discount_amount ?? 0
       );
     } finally {
       setDelivering(null);
@@ -921,7 +932,7 @@ interface FormDevice {
 function emptyDevice(): FormDevice {
   return {
     model: '', color: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
-    discount: 0, payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: {},
+    discount: 0, payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: checklistDefaults(),
     amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null,
   };
 }
@@ -1059,7 +1070,7 @@ function colorDot(color: string): string {
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
 // modelo (con sugerencias), monto, trabajos/fallas, blindaje colapsable y finanzas propias.
-function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove, canRemove }: {
+function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove, canRemove, hideChecklist = false }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
   phoneModels: PhoneModelEntry[];
@@ -1067,6 +1078,7 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
   index: number;
   onRemove: () => void;
   canRemove: boolean;
+  hideChecklist?: boolean;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSuggestions, setModelSuggestions] = useState<PhoneModelEntry[]>([]);
@@ -1252,56 +1264,23 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
       </div>
 
-      <div className="space-y-2">
-        <Button type="button" variant="outline" size="sm" className="w-full bg-orange-500/10 border-orange-500/60 text-orange-700 hover:bg-orange-500/20 hover:text-orange-800"
-          onClick={() => setShowChecklist(v => !v)}>
-          <ShieldCheck className="size-3.5" /> Blindaje del equipo
-          <span className="text-muted-foreground text-xs">
-            {Object.values(device.checklist).filter(v => v === 'si' || v === 'no').length}/10
-          </span>
-        </Button>
-        {showChecklist && (
-          <div className="rounded-md border border-border/60 p-3 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">
-                Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
-              </p>
-              <Button type="button" size="sm" variant="outline" className="shrink-0"
-                onClick={() => onChange({ checklist: Object.fromEntries(CHECKLIST_ITEMS.map(i => [i.key, 'si'])) })}
-                disabled={CHECKLIST_ITEMS.every(i => device.checklist[i.key] === 'si')}>
-                Marcar todo Sí
-              </Button>
+      {!hideChecklist && (
+        <div className="space-y-2">
+          <Button type="button" variant="outline" size="sm" className="w-full bg-orange-500/10 border-orange-500/60 text-orange-700 hover:bg-orange-500/20 hover:text-orange-800"
+            onClick={() => setShowChecklist(v => !v)}>
+            <ShieldCheck className="size-3.5" /> Blindaje del equipo
+            <span className="text-muted-foreground text-xs">
+              {Object.values(device.checklist).filter(v => v === 'si' || v === 'no').length}/{CHECKLIST_ITEMS.length}
+            </span>
+          </Button>
+          {showChecklist && (
+            <div className="rounded-md border border-border/60 p-3 space-y-2">
+              <ChecklistGrid value={device.checklist}
+                onChange={cl => onChange({ checklist: cl })} />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-              {CHECKLIST_ITEMS.map(item => {
-                const val = device.checklist[item.key] ?? '';
-                return (
-                  <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
-                    <span className="text-sm flex items-center gap-1.5">
-                      <span className={cn('size-2.5 rounded-full shrink-0', item.dot)} />
-                      {item.label}
-                    </span>
-                    <ToggleGroup type="single" size="sm" value={val}
-                      onValueChange={v => onChange({ checklist: { ...device.checklist, [item.key]: v } })}
-                      className="shrink-0">
-                      <ToggleGroupItem value="si" variant="outline"
-                        className={cn('min-w-12 data-[state=on]:bg-emerald-600 data-[state=on]:text-white data-[state=on]:hover:bg-emerald-600',
-                          val === 'si' ? 'bg-emerald-600 text-white hover:bg-emerald-600' : '')}>
-                        Sí
-                      </ToggleGroupItem>
-                      <ToggleGroupItem value="no" variant="outline"
-                        className={cn('min-w-12 data-[state=on]:bg-destructive data-[state=on]:text-white data-[state=on]:hover:bg-destructive',
-                          val === 'no' ? 'bg-destructive text-white hover:bg-destructive' : '')}>
-                        No
-                      </ToggleGroupItem>
-                    </ToggleGroup>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
@@ -1309,8 +1288,6 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
           <Select value={device.payment} onValueChange={v => {
             const patch: Partial<FormDevice> = { payment: v };
             if (v.includes('Punto')) patch.bankFeePercent = 3.5;
-            // El descuento SOLO aplica en efectivo (Divisas USD Cash)
-            if (v !== 'Divisas (USD Cash)') patch.discount = 0;
             onChange(patch);
           }}>
             <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1355,6 +1332,64 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
   );
 }
 
+// Grid de blindaje reutilizable (wizard): toggles Sí/No + "Marcar todo Sí" como reset.
+// Al crear, Chip (SIM) y Forro/funda arrancan en "No" (checklistDefaults): normalmente se
+// le entregan al cliente — el operario los cambia a "Sí" solo si los deja en el equipo.
+function ChecklistGrid({ value, onChange }: {
+  value: Record<string, string>;
+  onChange: (cl: Record<string, string>) => void;
+}) {
+  const markedCount = Object.values(value).filter(v => v === 'si' || v === 'no').length;
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
+          Marca Sí/No el estado real al recibir el equipo. Chip y forro/funda vienen en
+          "No" (normalmente se le entregan al cliente): cámbialos a "Sí" solo si los deja
+          en el equipo. Protege al taller ante reclamos.
+        </p>
+        <Button type="button" size="sm" variant="outline" className="shrink-0"
+          onClick={() => onChange(Object.fromEntries(CHECKLIST_ITEMS.map(i => [i.key, 'si'])))}
+          disabled={CHECKLIST_ITEMS.every(i => value[i.key] === 'si')}>
+          Marcar todo Sí
+        </Button>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+        {CHECKLIST_ITEMS.map(item => {
+          const val = value[item.key] ?? '';
+          return (
+            <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
+              <span className="text-sm flex items-center gap-1.5">
+                <span className={cn('size-2.5 rounded-full shrink-0', item.dot)} />
+                {item.label}
+              </span>
+              <ToggleGroup type="single" size="sm" value={val}
+                onValueChange={v => onChange({ ...value, [item.key]: v })}
+                className="shrink-0">
+                <ToggleGroupItem value="si" variant="outline"
+                  className={cn('min-w-12 data-[state=on]:bg-emerald-600 data-[state=on]:text-white data-[state=on]:hover:bg-emerald-600',
+                    val === 'si' ? 'bg-emerald-600 text-white hover:bg-emerald-600' : '')}>
+                  Sí
+                </ToggleGroupItem>
+                <ToggleGroupItem value="no" variant="outline"
+                  className={cn('min-w-12 data-[state=on]:bg-destructive data-[state=on]:text-white data-[state=on]:hover:bg-destructive',
+                    val === 'no' ? 'bg-destructive text-white hover:bg-destructive' : '')}>
+                  No
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {markedCount === 0
+          ? 'Nada marcado — el operario lo decide al recibir el equipo.'
+          : `${markedCount} de ${CHECKLIST_ITEMS.length} ítems revisados.`}
+      </p>
+    </div>
+  );
+}
+
 function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   service: Service | null;
   statuses: ServiceStatus[];
@@ -1377,7 +1412,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [dateOut, setDateOut] = useState('');
   const [status, setStatus] = useState('Recibido');
   const [observations, setObservations] = useState('');
-  const [checklist, setChecklist] = useState<Record<string, string>>({});
+  const [checklist, setChecklist] = useState<Record<string, string>>(service ? {} : checklistDefaults());
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [bankFeePercent, setBankFeePercent] = useState(0);
@@ -1629,23 +1664,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     onSaved();
   };
 
-  // Progreso paso a paso del formulario: cada sección completada = paso en verde.
-  // La falla y el blindaje son opcionales: no bloquean el avance del stepper.
+  // Wizard paso a paso (navegable): cada paso con su validación. Blindaje es OPCIONAL
+  // (siempre done — el operario decide al recibir); la falla también es opcional.
   const steps = service
     ? [
         { label: 'Cliente', done: client.trim().length > 0 },
-        { label: 'Equipo', done: !!model },
-        { label: 'Trabajos', done: serviceTypes.length > 0 },
+        { label: 'Equipo', done: !!model && serviceTypes.length > 0 },
+        { label: 'Blindaje', done: true },
         { label: 'Finanzas', done: amount > 0 },
-        { label: 'Cierre', done: !!observations.trim() || !!dateOut || status !== 'Recibido' },
+        { label: 'Cierre', done: true },
       ]
     : [
         { label: 'Cliente', done: client.trim().length > 0 },
-        { label: 'Equipo', done: devices.length > 0 && devices.every(d => d.model.trim()) },
-        { label: 'Trabajos', done: devices.every(d => d.serviceTypes.length > 0) },
-        { label: 'Finanzas', done: devices.every(d => d.amount > 0) },
+        { label: 'Equipos', done: devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0) },
+        { label: 'Blindaje', done: true },
+        { label: 'Revisar', done: devices.every(d => d.amount > 0) },
       ];
   const stepCurrent = steps.findIndex(s => !s.done);
+  // Paso activo del wizard: 0 Cliente, 1 Equipo(s), 2 Blindaje, 3 Finanzas/Revisar, (4 Cierre)
+  const [wizStep, setWizStep] = useState(0);
+  const goTo = (i: number) => {
+    if (i < wizStep || stepCurrent === -1) setWizStep(i);
+  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -1670,8 +1710,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <span>Garantía vencida el {warrantyEnd(service.date_out)}</span>
           </div>
         )}
-        <FormStepper steps={steps} current={stepCurrent === -1 ? steps.length : stepCurrent} />
+        <FormStepper steps={steps} current={wizStep} onNavigate={goTo} />
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
+          {wizStep === 0 && (
+          <>
           <div className="text-sm text-muted-foreground">
             Orden: <strong>{orderNum}</strong>
           </div>
@@ -1787,87 +1829,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             </div>
           )}
 
-          {service && (
-            <div className="rounded-lg border border-border/70 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold flex items-center gap-2">
-                  <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
-                </p>
-                <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false}>
-                  <Plus className="size-3.5" /> Registrar Pago / Abono
-                </Button>
-              </div>
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <div className="rounded-md bg-muted/60 px-3 py-2">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Total</p>
-                  <p className="font-bold">${amount.toFixed(2)}</p>
-                </div>
-                <div className="rounded-md bg-muted/60 px-3 py-2">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Abonado</p>
-                  <p className="font-bold text-emerald-600">
-                    ${abonadoUsd.toFixed(2)}
-                    {totalAbonadoBs > 0 && <span className="text-foreground font-medium"> + Bs. {totalAbonadoBs.toFixed(2)}</span>}
-                  </p>
-                </div>
-                <div className="rounded-md px-3 py-2 border">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
-                  {isFinalized(service?.status) ? (
-                    <p className="font-bold text-muted-foreground">{service?.status === 'Devuelto' ? 'Devuelto' : 'Cancelado'}</p>
-                  ) : saldoUsd < -0.005 ? (
-                    <p className="font-bold text-warning">Excedente ${excedenteUsd.toFixed(2)}</p>
-                  ) : payments.length === 0 ? (
-                    <p className="font-bold text-amber-600">Por pagar ${saldoUsd.toFixed(2)}</p>
-                  ) : saldoUsd > 0.005 ? (
-                    <p className="font-bold text-danger">${saldoUsd.toFixed(2)} pendiente</p>
-                  ) : (
-                    <p className="font-bold text-success">Cancelado</p>
-                  )}
-                </div>
-              </div>
-              {payments.length > 0 && (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Fecha</TableHead>
-                      <TableHead className="text-right">Monto</TableHead>
-                      <TableHead>Método</TableHead>
-                      <TableHead>Notas</TableHead>
-                      <TableHead className="w-10"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {payments.map(p => (
-                      <TableRow key={p.id}>
-                        <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
-                        <TableCell className="text-right font-medium">
-                          {isRefund(p) ? (
-                            <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
-                          ) : (
-                            <>{currencySymbol(p.currency)}{p.amount.toFixed(2)}</>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {isRefund(p) ? <span className="font-medium text-danger">Devolución</span> : (p.payment_method ?? '-')}
-                          {!isRefund(p) && isMovilOrZelle(p.payment_method) && p.zelle_reference && (
-                            <span className="block text-xs text-muted-foreground">····{p.zelle_reference.slice(-4)}</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground max-w-[140px] truncate">{p.notes ?? '-'}</TableCell>
-                        <TableCell>
-                          <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
-                            onClick={() => doDeletePayment(p.id)}>
-                            <Trash2 className="size-3.5" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </div>
+          </>
           )}
 
-          {service ? (
+          {wizStep === 1 && (service ? (
             <>
           <SectionTitle step={2} title="Equipo y diagnóstico" />
           <div className="grid grid-cols-2 gap-4">
@@ -1978,110 +1943,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               placeholder="Ej: Pantalla rota, se cambió por Incell nueva. Teléfono no enciende, se reemplazó batería..." />
           </div>
 
-          <SectionTitle step={3} title="Blindaje del equipo" tone="orange" />
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">
-                Marca Sí/No el estado real al recibir el equipo. Protege al taller si el cliente reclama algo que ya estaba así.
-              </p>
-              <Button type="button" size="sm" variant="outline" className="shrink-0"
-                onClick={() => setChecklist(Object.fromEntries(CHECKLIST_ITEMS.map(i => [i.key, 'si'])))}
-                disabled={CHECKLIST_ITEMS.every(i => checklist[i.key] === 'si')}>
-                Marcar todo Sí
-              </Button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-              {CHECKLIST_ITEMS.map(item => {
-                const val = checklist[item.key] ?? '';
-                return (
-                  <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-1.5">
-                    <span className="text-sm flex items-center gap-1.5">
-                      <span className={cn('size-2.5 rounded-full shrink-0', item.dot)} />
-                      {item.label}
-                    </span>
-                    <ToggleGroup type="single" size="sm" value={val}
-                      onValueChange={v => setChecklist(prev => ({ ...prev, [item.key]: v }))}
-                      className="shrink-0">
-                      <ToggleGroupItem value="si" variant="outline"
-                        className={cn('min-w-12 data-[state=on]:bg-emerald-600 data-[state=on]:text-white data-[state=on]:hover:bg-emerald-600',
-                          val === 'si' ? 'bg-emerald-600 text-white hover:bg-emerald-600' : '')}>
-                        Sí
-                      </ToggleGroupItem>
-                      <ToggleGroupItem value="no" variant="outline"
-                        className={cn('min-w-12 data-[state=on]:bg-destructive data-[state=on]:text-white data-[state=on]:hover:bg-destructive',
-                          val === 'no' ? 'bg-destructive text-white hover:bg-destructive' : '')}>
-                        No
-                      </ToggleGroupItem>
-                    </ToggleGroup>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <SectionTitle step={4} title="Finanzas y estado" />
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Método de Pago</label>
-              <Select value={payment} onValueChange={v => {
-                setPayment(v);
-                if (v.includes('Punto')) setBankFeePercent(3.5);
-                // El descuento SOLO aplica en efectivo (Divisas USD Cash)
-                if (v !== 'Divisas (USD Cash)') setDiscount(0);
-              }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {methods.map(m => (
-                    <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {service && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Estado</label>
-                <Select value={status} onValueChange={setStatus}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {statuses.map(s => (
-                      <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-          </div>
-
-          {isPos && (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Comisión Punto (%)</label>
-                <Input type="number" step={0.1} min={0} max={100} value={bankFeePercent}
-                  onChange={e => setBankFeePercent(Number(e.target.value))} />
-                <p className="text-xs text-muted-foreground">
-                  Comisión: ${((amount * bankFeePercent) / 100).toFixed(2)} · Neto: ${(amount - (amount * bankFeePercent) / 100).toFixed(2)}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Moneda</label>
-                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
-                  <span className="font-semibold">{currencySymbol(methodCurrency(payment))}</span>
-                  <span className="text-muted-foreground text-xs">
-                    {methodCurrency(payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {(isZelle || isPagoMovil) && (
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Referencia</label>
-              <Input value={zelleReference} onChange={e => setZelleReference(e.target.value)}
-                placeholder="Número de referencia (últimos 4 dígitos)..." />
-            </div>
-          )}
-            </>
+          </>
           ) : (
             <>
               <SectionTitle step={2} title={`Equipos (${devices.length})`} />
@@ -2089,7 +1951,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
                     phoneModels={phoneModels} methods={methods} index={i}
-                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} />
+                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
                 ))}
               </div>
               <Button type="button" variant="outline" onClick={addDevice} disabled={devices.length >= 10}>
@@ -2102,27 +1964,246 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                 </p>
               )}
             </>
+          ))}
+
+          {wizStep === 2 && (
+            <>
+              <SectionTitle step={3} title="Blindaje del equipo" tone="orange" />
+              {service ? (
+                <ChecklistGrid value={checklist} onChange={setChecklist} />
+              ) : (
+                <div className="space-y-3">
+                  {devices.map((d, i) => (
+                    <div key={i} className="rounded-xl border border-border/70 p-4 space-y-2">
+                      <p className="text-sm font-semibold flex items-center gap-2">
+                        <Smartphone className="size-4 text-primary" /> Equipo {i + 1}
+                        {d.model && <span className="text-muted-foreground font-normal text-xs truncate">— {d.model}</span>}
+                      </p>
+                      <ChecklistGrid value={d.checklist} onChange={cl => setDevice(i, { checklist: cl })} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
-          {service && (
+          {wizStep === 3 && (service ? (
+            <>
+              <SectionTitle step={4} title="Finanzas y estado" />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Método de Pago</label>
+                  <Select value={payment} onValueChange={v => {
+                    setPayment(v);
+                    if (v.includes('Punto')) setBankFeePercent(3.5);
+                  }}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {methods.map(m => (
+                        <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Estado</label>
+                  <Select value={status} onValueChange={setStatus}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {statuses.map(s => (
+                        <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {isPos && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Comisión Punto (%)</label>
+                    <Input type="number" step={0.1} min={0} max={100} value={bankFeePercent}
+                      onChange={e => setBankFeePercent(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground">
+                      Comisión: ${((amount * bankFeePercent) / 100).toFixed(2)} · Neto: ${(amount - (amount * bankFeePercent) / 100).toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Moneda</label>
+                    <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
+                      <span className="font-semibold">{currencySymbol(methodCurrency(payment))}</span>
+                      <span className="text-muted-foreground text-xs">
+                        {methodCurrency(payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {(isZelle || isPagoMovil) && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Referencia</label>
+                  <Input value={zelleReference} onChange={e => setZelleReference(e.target.value)}
+                    placeholder="Número de referencia (últimos 4 dígitos)..." />
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <SectionTitle step={4} title="Revisar y guardar" />
+              <div className="space-y-3">
+                <div className="rounded-lg border border-border/70 p-4 space-y-2">
+                  <p className="text-sm font-semibold flex items-center gap-2">
+                    <User className="size-4 text-primary" /> {client.trim() || 'Cliente'}
+                    {clientCi && <span className="text-muted-foreground font-normal text-xs">· {clientCi}</span>}
+                  </p>
+                  {devices.map((d, i) => {
+                    const net = Math.max(0, d.amount - d.discount);
+                    return (
+                      <div key={i} className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            <Smartphone className="size-3.5 inline mr-1 text-primary" /> {d.model || `Equipo ${i + 1}`}
+                          </p>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {d.serviceTypes.map(t => <Badge key={t} variant="outline" className="text-[11px]">{t}</Badge>)}
+                            {d.discount > 0.005 && <Badge variant="outline" className="text-[11px] text-emerald-600">Descuento ${d.discount.toFixed(2)}</Badge>}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-sm font-bold">${net.toFixed(2)}</p>
+                          <p className="text-[11px] text-muted-foreground">{d.payment}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between border-t pt-2 text-sm">
+                    <span className="text-muted-foreground">Total a cobrar ({devices.length} equipo{devices.length === 1 ? '' : 's'})</span>
+                    <span className="font-bold text-lg">${devices.reduce((a, d) => a + Math.max(0, d.amount - d.discount), 0).toFixed(2)}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Al guardar se crea la orden con el número siguiente. La garantía de 7 días se aplica al entregar el equipo.
+                  </p>
+                </div>
+              </div>
+            </>
+          ))}
+
+          {service && wizStep === 4 && (
             <>
               <SectionTitle step={5} title="Cierre de la orden" />
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Fecha Salida</label>
-                <Input type="date" value={dateOut} onChange={e => setDateOut(e.target.value)} />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Fecha Salida</label>
+                  <Input type="date" value={dateOut} onChange={e => setDateOut(e.target.value)} />
+                  <p className="text-xs text-muted-foreground">La garantía de 7 días se cuenta desde esta fecha (o desde el día que se entregue).</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Observaciones</label>
+                  <Textarea value={observations} onChange={e => setObservations(e.target.value)} />
+                </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Observaciones</label>
-                <Textarea value={observations} onChange={e => setObservations(e.target.value)} />
+
+              <div className="rounded-lg border border-border/70 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold flex items-center gap-2">
+                    <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
+                  </p>
+                  <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false}>
+                    <Plus className="size-3.5" /> Registrar Pago / Abono
+                  </Button>
+                </div>
+                <div className="grid grid-cols-3 gap-3 text-sm">
+                  <div className="rounded-md bg-muted/60 px-3 py-2">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Total</p>
+                    <p className="font-bold">${amount.toFixed(2)}</p>
+                  </div>
+                  <div className="rounded-md bg-muted/60 px-3 py-2">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Abonado</p>
+                    <p className="font-bold text-emerald-600">
+                      ${abonadoUsd.toFixed(2)}
+                      {totalAbonadoBs > 0 && <span className="text-foreground font-medium"> + Bs. {totalAbonadoBs.toFixed(2)}</span>}
+                    </p>
+                  </div>
+                  <div className="rounded-md px-3 py-2 border">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Saldo</p>
+                    {isFinalized(service?.status) ? (
+                      <p className="font-bold text-muted-foreground">{service?.status === 'Devuelto' ? 'Devuelto' : 'Cancelado'}</p>
+                    ) : saldoUsd < -0.005 ? (
+                      <p className="font-bold text-warning">Excedente ${excedenteUsd.toFixed(2)}</p>
+                    ) : payments.length === 0 ? (
+                      <p className="font-bold text-amber-600">Por pagar ${saldoUsd.toFixed(2)}</p>
+                    ) : saldoUsd > 0.005 ? (
+                      <p className="font-bold text-danger">${saldoUsd.toFixed(2)} pendiente</p>
+                    ) : (
+                      <p className="font-bold text-success">Cancelado</p>
+                    )}
+                  </div>
+                </div>
+                {payments.length > 0 && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Fecha</TableHead>
+                        <TableHead className="text-right">Monto</TableHead>
+                        <TableHead>Método</TableHead>
+                        <TableHead>Notas</TableHead>
+                        <TableHead className="w-10"></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {payments.map(p => (
+                        <TableRow key={p.id}>
+                          <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
+                          <TableCell className="text-right font-medium">
+                            {isRefund(p) ? (
+                              <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
+                            ) : (
+                              <>{currencySymbol(p.currency)}{p.amount.toFixed(2)}</>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {isRefund(p) ? <span className="font-medium text-danger">Devolución</span> : (p.payment_method ?? '-')}
+                            {!isRefund(p) && isMovilOrZelle(p.payment_method) && p.zelle_reference && (
+                              <span className="block text-xs text-muted-foreground">····{p.zelle_reference.slice(-4)}</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground max-w-[140px] truncate">{p.notes ?? '-'}</TableCell>
+                          <TableCell>
+                            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-danger"
+                              onClick={() => doDeletePayment(p.id)}>
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
               </div>
             </>
           )}
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
-          <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
-            {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
-          </Button>
+          <div className="flex w-full items-center justify-between gap-2">
+            <Button variant="outline" onClick={onClose}>Cancelar</Button>
+            <div className="flex items-center gap-2">
+              {wizStep > 0 && (
+                <Button type="button" variant="outline" onClick={() => setWizStep(w => w - 1)}>
+                  Anterior
+                </Button>
+              )}
+              {wizStep < steps.length - 1 ? (
+                <Button type="button" onClick={() => setWizStep(w => w + 1)} disabled={!steps[wizStep].done}>
+                  Siguiente
+                </Button>
+              ) : (
+                <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+                  {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
+                </Button>
+              )}
+            </div>
+          </div>
         </DialogFooter>
       </DialogContent>
 
