@@ -3,6 +3,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import type { LearningContext, LearningPattern } from "./types";
 import { config } from "../config";
+import { loadMemory, getUnresolvedErrors, getTopConventions, recordError, addConvention } from "../memory/store";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,6 +115,42 @@ export function loadLearningContext(): LearningContext {
     ...extractErrorsFromHistory(historyMd),
   ];
 
+  const memory = loadMemory();
+  const unresolvedErrors = getUnresolvedErrors(1);
+  const topConventions = getTopConventions(10);
+
+  for (const err of unresolvedErrors) {
+    const existing = patterns.find(p => p.description === err.message);
+    if (!existing) {
+      patterns.push({
+        kind: "recurring-error",
+        description: err.message,
+        severity: err.severity,
+        occurrences: err.count,
+        firstSeen: err.firstSeen,
+        lastSeen: err.lastSeen,
+        evidence: [`module: ${err.module}`],
+        suggestedFix: undefined,
+      });
+    }
+  }
+
+  for (const conv of topConventions) {
+    const existing = patterns.find(p => p.description === conv.description);
+    if (!existing) {
+      patterns.push({
+        kind: "convention",
+        description: conv.description,
+        severity: "medium",
+        occurrences: 1,
+        firstSeen: conv.establishedAt,
+        lastSeen: conv.lastReinforced,
+        evidence: [`module: ${conv.module}`],
+        suggestedFix: undefined,
+      });
+    }
+  }
+
   const errorsToAvoid = patterns
     .filter(p => p.kind === "recurring-error" && (p.severity === "critical" || p.severity === "high"))
     .map(p => p.description);
@@ -125,12 +162,13 @@ export function loadLearningContext(): LearningContext {
   const sourceFiles: string[] = [];
   if (patternsMd) sourceFiles.push("progress/patterns.md");
   if (historyMd) sourceFiles.push("progress/history.md");
+  sourceFiles.push("progress/memory/loop-memory.json");
 
   return {
     patterns,
     errorsToAvoid,
     activeConventions,
-    isFirstSession: patterns.length === 0,
+    isFirstSession: patterns.length === 0 && memory.sessionCount === 0,
     sourceFiles,
     timestamp: new Date().toISOString(),
   };

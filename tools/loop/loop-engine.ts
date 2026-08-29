@@ -4,12 +4,12 @@ import { fileURLToPath } from "url";
 import { config } from "../config";
 import { detectProject, type DetectedProject } from "../detector";
 import type { GoalConfig, LoopState, IterationRecord, LoopResult, PhaseResult } from "./types";
+import { recordLoopResult, recordError } from "../memory/store";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, "../..");
-const PROGRESS_DIR = path.resolve(PROJECT_ROOT, config.paths.progressDir);
-const ARTIFACTS_DIR = path.resolve(PROJECT_ROOT, config.paths.artifactsDir);
+const PROGRESS_DIR = path.resolve(__dirname, "..", config.paths.progressDir.replace(/^tools\//, ""));
+const ARTIFACTS_DIR = path.resolve(__dirname, "..", config.paths.artifactsDir.replace(/^tools\//, ""));
 const LOOPS_DIR = path.join(PROGRESS_DIR, "loops");
 
 function ensureDir(dir: string): void {
@@ -394,13 +394,12 @@ async function phaseDeployReadiness(verbose: boolean): Promise<PhaseResult> {
       warnings.push("No project migrations detected");
     }
 
-    // NO_DEBUG_ARTIFACTS — only check source files
+    // NO_DEBUG_ARTIFACTS — only check source files (skip tools/ — harness framework)
     try {
       const { execSync } = await import("child_process");
       const output = execSync("git diff --name-only HEAD", { cwd: projectRoot, encoding: "utf-8", timeout: 5000 });
       const changedFiles = output.split("\n").filter(Boolean);
       for (const file of changedFiles) {
-        // tools/ es el código del propio harness (CLI con console.log de diseño)
         if (file.startsWith("tools/")) continue;
         if (!file.endsWith(".ts") && !file.endsWith(".tsx") && !file.endsWith(".astro")) continue;
         try {
@@ -538,6 +537,14 @@ export async function executeLoop(
     const p1 = await phaseLearningInjector(verbose);
     phases.push(p1);
     console.log(`   ${p1.passed ? "✅" : "❌"} ${p1.durationMs}ms${p1.warnings.length ? ` (${p1.warnings.length} warnings)` : ""}`);
+
+    // Skills auto-injection
+    const { findSkills, matchSkillsToProject, injectSkillPrompt, printSkillMatches } = await import("../skills/index");
+    const allSkills = findSkills();
+    const matched = matchSkillsToProject(allSkills);
+    if (matched.length > 0) {
+      printSkillMatches(matched);
+    }
 
     if (p1.passed) {
       // Phase 2: Context Guard
@@ -698,6 +705,19 @@ export async function executeLoop(
     console.log(`   🧪 Truth:            ${record.truthPassed ? "✅" : "❌"}`);
     console.log(`   📦 Errors:           ${record.errors.length}`);
     console.log(`   ⏱️  Duration:         ${(record.durationMs / 1000).toFixed(1)}s`);
+
+    // Record to persistent memory
+    const phasesPassed = record.phases.filter(p => p.passed).length;
+    const phasesFailed = record.phases.filter(p => !p.passed).length;
+    recordLoopResult(conditionsMet, record.durationMs, phasesPassed, phasesFailed);
+    for (const e of record.errors) {
+      recordError("loop", e, "high");
+    }
+    for (const p of record.phases) {
+      for (const e of p.errors) {
+        recordError(p.phase, e, p.passed ? "low" : "high");
+      }
+    }
 
     if (conditionsMet) {
       console.log(`\n🎯 GOAL MET! All conditions satisfied.`);

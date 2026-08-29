@@ -332,8 +332,15 @@ function checkTypeScript(changedFiles: string[]): ReviewFinding[] {
 }
 
 /** Check #5: Import resolution — check that imports in changed files resolve */
-function checkImportResolution(changedFiles: string[]): ReviewFinding[] {
+async function checkImportResolution(changedFiles: string[]): Promise<ReviewFinding[]> {
   const findings: ReviewFinding[] = [];
+
+  let ts: typeof import("typescript");
+  try {
+    ts = await import("typescript");
+  } catch {
+    return checkImportResolutionFallback(changedFiles);
+  }
 
   for (const file of changedFiles) {
     if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
@@ -341,24 +348,63 @@ function checkImportResolution(changedFiles: string[]): ReviewFinding[] {
     const content = readFileSafe(path.join(PROJECT_ROOT, file));
     if (!content) continue;
 
+    const sourceFile = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+
+    function walk(node: import("typescript").Node) {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+        const importPath = node.moduleSpecifier.getText(sourceFile).replace(/['"`]/g, "");
+
+        if (!importPath.startsWith(".") && !importPath.startsWith("@/") && !importPath.startsWith("/")) return;
+
+        const fileDir = path.dirname(path.join(PROJECT_ROOT, file));
+        let resolvedPath: string;
+
+        if (importPath.startsWith("@/")) {
+          resolvedPath = path.join(PROJECT_ROOT, config.paths.sourceDir, importPath.slice(2));
+        } else {
+          resolvedPath = path.resolve(fileDir, importPath);
+        }
+
+        const exts = [".ts", ".tsx", ".astro", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"];
+        let exists = fs.existsSync(resolvedPath);
+        if (!exists) {
+          for (const ext of exts) {
+            if (fs.existsSync(resolvedPath + ext)) { exists = true; break; }
+          }
+        }
+
+        if (!exists && !resolvedPath.includes("node_modules")) {
+          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+          findings.push({
+            severity: "blocking",
+            category: "typescript",
+            file, line,
+            message: `Import no resuelve: "${importPath}" → buscado en "${resolvedPath}"`,
+          });
+        }
+      }
+      ts.forEachChild(node, walk);
+    }
+    walk(sourceFile);
+  }
+
+  return findings;
+}
+
+function checkImportResolutionFallback(changedFiles: string[]): ReviewFinding[] {
+  const findings: ReviewFinding[] = [];
+  for (const file of changedFiles) {
+    if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+    const content = readFileSafe(path.join(PROJECT_ROOT, file));
+    if (!content) continue;
     const importMatches = content.matchAll(/from\s+["'](.+?)["']/g);
     for (const match of importMatches) {
       const importPath = match[1];
-
-      // Skip npm packages (no relative/absolute path)
       if (!importPath.startsWith(".") && !importPath.startsWith("@/") && !importPath.startsWith("/")) continue;
-
-      // Resolve the import path
       const fileDir = path.dirname(path.join(PROJECT_ROOT, file));
-      let resolvedPath: string;
-
-      if (importPath.startsWith("@/")) {
-        resolvedPath = path.join(PROJECT_ROOT, config.paths.sourceDir, importPath.slice(2));
-      } else {
-        resolvedPath = path.resolve(fileDir, importPath);
-      }
-
-      // Try extensions
+      const resolvedPath = importPath.startsWith("@/")
+        ? path.join(PROJECT_ROOT, config.paths.sourceDir, importPath.slice(2))
+        : path.resolve(fileDir, importPath);
       const exts = [".ts", ".tsx", ".astro", "/index.ts", "/index.tsx"];
       let exists = fs.existsSync(resolvedPath);
       if (!exists) {
@@ -367,18 +413,11 @@ function checkImportResolution(changedFiles: string[]): ReviewFinding[] {
           if (fs.existsSync(resolvedPath.replace(/\/[^/]+$/, "") + ext)) { exists = true; break; }
         }
       }
-
       if (!exists && !resolvedPath.includes("node_modules")) {
-        findings.push({
-          severity: "blocking",
-          category: "typescript",
-          file,
-          message: `Import no resuelve: "${importPath}" → buscado en "${resolvedPath}"`,
-        });
+        findings.push({ severity: "blocking", category: "typescript", file, message: `Import no resuelve: "${importPath}"` });
       }
     }
   }
-
   return findings;
 }
 
@@ -462,10 +501,9 @@ function analyzeChangedFiles(changedFiles: string[]): ReviewFinding[] {
 // === Check 8: Test Quality ===
 // Validates that tests follow AAA pattern, have assertions, no console.log, etc.
 // Based on Midudev's testing philosophy: "test code is production code"
-function checkTestQuality(changedFiles: string[]): ReviewFinding[] {
+async function checkTestQuality(changedFiles: string[]): Promise<ReviewFinding[]> {
   const findings: ReviewFinding[] = [];
 
-  // Only check test files
   const testFiles = changedFiles.filter(f =>
     /\.test\.(ts|tsx|js|jsx)$/.test(f) ||
     /\.spec\.(ts|tsx|js|jsx)$/.test(f)
@@ -476,105 +514,120 @@ function checkTestQuality(changedFiles: string[]): ReviewFinding[] {
   for (const file of testFiles) {
     if (!fs.existsSync(file)) continue;
     const content = fs.readFileSync(file, "utf-8");
-    const lines = content.split("\n");
 
-    // Check 1: Tests must have assertions
-    const testMatches = [...content.matchAll(/\b(it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g)];
-    for (const m of testMatches) {
-      const lineNum = content.substring(0, m.index).split("\n").length;
-      const testName = m[2];
+    let ts: typeof import("typescript");
+    try {
+      ts = await import("typescript");
+    } catch {
+      return checkTestQualityFallback(changedFiles);
+    }
 
-      // Look for the function body
-      const startLine = lineNum - 1;
-      let body = "";
-      let braceIdx = content.indexOf("{", m.index);
-      if (braceIdx >= 0) {
-        let depth = 0;
-        const bodyStart = content.substring(0, braceIdx).split("\n").length - 1;
-        for (let i = bodyStart; i < lines.length; i++) {
-          body += lines[i] + "\n";
-          for (const ch of lines[i]) {
-            if (ch === "{") depth++;
-            else if (ch === "}") depth--;
+    const sourceFile = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+    const testNames: string[] = [];
+
+    function walk(node: import("typescript").Node, body: string) {
+      if (ts.isCallExpression(node)) {
+        const exprText = node.expression.getText(sourceFile);
+        if (/^(it|test|describe|it\.skip|test\.skip|describe\.skip)$/.test(exprText)) {
+          const arg = node.arguments[0];
+          const name = arg && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg))
+            ? arg.text : "unnamed";
+          const lineNum = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+          testNames.push(name);
+
+          const bodyNode = node.arguments.length > 1 ? node.arguments[1] : null;
+          const bodyText = bodyNode ? bodyNode.getText(sourceFile) : "";
+
+          const hasAssertion = /\bexpect\s*\(/.test(bodyText) ||
+                              /\bassert\./.test(bodyText) ||
+                              /\.(toBe|toEqual|toThrow|toHaveBeenCalled|toHaveLength|toContain|toMatchObject)\s*\(/.test(bodyText);
+
+          if (!hasAssertion) {
+            findings.push({
+              severity: "blocking",
+              category: "test-quality",
+              file, line: lineNum,
+              message: `Test "${name}" has no assertions (AAA pattern violated).`,
+              suggestion: "Add expect(), assert, or toBe()/toEqual() in the body.",
+            });
           }
-          if (depth <= 0) break;
+
+          if (/\bconsole\.log\s*\(/.test(bodyText)) {
+            findings.push({
+              severity: "warning",
+              category: "test-quality",
+              file, line: lineNum,
+              message: `Test "${name}" contains console.log — debugging residue.`,
+              suggestion: "Remove console.log or convert to expect(...).toHaveBeenCalled().",
+            });
+          }
+
+          if (/\bdebugger\b/.test(bodyText)) {
+            findings.push({
+              severity: "blocking",
+              category: "test-quality",
+              file, line: lineNum,
+              message: `Test "${name}" contains debugger statement.`,
+            });
+          }
+
+          const hasGoodNaming = /^should[_\s]/i.test(name) || /^it[_\s]/i.test(name) ||
+            /\b(when|then|throws|returns|fails)\b/i.test(name);
+          if (!hasGoodNaming && name.length < 8) {
+            findings.push({
+              severity: "info",
+              category: "test-quality",
+              file, line: lineNum,
+              message: `Test "${name}" has weak naming. Use should_X_when_Y or it_X pattern.`,
+            });
+          }
         }
       }
+      ts.forEachChild(node, child => walk(child, body));
+    }
 
-      // Has assertion?
-      const hasAssertion = /\bexpect\s*\(/.test(body) ||
-                          /\bassert\./.test(body) ||
-                          /\.toBe\s*\(/.test(body) ||
-                          /\.toEqual\s*\(/.test(body) ||
-                          /\.toThrow\b/.test(body) ||
-                          /\.toHaveBeenCalled\b/.test(body);
+    walk(sourceFile, "");
+    if (testNames.length === 0) continue;
 
-      if (!hasAssertion) {
-        findings.push({
-          severity: "blocking",
-          category: "test-quality",
-          file,
-          line: lineNum,
-          message: `Test "${testName}" has no assertions (AAA pattern violated).`,
-          suggestion: "Add expect(), assert, or .toBe()/.toEqual() in the body.",
-        });
-      }
-
-      // Check 2: No console.log in test body
-      if (/\bconsole\.log\s*\(/.test(body)) {
+    const seen = new Set<string>();
+    for (const name of testNames) {
+      if (seen.has(name)) {
         findings.push({
           severity: "warning",
           category: "test-quality",
           file,
-          line: lineNum,
-          message: `Test "${testName}" contains console.log — debugging residue.`,
-          suggestion: "Remove console.log or convert to expect(...).toHaveBeenCalled().",
+          message: `Duplicate test name: "${name}" appears multiple times.`,
         });
       }
-
-      // Check 3: No debugger
-      if (/\bdebugger\b/.test(body)) {
-        findings.push({
-          severity: "blocking",
-          category: "test-quality",
-          file,
-          line: lineNum,
-          message: `Test "${testName}" contains debugger statement.`,
-        });
-      }
-
-      // Check 4: Naming convention
-      const hasGoodNaming = /^should[_\s]/i.test(testName) ||
-                           /^it[_\s]/i.test(testName) ||
-                           /\bwhen\b/i.test(testName) ||
-                           /\bthen\b/i.test(testName) ||
-                           /\bthrows\b/i.test(testName) ||
-                           /\breturns\b/i.test(testName) ||
-                           /\bfails\b/i.test(testName);
-      if (!hasGoodNaming && testName.length < 8) {
-        findings.push({
-          severity: "info",
-          category: "test-quality",
-          file,
-          line: lineNum,
-          message: `Test "${testName}" has weak naming. Use should_X_when_Y or it_X pattern.`,
-        });
-      }
-    }
-
-    // Check 5: Duplicate test names within file
-    const testNames = testMatches.map(m => m[2]);
-    const duplicates = testNames.filter((n, i) => testNames.indexOf(n) !== i);
-    for (const dup of [...new Set(duplicates)]) {
-      findings.push({
-        severity: "warning",
-        category: "test-quality",
-        file,
-        message: `Duplicate test name: "${dup}" appears multiple times.`,
-      });
+      seen.add(name);
     }
   }
 
+  return findings;
+}
+
+function checkTestQualityFallback(changedFiles: string[]): ReviewFinding[] {
+  const findings: ReviewFinding[] = [];
+  const testFiles = changedFiles.filter(f =>
+    /\.test\.(ts|tsx|js|jsx)$/.test(f) || /\.spec\.(ts|tsx|js|jsx)$/.test(f)
+  );
+  if (testFiles.length === 0) return findings;
+  for (const file of testFiles) {
+    if (!fs.existsSync(file)) continue;
+    const content = fs.readFileSync(file, "utf-8");
+    const testMatches = [...content.matchAll(/\b(it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g)];
+    const testNames = testMatches.map(m => m[2]);
+    const seen = new Set<string>();
+    for (const name of testNames) {
+      if (seen.has(name)) {
+        findings.push({ severity: "warning", category: "test-quality", file, message: `Duplicate test name: "${name}"` });
+      }
+      seen.add(name);
+    }
+    if (testNames.length === 0) {
+      findings.push({ severity: "info", category: "test-quality", file, message: "No tests found in file" });
+    }
+  }
   return findings;
 }
 
@@ -582,7 +635,7 @@ function checkTestQuality(changedFiles: string[]): ReviewFinding[] {
 // Validates that code coverage meets thresholds.
 // Coverage is complementary to mutation score — high coverage doesn't mean good tests,
 // but very low coverage means we're not testing enough.
-function checkCoverage(changedFiles: string[]): ReviewFinding[] {
+async function checkCoverage(changedFiles: string[]): Promise<ReviewFinding[]> {
   const findings: ReviewFinding[] = [];
 
   // Only run coverage check if test files were changed
@@ -594,7 +647,7 @@ function checkCoverage(changedFiles: string[]): ReviewFinding[] {
   if (!hasTestChanges) return findings;
 
   try {
-    const { runCoverage } = require("../testing/coverage");
+    const { runCoverage } = await import("../testing/coverage");
     const report = runCoverage({ warnBelow: 60, blockBelow: 40 });
 
     if ("error" in report) {
@@ -672,10 +725,10 @@ export async function runReview(): Promise<ReviewResult> {
   findings.push(...checkDataFlowConsistency(changedFiles));
   findings.push(...checkMigrationChanges(changedFiles));
   findings.push(...checkTypeScript(changedFiles));
-  findings.push(...checkImportResolution(changedFiles));
+  findings.push(...await checkImportResolution(changedFiles));
   findings.push(...checkMigrationApplied(changedFiles));
-  findings.push(...checkTestQuality(changedFiles));
-  findings.push(...checkCoverage(changedFiles));
+  findings.push(...await checkTestQuality(changedFiles));
+  findings.push(...await checkCoverage(changedFiles));
 
   const blocked = attempt > MAX_REVIEW_ATTEMPTS;
   const blockingCount = findings.filter(f => f.severity === "blocking").length;

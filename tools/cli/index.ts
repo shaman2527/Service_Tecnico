@@ -100,6 +100,67 @@ async function main() {
       break;
     }
 
+    case "memory": {
+      const { loadMemory, clearMemory } = await import("../memory/store");
+      if (args[1] === "clear") {
+        clearMemory();
+        console.log("   🧹 Memory cleared");
+      } else {
+        const mem = loadMemory();
+        console.log(`\n🧠 Loop Memory Store`);
+        console.log(`   Sessions:     ${mem.sessionCount}`);
+        console.log(`   Last result:  ${mem.lastLoopResult}`);
+        console.log(`   Errors:       ${Object.keys(mem.errors).length}`);
+        console.log(`   Conventions:  ${mem.conventions.length}`);
+        console.log(`   Phases OK:    ${mem.totalPhasesPassed}`);
+        console.log(`   Phases fail:  ${mem.totalPhasesFailed}`);
+        const unresolved = Object.values(mem.errors).filter(e => !e.resolvedAt);
+        if (unresolved.length > 0) {
+          console.log(`\n   ⛔ Unresolved errors:`);
+          for (const e of unresolved.slice(0, 10)) {
+            console.log(`     - [${e.severity}] ${e.module}: ${e.message.slice(0, 80)} (x${e.count})`);
+          }
+        }
+      }
+      break;
+    }
+
+    case "mcp": {
+      console.log(`\n🔌 Starting Harness MCP server...`);
+      await import("../mcp/server");
+      break;
+    }
+
+    case "parallel": {
+      const { runParallel } = await import("../parallel/pool");
+      const { runFullSecurityScan, printSecurityReport } = await import("../governance/security-validator");
+      const { runReview, printReviewResult } = await import("../governance/reviewer-bus");
+      const { runBuild } = await import("../governance/build-validator");
+      console.log(`\n⚡ Running phases in parallel...`);
+      const results = await runParallel([
+        { name: "security", fn: async () => { const r = await runFullSecurityScan(); return { passed: r.passed, report: r }; } },
+        { name: "review", fn: async () => { const r = await runReview(); return { passed: r.passed, review: r }; } },
+        { name: "build", fn: async () => { const r = runBuild(); return { passed: r.success, build: r }; } },
+      ], 2);
+      for (const [name, r] of Object.entries(results)) {
+        console.log(`   ${r.success ? "✅" : "❌"} ${name} (${r.durationMs}ms)`);
+      }
+      break;
+    }
+
+    case "dashboard":
+    case "dash": {
+      console.log(`\n📊 Starting Harness Dashboard...`);
+      await import("../telemetry/server");
+      break;
+    }
+
+    case "--version":
+    case "-v": {
+      console.log(`Harness ENGINEERING v2.0.0`);
+      break;
+    }
+
     case "help":
     default: {
       console.log(`
@@ -112,6 +173,11 @@ Harness ENGINEERING CLI
   generate [--dry-run] Run code generator
   governance [flags]   Run governance cycle
   truth [flags]        Run truth verification
+  memory [clear]       View/clear loop memory
+  dashboard, dash      Start telemetry dashboard (port 3987)
+  mcp                  Start MCP server for AI agent integration
+  parallel             Run security + review + build in parallel
+  --version, -v        Show version
 
 Goals: build-pass, truth-pass, mvp-complete, full-cycle,
        spec-pass, tdd-pass, mutation-pass, test-quality, deploy-ready
