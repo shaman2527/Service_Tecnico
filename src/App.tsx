@@ -1,9 +1,8 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import {
-  LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen, Smartphone,
+  LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen,
   PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
-} from 'lucide-react';
-import { Button } from './components/ui/button';
+} from 'lucide-react';import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import UpdateDialog from './components/UpdateDialog';
@@ -20,18 +19,16 @@ const Services = lazy(() => import('./components/Services'));
 const Inventory = lazy(() => import('./components/Inventory'));
 const Clients = lazy(() => import('./components/Clients'));
 const DailyLedger = lazy(() => import('./components/DailyLedger'));
-const Catalog = lazy(() => import('./components/Catalog'));
 const Help = lazy(() => import('./components/Help'));
 const Pedidos = lazy(() => import('./components/Pedidos'));
 
-type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pantallas' | 'pedidos' | 'ayuda';
+type Tab = 'dashboard' | 'ventas' | 'servicios' | 'inventario' | 'clientes' | 'libro' | 'pedidos' | 'ayuda';
 
 const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'ventas', label: 'Ventas', icon: ShoppingCart },
   { key: 'servicios', label: 'Servicio Técnico', icon: Wrench },
   { key: 'inventario', label: 'Inventario', icon: Package },
-  { key: 'pantallas', label: 'Pantallas', icon: Smartphone },
   { key: 'pedidos', label: 'Pedidos', icon: ShoppingBag },
   { key: 'clientes', label: 'Clientes', icon: Users },
   { key: 'libro', label: 'Libro Diario', icon: BookOpen },
@@ -293,8 +290,7 @@ function App() {
             {tab === 'dashboard' && <Dashboard />}
             {tab === 'ventas' && <Sales />}
             {tab === 'servicios' && <Services />}
-            {tab === 'inventario' && <Inventory />}
-            {tab === 'pantallas' && <Catalog />}
+            {tab === 'inventario' && <Inventory role={role} />}
             {tab === 'pedidos' && <Pedidos />}
             {tab === 'clientes' && <Clients />}
             {tab === 'libro' && <DailyLedger role={role} />}

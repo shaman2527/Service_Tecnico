@@ -57,8 +57,117 @@ export interface Product {
   category_name: string | null;
 }
 
-export interface Sale {
+// --- Inventario unificado (2026-09-15) ---
+
+/** Página de productos: la tabla ya no trae las 1126 filas de golpe. */
+export interface ProductPage {
+  items: Product[];
+  total: number;
+}
+
+export interface StockCount {
+  name: string;
+  sku: number;
+  units: number;
+}
+
+/** KPIs del encabezado del módulo de inventario. */
+export interface InventoryStats {
+  sku: number;
+  with_stock: number;
+  out_of_stock: number;
+  negative: number;
+  low_stock: number;
+  no_price: number;
+  no_compat: number;
+  brands: number;
+  units: number;
+  value_cost: number;
+  value_sale: number;
+  duplicate_groups: number;
+  duplicate_ids: number[];
+  by_category: StockCount[];
+}
+
+/** Teléfono del catálogo (lista maestra derivada de compatibility). */
+export interface PhoneModelRow {
+  label: string;
+  brand: string;
+  key: string;
+  screens: number;
+  stock: number;
+  with_stock: number;
+}
+
+/** Candidata del desplegable "Pantalla a instalar" del servicio. */
+export interface ScreenCandidate {
+  product: Product;
+  match_quality: 'exacta' | 'prefijo' | 'parcial';
+  in_stock: boolean;
+}
+
+export interface MovementPage {
+  items: InventoryMovement[];
+  total: number;
+}
+
+/** Un producto dentro de un grupo de duplicados. */
+export interface DuplicateItem {
   id: number;
+  name: string;
+  stock: number;
+  price_sale: number;
+  updated_at: string | null;
+}
+
+/** Grupo de productos repetidos (mismo teléfono en dos fichas). */
+export interface DuplicateGroup {
+  label: string;
+  items: DuplicateItem[];
+  stock_total: number;
+}
+
+/** Reporte de limpieza del catálogo (dry_run = solo cuenta). */
+export interface CatalogSample {
+  id: number;
+  field: string;
+  before: string;
+  after: string;
+}
+
+export interface CatalogReport {
+  dry_run: boolean;
+  products: number;
+  brands_fixed: number;
+  models_fixed: number;
+  models_split: number;
+  names_fixed: number;
+  compat_fixed: number;
+  variants_fixed: number;
+  phones_canonical: number;
+  phone_labels_raw: number;
+  duplicate_groups: number;
+  duplicate_ids: number[];
+  stock_units: number;
+  search_fixed: number;
+  backup: string | null;
+  samples: CatalogSample[];
+}
+
+/** Reporte de restauración de precios desde la lista CELL WORLD. */
+export interface PriceRestoreReport {
+  dry_run: boolean;
+  items: number;
+  matched: number;
+  updated: number;
+  ambiguous: number;
+  unmatched: number;
+  already_priced: number;
+  samples: { product_id: number; name: string; before_cost: number; before_sale: number; after_cost: number; after_sale: number }[];
+  unmatched_samples: string[];
+}
+
+export interface Sale {  id: number;
   date: string | null;
   product_id: number | null;
   product_name: string | null;
@@ -477,4 +586,18 @@ export interface HealthReport {
   issues: string[];
   /** Avisos NO críticos (ej. BCV sin internet) — no disparan rollback. */
   warnings: string[];
+}
+
+// --- Perfil del técnico (Dashboard) ---
+export interface TechDayRow { date: string; received: number; delivered: number; usd: number }
+export interface TechTypeRow { label: string; count: number; usd: number }
+export interface TechServiceRow {
+  id: number; order_num: string; date_in: string; date_out: string | null; client: string;
+  model: string; status: string; types: string; amount: number; paid: number; saldo: number; currency: string;
+}
+export interface TechnicianProfile {
+  technician_id: number | null; name: string; initials: string; color: string;
+  start: string; end: string; days: TechDayRow[]; types: TechTypeRow[];
+  services: number; delivered: number; active: number; finalized: number;
+  income_usd: number; pending_usd: number; avg_per_day: number; items: TechServiceRow[];
 }

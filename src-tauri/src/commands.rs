@@ -533,3 +533,120 @@ pub fn search_payments(db: State<Database>, start_date: Option<String>, end_date
 pub fn get_payment_daily_detail(db: State<Database>, date: String, method: Option<String>) -> Result<Vec<crate::db::PaymentSearchResult>, String> {
     db.get_payment_daily_detail(&date, method.as_deref()).map_err(|e| e.to_string())
 }
+
+// --- Catálogo: limpieza (marcas, modelos, nombres, compatibilidad) ---
+
+#[tauri::command]
+pub fn normalize_catalog(db: State<Database>, dry_run: bool) -> Result<crate::catalog::CatalogReport, String> {
+    db.normalize_catalog(dry_run).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn restore_prices(db: State<Database>, path: Option<String>, only_zero: bool, dry_run: bool)
+    -> Result<crate::catalog::PriceRestoreReport, String> {
+    db.restore_prices_from_file(path.as_deref(), only_zero, dry_run).map_err(|e| e.to_string())
+}
+
+// --- Inventario unificado: página, KPIs, modelos de teléfono y pantallas ---
+
+#[tauri::command]
+pub fn get_products_page(db: State<Database>, search: String, category_id: Option<i64>,
+                         brand: Option<String>, stock_filter: Option<String>, sort: Option<String>,
+                         limit: i64, offset: i64) -> Result<crate::db::ProductPage, String> {
+    db.get_products_page(&search, category_id, brand.as_deref(), stock_filter.as_deref(), sort.as_deref(), limit, offset)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_inventory_stats(db: State<Database>) -> Result<crate::db::InventoryStats, String> {
+    db.get_inventory_stats().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_phone_models(db: State<Database>, search: String, limit: i64)
+    -> Result<Vec<crate::db::PhoneModelRow>, String> {
+    db.get_phone_models(&search, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn find_compatible_screens(db: State<Database>, model: String, limit: i64)
+    -> Result<Vec<crate::db::ScreenCandidate>, String> {
+    db.find_compatible_screens(&model, limit).map_err(|e| e.to_string())
+}
+
+/// Repuestos compatibles con un modelo (cualquier categoría si `category_id` es None).
+#[tauri::command]
+pub fn find_compatible_products(db: State<Database>, model: String, category_id: Option<i64>, limit: i64)
+    -> Result<Vec<crate::db::ScreenCandidate>, String> {
+    db.find_compatible_products(&model, category_id, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_inventory_movements_page(db: State<Database>, product_id: Option<i64>, movement_type: Option<String>,
+                                    reason: Option<String>, from_date: Option<String>, to_date: Option<String>,
+                                    limit: i64, offset: i64) -> Result<crate::db::MovementPage, String> {
+    db.get_inventory_movements_page(product_id, movement_type.as_deref(), reason.as_deref(),
+                                    from_date.as_deref(), to_date.as_deref(), limit, offset)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn merge_products(db: State<Database>, keep_id: i64, remove_id: i64) -> Result<(), String> {
+    db.merge_products(keep_id, remove_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_duplicate_groups(db: State<Database>) -> Result<Vec<crate::db::DuplicateGroup>, String> {
+    db.get_duplicate_groups().map_err(|e| e.to_string())
+}
+
+// --- F2: padron de telefonos (lista de modelos del taller) ---
+
+#[tauri::command]
+pub fn get_phone_brands(db: State<Database>) -> Result<Vec<crate::phones::PhoneBrandRow>, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::get_phone_brands(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_phones(db: State<Database>, brand: Option<String>, search: String,
+                  only_with_products: bool, only_stock: bool, sort: String, dir: String,
+                  limit: i64, offset: i64) -> Result<crate::phones::PhonePage, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::get_phones(&conn, brand.as_deref(), &search, only_with_products, only_stock,
+                              &sort, &dir, limit, offset).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_phone_detail(db: State<Database>, phone_id: i64) -> Result<Option<crate::phones::PhoneDetail>, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::get_phone_detail(&conn, phone_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_phone(db: State<Database>, id: i64, brand: String, line: String, model: String) -> Result<(), String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::rename_phone(&conn, id, &brand, &line, &model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_phone(db: State<Database>, brand: String, line: String, model: String) -> Result<i64, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::add_phone(&conn, &brand, &line, &model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn merge_phones(db: State<Database>, keep_id: i64, remove_id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::merge_phones(&conn, keep_id, remove_id).map_err(|e| e.to_string())
+}
+// --- Perfil profesional del tecnico (Dashboard) ---
+
+#[tauri::command]
+pub fn get_technician_profile(db: State<Database>, technician_id: Option<i64>,
+                              start_date: String, end_date: String)
+    -> Result<crate::tech::TechnicianProfile, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::tech::get_technician_profile(&conn, technician_id, &start_date, &end_date)
+        .map_err(|e| e.to_string())
+}

@@ -1,0 +1,83 @@
+{
+  "_comment": "FUENTE ÚNICA de las reglas de normalización del catálogo. Lo leen el backend Rust (include_str!) y las herramientas node (tools/audit_inventory.mjs). Si se agrega una marca o un alias, se toca SOLO este archivo.",
+  "version": 2,
+  "brands": {
+    "Alcatel": ["alcatel"],
+    "Amazon": ["amazon"],
+    "Apple": ["apple"],
+    "Blackview": ["blackview"],
+    "Blu": ["blu"],
+    "Genérico": ["generico", "generic", "sin marca", "s/marca"],
+    "Google": ["google pixel", "google", "pixel"],
+    "Honor": ["honor"],
+    "Huawei": ["huawei"],
+    "Hyundai": ["hyundai"],
+    "Infinix": ["infinix", "inf"],
+    "Itel": ["itel"],
+    "Krip": ["krip"],
+    "LG": ["lg"],
+    "Lifephone": ["lifephone", "life phone"],
+    "Motorola": ["motorola", "moto"],
+    "Nokia": ["nokia"],
+    "Oppo": ["oppo"],
+    "Realme": ["realme"],
+    "Samsung": ["samsung"],
+    "TCL": ["tcl"],
+    "Tecno": ["tecno"],
+    "Umidigi": ["umidigi", "umi"],
+    "Vivo": ["vivo"],
+    "Xiaomi": ["xiaomi"],
+    "Yezz": ["yezz"],
+    "ZTE": ["zte"]
+  },
+  "subBrands": {
+    "Apple": {
+      "iphone": "iPhone",
+      "ipad": "iPad",
+      "ipod": "iPod"
+    },
+    "Xiaomi": {
+      "red": "Redmi",
+      "redmi": "Redmi",
+      "red note": "Redmi Note",
+      "poco": "Poco",
+      "mi": "Mi"
+    }
+  },
+  "_subBrandKeyStrippable_comment": "Solo estas sub-marcas se ignoran al AGRUPAR teléfonos: 'Red Note 11' y 'Redmi Note 11' y 'Note 11' son el MISMO teléfono. 'Mi' y 'Poco' NO se ignoran (Mi A2 != Redmi A2).",
+  "subBrandKeyStrippable": {
+    "Xiaomi": ["red", "redmi", "red note"]
+  },
+  "_familyBrands_comment": "Familias (líneas comerciales) que identifican una marca por sí solas: 'Camon 20' dentro de un producto Infinix es TECNO. Solo familias inequívocas (no 'Note', que lo usan varias).",
+  "familyBrands": {
+    "camon": "Tecno",
+    "spark": "Tecno",
+    "pop": "Tecno",
+    "pouvoir": "Tecno",
+    "phantom": "Tecno",
+    "hot": "Infinix",
+    "smart": "Infinix",
+    "zero": "Infinix",
+    "galaxy": "Samsung",
+    "moto": "Motorola",
+    "redmi": "Xiaomi",
+    "poco": "Xiaomi",
+    "magic": "Honor",
+    "nova": "Huawei",
+    "blade": "ZTE"
+  },
+  "styledTokens": {
+    "iphone": "iPhone",
+    "ipad": "iPad",
+    "ipod": "iPod",
+    "imac": "iMac",
+    "apple watch": "Apple Watch"
+  },
+  "acronyms": [
+    "LTE", "4G", "5G", "3G", "2G", "WIFI", "NFC", "OLED", "AMOLED", "AM", "INCELL",
+    "TFT", "IPS", "LCD", "HD", "FHD", "SIM", "ESIM", "GPS", "USB", "TV", "DS", "ORIGINAL", "SE"
+  ],
+  "lowerSuffixBrands": ["Infinix", "Tecno"],
+  "categoryPrefixes": ["Pantalla", "Táctil Tablet", "Táctil", "Batería", "Flex"],
+  "variants": ["INCELL", "OLED", "AMOLED", "AM", "ORIGINAL", "SERVICE PACK", "TFT"]
+}

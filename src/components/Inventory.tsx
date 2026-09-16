@@ -1,280 +1,126 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, MoveHorizontal, Package } from 'lucide-react';
+import { Layers, MoveHorizontal, Package, Tag, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../db';
-import type { Product, Category, InventoryMovement } from '../types';
+import type { Category, InventoryStats, Product } from '../types';
 import { ProductForm } from './ProductForm';
+import { ProductsTab } from './inventory/ProductsTab';
+import { ByModelTab } from './inventory/ByModelTab';
+import { MovementsTab } from './inventory/MovementsTab';
+import { PricesTab } from './inventory/PricesTab';
+import { DuplicatesDialog } from './inventory/DuplicatesDialog';
 
-export default function Inventory() {
-  const [tab, setTab] = useState<'inventario' | 'movimientos'>('inventario');
-  const [products, setProducts] = useState<Product[]>([]);
+// MÓDULO ÚNICO de inventario (2026-09-15). Antes había dos pantallas sobre la
+// misma tabla ("Inventario" y "Pantallas"); ahora es una sola con pestañas:
+//   Productos   → gestión del catálogo (KPIs, filtros, tabla paginada)
+//   Por modelo  → consulta "¿qué repuesto le sirve a este teléfono?"
+//   Movimientos → auditoría de entradas/salidas con su orden o pedido
+//   Precios     → herramientas de datos (solo dueño)
+export default function Inventory({ role = 'owner', initialTab = 'productos', initialModel = '' }: {
+  role?: 'owner' | 'cashier' | 'loading';
+  initialTab?: string;
+  initialModel?: string;
+}) {
+  const [tab, setTab] = useState(initialTab);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [search, setSearch] = useState('');
-  const [catFilter, setCatFilter] = useState<number | ''>(''); // default: todas
+  const [stats, setStats] = useState<InventoryStats | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
-  const [movements, setMovements] = useState<InventoryMovement[]>([]);
-  const [movementProduct, setMovementProduct] = useState<Product | null>(null);
-  const [movementType, setMovementType] = useState<'entrada' | 'salida'>('entrada');
-  const [movementQty, setMovementQty] = useState(1);
-  const [movementReason, setMovementReason] = useState('Ajuste');
+  const [showDuplicates, setShowDuplicates] = useState(false);
+  const [modelQuery, setModelQuery] = useState(initialModel);
+  // Sube al guardar/editar/fusionar: hace que las pestañas vuelvan a consultar
+  // (antes había que refrescar la app para ver el producto nuevo).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refreshAll = () => { loadStats(); setRefreshKey(k => k + 1); };
 
-  const load = async () => {
-    const [p, c] = await Promise.all([
-      api.getProducts(search, catFilter || null),
-      api.getCategories(),
-    ]);
-    setProducts(p);
-    setCategories(c);
+  const loadStats = () => {
+    api.getInventoryStats().then(setStats).catch(() => setStats(null));
   };
 
-  const loadMovements = async () => {
-    setMovements(await api.getInventoryMovements(90));
-  };
+  useEffect(() => {
+    api.getCategories().then(setCategories).catch(() => setCategories([]));
+    loadStats();
+  }, []);
 
-  const saveMovement = async () => {
-    if (!movementProduct) return;
-    await api.addInventoryMovement(movementProduct.id, movementType, movementQty, movementReason, '');
-    setMovementProduct(null);
-    load();
-    if (tab === 'movimientos') loadMovements();
-  };
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
+  useEffect(() => { setModelQuery(initialModel); }, [initialModel]);
 
-  useEffect(() => { load(); }, []);
-  useEffect(() => { load(); }, [search, catFilter]);
-  useEffect(() => { if (tab === 'movimientos') loadMovements(); }, [tab]);
+  const openByModel = (model: string) => {
+    setModelQuery(model);
+    setTab('modelo');
+  };
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Inventario</h1>
-          <p className="text-sm text-muted-foreground mt-1">Productos, compatibilidad y movimientos</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant={tab === 'inventario' ? 'default' : 'outline'} onClick={() => setTab('inventario')}>
-            <Package className="size-4" /> Productos
-          </Button>
-          <Button variant={tab === 'movimientos' ? 'default' : 'outline'} onClick={() => setTab('movimientos')}>
-            <MoveHorizontal className="size-4" /> Movimientos
-          </Button>
-          <Button onClick={() => { setEditing(null); setShowForm(true); }}>
-            <Plus className="size-4" /> Nuevo Producto
-          </Button>
-        </div>
-      </div>
-
-      {tab === 'inventario' && (
-        <>
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1 max-w-sm">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-              <Input placeholder="Buscar producto..." className="pl-9"
-                value={search} onChange={e => setSearch(e.target.value)} />
-            </div>
-            <Select value={String(catFilter)} onValueChange={v => setCatFilter(v ? Number(v) : '')}>
-              <SelectTrigger className="w-44">
-                <SelectValue placeholder="Todas las categorías" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="">Todas las categorías</SelectItem>
-                {categories.map(c => (
-                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <Card>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Producto</TableHead>
-                    <TableHead>Cat.</TableHead>
-                    <TableHead>Marca</TableHead>
-                    <TableHead>Modelo</TableHead>
-                    <TableHead>Variante</TableHead>
-                    <TableHead>Compatibilidad</TableHead>
-                    <TableHead className="text-right">Costo</TableHead>
-                    <TableHead className="text-right">Venta</TableHead>
-                    <TableHead className="text-right">Efectivo ($)</TableHead>
-                    <TableHead className="text-right">Stock</TableHead>
-                    <TableHead className="text-right">Stock Mín</TableHead>
-                    <TableHead>Agregado</TableHead>
-                    <TableHead className="w-24"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {products.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
-                        Sin productos registrados
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    products.map(p => (
-                      <TableRow key={p.id}>
-                        <TableCell className="font-medium">{p.name.replace(/^Pantalla\s+/i, '')}</TableCell>
-                        <TableCell>{p.category_name ?? '-'}</TableCell>
-                        <TableCell>{p.brand ?? '-'}</TableCell>
-                        <TableCell>{p.model ?? '-'}</TableCell>
-                        <TableCell className="text-xs">{p.variant ?? '-'}</TableCell>
-                        <TableCell className="max-w-[240px]">
-                          {p.compatibility ? (() => {
-                            try {
-                              const list = JSON.parse(p.compatibility);
-                              if (!Array.isArray(list) || list.length === 0) return <span className="text-muted-foreground">-</span>;
-                              return (
-                                <div className="flex flex-wrap gap-1">
-                                  {list.slice(0, 3).map(m => (
-                                    <span key={m} className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-muted-foreground">
-                                      {m}
-                                    </span>
-                                  ))}
-                                  {list.length > 3 && (
-                                    <span className="text-[11px] px-1.5 py-0.5 rounded-md bg-muted text-primary font-medium">
-                                      +{list.length - 3}
-                                    </span>
-                                  )}
-                                </div>
-                              );
-                            } catch { return <span className="text-muted-foreground text-xs">{p.compatibility}</span>; }
-                          })() : <span className="text-muted-foreground">-</span>}
-                        </TableCell>
-                        <TableCell className="text-right">${p.price_cost.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">${p.price_sale.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">{p.price_usd > 0 ? `$${p.price_usd.toFixed(2)}` : '—'}</TableCell>
-                        <TableCell className="text-right">
-                          <span className={p.stock <= p.min_stock ? 'text-danger font-bold' : ''}>
-                            {p.stock}
-                          </span>
-                        </TableCell>
-                        <TableCell className="text-right">{p.min_stock}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-                          {p.created_at ? p.created_at.slice(0, 10) : '—'}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-1">
-                            <Button variant="outline" size="sm"
-                              onClick={() => { setEditing(p); setShowForm(true); }}>
-                              Editar
-                            </Button>
-                            <Button variant="outline" size="sm"
-                              onClick={() => {
-                                setMovementProduct(p);
-                                setMovementType('entrada');
-                                setMovementQty(1);
-                                setMovementReason('Ajuste');
-                              }}>
-                              Mov.
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </>
-      )}
-
-      {tab === 'movimientos' && (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Fecha</TableHead>
-                  <TableHead>Producto</TableHead>
-                  <TableHead>Tipo</TableHead>
-                  <TableHead className="text-right">Cantidad</TableHead>
-                  <TableHead>Motivo</TableHead>
-                  <TableHead>Referencia</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {movements.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
-                      Sin movimientos registrados
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  movements.map(m => (
-                    <TableRow key={m.id}>
-                      <TableCell>{m.date ?? '-'}</TableCell>
-                      <TableCell className="font-medium">{m.product_name ?? '-'}</TableCell>
-                      <TableCell>
-                        <Badge variant={m.type === 'entrada' ? 'default' : 'destructive'}>
-                          {m.type?.toUpperCase()}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">{m.quantity}</TableCell>
-                      <TableCell>{m.reason ?? '-'}</TableCell>
-                      <TableCell className="text-muted-foreground">{m.reference ?? '-'}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
-
-      {showForm && (
-        <ProductForm
-          product={editing}
-          categories={categories}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSaved={() => { setShowForm(false); setEditing(null); load(); }}
-        />
-      )}
-
-      <Dialog open={!!movementProduct} onOpenChange={() => setMovementProduct(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Movimiento de Inventario</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Producto: <strong>{movementProduct?.name}</strong>
-              {movementProduct && <span className="ml-2">Stock actual: {movementProduct.stock}</span>}
+    <TooltipProvider delayDuration={200}>
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Inventario</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Catálogo, compatibilidad por teléfono, stock real y movimientos — todo en un solo lugar
             </p>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Tipo</label>
-              <Select value={movementType} onValueChange={v => setMovementType(v as 'entrada' | 'salida')}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="entrada">Entrada (+)</SelectItem>
-                  <SelectItem value="salida">Salida (-)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Cantidad</label>
-              <Input type="number" min={1} value={movementQty}
-                onChange={e => setMovementQty(Number(e.target.value))} />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Motivo</label>
-              <Input value={movementReason} onChange={e => setMovementReason(e.target.value)} />
-            </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setMovementProduct(null)}>Cancelar</Button>
-            <Button onClick={saveMovement}>Registrar Movimiento</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" onClick={() => openByModel('')}>
+              <Layers data-icon="inline-start" /> Buscar por modelo
+            </Button>
+            <Button onClick={() => { setEditing(null); setShowForm(true); }}>
+              <Package data-icon="inline-start" /> Nuevo producto
+            </Button>
+          </div>
+        </div>
+
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList>
+            <TabsTrigger value="productos"><Tag data-icon="inline-start" /> Productos</TabsTrigger>
+            <TabsTrigger value="modelo"><Layers data-icon="inline-start" /> Por modelo</TabsTrigger>
+            <TabsTrigger value="movimientos"><MoveHorizontal data-icon="inline-start" /> Movimientos</TabsTrigger>
+            {role === 'owner' && <TabsTrigger value="precios"><Wand2 data-icon="inline-start" /> Ajustes</TabsTrigger>}
+          </TabsList>
+
+          <TabsContent value="productos">
+            <ProductsTab
+              categories={categories}
+              stats={stats}
+              refreshKey={refreshKey}
+              onEdit={p => { setEditing(p); setShowForm(true); }}
+              onReviewDuplicates={() => setShowDuplicates(true)}
+              onByModel={openByModel}
+            />
+          </TabsContent>
+
+          <TabsContent value="modelo">
+            <ByModelTab refreshKey={refreshKey} initialModel={modelQuery} onEdit={p => { setEditing(p); setShowForm(true); }} />
+          </TabsContent>
+
+          <TabsContent value="movimientos">
+            <MovementsTab refreshKey={refreshKey} />
+          </TabsContent>
+
+          {role === 'owner' && (
+            <TabsContent value="precios">
+              <PricesTab onChanged={() => { refreshAll(); setTab('productos'); }} />
+            </TabsContent>
+          )}
+        </Tabs>
+
+        {showForm && (
+          <ProductForm
+            product={editing}
+            categories={categories}
+            onClose={() => { setShowForm(false); setEditing(null); }}
+            onSaved={() => { setShowForm(false); setEditing(null); refreshAll(); }}
+          />
+        )}
+
+        <DuplicatesDialog
+          open={showDuplicates}
+          onClose={() => setShowDuplicates(false)}
+          onChanged={refreshAll}
+        />
+      </div>
+    </TooltipProvider>
   );
 }

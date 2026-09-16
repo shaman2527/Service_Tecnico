@@ -66,3 +66,54 @@ Cambio cámara, Cambio parlante / micrófono, Otro
 - Run: `.\Registro.exe` o `.\run.ps1`
 - Test Rust: `cd src-tauri && cargo test`
 - Harness governance: `npx tsx tools/governance/run.ts --build-only`
+
+## Modo DEV obligatorio durante el módulo de inventario (2026-09-15)
+Regla del usuario (vigente hasta que él lo levante): **todo en modo dev**.
+- NO publicar release (`tools/release.ps1` queda prohibido), NO push a producción.
+- La limpieza/normalización del catálogo se corre SIEMPRE sobre una copia
+  (`node tools/snapshot_db.mjs`) o sobre la base de dev (`REGISTRO_DB=dev_registro.db`).
+- NUNCA sobre la plantilla `registro.db` ni sobre la base instalada de la tienda
+  sin pedido explícito.
+
+## Limpieza del catálogo (marcas/modelos/nombres) — 2026-09-15
+- Reglas en UN solo archivo: `tools/canonical_brands.json`. Lo leen el backend Rust
+  (`catalog.rs`, `include_str!`) y la auditoría node (`tools/audit_inventory.mjs`).
+- Paridad node <-> Rust verificada con `tools/canonical_fixtures.json`
+  (`node tools/audit_inventory.mjs --gen-fixtures` + test
+  `catalog::tests::test_canonical_rules_match_node_fixtures`). Si divergen, el test falla.
+- Auditoría (solo lectura): `node tools/audit_inventory.mjs --db <ruta> [--json] [--snapshot <out>]`
+  → marcas fuera del mapa, modelos multi-teléfono ("A / B / C"), nombres no canónicos,
+  duplicados, stock negativo y snapshot de stock por id (invariante antes/después).
+- Aplicar: comando Tauri `normalize_catalog(dry_run)` desde la UI, o el hook manual
+  `REGISTRO_NORMALIZE_DB=<ruta> [REGISTRO_NORMALIZE_APPLY=1] cargo test -- --ignored
+  test_manual_normalize_db --nocapture` (hace respaldo en `backup/` antes de escribir).
+- Invariante obligatorio: `stock` por id y unidades totales NO cambian (verificado 702/702).
+- `products.search_text` (columna nueva) = nombre+marca+modelo+variante+compatibilidad
+  normalizados; la búsqueda exige TODOS los tokens escritos, así "red note" sigue
+  encontrando "Xiaomi Redmi Note 11" después de canonicalizar el catálogo.
+
+## Harness en este proyecto
+`harness_*` (learn/review/security/truth) NO detectan la copia de `tools/`: el detector
+exige `spec/ + governance/ + config/` y aquí la config es `tools/config.ts` (archivo).
+Alternativa mientras siga así: escribir a mano en `tools/progress/patterns.md` y usar
+`npx tsx tools/governance/run.ts --build-only` / `--security` para los gates.
+
+## Lecciones 2026-09-15 (inventario: padrón de teléfonos y limpieza)
+- **`conn.last_insert_rowid()` se captura ANTES de cualquier otra escritura**: poner `rebuild_phones` dentro de
+  `add_product` devolvía el rowid de `phones`, y el FK de `sales` fallaba (`test_all_operations` lo detectó).
+- **`tauri dev` mantiene bloqueados los archivos de `src-tauri`** mientras recompila (ReplaceFileW EIO / Win32 32/1175):
+  detener la app + `cargo` ANTES de editar Rust y relanzar después.
+- **Los hooks manuales abren la base sin `init()`** → cada función que escribe debe crear su tabla/columna si falta
+  (autosuficiente), o falla con “no such column” (pasó con `search_text` y con `needs_review`).
+- **Análisis de texto por marca**: comprobar el ORDEN de las reglas —`canonical_phone` re-detecta la marca del texto y
+  pisaba la familia; la solución fue una variante `canonical_phone_forced` + quitar la marca inicial solo cuando es marca real
+  (no la línea Redmi/Poco, que debe conservarse).
+- **La familia comercial manda sobre la marca escrita** (`Infinix Spark 10C` y `ZTE Spark 10C` = **Tecno Spark 10C**): mapa
+  `familyBrands` en `tools/canonical_brands.json`.
+- **INCELL es la genérica del taller** → cuenta igual que “sin variante” al agrupar (`variant_key`); OLED/AM/ORIGINAL siguen
+  siendo repuestos distintos.
+- **Refresco de UI**: una pestaña que carga sus datos en un `useEffect` NO se entera de un guardado hecho en otra →
+  patrón `refreshKey` (contador que sube al guardar y va en las dependencias del efecto).
+- **Verificación de UI en vivo sin imágenes**: `Add-Type UIAutomationClient` + `EnumWindows`/`FindAll` leen el texto real de la
+  ventana (sidebar, KPIs, campos); la accesibilidad de Chromium se habilita tras la primera consulta (repetir el dump si sale corto).
+- **`Input` del proyecto acepta `ref`** (React 19) → se puede devolver el foco al campo después de elegir en una lista.

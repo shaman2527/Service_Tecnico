@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
 import type { Product, Category } from '../types';
@@ -36,6 +37,12 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
       }
     }
   }, [product]);
+
+  // Vista previa de la compatibilidad tal como se va a guardar (chips, sin repetidos)
+  const compatPreview = useMemo(
+    () => [...new Set(compatibility.split('/').map(s => s.trim()).filter(Boolean))].slice(0, 12),
+    [compatibility],
+  );
 
   const save = async () => {
     if (!name) return;
@@ -89,23 +96,35 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
           <div className="grid grid-cols-3 gap-4">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Marca</label>
-              <Input value={brand} onChange={e => setBrand(e.target.value)} />
+              <Input value={brand} onChange={e => setBrand(e.target.value)} placeholder="Xiaomi, Samsung, Tecno…" />
+              <p className="text-xs text-muted-foreground">Se guarda normalizada (Lg→LG, Redmi→Xiaomi, Iphone→Apple).</p>
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Modelo</label>
-              <Input value={model} onChange={e => setModel(e.target.value)} />
+              <Input value={model} onChange={e => setModel(e.target.value)} placeholder="Hot 40i, A06 4G…" />
+              <p className="text-xs text-muted-foreground">Teléfono PRINCIPAL de la ficha.</p>
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Variante</label>
-              <Input value={variant} onChange={e => setVariant(e.target.value)} />
+              <Input value={variant} onChange={e => setVariant(e.target.value)} placeholder="INCELL, OLED…" />
             </div>
           </div>
 
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Compatibilidad</label>
-            <p className="text-xs text-muted-foreground">Modelos separados por <strong>/</strong></p>
+            <p className="text-xs text-muted-foreground">
+              Teléfonos separados por <strong>/</strong>. Se guardan con su marca (ej. <em>Honor X7</em>) y sin repetidos,
+              así la lista de modelos no duplica el mismo teléfono.
+            </p>
             <Textarea value={compatibility} onChange={e => setCompatibility(e.target.value)}
               placeholder="Redmi Note 11 / Redmi Note 11S / Redmi Note 11 Pro" />
+            {compatPreview.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {compatPreview.map(m => (
+                  <Badge key={m} variant="outline" className="text-[11px] font-normal">{m}</Badge>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5">

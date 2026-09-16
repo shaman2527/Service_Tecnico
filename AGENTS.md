@@ -23,18 +23,20 @@ registro/
 │   │   ├── Services.tsx        # Órdenes de reparación + abonos/pagos + checklist
 │   │   ├── PrintReceiptDialog.tsx  # Factura de servicio: preview + imprimir (ESC/POS)
 │   │   ├── PrinterSettingsDialog.tsx # Config impresora: puerto COM, baudios, 58/80mm
-│   │   ├── Inventory.tsx      # Productos, compatibilidad, movimientos
+│   │   ├── Inventory.tsx      # MÓDULO ÚNICO de inventario: tabs Productos | Por modelo | Movimientos | Precios y datos
+│   │   ├── inventory/         # ProductsTab, ByModelTab, MovementsTab, PricesTab, StockBadge, CompatChips, DuplicatesDialog
+│   │   ├── ModelCombobox.tsx  # Selector de modelo de teléfono (lista canónica del backend)
 │   │   ├── Clients.tsx        # Clientes con historial y saldos por servicio
 │   │   ├── DailyLedger.tsx    # Libro Diario: turno de caja, tasa BCV, arqueo
-│   │   ├── Catalog.tsx        # Pantallas: catálogo + compatibilidad completa
-│   │   ├── ProductForm.tsx    # Form compartido producto (Inventario + Pantallas)
-│   │   └── ui/                # 16 componentes shadcn (incl. accordion radix, alert)
+│   │   ├── ProductForm.tsx    # Form del producto (marca/modelo/compat normalizados al guardar)
+│   │   └── ui/                # 23 componentes shadcn (incl. tabs, empty, skeleton propios)
 │   └── index.css              # Tailwind v4 + CSS variables
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 74 comandos
-│   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario + settings
+│   │   ├── lib.rs             # Tauri builder + 99 comandos
+│   │   ├── db.rs              # SQLite CRUD + turno de caja + abonos + auto-inventario + inventario unificado
+│   │   ├── catalog.rs         # Reglas canónicas (marca/modelo/compat) + normalize_catalog + restore_prices
 │   │   ├── updates.rs         # Updater: respaldo pre-update, rollback, health-check, watchdog
 │   │   ├── printer.rs         # Impresora térmica: list_com_ports, ESC/POS CP850, print_receipt
 │   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
@@ -145,6 +147,20 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Movimiento de inventario registrado: type salida/entrada, reason "Servicio Entregado"/"Servicio Reabierto", reference 'Servicio'.
 - UI: sugerencias de modelo en ServiceForm y de producto en SaleForm muestran chips de compatibilidad + stock (rojo si ≤0). Catalog/Inventory muestran compatibilidad en chips (Badge) no texto pegado.
 
+### Inventario unificado + catálogo canónico (2026-09-15) — MODO DEV
+- **Un solo módulo:** `Inventory.tsx` (sidebar sin "Pantallas"; `Catalog.tsx` ELIMINADO) con pestañas `Productos | Por modelo | Movimientos | Precios y datos` (esta última solo owner). Los helpers viven en `src/components/inventory/` (`ProductsTab`, `ByModelTab`, `MovementsTab`, `PricesTab`, `StockBadge`, `CompatChips`, `DuplicatesDialog`) y `src/components/ModelCombobox.tsx` (compartido con el formulario de servicio).
+- **Sin columna "Efectivo ($)" en las tablas** (decisión del local): el campo sigue en `ProductForm` (precio contado). Las columnas de precio se ocultan si ningún resultado tiene precio.
+- **Tabla paginada server-side:** `get_products_page(search, category_id, brand, stock_filter, sort, limit, offset)` → `ProductPage {items,total}`; filtros `con_stock|agotado|bajo_minimo|negativo|sin_precio|sin_compat`. KPIs con `get_inventory_stats()` (incluye `duplicate_ids`).
+- **Reglas canónicas en UN archivo:** `tools/canonical_brands.json` (marcas/alias, submarcas, acrónimos, `subBrandKeyStrippable`). Lo leen `src-tauri/src/catalog.rs` (`include_str!`) y `tools/audit_inventory.mjs`. Marca = fabricante (**Redmi → Xiaomi**); modelo Title Case con códigos en mayúscula (`A06`, `13 Pro Max`), `iPhone` real, sufijo `i/s` minúscula solo Infinix/Tecno (`Hot 40i`); guiones → espacio (`G51-5G` = `G51 5G`).
+- **Paridad node↔Rust:** `node tools/audit_inventory.mjs --gen-fixtures` escribe `tools/canonical_fixtures.json`; el test `catalog::tests::test_canonical_rules_match_node_fixtures` falla si divergen. Verificado sobre los 1126 productos reales (modelos 726, nombres 896, duplicados 38, teléfonos 1201, unidades 702 en ambas implementaciones).
+- **Limpieza:** comando `normalize_catalog(dry_run)` (pestaña Precios y datos) o hook manual `REGISTRO_NORMALIZE_DB=<ruta> [REGISTRO_NORMALIZE_APPLY=1] cargo test -- --ignored test_manual_normalize_db --nocapture`. Respalda el `.db` en `backup/` antes de escribir; **idempotente**; el INVARIANTE es que el stock por id y las unidades totales NO cambian (verificado 702/702).
+- **Auditoría (solo lectura):** `node tools/audit_inventory.mjs [--db ruta] [--json] [--snapshot out.json]`; copia consistente con `node tools/snapshot_db.mjs --out backup/x.db` (VACUUM INTO, incluye el WAL).
+- **Precios:** `restore_prices(path, only_zero, dry_run)` cruza `cellworld_items.json` por marca+modelo+variante canónicos (957/957 fichas, 982 filas, 25 ambiguas, 0 sin match; quedan ~155 SKU sin precio porque no están en la lista). NO crea productos (a diferencia de `import_price_list`, que sigue igual y sin uso en UI).
+- **Duplicados:** `get_duplicate_groups()` + `merge_products(keep_id, remove_id)` (fusiona sumando stock y repunta movimientos/ventas/servicios/pedidos). **NO hay fusión automática**: la decide el local desde el aviso "Revisar duplicados".
+- **Búsqueda por tokens:** columna `products.search_text` (nombre+marca+modelo+variante+compatibilidad normalizados, migración + backfill en `init()`); `get_products`, `suggest_products` y `get_products_page` exigen TODOS los tokens, así "red note" sigue encontrando "Xiaomi Redmi Note 11" después de canonicalizar.
+- **Servicio:** `find_compatible_products(model, category_id, limit)` rankea (exacta → prefijo → parcial; con stock antes de agotados) y `find_compatible_screens` = categoría 1. `Services.tsx` ya NO carga el catálogo completo en el formulario: usa `ModelCombobox` (lista canónica, `get_phone_models`) + auto-selección cuando hay UNA sola pantalla con stock + confirmación obligatoria al entregar una agotada (`screenConfirm`; el gate solo exige confirmar cuando el estado es "Entregado").
+- **Movimientos trazables:** `inventory_movements.reference` guarda el número de orden (`DEV-00xx`, vía `ref_label()`), y el motivo es `Servicio Entregado (faltante)` cuando el stock queda negativo. Chip rojo "Faltante" y filtro "negativo" para auditarlos.
+
 ### Abonos y Pagos Parciales (service_payments)
 - **Tabla `service_payments`:** id, service_id (FK), amount, payment_method, bank_fee_percent/amount, net_amount, zelle_reference, currency, payment_date (fecha del pago), notes.
 - **`services` columnas:** `client_id INTEGER REFERENCES clients(id)` (vínculo al registro cliente) + `paid_amount REAL DEFAULT 0` (suma de abonos en USD equivalente, se recalcula en add/delete payment).
@@ -243,9 +259,9 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - **UI (DailyLedger.tsx):** tab Gastos (rango Desde/Hasta compartido con diario, tabla con badge categoría + monto coloreado por moneda + borrar Trash2, fila TOTAL del período por moneda, dialog "Registrar gasto" con select categoría + MoneyInput + toggle moneda $/Bs + notas); tab Salud (4 KPIs: Ingresos / Utilidad+margen% / Por cobrar / Capital en inventario; card Utilidad con desglose Ventas vs Servicios y costo, + comparativo % vs período anterior del MISMO largo; card Cuentas por cobrar con buckets + top morosas; card Inventario con capital vs potencial de venta + top categorías). Nota metodológica: "Bs convertidos a tasa BCV del período".
 
 ### Commands Tauri (Rust)
-- 83 comandos registrados en lib.rs (incl. add_service_order multi-equipo, get_dashboard_analytics, export_daily_report_xlsx, list_com_ports/print_receipt, get/set_printer_settings, updater x6, get_technician_stats, salud del negocio x6, search_payments, get_payment_daily_detail)
-- DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%
-- Tests: `cd src-tauri && cargo test` (48/48, incl. printer 7 + multi-equipo batch/rollback + next_order_num vacío + suite pantalla exacta x4)
+- **99 comandos** registrados en lib.rs (al 2026-09-15; incluye los 10 del inventario unificado: get_products_page, get_inventory_stats, get_phone_models, find_compatible_screens/products, get_inventory_movements_page, merge_products, get_duplicate_groups, normalize_catalog, restore_prices) + add_service_order multi-equipo, get_dashboard_analytics, export_daily_report_xlsx, list_com_ports/print_receipt, get/set_printer_settings, updater x6, get_technician_stats, salud del negocio x6, search_payments, get_payment_daily_detail
+- DB path: 1) junto al exe, 2) project root (dev), 3) %APPDATA%; override de pruebas: `REGISTRO_DB=<ruta>`
+- Tests: `cd src-tauri && cargo test` (**75/75** al 2026-09-15: incluye catalog x9, inventario unificado x5, precios x1, printer 7, multi-equipo batch/rollback, suite pantalla exacta x4, refund ledger E2E)
 
 ### Impresora Térmica (factura de servicio por COM)
 - **Módulo `printer.rs`** (sin deps extra de red): `list_com_ports` (enumera puertos COM con descripción: USB VID/PID descriptivo o **Bluetooth con el nombre del equipo pareado**, ej. "Bluetooth · MP58-04BLE"), `cp850_encode` (tabla OEM 858/CP850 para caracteres españoles), `build_escpos` (ESC @ init, texto normal + CR LF, ESC d 5 avance 5 líneas, GS V B corte), `print_receipt(port, baud, text)` con `serialport = "4"`, `test_ticket` (ticket de prueba). 7 tests unitarios.
@@ -416,8 +432,122 @@ Antes de hacer commit:
 - Fácil de respaldar (solo copiar registro.db)
 
 ## Build Status
-- **Date:** 2026-08-24
-- **Build: ✅ PASS (12.65s)**
+- **Date:** 2026-08-29
+- **Build: ✅ PASS (29.1s)**
 - **Errors:** 0
-- **Warnings:** 0 (2 pre-existing: p_base, noFault)
+- **Warnings:** 0
 
+
+## Inventario: padrón de teléfonos + limpieza de datos (2026-09-15) — MODO DEV
+
+### Padrón de teléfonos (tabla `phones`) — la lista de modelos del taller
+- **Tabla:** `id, brand, line, model, name, key UNIQUE, aliases, source, needs_review, created_at, updated_at`.
+  `key = norm(marca) + '|' + norm(modelo sin línea)` → **garantía de 0 duplicados**.
+- **`catalog.rs::real_name(brand, model)`** arma el nombre comercial: Samsung → `Galaxy A06`, Motorola → `Moto G52`,
+  Apple → `iPhone 13 Mini` (el iPhone es parte del nombre, también en la clave), Xiaomi conserva `Redmi/Poco/Mi`;
+  el resto queda como está hasta que el local lo renombre.
+- **`variant_key()`**: **INCELL cuenta como la genérica** (igual que sin variante) al agrupar;OLED/AM/ORIGINAL son repuestos distintos.
+- **`familyBrands`** (en `tools/canonical_brands.json`): la familia manda sobre la marca del texto —
+  `Spark`/`Camon`/`Pop` = **Tecno**, `Hot`/`Smart`/`Zero` = **Infinix**, `Galaxy` = Samsung, `Moto` = Motorola,
+  `Redmi`/`Poco` = Xiaomi, `Magic` = Honor, `Nova` = Huawei, `Blade` = ZTE. Así `Infinix Spark 10C` y `ZTE Spark 10C`
+  caen en **una sola ficha Tecno Spark 10C** (4 alias guardados).
+- **`clean_compat_entry()` / `is_junk_entry()`**: limpian los restos del formato de la lista física
+  (`1B (3` → `1B`, `4) (1)` → descartado, `13 Pro (ORIGINAL)` → `13 Pro`).
+- **`rebuild_phones(dry_run)`**: reconstruye el padrón desde la compatibilidad del catálogo. **Idempotente** y con
+  **reconciliación** (borra las filas `source='catalogo'` que ya no existen; **nunca** toca las escritas a mano).
+  Se llama en `init()` si la tabla está vacía, al guardar producto (`add_product`/`update_product`) y al aplicar la limpieza.
+  Medido sobre el inventario real: **1154 teléfonos · 0 claves repetidas · 341 entradas fusionadas · 217 “por revisar”**
+  (sin familia: `8P`, `8T`, `18i`… se renombran desde la app).
+- **`merge_duplicate_products(dry_run)`**: deja **UNA** ficha por modelo (misma marca+modelo+variante con INCELL = genérica),
+  conserva la de **mayor compatibilidad** y **une los teléfonos** de las demás; repunta movimientos/ventas/servicios/pedidos
+  y borra las otras. Aplicado: **1126 → 1083 fichas** (43 borradas, compatibilidad ganada).
+- **`wipe_stock_and_prices(dry_run)`**: deja `stock`, `price_cost`, `price_sale`, `price_usd` en **0**
+  (los datos de inventario/precio de prueba no son reales). NO toca movimientos, ventas ni servicios.
+- **Hooks manuales** (sin abrir la app, con respaldo automático en `backup/`):
+  `REGISTRO_PHONES_DB=<db> [REGISTRO_PHONES_APPLY=1] cargo test -- --ignored test_manual_rebuild_phones --nocapture`
+  `REGISTRO_WIPE_DB=<db> [REGISTRO_WIPE_APPLY=1] cargo test -- --ignored test_manual_wipe_and_dedupe --nocapture`
+  (también `test_manual_normalize_db` y `test_manual_restore_prices`).
+- **Herramientas de auditoría:** `tools/phones_report.mjs` (conteos/duplicados por marca), `tools/phones_aliases.mjs <texto>`
+  (de dónde salió un nombre), `tools/phones_by_category.mjs` (teléfonos por categoría: Pantalla 1122 / Táctil 38 / Táctil Tablet 24),
+  `tools/verify_clean_inventory.mjs` (stock/precios/duplicados), `tools/snapshot_db.mjs`, `tools/audit_inventory.mjs`.
+
+### UI del inventario (ajustes pedidos por el local)
+- **KPIs compactos**: una sola franja (`Productos 1083 · 26 marcas · Con stock 0 · Agotados 1083 · Sin precio 1083 · Capital $0.00`)
+  en vez de 7 tarjetas grandes; los indicadores en cero que no aportan (**Faltantes**, **Bajo mínimo**) se ocultan solos.
+- **Pestaña “Ajustes”** (antes “Precios y datos”, que no se entendía): dos tarjetas en lenguaje de tienda con botones
+  **“1. Revisar qué cambiaría”** y **“2. Cargar los precios” / “2. Ordenar los nombres”**, cada una diciendo su resultado en
+  palabras simples (“Se van a cargar los precios de N productos”, “Todo al día”) y aclarando que **no borra productos ni toca el stock**.
+- **Campo Modelo (servicio)**: la lista de sugerencias muestra **solo el nombre del modelo** (se quitaron los badges de
+  repuestos/stock que tapaban el texto); el **stock aparece únicamente en “Pantalla a instalar”**, con `stock N` / `agotada`.
+  El texto escrito se ve siempre (`query` manda mientras el campo tiene foco, `text-foreground` forzado) y si el modelo no
+  está en el padrón avisa `(no está en la lista — se guarda tal cual)`.
+- **Refresco automático**: `refreshKey` en `Inventory.tsx` → al guardar/editar/eliminar producto, fusionar duplicados o
+  aplicar precios/nombres, las pestañas **Productos / Por modelo / Movimientos** vuelven a consultar solas
+  (antes había que refrescar la app para ver la carga).
+
+### Lecciones de la jornada (para no repetirlas)
+- **`conn.last_insert_rowid()` se captura ANTES de cualquier otra escritura**: llamar `rebuild_phones` dentro de
+  `add_product` devolvía el rowid de `phones` y rompía el FK de `sales` (bug detectado por `test_all_operations`).
+- **`tauri dev` bloquea los archivos de `src-tauri`** mientras recompila (ReplaceFileW EIO / Win32 32): hay que
+  **detener la app y cargo** antes de editar Rust, y relanzarla después.
+- **Los hooks manuales abren la base sin `init()`**: cada función que escribe (rebuild_phones, normalize_catalog…) debe
+  **crear su tabla/columna** si falta (autosuficiente), si no falla con “no such column”.
+- **Verificación de UI en vivo sin imágenes**: `Add-Type UIAutomationClient` + `EnumWindows`/`FindAll` permiten leer el texto
+  real de la ventana (sidebar, KPIs, campos) y confirmar que un cambio llegó a la app. La accesibilidad de Chromium se
+  habilita tras la primera consulta: si el primer dump sale corto, repetirlo.
+- **`Input` de shadcn del proyecto acepta `ref`** (React 19 + forwardRef) → se puede devolver el foco tras elegir en la lista.
+
+### Pendiente (plan en curso, todo en MODO DEV)
+- **F2** comandos: `get_phone_brands`, `get_phones` (filtros+orden), `get_phone_detail`, `rename_phone`, `add_phone`,
+  `merge_phones`; `get_phone_models` leyendo `phones` (el servicio ya usa el nombre real).
+- **F3** tabla de **modelos** con marca como filtro/columna, buscador y **ordenamiento de 3 estados** en cada columna
+  (↓ mayor→menor, ↑ menor→mayor, ↕ sin orden) — también en Productos y Movimientos.
+- **F4** ficha del teléfono con repuestos **por categoría (Pantalla primero)** + **renombrar** y fusionar + barra “217 por revisar”.
+- **F5** servicio: verificación en vivo del nombre real y de la pantalla compatible.
+- **F6** **cargar inventario**: asistente (pegar/abrir lista → cruce → vista previa editable → aplicar con respaldo).
+- **Regla “solo Pantalla”**: padrón desde categoría Pantalla (1122 teléfonos) e Inventario abriendo filtrado en Pantalla.
+- Docs y verificación final. **Sin release ni push mientras el usuario no lo pida.**
+
+### Perfil profesional del TÉCNICO (en curso, 2026-09-15)
+- **Backend:** `src-tauri/src/tech.rs` → `get_technician_profile(technician_id, start, end)` con
+  `TechnicianProfile { days[] (recibidos/entregados/USD por día), types[] (desglose por tipo de trabajo),
+  services/delivered/active/finalized, income_usd (entregados en el período), pending_usd (saldo por cobrar),
+  avg_per_day, items[] (órdenes con fecha, cliente, modelo, trabajos, monto, abonado, saldo) }`.
+  Comando registrado en `lib.rs` (106 comandos). El filtro acepta **id o nombre** del técnico.
+- **PENDIENTE DE VERIFICAR:** el test `tech::tests::test_technician_profile_period_and_types` está
+  `#[ignore]` porque el fixture devuelve 0 servicios (revisar el WHERE de `technician_id`/fechas y el
+  orden posicional de argumentos de `add_service` en los tests). **No dar por bueno el perfil hasta arreglarlo.**
+- **Falta la pantalla** (F4-b): pestaña/perfil por técnico en el Dashboard con selector de período
+  (hoy / semana / mes / rango), KPIs, **gráficas en CSS puro** (barras por día y por tipo de trabajo,
+  sin librerías nuevas porque no hay red para instalar recharts) y la tabla de sus servicios con
+  **ordenamiento de 3 estados** en cada columna.
+
+## Dónde quedamos (cierre de jornada 2026-09-15, MODO DEV)
+
+**Hecho y verificado (suite Rust 81/81 · `npm run build` ✓):**
+1. **Padrón de teléfonos** (`phones` + `src-tauri/src/phones.rs`): 1154 teléfonos, 0 claves repetidas, nombre comercial real
+   (`Galaxy A06`, `Moto G52`, `iPhone 13 Mini`, `Redmi Note 11`), INCELL = genérica, familias que fijan la marca
+   (Spark/Camon→Tecno…), limpieza de basura de la lista física, 341 entradas fusionadas, 217 “por revisar”.
+   Comandos: `get_phone_brands`, `get_phones` (filtros+orden+paginación), `get_phone_detail` (por categoría, Pantalla primero),
+   `rename_phone`, `add_phone`, `merge_phones`. Bugs corregidos: repuestos duplicados en la ficha y **el vínculo que se perdía al renombrar**
+   (ahora se une por la clave + los alias).
+2. **Limpieza del inventario de prueba**: stock y precios en 0 (1083 fichas), 43 fichas duplicadas fusionadas conservando
+   **la de mayor compatibilidad**, respaldos en `backup/backup/`.
+3. **Inventario unificado** (una sola entrada, pestañas Productos / Por modelo / Movimientos / **Ajustes**), KPIs compactos,
+   sin columna “Efectivo ($)”, campo **Modelo** del servicio con nombres reales (stock solo al elegir la pantalla) y
+   **refresco automático** al guardar/fusionar/aplicar.
+4. **Perfil profesional del técnico** (`src-tauri/src/tech.rs` + `src/components/TechnicianProfile.tsx`): se abre con el botón
+   **“Ver perfil”** en la tarjeta **“Servicios por Técnico”** del Dashboard (ahora ubicada **antes de “Stock Bajo”**).
+   Muestra período (Hoy/7 días/Este mes/Mes pasado/Rango), KPIs (equipos, entregados, en taller, facturado, por cobrar,
+   promedio/día), **gráfica de trabajo por día**, **gráfica por tipo de trabajo** (CSS puro, sin librerías) y la tabla de sus
+   servicios con **ordenamiento de 3 estados** por columna. El bug que lo dejaba en 0 (comparar `date_in` con hora contra una
+   fecha) está corregido y **con test pasando**.
+
+**Pendiente (en este orden):**
+- **F3**: tabla de **Modelos** en el Inventario con marca como filtro/columna, buscador y orden de 3 estados (el backend ya lo soporta).
+- **Renombrar los 217** modelos sin familia desde la app (comandos listos).
+- **Cargar inventario**: asistente pegar/abrir lista → cruce → vista previa editable → aplicar con respaldo.
+- Regla **“solo Pantalla”**: padrón desde categoría Pantalla (1122 teléfonos) e Inventario abriendo filtrado en Pantalla.
+- Pulido: los 10 pares de fichas que difieren en variante (INCELL vs OLED) quedan a propósito sin fusionar.
+
+**Modo dev vigente:** sin release, sin push; siempre sobre copia (`backup/registro_pre_normalizacion_20260915.db`) con respaldo previo.

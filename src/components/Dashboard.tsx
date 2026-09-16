@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { api } from '../db';
 import { initialsOf } from '@/lib/utils';
+import { TechnicianProfileDialog } from './TechnicianProfile';
 import { cn } from '@/lib/utils';
 import type { ServiceDashboard, Product, DashboardAnalytics, StatusStat, TechnicianStat } from '../types';
 
@@ -42,6 +43,9 @@ export default function Dashboard() {
   const [analytics, setAnalytics] = useState<DashboardAnalytics | null>(null);
   const [lowStock, setLowStock] = useState<Product[]>([]);
   const [techStats, setTechStats] = useState<TechnicianStat[]>([]);
+  // Perfil profesional del tecnico (que hizo, cuando y de que tipo)
+  const [profileTech, setProfileTech] = useState<number | null>(null);
+  const [showProfile, setShowProfile] = useState(false);
   const [synced, setSynced] = useState<boolean | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
@@ -229,6 +233,7 @@ export default function Dashboard() {
             </Table>
           </CardContent>
         </Card>
+      <TechnicianProfileDialog open={showProfile} onClose={() => setShowProfile(false)} technicianId={profileTech} />
       </div>
 
       <Card className="shadow-sm border border-border/50">
@@ -352,6 +357,64 @@ export default function Dashboard() {
         </Card>
       </div>
 
+        <Card className="shadow-sm border border-border/50">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold">Servicios por Técnico</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-b border-border/50">
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">Técnico</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">En taller</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Entregados</TableHead>
+                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Ingresos</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {techStats.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="text-center text-muted-foreground py-10">
+                      Sin servicios registrados
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  techStats.map(t => (
+                    <TableRow
+                      key={t.technician_id ?? `sin-${t.technician}`}
+                      className="border-b border-border/30 hover:bg-muted/40 cursor-pointer"
+                      title="Ver perfil del técnico: qué hizo, cuándo y de qué tipo"
+                      onClick={() => { setProfileTech(t.technician_id ?? null); setShowProfile(true); }}
+                    >
+                      <TableCell className="py-3 px-4">
+                        <span className="flex items-center gap-2">
+                          <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', t.color || 'bg-slate-500')}>
+                            {t.initials || initialsOf(t.technician)}
+                          </span>
+                          <span className="font-medium">{t.technician || 'Sin asignar'}</span>
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-3 px-4 text-right">{t.activos}</TableCell>
+                      <TableCell className="py-3 px-4 text-right">
+                        <span className="text-success font-medium">{t.entregados}</span>
+                      </TableCell>
+                      <TableCell className="py-3 px-4">
+                        <span className="flex items-center justify-end gap-2">
+                          <span className="font-medium tabular-nums">${t.ingresos.toFixed(2)}</span>
+                          <Button variant="outline" size="sm"
+                            onClick={() => { setProfileTech(t.technician_id ?? null); setShowProfile(true); }}>
+                            Ver perfil
+                          </Button>
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+
       <Card className="shadow-sm border border-border/50">
         <CardHeader className="pb-3">
           <CardTitle className="text-base font-semibold">Stock Bajo</CardTitle>
@@ -388,51 +451,6 @@ export default function Dashboard() {
             </TableBody>
           </Table>
         </CardContent>
-        </Card>
-
-        <Card className="shadow-sm border border-border/50">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold">Servicios por Técnico</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow className="border-b border-border/50">
-                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">Técnico</TableHead>
-                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">En taller</TableHead>
-                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Entregados</TableHead>
-                  <TableHead className="h-11 px-4 text-xs font-medium uppercase tracking-wider text-muted-foreground/70 text-right">Ingresos</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {techStats.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={4} className="text-center text-muted-foreground py-10">
-                      Sin servicios registrados
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  techStats.map(t => (
-                    <TableRow key={t.technician_id ?? `sin-${t.technician}`} className="border-b border-border/30 hover:bg-muted/40">
-                      <TableCell className="py-3 px-4">
-                        <span className="flex items-center gap-2">
-                          <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', t.color || 'bg-slate-500')}>
-                            {t.initials || initialsOf(t.technician)}
-                          </span>
-                          <span className="font-medium">{t.technician || 'Sin asignar'}</span>
-                        </span>
-                      </TableCell>
-                      <TableCell className="py-3 px-4 text-right">{t.activos}</TableCell>
-                      <TableCell className="py-3 px-4 text-right">
-                        <span className="text-success font-medium">{t.entregados}</span>
-                      </TableCell>
-                      <TableCell className="py-3 px-4 text-right font-medium">${t.ingresos.toFixed(2)}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
         </Card>
       </div>
   );

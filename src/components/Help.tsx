@@ -167,14 +167,30 @@ const sections = [
   {
     value: 'inventario',
     icon: Package,
-    title: 'Inventario y Pantallas',
+    title: 'Inventario (un solo módulo)',
     color: 'text-blue-600',
     bg: 'bg-blue-50',
     content: (
       <div className="space-y-2">
-        <p><Badge variant="outline">Inventario</Badge> muestra todos los productos con su stock, costo, precio y compatibilidad. <Badge variant="outline">Pantallas</Badge> filtra solo la categoría de pantallas.</p>
-        <p>Cada pantalla puede ser compatible con varios modelos — verás los modelos como chips. Al vender o entregar un servicio, el stock se actualiza solo, y cada movimiento queda registrado (entradas/salidas con motivo).</p>
-        <p>Los productos con stock bajo (menor al mínimo) aparecen en el <Badge variant="outline">Dashboard</Badge> y en <Badge variant="outline">Pedidos</Badge> con sugerencia de reposición.</p>
+        <p>
+          Todo el inventario vive en <Badge variant="outline">Inventario</Badge>, dividido en pestañas:
+        </p>
+        <ul className="list-disc pl-5 space-y-1">
+          <li><span className="font-medium text-foreground">Productos:</span> el catálogo completo con KPIs arriba (con stock, agotados, faltantes, bajo mínimo, sin precio, capital a costo), búsqueda por producto/marca/modelo/teléfono compatible, filtros por categoría y estado del stock, y la tabla paginada (50 por página). Cada ficha muestra sus teléfonos compatibles como chips (el “+N” despliega el resto).</li>
+          <li><span className="font-medium text-foreground">Por modelo:</span> escribes el teléfono (ej. <em>Redmi Note 11</em>) y ves qué repuestos del catálogo le sirven, con la coincidencia y el stock real. Es la misma compatibilidad que usa el formulario de servicio.</li>
+          <li><span className="font-medium text-foreground">Movimientos:</span> entradas y salidas con su motivo, fecha y la referencia (número de orden <code className="text-[11px]">DEV-00xx</code> o pedido). Aquí se auditan los faltantes.</li>
+          <li><span className="font-medium text-foreground">Precios y datos</span> (solo dueño): restaurar costo/venta desde la lista CELL WORLD y limpiar marcas/modelos/nombres del catálogo, siempre con vista previa y respaldo.</li>
+        </ul>
+        <p>
+          <span className="font-medium text-foreground">Marcas y modelos:</span> la marca es el fabricante (Redmi es la línea Redmi de Xiaomi) y los modelos se guardan
+          con la misma convención (<em>Hot 40i</em>, <em>13 Pro Max</em>, <em>iPhone 11</em>). Al guardar un producto desde la app, marca, modelo y compatibilidad se
+          normalizan solos; los teléfonos compatibles se guardan como <em>Marca Modelo</em> para que la lista de modelos no se duplique.
+        </p>
+        <p>
+          <span className="font-medium text-foreground">Faltante</span> = stock negativo: salió más mercancía de la que estaba registrada. Se ve en rojo en la tabla y en
+          Movimientos con el motivo <em>Servicio Entregado (faltante)</em>.
+        </p>
+        <p>Los productos con stock bajo (menor al mínimo) aparecen también en el <Badge variant="outline">Dashboard</Badge> y en <Badge variant="outline">Pedidos</Badge> con sugerencia de reposición.</p>
       </div>
     ),
   },
@@ -323,8 +339,8 @@ const sections = [
           <p>Porque la moneda se deriva del método de pago: si pagó en bolívares, el abono queda en Bs. y su equivalente en $ se calcula con la tasa BCV del día (ej: 2000 Bs. @748.79 ≈ $2.67). Así el Libro Diario y los saldos nunca mezclan monedas.</p>
         </div>
         <div>
-          <p className="font-medium text-foreground">¿Cómo sé qué pantallas tengo en stock?</p>
-          <p>En <Badge variant="outline">Pantallas</Badge>, en el Dashboard (Stock Bajo) o en Pedidos. Al buscar un producto en una venta también ves el stock en vivo.</p>
+          <p className="font-medium text-foreground">¿Cómo sé qué repuestos tengo en stock?</p>
+          <p>En <Badge variant="outline">Inventario</Badge> → pestaña <span className="font-medium text-foreground">Productos</span> (filtro “Con stock”) o pestaña <span className="font-medium text-foreground">Por modelo</span> para ver qué le sirve a un teléfono concreto. También en el Dashboard (Stock Bajo) y en Pedidos. Al buscar un producto en una venta ves el stock en vivo.</p>
         </div>
         <div>
           <p className="font-medium text-foreground">¿Cómo veo qué vendí o qué entró un día específico?</p>
@@ -401,7 +417,7 @@ const sections = [
           </li>
           <li className="flex items-center gap-2">
             <Badge variant="outline">Alt + 1..9</Badge>
-            <span>— cambiar de pantalla (1 Dashboard, 2 Ventas, 3 Servicios, 4 Inventario, 5 Pantallas, 6 Pedidos, 7 Clientes, 8 Libro Diario, 9 Ayuda)</span>
+            <span>— cambiar de pantalla (1 Dashboard, 2 Ventas, 3 Servicios, 4 Inventario, 5 Pedidos, 6 Clientes, 7 Libro Diario, 8 Ayuda)</span>
           </li>
         </ul>
         <p className="text-xs text-muted-foreground">Los atajos no interfieren mientras escribes en un campo.</p>
@@ -424,7 +440,7 @@ const sections = [
           <li><span className="font-medium text-foreground">Exportar Excel:</span> requiere Python 3 instalado en la computadora con el paquete <code className="rounded bg-muted px-1.5 py-0.5 text-xs">openpyxl</code>. Si no está, el sistema genera el respaldo en CSV.</li>
           <li><span className="font-medium text-foreground">Impresora por Bluetooth:</span> la impresora BT debe estar <span className="font-medium">encendida y pareada</span> en Windows antes de imprimir; si se conecta por USB con el driver instalado (HPRT MPT-II), funciona directo desde <Badge variant="outline">Impresora</Badge>.</li>
           <li><span className="font-medium text-foreground">Garantía de 7 días corridos:</span> se calcula desde la fecha de entrega y no se pausa por fines de semana ni días feriados. La garantía cubre el trabajo realizado, no daños físicos nuevos.</li>
-          <li><span className="font-medium text-foreground">Pantalla exacta obligatoria:</span> si un trabajo es "Cambio pantalla" y el modelo tiene pantallas en el catálogo, hay que elegir cuál se instala (Incell, Original…) antes de guardar — es a propósito, para que el inventario nunca se descuente mal.</li>
+          <li><span className="font-medium text-foreground">Pantalla exacta:</span> si el trabajo es “Cambio pantalla”, eliges del listado de pantallas compatibles con el modelo (ordenadas por coincidencia exacta y stock). Al <Badge variant="outline">Entregado</Badge> se descuenta ESA pantalla y solo esa. Si eliges una <span className="font-medium text-foreground">agotada</span>, la app te avisa y pide confirmación: el stock queda en faltante y el movimiento lo registra como tal.</li>
           <li><span className="font-medium text-foreground">Sin conexión a otros dispositivos:</span> la app es local a una computadora; si se usa en otra PC, los datos no se comparten (se pueden llevar con respaldo/importación manual).</li>
         </ul>
       </div>

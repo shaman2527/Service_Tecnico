@@ -257,12 +257,90 @@ pub struct InventoryMovement {
     pub product_name: Option<String>,
 }
 
+// --- Inventario unificado (2026-09-15): página, KPIs, modelos y pantallas ---
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProductPage {
+    pub items: Vec<Product>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct StockCount {
+    pub name: String,
+    pub sku: i64,
+    pub units: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct InventoryStats {
+    pub sku: i64,
+    pub with_stock: i64,
+    pub out_of_stock: i64,
+    pub negative: i64,
+    pub low_stock: i64,
+    pub no_price: i64,
+    pub no_compat: i64,
+    pub brands: i64,
+    pub units: i64,
+    pub value_cost: f64,
+    pub value_sale: f64,
+    pub duplicate_groups: i64,
+    pub duplicate_ids: Vec<i64>,
+    pub by_category: Vec<StockCount>,
+}
+
+/// Un teléfono del catálogo (lista maestra derivada de `compatibility`).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PhoneModelRow {
+    pub label: String,
+    pub brand: String,
+    pub key: String,
+    /// cuántas pantallas/repuestos distintos le sirven
+    pub screens: i64,
+    /// unidades totales de esos repuestos
+    pub stock: i64,
+    pub with_stock: i64,
+}
+
+/// Candidata del desplegable "Pantalla a instalar" del formulario de servicio.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScreenCandidate {
+    pub product: Product,
+    /// "exacta" | "prefijo" | "parcial"
+    pub match_quality: String,
+    pub in_stock: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MovementPage {
+    pub items: Vec<InventoryMovement>,
+    pub total: i64,
+}
+
+/// Un producto dentro de un grupo de duplicados.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DuplicateItem {
+    pub id: i64,
+    pub name: String,
+    pub stock: i64,
+    pub price_sale: f64,
+    pub updated_at: Option<String>,
+}
+
+/// Grupo de productos repetidos (mismo teléfono en dos fichas distintas).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DuplicateGroup {
+    pub label: String,
+    pub items: Vec<DuplicateItem>,
+    pub stock_total: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PaymentMethod {
     pub id: i64,
     pub name: String,
 }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServiceStatus {
     pub id: i64,
@@ -506,6 +584,8 @@ pub struct DashboardAnalytics {
 
 pub struct Database {
     pub conn: Mutex<Connection>,
+    /// Ruta del archivo .db (para respaldos antes de operaciones masivas)
+    pub db_path: PathBuf,
 }
 
 impl Database {
@@ -514,6 +594,7 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         let db = Database {
             conn: Mutex::new(conn),
+            db_path: db_path.clone(),
         };
         db.init()?;
         Ok(db)
@@ -851,6 +932,71 @@ impl Database {
         if !has_sale_discount {
             let _ = conn.execute_batch("ALTER TABLE sales ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;");
         }
+        // Migration: TEXTO DE BÚSQUEDA normalizado (2026-09-15).
+        // El catálogo se guarda canónico ("Xiaomi Redmi Note 11"), pero el operario
+        // sigue escribiendo como antes ("Red Note"). search_text = nombre+marca+modelo+
+        // variante+compatibilidad normalizados (sin acentos/puntuación, minúsculas) y la
+        // búsqueda exige TODOS los tokens del texto escrito → "red note" encuentra
+        // "xiaomi redmi note 11" (red ⊂ redmi).
+        let has_search_text: bool = conn.prepare("SELECT search_text FROM products LIMIT 1").is_ok();
+        if !has_search_text {
+            let _ = conn.execute_batch("ALTER TABLE products ADD COLUMN search_text TEXT;");
+        }
+        {
+            let pending: Vec<(i64, String, String, String, String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, COALESCE(name,''), COALESCE(brand,''), COALESCE(model,''),
+                            COALESCE(variant,''), COALESCE(compatibility,'')
+                     FROM products WHERE search_text IS NULL OR search_text=''",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, name, brand, model, variant, compatibility) in pending {
+                let text = crate::catalog::search_text(&name, &brand, &model, &variant, &compatibility);
+                let _ = conn.execute("UPDATE products SET search_text=?1 WHERE id=?2", params![text, id]);
+            }
+        }
+        let _ = conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+             CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
+             CREATE INDEX IF NOT EXISTS idx_products_model ON products(model);
+             CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock);",
+        );
+
+        // Padrón de TELÉFONOS (2026-09-15): nombre comercial real + clave ÚNICA.
+        // Nace de la compatibilidad del catálogo (los MISMOS modelos que se eligen al
+        // registrar un servicio) y es editable desde la app (renombrar / fusionar).
+        //   key = norm(marca) + '|' + norm(modelo sin línea)  → 0 duplicados
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS phones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand TEXT NOT NULL,
+                line TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                name TEXT NOT NULL,
+                key TEXT NOT NULL UNIQUE,
+                aliases TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'catalogo',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_phones_key ON phones(key);
+            CREATE INDEX IF NOT EXISTS idx_phones_brand ON phones(brand);",
+        )?;
+        // migración idempotente: columna de "nombre por revisar" (sin familia)
+        if conn.prepare("SELECT needs_review FROM phones LIMIT 1").is_err() {
+            let _ = conn.execute_batch("ALTER TABLE phones ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0;");
+        }
+        // primera carga: si el padrón está vacío se arma desde el catálogo
+        let phones_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM phones", [], |r| r.get(0))
+            .unwrap_or(0);
+        if phones_count == 0 {
+            let _ = crate::catalog::rebuild_phones(&conn, false);
+        }
         // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
         // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
         if conn.prepare("SELECT id FROM service_payments LIMIT 1").is_ok() {
@@ -1095,25 +1241,505 @@ impl Database {
     }
 
     // --- Products ---
+    /// Nombre de la categoría (para reconstruir nombres canónicos).
+    fn category_name(conn: &Connection, category_id: Option<i64>) -> String {
+        let Some(id) = category_id else { return String::new() };
+        conn.query_row("SELECT name FROM categories WHERE id=?1", params![id], |r| r.get::<_, String>(0))
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// Limpieza masiva del catálogo (marcas/modelos/nombres/compatibilidad).
+    /// `dry_run = true` NO escribe nada: devuelve conteos y muestras.
+    /// `dry_run = false` respalda el .db (checkpoint + copia en `backup/`) y aplica.
+    /// Es idempotente: correrlo dos veces no cambia nada la segunda vez.
+    pub fn normalize_catalog(&self, dry_run: bool) -> SqlResult<crate::catalog::CatalogReport> {
+        let conn = self.conn.lock().unwrap();
+        if dry_run {
+            return crate::catalog::normalize_catalog(&conn, true);
+        }
+
+        // respaldo ANTES de escribir: checkpoint del WAL y copia del archivo
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        let backup = (|| -> Option<PathBuf> {
+            let stamp: String = conn
+                .query_row("SELECT strftime('%Y%m%d_%H%M%S','now','localtime')", [], |r| r.get(0))
+                .unwrap_or_else(|_| "sin_fecha".to_string());
+            let dir = self.db_path.parent()?.join("backup");
+            std::fs::create_dir_all(&dir).ok()?;
+            let dest = dir.join(format!("registro_pre_normalizacion_{stamp}.db"));
+            std::fs::copy(&self.db_path, &dest).ok()?;
+            Some(dest)
+        })();
+
+        let mut report = crate::catalog::normalize_catalog(&conn, false)?;
+        report.backup = backup.map(|p| p.to_string_lossy().to_string());
+        // la compatibilidad cambió → se refresca el padrón de teléfonos
+        let _ = crate::catalog::rebuild_phones(&conn, false);
+        Ok(report)
+    }
+
+    // --- Inventario unificado: consultas del módulo de pantallas/productos ---
+
+    /// Página de productos con filtros y orden server-side (la tabla ya no trae 1126 filas).
+    pub fn get_products_page(
+        &self,
+        search: &str,
+        category_id: Option<i64>,
+        brand: Option<&str>,
+        stock_filter: Option<&str>,
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> SqlResult<ProductPage> {
+        let conn = self.conn.lock().unwrap();
+        let mut where_sql = String::from(" WHERE 1=1");
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        let tokens = crate::catalog::search_tokens(search);
+        let (clause, vals) = crate::catalog::search_clause(&tokens, values.len() + 1);
+        where_sql.push_str(&clause);
+        for v in vals { values.push(Box::new(v)); }
+
+        if let Some(cid) = category_id {
+            values.push(Box::new(cid));
+            where_sql.push_str(&format!(" AND p.category_id=?{}", values.len()));
+        }
+        if let Some(b) = brand {
+            if !b.trim().is_empty() {
+                values.push(Box::new(b.trim().to_string()));
+                where_sql.push_str(&format!(" AND p.brand=?{}", values.len()));
+            }
+        }
+        let stock_clause = match stock_filter.unwrap_or("todos") {
+            "con_stock" => " AND p.stock > 0",
+            "agotado" => " AND p.stock = 0",
+            "negativo" => " AND p.stock < 0",
+            "bajo_minimo" => " AND p.min_stock > 0 AND p.stock <= p.min_stock",
+            "sin_precio" => " AND COALESCE(p.price_cost,0)=0 AND COALESCE(p.price_sale,0)=0",
+            "sin_compat" => " AND COALESCE(p.compatibility,'') IN ('','[]')",
+            _ => "",
+        };
+        where_sql.push_str(stock_clause);
+
+        let order = match sort.unwrap_or("nombre") {
+            "stock" => "p.stock DESC, p.name",
+            "stock_asc" => "p.stock ASC, p.name",
+            "marca" => "p.brand, p.model, p.name",
+            "reciente" => "p.updated_at DESC, p.name",
+            _ => "p.name",
+        };
+
+        let total: i64 = {
+            let sql = format!("SELECT COUNT(*) FROM products p{}", where_sql);
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(&sql, params_ref.as_slice(), |r| r.get(0))?
+        };
+
+        values.push(Box::new(limit.max(1)));
+        let limit_idx = values.len();
+        values.push(Box::new(offset.max(0)));
+        let offset_idx = values.len();
+        let sql = format!(
+            "SELECT p.*, c.name as category_name FROM products p
+             LEFT JOIN categories c ON p.category_id = c.id{where_sql}
+             ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+        );
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok(Product {
+                id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?, brand: r.get(3)?,
+                model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
+                price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
+                min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
+                category_name: r.get(14)?, price_usd: r.get(13)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows { items.push(row?); }
+        Ok(ProductPage { items, total })
+    }
+
+    /// KPIs del inventario (los del encabezado del módulo).
+    pub fn get_inventory_stats(&self) -> SqlResult<InventoryStats> {
+        let conn = self.conn.lock().unwrap();
+        let mut stats = conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN stock > 0 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN stock = 0 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN stock < 0 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN min_stock > 0 AND stock <= min_stock THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(price_cost,0)=0 AND COALESCE(price_sale,0)=0 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN COALESCE(compatibility,'') IN ('','[]') THEN 1 ELSE 0 END),0),
+                    COUNT(DISTINCT brand),
+                    COALESCE(SUM(stock),0),
+                    COALESCE(SUM(stock * COALESCE(price_cost,0)),0),
+                    COALESCE(SUM(stock * COALESCE(price_sale,0)),0)
+             FROM products",
+            [],
+            |r| {
+                Ok(InventoryStats {
+                    sku: r.get(0)?, with_stock: r.get(1)?, out_of_stock: r.get(2)?,
+                    negative: r.get(3)?, low_stock: r.get(4)?, no_price: r.get(5)?,
+                    no_compat: r.get(6)?, brands: r.get(7)?, units: r.get(8)?,
+                    value_cost: r.get(9)?, value_sale: r.get(10)?,
+                    ..Default::default()
+                })
+            },
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(brand,''), COALESCE(model,''), COALESCE(variant,''), id
+             FROM products ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+        })?;
+        let mut groups: std::collections::BTreeMap<String, Vec<i64>> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (brand, model, variant, id) = row?;
+            let n = crate::catalog::normalize_fields("", &brand, &model, &variant, "");
+            let key = format!("{}|{}|{}", crate::catalog::norm(&n.brand), crate::catalog::norm(&n.model), crate::catalog::norm(&n.variant));
+            groups.entry(key).or_default().push(id);
+        }
+        let dups: Vec<Vec<i64>> = groups.into_values().filter(|v| v.len() > 1).collect();
+        stats.duplicate_groups = dups.len() as i64;
+        stats.duplicate_ids = dups.into_iter().flatten().collect();
+
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(c.name,'(sin categoría)'), COUNT(*) sku, COALESCE(SUM(p.stock),0) units
+             FROM products p LEFT JOIN categories c ON c.id = p.category_id
+             GROUP BY c.name ORDER BY sku DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok(StockCount { name: r.get(0)?, sku: r.get(1)?, units: r.get(2)? }))?;
+        for row in rows { stats.by_category.push(row?); }
+
+        Ok(stats)
+    }
+
+    /// Lista maestra de teléfonos derivada de `compatibility`, deduplicada por
+    /// clave canónica (evita el mismo teléfono dos veces por escribir la marca
+    /// de otra forma). Incluye cuántos repuestos le sirven y su stock.
+    pub fn get_phone_models(&self, search: &str, limit: i64) -> SqlResult<Vec<PhoneModelRow>> {
+        let conn = self.conn.lock().unwrap();
+        #[derive(Default)]
+        struct Acc {
+            label: String,
+            brand: String,
+            ids: std::collections::BTreeSet<i64>,
+            stock: i64,
+        }
+        let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, COALESCE(brand,''), COALESCE(compatibility,''), COALESCE(stock,0)
+                 FROM products WHERE COALESCE(compatibility,'') NOT IN ('','[]')",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+            })?;
+            for row in rows {
+                let (id, brand, compat, stock) = row?;
+                for phone in crate::catalog::compat_phones(&compat, &brand) {
+                    let key = crate::catalog::phone_key(&phone);
+                    let entry = map.entry(key).or_insert_with(|| Acc {
+                        label: phone.label.clone(),
+                        brand: phone.brand.clone(),
+                        ..Default::default()
+                    });
+                    // etiqueta preferida: la más específica (con submarca)
+                    if phone.label.len() > entry.label.len() {
+                        entry.label = phone.label.clone();
+                        entry.brand = phone.brand.clone();
+                    }
+                    if entry.ids.insert(id) {
+                        entry.stock += stock;
+                    }
+                }
+            }
+        }
+
+        let tokens = crate::catalog::search_tokens(search);
+        let mut list: Vec<PhoneModelRow> = map
+            .into_iter()
+            .filter(|(_, a)| {
+                tokens.is_empty() || tokens.iter().all(|t| crate::catalog::norm(&a.label).contains(t))
+            })
+            .map(|(key, a)| PhoneModelRow {
+                label: a.label,
+                brand: a.brand,
+                key,
+                screens: a.ids.len() as i64,
+                stock: a.stock,
+                with_stock: if a.stock > 0 { 1 } else { 0 },
+            })
+            .collect();
+        list.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        if limit > 0 { list.truncate(limit as usize); }
+        Ok(list)
+    }
+
+    /// Productos compatibles con un modelo, RANKEADOS: primero las coincidencias
+    /// exactas y, dentro de cada nivel, los que tienen stock.
+    /// `category_id = None` → todas las categorías (para sugerir precios del
+    /// repuesto que corresponda); `Some(1)` → solo pantallas.
+    pub fn find_compatible_products(&self, model: &str, category_id: Option<i64>, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
+        let conn = self.conn.lock().unwrap();
+        let target = crate::catalog::phone_model_norm(model);
+        if target.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from(
+            "SELECT p.*, c.name as category_name FROM products p
+             LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1",
+        );
+        if let Some(cid) = category_id {
+            sql.push_str(&format!(" AND p.category_id = {cid}"));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Product {
+                id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?, brand: r.get(3)?,
+                model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
+                price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
+                min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
+                category_name: r.get(14)?, price_usd: r.get(13)?,
+            })
+        })?;
+
+        let mut out: Vec<ScreenCandidate> = Vec::new();
+        for row in rows {
+            let p = row?;
+            let brand = p.brand.clone().unwrap_or_default();
+            let compat = p.compatibility.clone().unwrap_or_default();
+            let mut best: Option<&'static str> = None;
+            for phone in crate::catalog::compat_phones(&compat, &brand) {
+                if let Some(q) = crate::catalog::match_quality(&target, &phone.model) {
+                    let rank = |s: &str| match s { "exacta" => 0, "prefijo" => 1, _ => 2 };
+                    if best.map(|b| rank(q) < rank(b)).unwrap_or(true) {
+                        best = Some(q);
+                    }
+                }
+            }
+            if let Some(q) = best {
+                out.push(ScreenCandidate { in_stock: p.stock > 0, product: p, match_quality: q.to_string() });
+            }
+        }
+        let rank = |s: &str| match s { "exacta" => 0, "prefijo" => 1, _ => 2 };
+        out.sort_by(|a, b| {
+            rank(&a.match_quality)
+                .cmp(&rank(&b.match_quality))
+                .then(b.in_stock.cmp(&a.in_stock))
+                .then(b.product.stock.cmp(&a.product.stock))
+                .then(a.product.name.cmp(&b.product.name))
+        });
+        if limit > 0 { out.truncate(limit as usize); }
+        Ok(out)
+    }
+
+    /// Pantallas (categoría 1) compatibles con un modelo (desplegable del servicio).
+    pub fn find_compatible_screens(&self, model: &str, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
+        self.find_compatible_products(model, Some(1), limit)
+    }
+
+    /// Grupos de productos repetidos (mismo marca+modelo+variante canónicos).
+    /// La fusión NO es automática: el local decide cuál ficha se queda.
+    pub fn get_duplicate_groups(&self) -> SqlResult<Vec<DuplicateGroup>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(name,''), COALESCE(brand,''), COALESCE(model,''),
+                    COALESCE(variant,''), COALESCE(stock,0), COALESCE(price_sale,0), updated_at
+             FROM products ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                DuplicateItem {
+                    id: r.get(0)?, name: r.get(1)?, stock: r.get(5)?,
+                    price_sale: r.get(6)?, updated_at: r.get(7)?,
+                },
+                r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut groups: std::collections::BTreeMap<String, Vec<DuplicateItem>> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (item, brand, model, variant) = row?;
+            let n = crate::catalog::normalize_fields("", &brand, &model, &variant, "");
+            let key = format!(
+                "{}|{}|{}",
+                crate::catalog::norm(&n.brand),
+                crate::catalog::norm(&n.model),
+                crate::catalog::norm(&n.variant)
+            );
+            groups.entry(key).or_default().push(item);
+        }
+        let mut out: Vec<DuplicateGroup> = groups
+            .into_iter()
+            .filter(|(_, items)| items.len() > 1)
+            .map(|(_, items)| {
+                let label = items[0].name.clone();
+                let stock_total = items.iter().map(|i| i.stock).sum();
+                DuplicateGroup { label, items, stock_total }
+            })
+            .collect();
+        out.sort_by(|a, b| b.stock_total.cmp(&a.stock_total));
+        Ok(out)
+    }
+
+    /// Movimientos de inventario con filtros y paginación (auditoría del módulo).
+    pub fn get_inventory_movements_page(
+        &self,
+        product_id: Option<i64>,
+        type_: Option<&str>,
+        reason: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> SqlResult<MovementPage> {
+        let conn = self.conn.lock().unwrap();
+        let mut where_sql = String::from(" WHERE 1=1");
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(pid) = product_id {
+            values.push(Box::new(pid));
+            where_sql.push_str(&format!(" AND m.product_id=?{}", values.len()));
+        }
+        if let Some(t) = type_ {
+            if !t.trim().is_empty() {
+                values.push(Box::new(t.trim().to_string()));
+                where_sql.push_str(&format!(" AND m.type=?{}", values.len()));
+            }
+        }
+        if let Some(r) = reason {
+            if !r.trim().is_empty() {
+                values.push(Box::new(format!("%{}%", r.trim())));
+                where_sql.push_str(&format!(" AND m.reason LIKE ?{}", values.len()));
+            }
+        }
+        if let Some(f) = from {
+            if !f.trim().is_empty() {
+                values.push(Box::new(f.trim().to_string()));
+                where_sql.push_str(&format!(" AND date(m.date) >= date(?{})", values.len()));
+            }
+        }
+        if let Some(t) = to {
+            if !t.trim().is_empty() {
+                values.push(Box::new(t.trim().to_string()));
+                where_sql.push_str(&format!(" AND date(m.date) <= date(?{})", values.len()));
+            }
+        }
+
+        let total: i64 = {
+            let sql = format!("SELECT COUNT(*) FROM inventory_movements m{}", where_sql);
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(&sql, params_ref.as_slice(), |r| r.get(0))?
+        };
+
+        values.push(Box::new(limit.max(1)));
+        let limit_idx = values.len();
+        values.push(Box::new(offset.max(0)));
+        let offset_idx = values.len();
+        let sql = format!(
+            "SELECT m.id, m.date, m.product_id, m.type, m.quantity, m.reason, m.reference, p.name
+             FROM inventory_movements m LEFT JOIN products p ON p.id = m.product_id{where_sql}
+             ORDER BY m.id DESC LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+        );
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
+            Ok(InventoryMovement {
+                id: r.get(0)?, date: r.get(1)?, product_id: r.get(2)?, r#type: r.get(3)?,
+                quantity: r.get(4)?, reason: r.get(5)?, reference: r.get(6)?, product_name: r.get(7)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows { items.push(row?); }
+        Ok(MovementPage { items, total })
+    }
+
+    /// Fusiona dos productos DUPLICADOS: mueve stock, movimientos, ventas,
+    /// servicios y pedidos al que se queda, y borra el otro. Suma el stock
+    /// (son bins distintos del mismo repuesto).
+    pub fn merge_products(&self, keep_id: i64, remove_id: i64) -> SqlResult<()> {
+        if keep_id == remove_id {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let remove_stock: i64 = tx.query_row(
+            "SELECT COALESCE(stock,0) FROM products WHERE id=?1", params![remove_id], |r| r.get(0),
+        )?;
+        tx.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![remove_stock, keep_id])?;
+        // referencias: se repuntan al producto que queda
+        for sql in [
+            "UPDATE inventory_movements SET product_id=?1 WHERE product_id=?2",
+            "UPDATE sales SET product_id=?1 WHERE product_id=?2",
+            "UPDATE services SET screen_product_id=?1 WHERE screen_product_id=?2",
+            "UPDATE purchase_order_items SET product_id=?1 WHERE product_id=?2",
+        ] {
+            let _ = tx.execute(sql, params![keep_id, remove_id]);
+        }
+        tx.execute("DELETE FROM products WHERE id=?1", params![remove_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restaura costo/venta desde la lista de precios (JSON `cellworld_items.json`).
+    /// `path = None` busca el archivo junto al .exe / en la raíz del proyecto.
+    pub fn restore_prices_from_file(
+        &self,
+        path: Option<&str>,
+        only_zero: bool,
+        dry_run: bool,
+    ) -> SqlResult<crate::catalog::PriceRestoreReport> {
+        let file = match path {
+            Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+            _ => crate::catalog::find_price_list_file().ok_or_else(|| {
+                day_shift_error("No encontré la lista de precios (cellworld_items.json). Elige el archivo con Examinar.")
+            })?,
+        };
+        let content = std::fs::read_to_string(&file).map_err(|e| {
+            day_shift_error(&format!("No se pudo leer {}: {e}", file.display()))
+        })?;
+        let conn = self.conn.lock().unwrap();
+        crate::catalog::restore_prices(&conn, &content, only_zero, dry_run)
+    }
+
     pub fn add_product(&self, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                        variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
                        stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
+        // Marca/modelo/variante/compatibilidad se guardan CANÓNICOS (mismas reglas
+        // que la limpieza masiva). El nombre lo escribe el operario y se respeta.
+        let cat = Self::category_name(&conn, category_id);
+        let n = crate::catalog::normalize_fields(&cat, brand, model, variant, compatibility);
+        let search = crate::catalog::search_text(name, &n.brand, &n.model, &n.variant, &n.compatibility);
         conn.execute(
-            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd],
+            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd, search_text) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![name, category_id, n.brand, n.model, n.variant, n.compatibility, price_cost, price_sale, stock, min_stock, price_usd, search],
         )?;
-        Ok(conn.last_insert_rowid())
+        // OJO: el rowid se captura ANTES del rebuild (que inserta en `phones`)
+        let new_id = conn.last_insert_rowid();
+        // el padrón de teléfonos sigue la compatibilidad del catálogo
+        let _ = crate::catalog::rebuild_phones(&conn, false);
+        Ok(new_id)
     }
 
     pub fn update_product(&self, id: i64, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                           variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
                           stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
+        let cat = Self::category_name(&conn, category_id);
+        let n = crate::catalog::normalize_fields(&cat, brand, model, variant, compatibility);
+        let search = crate::catalog::search_text(name, &n.brand, &n.model, &n.variant, &n.compatibility);
         conn.execute(
-            "UPDATE products SET name=?1, category_id=?2, brand=?3, model=?4, variant=?5, compatibility=?6, price_cost=?7, price_sale=?8, stock=?9, min_stock=?10, price_usd=?11, updated_at=datetime('now','localtime') WHERE id=?12",
-            params![name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd, id],
+            "UPDATE products SET name=?1, category_id=?2, brand=?3, model=?4, variant=?5, compatibility=?6, price_cost=?7, price_sale=?8, stock=?9, min_stock=?10, price_usd=?11, updated_at=datetime('now','localtime'), search_text=?13 WHERE id=?12",
+            params![name, category_id, n.brand, n.model, n.variant, n.compatibility, price_cost, price_sale, stock, min_stock, price_usd, id, search],
         )?;
+        let _ = crate::catalog::rebuild_phones(&conn, false);
         Ok(())
     }
 
@@ -1137,9 +1763,13 @@ impl Database {
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-        if !search.is_empty() {
-            sql.push_str(" AND (p.name LIKE ?1 OR p.brand LIKE ?1 OR p.model LIKE ?1 OR p.compatibility LIKE ?1)");
-            param_values.push(Box::new(format!("%{}%", search)));
+        // Búsqueda por TOKENS normalizados: "red note" encuentra "Xiaomi Redmi Note 11"
+        // (el catálogo se guarda canónico, pero el operario sigue escribiendo como antes).
+        let tokens = crate::catalog::search_tokens(search);
+        let (clause, values) = crate::catalog::search_clause(&tokens, 1);
+        sql.push_str(&clause);
+        for v in values {
+            param_values.push(Box::new(v));
         }
         if let Some(cid) = category_id {
             let idx = param_values.len() + 1;
@@ -1408,10 +2038,13 @@ impl Database {
             .optional()?;
         if let Some(prev) = prev_status.as_deref() {
             if prev != status {
+                let order_num: String = conn
+                    .query_row("SELECT COALESCE(order_num,'') FROM services WHERE id=?1", params![id], |r| r.get(0))
+                    .unwrap_or_default();
                 if status == "Entregado" {
-                    self.apply_service_stock(&conn, model, screen_product_id, service_types, service_type, -1)?;
+                    self.apply_service_stock(&conn, model, screen_product_id, service_types, service_type, &order_num, -1)?;
                 } else if prev == "Entregado" {
-                    self.apply_service_stock(&conn, model, screen_product_id, service_types, service_type, 1)?;
+                    self.apply_service_stock(&conn, model, screen_product_id, service_types, service_type, &order_num, 1)?;
                 }
             }
         }
@@ -1454,7 +2087,7 @@ impl Database {
     //   exacta → nombre/modelo exacto → LIKE determinista. NUNCA auto-crea productos: si el
     //   modelo no matchea nada, no descuenta (regla: aviso sin descuento, no fantasmas).
     fn apply_service_stock(&self, conn: &rusqlite::Connection, model: &str, screen_pid: Option<i64>,
-                           service_types: &str, service_type: &str, delta: i64) -> SqlResult<i64> {
+                           service_types: &str, service_type: &str, order_num: &str, delta: i64) -> SqlResult<i64> {
         let is_screen_job = serde_json::from_str::<Vec<String>>(service_types)
             .map(|v| v.iter().any(|t| t == "Cambio pantalla"))
             .unwrap_or_else(|_| service_type.trim() == "Cambio pantalla");
@@ -1465,13 +2098,22 @@ impl Database {
         // Descuento EXACTO: pantalla elegida por el técnico en la orden.
         if let Some(pid) = screen_pid {
             conn.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![delta, pid])?;
+            let new_stock: i64 = conn
+                .query_row("SELECT COALESCE(stock,0) FROM products WHERE id=?1", params![pid], |r| r.get(0))
+                .unwrap_or(0);
             let mov_type = if delta < 0 { "salida" } else { "entrada" };
-            let reason = if delta < 0 { "Servicio Entregado" } else { "Servicio Reabierto" };
+            // Entregar una pantalla sin stock deja faltante: queda registrado como tal
+            // (la mercancía salió de verdad del local — no se esconde el descuadre).
+            let reason = if delta < 0 {
+                if new_stock < 0 { "Servicio Entregado (faltante)" } else { "Servicio Entregado" }
+            } else {
+                "Servicio Reabierto"
+            };
             conn.execute(
-                "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, ?2, ?3, ?4, 'Servicio')",
-                params![pid, mov_type, delta.abs(), reason],
+                "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![pid, mov_type, delta.abs(), reason, ref_label(order_num)],
             )?;
-            return Ok(pid);
+            return Ok(new_stock);
         }
 
         // Legacy: match por modelo contra pantallas del catálogo (sin auto-create).
@@ -1521,29 +2163,36 @@ impl Database {
         };
 
         conn.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![delta, pid])?;
+        let new_stock: i64 = conn
+            .query_row("SELECT COALESCE(stock,0) FROM products WHERE id=?1", params![pid], |r| r.get(0))
+            .unwrap_or(0);
         let mov_type = if delta < 0 { "salida" } else { "entrada" };
-        let reason = if delta < 0 { "Servicio Entregado" } else { "Servicio Reabierto" };
+        let reason = if delta < 0 {
+            if new_stock < 0 { "Servicio Entregado (faltante)" } else { "Servicio Entregado" }
+        } else {
+            "Servicio Reabierto"
+        };
         conn.execute(
-            "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, ?2, ?3, ?4, 'Servicio')",
-            params![pid, mov_type, delta.abs(), reason],
+            "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![pid, mov_type, delta.abs(), reason, ref_label(order_num)],
         )?;
-        Ok(pid)
+        Ok(new_stock)
     }
 
     pub fn delete_service(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         // Si el servicio estaba entregado, devolver el stock antes de borrar
         // (usa la pantalla EXACTA elegida si existe; si no, matching por modelo legacy).
-        let svc: Option<(String, String, Option<i64>, String, String)> = conn
+        let svc: Option<(String, String, Option<i64>, String, String, String)> = conn
             .query_row(
-                "SELECT model, status, screen_product_id, COALESCE(service_types,''), COALESCE(service_type,'') FROM services WHERE id=?1",
+                "SELECT model, status, screen_product_id, COALESCE(service_types,''), COALESCE(service_type,''), COALESCE(order_num,'') FROM services WHERE id=?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()?;
-        if let Some((model, status, screen_pid, s_types, s_type)) = svc {
+        if let Some((model, status, screen_pid, s_types, s_type, order_num)) = svc {
             if status == "Entregado" {
-                self.apply_service_stock(&conn, &model, screen_pid, &s_types, &s_type, 1)?;
+                self.apply_service_stock(&conn, &model, screen_pid, &s_types, &s_type, &order_num, 1)?;
             }
         }
         conn.execute("DELETE FROM service_payments WHERE service_id=?", params![id])?;
@@ -2797,13 +3446,25 @@ impl Database {
     // --- Autocomplete suggestions ---
     pub fn suggest_products(&self, query: &str, limit: i64) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        // Mismos tokens normalizados que get_products: "red note" sugiere la pantalla
+        // de "Xiaomi Redmi Note 11" aunque el catálogo ya esté canónico.
+        let tokens = crate::catalog::search_tokens(query);
+        let (clause, values) = crate::catalog::search_clause(&tokens, 1);
+        let limit_idx = values.len() + 1;
+        let sql = format!(
             "SELECT p.*, c.name as category_name FROM products p
              LEFT JOIN categories c ON p.category_id = c.id
-             WHERE p.name LIKE ?1 OR p.brand LIKE ?1 OR p.model LIKE ?1 OR p.compatibility LIKE ?1
-             ORDER BY p.name LIMIT ?2"
-        )?;
-        let rows = stmt.query_map(params![format!("%{}%", query), limit], |r| {
+             WHERE 1=1{clause}
+             ORDER BY p.name LIMIT ?{limit_idx}"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        for v in values {
+            param_values.push(Box::new(v));
+        }
+        param_values.push(Box::new(limit));
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |r| {
             Ok(Product {
                 id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?,
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
@@ -4036,6 +4697,13 @@ fn run_python_export(script: &std::path::Path, json: &std::path::Path, out: &std
         Ok(r) => r,
         Err(_) => Err("tiempo agotado (30s) generando el Excel".to_string()),
     }
+}
+
+/// Etiqueta de referencia de un movimiento de inventario generado por un
+/// servicio: el número de orden (trazabilidad: DEV-0004) o "Servicio" como antes.
+fn ref_label(order_num: &str) -> String {
+    let t = order_num.trim();
+    if t.is_empty() { "Servicio".to_string() } else { t.to_string() }
 }
 
 fn day_shift_error(msg: &str) -> rusqlite::Error {
@@ -6089,6 +6757,212 @@ discount_amount: 0.0,
         assert!((v.cost_usd - 250.0).abs() < 1e-6, "50+200+0: {}", v.cost_usd);
         assert!((v.sale_usd - 575.0).abs() < 1e-6, "125+400+50: {}", v.sale_usd);
         assert!(!v.categories.is_empty(), "top categorías poblado");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    // --- Inventario unificado (F4): página, KPIs, teléfonos, pantallas, movimientos ---
+
+    #[test]
+    fn test_get_products_page_filters_and_total() {
+        let test_path = PathBuf::from("test_products_page.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        // la marca/modelo se guardan CANÓNICOS (Redmi -> Xiaomi)
+        db.add_product("Pantalla Redmi 10 4G", Some(1), "Redmi", "Red 10 4G", "", r#"["Red 10 4G"]"#, 10.0, 20.0, 5, 2, 0.0).unwrap();
+        db.add_product("Pantalla Samsung A06", Some(1), "Samsung", "A06 4G", "", r#"["Samsung A06 4G"]"#, 8.0, 15.0, 0, 2, 0.0).unwrap();
+        db.add_product("Táctil Tecno", Some(2), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 0.0, 0.0, -1, 0, 0.0).unwrap();
+
+        let all = db.get_products_page("", None, None, None, None, 50, 0).unwrap();
+        assert_eq!(all.total, 3);
+        assert_eq!(all.items.len(), 3);
+
+        // búsqueda con la jerga vieja sobre catálogo canónico
+        let red = db.get_products_page("red note", None, None, None, None, 50, 0).unwrap();
+        assert_eq!(red.total, 0, "no hay Redmi Note en este fixture");
+        let old = db.get_products_page("Red 10", None, None, None, None, 50, 0).unwrap();
+        assert_eq!(old.total, 1, "'Red 10' encuentra 'Redmi 10 4G'");
+
+        // filtros
+        let out = db.get_products_page("", None, None, Some("agotado"), None, 50, 0).unwrap();
+        assert_eq!(out.total, 1);
+        let neg = db.get_products_page("", None, None, Some("negativo"), None, 50, 0).unwrap();
+        assert_eq!(neg.total, 1);
+        let low = db.get_products_page("", None, None, Some("bajo_minimo"), None, 50, 0).unwrap();
+        assert_eq!(low.total, 1, "solo el de stock 0 con min 2 (el negativo tiene min 0)");
+        let cat = db.get_products_page("", Some(2), None, None, None, 50, 0).unwrap();
+        assert_eq!(cat.total, 1, "filtro por categoría");
+        let brand = db.get_products_page("", None, Some("Xiaomi"), None, None, 50, 0).unwrap();
+        assert_eq!(brand.total, 1, "filtro por marca canónica");
+
+        // paginación
+        let p1 = db.get_products_page("", None, None, None, Some("stock"), 2, 0).unwrap();
+        assert_eq!(p1.total, 3);
+        assert_eq!(p1.items.len(), 2);
+        let p2 = db.get_products_page("", None, None, None, Some("stock"), 2, 2).unwrap();
+        assert_eq!(p2.items.len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_inventory_stats_counts() {
+        let test_path = PathBuf::from("test_inv_stats.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.add_product("P1", Some(1), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 3, 1, 0.0).unwrap();
+        db.add_product("P2", Some(1), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 1, 1, 0.0).unwrap(); // duplicado
+        db.add_product("P3", Some(2), "Samsung", "A06 4G", "", "[]", 0.0, 0.0, 0, 0, 0.0).unwrap();  // sin precio y sin compat
+        db.add_product("P4", Some(1), "Blu", "G73", "", r#"["Blu G73"]"#, 5.0, 9.0, -2, 0, 0.0).unwrap();
+
+        let s = db.get_inventory_stats().unwrap();
+        assert_eq!(s.sku, 4);
+        assert_eq!(s.with_stock, 2);
+        assert_eq!(s.out_of_stock, 1);
+        assert_eq!(s.negative, 1);
+        assert_eq!(s.low_stock, 1, "solo P2 (stock 1 <= min 1); P1 3>1 y P4 tiene min 0");
+        assert_eq!(s.no_price, 1);
+        assert_eq!(s.no_compat, 1);
+        assert_eq!(s.units, 2, "3+1+0-2");
+        assert!((s.value_cost - 30.0).abs() < 1e-6, "3*10 + 1*10 - 2*5 = 30");
+        assert_eq!(s.duplicate_groups, 1);
+        assert_eq!(s.duplicate_ids.len(), 2);
+        assert!(s.by_category.iter().any(|c| c.name == "Pantalla" && c.sku == 3));
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_phone_models_dedup_and_screens_ranking() {
+        let test_path = PathBuf::from("test_phone_models.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        // el MISMO teléfono escrito de dos formas (con y sin submarca) + una sin marca
+        db.add_product("Pantalla Redmi Note 11 Incell", Some(1), "Redmi", "Redmi Note 11", "INCELL",
+            r#"["Redmi Note 11","Note 11","Redmi 11S 4g"]"#, 10.0, 20.0, 0, 0, 0.0).unwrap();
+        db.add_product("Pantalla Redmi Note 11 OLED", Some(1), "Xiaomi", "Redmi Note 11", "OLED",
+            r#"["Xiaomi Note 11"]"#, 12.0, 25.0, 4, 0, 0.0).unwrap();
+        db.add_product("Pantalla Samsung A06 4G", Some(1), "Samsung", "A06 4G", "",
+            r#"["Samsung A06 4G"]"#, 8.0, 15.0, 2, 0, 0.0).unwrap();
+
+        let phones = db.get_phone_models("", 100).unwrap();
+        let note11: Vec<_> = phones.iter().filter(|p| p.label.contains("Note 11")).collect();
+        assert_eq!(note11.len(), 1, "el mismo teléfono NO se duplica: {:?}", phones.iter().map(|p| &p.label).collect::<Vec<_>>());
+        assert_eq!(note11[0].label, "Xiaomi Redmi Note 11", "gana la etiqueta más específica");
+        assert_eq!(note11[0].screens, 2);
+        assert_eq!(note11[0].stock, 4, "0 + 4 unidades");
+
+        // búsqueda de teléfonos
+        let sam = db.get_phone_models("a06", 100).unwrap();
+        assert_eq!(sam.len(), 1);
+        assert_eq!(sam[0].label, "Samsung A06 4G");
+
+        // pantallas compatibles RANKEADAS: primero la coincidencia EXACTA y, dentro
+        // de cada nivel, la que tiene stock (el fit manda; el stock se muestra con badge)
+        let screens = db.find_compatible_screens("Redmi Note 11", 10).unwrap();
+        assert_eq!(screens.len(), 2, "las dos variantes sirven");
+        assert_eq!(screens[0].match_quality, "exacta", "la que lista el teléfono tal cual");
+        assert_eq!(screens[0].product.variant.as_deref(), Some("INCELL"));
+        assert_eq!(screens[1].product.variant.as_deref(), Some("OLED"));
+        assert!(screens[1].in_stock, "la segunda sí tiene stock (4)");
+        // la búsqueda por una variante del nombre ("11S 4G" vs "Redmi 11S 4G")
+        // cae en 'prefijo'/'parcial' y encuentra la pantalla que la declara
+        let screens2 = db.find_compatible_screens("11S 4G", 10).unwrap();
+        assert_eq!(screens2.len(), 1, "encuentra la pantalla que declara 'Redmi 11S 4G'");
+        assert_eq!(screens2[0].product.variant.as_deref(), Some("INCELL"));
+        let none = db.find_compatible_screens("Zzz 1", 10).unwrap();
+        assert!(none.is_empty());
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_movements_page_and_merge_products() {
+        let test_path = PathBuf::from("test_movements_page.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let keep = db.add_product("P1", Some(1), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 3, 0, 0.0).unwrap();
+        let dup = db.add_product("P2 duplicado", Some(1), "Tecno", "SPARK 8C", "", r#"["Tecno SPARK 8C"]"#, 10.0, 20.0, 2, 0, 0.0).unwrap();
+        db.add_inventory_movement(keep, "entrada", 3, "Ajuste", "manual").unwrap();
+        db.add_inventory_movement(dup, "salida", 1, "Servicio Entregado", "DEV-0009").unwrap();
+
+        let page = db.get_inventory_movements_page(None, None, None, None, None, 10, 0).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 2);
+        let by_type = db.get_inventory_movements_page(None, Some("salida"), None, None, None, 10, 0).unwrap();
+        assert_eq!(by_type.total, 1);
+        assert_eq!(by_type.items[0].reference.as_deref(), Some("DEV-0009"));
+        let by_prod = db.get_inventory_movements_page(Some(dup), None, None, None, None, 10, 0).unwrap();
+        assert_eq!(by_prod.total, 1);
+        let by_reason = db.get_inventory_movements_page(None, None, Some("Ajuste"), None, None, 10, 0).unwrap();
+        assert_eq!(by_reason.total, 1);
+        // paginación
+        let p2 = db.get_inventory_movements_page(None, None, None, None, None, 1, 1).unwrap();
+        assert_eq!(p2.total, 2);
+        assert_eq!(p2.items.len(), 1);
+
+        // Fusión de duplicados: suma stock y repunta los movimientos.
+        // Ojo: add_inventory_movement YA ajusta el stock (keep 3+3=6, dup 2-1=1) → 7.
+        db.merge_products(keep, dup).unwrap();
+        let merged_stock: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![keep], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(merged_stock, 7, "6 del que se queda + 1 del duplicado");
+        let after = db.get_inventory_movements_page(Some(keep), None, None, None, None, 10, 0).unwrap();
+        assert_eq!(after.total, 2, "los dos movimientos quedaron en el producto que se queda");
+        let gone = db.get_products_page("duplicado", None, None, None, None, 10, 0).unwrap();
+        assert_eq!(gone.total, 0, "el duplicado se borró");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_service_stock_faltante_and_order_reference() {
+        // Entregar una pantalla SIN stock deja faltante registrado y el movimiento
+        // guarda el número de orden (trazabilidad), no un genérico "Servicio".
+        let test_path = PathBuf::from("test_faltante.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+        let pid = db.add_product("Pantalla Tecno SPARK 8C", Some(1), "Tecno", "Spark 8C", "",
+            r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 0, 0, 0.0).unwrap();
+
+        let sid = db.add_service("DEV-0042", "Ana", "", "Tecno Spark 8C", "rota", "Cambio pantalla",
+            r#"["Cambio pantalla"]"#, 20.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "{}",
+            None, "", None, "", Some(pid), 0.0).unwrap();
+        db.update_service(sid, "Ana", "", "Tecno Spark 8C", "rota", "Cambio pantalla",
+            r#"["Cambio pantalla"]"#, 20.0, "Divisas (USD Cash)", "", "Entregado", "", 0.0, "", "USD",
+            "", "", "{}", "", None, "", Some(pid), 0.0).unwrap();
+
+        let (stock, reason, reference): (i64, String, String) = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            let stock: i64 = c.query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+            let (reason, reference): (String, String) = c
+                .query_row("SELECT reason, reference FROM inventory_movements ORDER BY id DESC LIMIT 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            (stock, reason, reference)
+        });
+        assert_eq!(stock, -1, "sin stock queda en faltante visible");
+        assert_eq!(reason, "Servicio Entregado (faltante)");
+        assert_eq!(reference, "DEV-0042");
+
+        // Reabrir devuelve el faltante a 0
+        db.update_service(sid, "Ana", "", "Tecno Spark 8C", "rota", "Cambio pantalla",
+            r#"["Cambio pantalla"]"#, 20.0, "Divisas (USD Cash)", "", "Recibido", "", 0.0, "", "USD",
+            "", "", "{}", "", None, "", Some(pid), 0.0).unwrap();
+        let back: i64 = conn_query(|| {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap()
+        });
+        assert_eq!(back, 0, "reabrir devuelve el faltante");
+
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }

@@ -173,7 +173,7 @@ export interface PhoneModelEntry {
   products: Product[];
 }
 
-function parseCompatList(compat: string | null | undefined): string[] {
+export function parseCompatList(compat: string | null | undefined): string[] {
   if (!compat) return [];
   try {
     const l = JSON.parse(compat);

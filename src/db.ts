@@ -4,7 +4,9 @@ import type {
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
   ServiceDeviceInput, DaySummary, ExportResult, Expense, ProfitSummary,
-  ReceivablesSummary, InventoryValue, PaymentSearchResult
+  ReceivablesSummary, InventoryValue, PaymentSearchResult,
+  ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage,
+  CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -73,6 +75,46 @@ export const api = {
   deleteProduct: (id: number) => tauriInvoke<void>('delete_product', { id }),
   getProducts: (search: string = '', categoryId: number | null = null) =>
     tauriInvoke<Product[]>('get_products', { search, categoryId }),
+
+  // --- Inventario unificado (2026-09-15) ---
+  getProductsPage: (search: string = '', categoryId: number | null = null, brand: string | null = null,
+    stockFilter: string = 'todos', sort: string = 'nombre', limit: number = 50, offset: number = 0) =>
+    tauriInvoke<ProductPage>('get_products_page', {
+      search, categoryId, brand, stockFilter, sort, limit, offset
+    }).catch(() => mock<ProductPage>({ items: [], total: 0 })),
+  getInventoryStats: () =>
+    tauriInvoke<InventoryStats>('get_inventory_stats').catch(() =>
+      mock<InventoryStats>({
+        sku: 0, with_stock: 0, out_of_stock: 0, negative: 0, low_stock: 0, no_price: 0,
+        no_compat: 0, brands: 0, units: 0, value_cost: 0, value_sale: 0,
+        duplicate_groups: 0, duplicate_ids: [], by_category: [],
+      })),
+  getPhoneModels: (search: string = '', limit: number = 0) =>
+    tauriInvoke<PhoneModelRow[]>('get_phone_models', { search, limit }).catch(() =>
+      mock<PhoneModelRow[]>([])),
+  findCompatibleScreens: (model: string, limit: number = 0) =>
+    tauriInvoke<ScreenCandidate[]>('find_compatible_screens', { model, limit }).catch(() =>
+      mock<ScreenCandidate[]>([])),
+  findCompatibleProducts: (model: string, categoryId: number | null = null, limit: number = 0) =>
+    tauriInvoke<ScreenCandidate[]>('find_compatible_products', { model, categoryId, limit }).catch(() =>
+      mock<ScreenCandidate[]>([])),
+  getInventoryMovementsPage: (productId: number | null = null, movementType: string | null = null,
+    reason: string | null = null, fromDate: string | null = null, toDate: string | null = null,
+    limit: number = 50, offset: number = 0) =>
+    tauriInvoke<MovementPage>('get_inventory_movements_page', {
+      productId, movementType, reason, fromDate, toDate, limit, offset
+    }).catch(() => mock<MovementPage>({ items: [], total: 0 })),
+  mergeProducts: (keepId: number, removeId: number) =>
+    tauriInvoke<void>('merge_products', { keepId, removeId }),
+  getTechnicianProfile: (technicianId: number | null, startDate: string, endDate: string) =>
+    tauriInvoke<TechnicianProfile>('get_technician_profile', { technicianId, startDate, endDate })
+      .catch(() => mock<TechnicianProfile | null>(null) as unknown as Promise<TechnicianProfile>),
+  getDuplicateGroups: () =>
+    tauriInvoke<DuplicateGroup[]>('get_duplicate_groups').catch(() => mock<DuplicateGroup[]>([])),
+  normalizeCatalog: (dryRun: boolean = true) =>
+    tauriInvoke<CatalogReport>('normalize_catalog', { dryRun }),
+  restorePrices: (path: string | null = null, onlyZero: boolean = true, dryRun: boolean = true) =>
+    tauriInvoke<PriceRestoreReport>('restore_prices', { path, onlyZero, dryRun }),
 
   getLowStockProducts: () => tauriInvoke<Product[]>('get_low_stock_products').catch(() =>
     mock<Product[]>([])),

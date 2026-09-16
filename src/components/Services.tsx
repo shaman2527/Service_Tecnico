@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,8 +17,9 @@ import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, buildPhoneModels, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
+import { ModelCombobox } from './ModelCombobox';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
@@ -927,13 +928,15 @@ interface FormDevice {
   discountTouched: boolean;
   modelPicked: boolean;
   screenProductId: number | null;
+  /** true = el técnico confirmó entregar una pantalla AGOTADA (queda faltante) */
+  screenConfirm: boolean;
 }
 
 function emptyDevice(): FormDevice {
   return {
     model: '', color: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
     discount: 0, payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: checklistDefaults(),
-    amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null,
+    amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null, screenConfirm: false,
   };
 }
 
@@ -965,58 +968,157 @@ function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouche
   return patch;
 }
 
-// Pantallas (categoría 1) compatibles con un modelo, para el desplegable de pantalla EXACTA.
-// Fuente = la entrada del modelo en phoneModels (compatibilidad curada por producto).
-function compatibleScreens(phoneModels: PhoneModelEntry[], model: string): Product[] {
-  const q = normPhoneModel(model);
-  if (!q) return [];
-  const entry = phoneModels.find(e => e.norm === q);
-  return entry ? entry.products.filter(p => p.category_id === 1) : [];
+// Compatibilidad del modelo: la resuelve el BACKEND (find_compatible_products),
+// la MISMA fuente que usa el módulo de inventario. Devuelve los repuestos del
+// catálogo que sirven a ese teléfono, rankeados (coincidencia exacta primero y,
+// dentro del nivel, con stock antes de agotados). Antes esto se calculaba en el
+// frontend sobre las 1126 filas del catálogo completo.
+function useCompatibleProducts(model: string, enabled = true) {
+  const [candidates, setCandidates] = useState<ScreenCandidate[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const q = model.trim();
+    if (!enabled || q.length < 3) { setCandidates([]); return; }
+    let alive = true;
+    setLoading(true);
+    const t = setTimeout(() => {
+      api.findCompatibleProducts(q, null, 80)
+        .then(r => { if (alive) setCandidates(r); })
+        .catch(() => { if (alive) setCandidates([]); })
+        .finally(() => { if (alive) setLoading(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(t); };
+  }, [model, enabled]);
+  return { candidates, loading };
 }
 
-// La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay opciones en el catálogo
-const screenOk = (serviceTypes: string[], screenProductId: number | null, options: Product[]) =>
-  !(serviceTypes.includes('Cambio pantalla') && options.length > 0 && screenProductId == null);
+// Solo pantallas (categoría 1) para el descuento exacto de inventario.
+const onlyScreens = (candidates: ScreenCandidate[]) => candidates.filter(c => c.product.category_id === 1);
 
-// Select de "Pantalla a instalar": desplegable con las pantallas compatibles del modelo
-function ScreenSelect({ screenProductId, screenOptions, onChange }: {
+// Adaptador a la forma que usa applyModelPrice (precio sugerido del modelo).
+const asPhoneEntry = (label: string, candidates: ScreenCandidate[]): PhoneModelEntry => ({
+  label,
+  norm: normPhoneModel(label),
+  products: candidates.map(c => c.product),
+});
+
+// La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay
+// opciones en el catálogo. Al ENTREGAR una pantalla AGOTADA hay que confirmarlo
+// (queda en faltante) — antes se podía entregar sin ningún aviso.
+const screenOk = (serviceTypes: string[], screenProductId: number | null,
+                  options: ScreenCandidate[], confirmed = false, status = '') => {
+  if (!serviceTypes.includes('Cambio pantalla') || options.length === 0) return true;
+  if (screenProductId == null) return false;
+  const chosen = options.find(o => o.product.id === screenProductId);
+  if (!chosen) return true;
+  if (status === 'Entregado' && !chosen.in_stock) return confirmed;
+  return true;
+};
+
+// Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala
+// (al entregar se descuenta esa y solo esa) y las agotadas se marcan aparte.
+function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, onChange, onConfirm }: {
   screenProductId: number | null;
-  screenOptions: Product[];
+  screenOptions: ScreenCandidate[];
+  loading: boolean;
+  confirmed: boolean;
   onChange: (id: number | null) => void;
+  onConfirm: (v: boolean) => void;
 }) {
+  const chosen = screenOptions.find(o => o.product.id === screenProductId) ?? null;
+  const chosenOut = chosen != null && !chosen.in_stock;
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <label className="text-sm font-medium flex items-center gap-1.5">
         <Smartphone className="size-3.5 text-muted-foreground" /> Pantalla a instalar
         <span className="font-normal text-muted-foreground text-xs">(descuenta del inventario al entregar)</span>
       </label>
-      {screenOptions.length > 0 ? (
-        <>
-          <Select value={String(screenProductId ?? '')} onValueChange={v => onChange(v ? Number(v) : null)}>
-            <SelectTrigger className={cn(!screenProductId && 'border-amber-500/60')}>
-              <SelectValue placeholder="Elige la pantalla exacta..." />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="">— Sin seleccionar</SelectItem>
-              {screenOptions.map(p => (
-                <SelectItem key={p.id} value={String(p.id)}>
-                  {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`} · ${p.price_sale.toFixed(2)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {screenProductId == null ? (
-            <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
-          ) : (
-            <p className="text-xs text-emerald-600 flex items-center gap-1">
-              <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario
-            </p>
-          )}
-        </>
-      ) : (
+
+      {loading && (
+        <div className="flex flex-col gap-1.5">
+          {[0, 1, 2].map(i => <div key={i} className="h-9 rounded-md bg-muted animate-pulse" />)}
+        </div>
+      )}
+
+      {!loading && screenOptions.length === 0 && (
         <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
           Modelo sin pantallas en el catálogo — el inventario no se descuenta automáticamente.
+          Revisa cómo está escrito el modelo o registra la pantalla en Inventario.
         </p>
+      )}
+
+      {!loading && screenOptions.length > 0 && (
+        <div className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
+          {screenOptions.map(({ product: p, in_stock, match_quality }) => {
+            const active = p.id === screenProductId;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
+                className={cn(
+                  'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                  active ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-accent',
+                )}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
+                  <span className="truncate">
+                    {partLabel(p)}
+                    {p.variant && <Badge variant="secondary" className="ml-2 text-[10px]">{p.variant}</Badge>}
+                  </span>
+                </span>
+                <span className="flex items-center gap-1.5 shrink-0">
+                  {match_quality !== 'exacta' && (
+                    <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
+                  )}
+                  {p.price_sale > 0 && (
+                    <span className="text-xs text-muted-foreground tabular-nums">${p.price_sale.toFixed(2)}</span>
+                  )}
+                  <Badge
+                    variant={in_stock ? 'default' : 'outline'}
+                    className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}
+                  >
+                    {in_stock ? `stock ${p.stock}` : 'agotada'}
+                  </Badge>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {!loading && screenOptions.length > 0 && screenProductId == null && (
+        <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
+      )}
+
+      {!loading && chosen && !chosenOut && (
+        <p className="text-xs text-emerald-600 flex items-center gap-1">
+          <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario (stock actual {chosen.product.stock})
+        </p>
+      )}
+
+      {!loading && chosenOut && (
+        <Alert variant="destructive" className="py-2">
+          <AlertTriangle className="size-4" />
+          <AlertTitle className="text-xs">Esa pantalla no tiene stock</AlertTitle>
+          <AlertDescription className="text-xs flex flex-col gap-2">
+            <span>
+              Si se entrega igual, el inventario de «{partLabel(chosen!.product)}» queda en{' '}
+              <strong>{chosen!.product.stock - 1}</strong> y el movimiento se marca como <strong>faltante</strong>.
+            </span>
+            <button
+              type="button"
+              onClick={() => onConfirm(!confirmed)}
+              className={cn(
+                'self-start rounded-md border px-2 py-1 text-[11px] font-medium transition-colors',
+                confirmed ? 'border-destructive bg-destructive text-white' : 'border-border bg-background hover:bg-muted',
+              )}
+            >
+              {confirmed ? '✓ Confirmado: se entregó sin stock registrado' : 'Confirmo que se entregó sin stock registrado'}
+            </button>
+          </AlertDescription>
+        </Alert>
       )}
     </div>
   );
@@ -1070,18 +1172,17 @@ function colorDot(color: string): string {
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
 // modelo (con sugerencias), monto, trabajos/fallas, blindaje colapsable y finanzas propias.
-function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove, canRemove, hideChecklist = false }: {
+function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
-  phoneModels: PhoneModelEntry[];
   methods: { id: number; name: string }[];
   index: number;
   onRemove: () => void;
   canRemove: boolean;
   hideChecklist?: boolean;
+  /** informa al formulario si este equipo tiene resuelta la pantalla */
+  onScreenValid?: (index: number, valid: boolean) => void;
 }) {
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelSuggestions, setModelSuggestions] = useState<PhoneModelEntry[]>([]);
   const [showChecklist, setShowChecklist] = useState(false);
 
   const isPos = device.payment.includes('Punto');
@@ -1091,51 +1192,53 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
   // Monto = PRECIO del servicio; Total a pagar = Monto − Descuento (lo que se guarda)
   const deviceNet = Math.max(0, device.amount - device.discount);
 
-  useEffect(() => {
-    const q = normPhoneModel(device.model);
-    if (q.length >= 1 && phoneModels.length > 0) {
-      const filtered = phoneModels
-        .filter(e => e.norm.includes(q) || e.products.some(p =>
-          normPhoneModel([p.brand ?? '', p.model ?? '', p.name].join(' ')).includes(q)))
-        .slice(0, 10);
-      setModelSuggestions(filtered);
-      setModelOpen(filtered.length > 0 && !device.modelPicked);
-    } else {
-      setModelSuggestions([]);
-      setModelOpen(false);
-    }
-  }, [device.model, phoneModels]);
+  // Compatibilidad resuelta por el backend para el modelo escrito
+  const { candidates, loading: compatLoading } = useCompatibleProducts(device.model);
+  const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
+  const isScreenJob = device.serviceTypes.includes('Cambio pantalla');
 
-  const selectModel = (sugg: PhoneModelEntry) => {
-    onChange({ model: sugg.label, modelPicked: true });
-    onChange(applyModelPrice(sugg, isDivisas, device.amountTouched, device.discountTouched));
-    setModelOpen(false);
+  // El formulario necesita saber si este equipo tiene la pantalla resuelta
+  const screenValid = screenOk(device.serviceTypes, device.screenProductId, screenOptions);
+  useEffect(() => {
+    onScreenValid?.(index, screenValid);
+  }, [index, screenValid, onScreenValid]);
+
+  // Si hay UNA sola pantalla con stock para ese modelo, se elige sola (evita
+  // que el operario entregue una agotada por descuido).
+  useEffect(() => {
+    if (!isScreenJob || device.screenProductId != null) return;
+    const inStock = screenOptions.filter(o => o.in_stock);
+    if (inStock.length === 1) onChange({ screenProductId: inStock[0].product.id, screenConfirm: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenOptions, isScreenJob, device.screenProductId]);
+
+  const selectModel = (label: string) => {
+    onChange({ model: label, modelPicked: true });
+    const entry = asPhoneEntry(label, candidates);
+    if (entry.products.length > 0) {
+      onChange(applyModelPrice(entry, isDivisas, device.amountTouched, device.discountTouched));
+    }
   };
 
   const divHints = useMemo(() => {
-    if (!isDivisas || !device.model.trim()) return null;
-    const q = normPhoneModel(device.model);
-    const entry = phoneModels.find(e => e.norm === q);
-    if (!entry) return null;
-    const withUsd = entry.products.filter(p => p.price_usd > 0);
+    if (!isDivisas || !device.model.trim() || candidates.length === 0) return null;
+    const products = candidates.map(c => c.product);
+    const withUsd = products.filter(p => p.price_usd > 0);
     if (withUsd.length === 0) return null;
     const usdPrice = Math.min(...withUsd.map(p => p.price_usd));
-    const base = new Set(entry.products.map(p => p.price_sale)).size === 1
-      ? [...new Set(entry.products.map(p => p.price_sale))][0]
-      : withUsd[0].price_sale;
+    const saleSet = [...new Set(products.map(p => p.price_sale))];
+    const base = saleSet.length === 1 ? saleSet[0] : withUsd[0].price_sale;
     return { base, usdPrice, suggested: Math.max(0, base - usdPrice) };
-  }, [isDivisas, device.model, phoneModels]);
+  }, [isDivisas, device.model, candidates]);
 
-  // Catálogo sin precios para este modelo (carga de inventario real): el descuento se escribe a mano
-  const noCatalogPrice = useMemo(() => {
-    if (!device.model.trim()) return false;
-    const q = normPhoneModel(device.model);
-    const entry = phoneModels.find(e => e.norm === q);
-    return !!entry && entry.products.every(p => p.price_sale <= 0);
-  }, [device.model, phoneModels]);
+  // Catálogo sin precios para este modelo: el descuento se escribe a mano
+  const noCatalogPrice = useMemo(
+    () => candidates.length > 0 && candidates.every(c => c.product.price_sale <= 0),
+    [candidates],
+  );
 
   return (
-    <div className="rounded-xl border border-border/70 p-4 space-y-3">
+    <div className="rounded-xl border border-border/70 p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm font-semibold flex items-center gap-2">
           <Smartphone className="size-4 text-primary" /> Equipo {index + 1}
@@ -1147,41 +1250,13 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           <label className="text-sm font-medium">Modelo *</label>
-          <Input value={device.model}
-            onChange={e => { onChange({ model: e.target.value, modelPicked: false }); }}
-            placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)..." />
-          {modelOpen && modelSuggestions.length > 0 && (
-            <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
-              {modelSuggestions.map(sugg => (
-                <button key={sugg.norm} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
-                  onClick={() => selectModel(sugg)}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{sugg.label}</span>
-                    <span className="text-muted-foreground text-xs shrink-0">
-                      {sugg.products.length} repuesto{sugg.products.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  {sugg.products.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {sugg.products.slice(0, 8).map(p => (
-                        <span key={p.id} className={cn(
-                          'text-[11px] px-1.5 py-0.5 rounded-md',
-                          p.stock <= 0 ? 'bg-danger/10 text-danger' : 'bg-muted text-muted-foreground'
-                        )}>
-                          {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`}
-                        </span>
-                      ))}
-                      {sugg.products.length > 8 && (
-                        <span className="text-[11px] text-muted-foreground">+{sugg.products.length - 8}</span>
-                      )}
-                    </div>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+          <ModelCombobox
+            value={device.model}
+            onChange={selectModel}
+            placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)…"
+          />
         </div>
         <div className="space-y-2">
           <label className="text-sm font-medium">Monto ($) — precio del servicio</label>
@@ -1250,11 +1325,14 @@ function DeviceFields({ device, onChange, phoneModels, methods, index, onRemove,
         )}
       </div>
 
-      {device.serviceTypes.includes('Cambio pantalla') && (
+      {isScreenJob && (
         <ScreenSelect
           screenProductId={device.screenProductId}
-          screenOptions={compatibleScreens(phoneModels, device.model)}
+          screenOptions={screenOptions}
+          loading={compatLoading}
+          confirmed={device.screenConfirm}
           onChange={id => onChange({ screenProductId: id })}
+          onConfirm={v => onChange({ screenConfirm: v })}
         />
       )}
 
@@ -1418,9 +1496,6 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [bankFeePercent, setBankFeePercent] = useState(0);
   const [zelleReference, setZelleReference] = useState('');
   const [currency, setCurrency] = useState('USD');
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelSuggestions, setModelSuggestions] = useState<PhoneModelEntry[]>([]);
-  const [catalog, setCatalog] = useState<Product[]>([]);
   const [clientOpen, setClientOpen] = useState(false);
   const [clientSugs, setClientSugs] = useState<Client[]>([]);
   const [clientId, setClientId] = useState<number | null>(null);
@@ -1434,6 +1509,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [svc, setSvc] = useState<Service | null>(service);
   const [screenProductId, setScreenProductId] = useState<number | null>(null);
+  const [screenConfirm, setScreenConfirm] = useState(false);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techSel, setTechSel] = useState('');
   const [showTechDialog, setShowTechDialog] = useState(false);
@@ -1447,13 +1523,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   // Tipo PRIMARIO = el primero elegido (compatibilidad con service_type y auto-inventario)
   const serviceType = serviceTypes[0] ?? 'Cambio pantalla';
-  // Lista maestra de modelos de teléfono: una fila por teléfono, deduplicada del catálogo.
-  // OJO: DEBE declararse ANTES de devicesValid (TDZ: un const no se puede leer antes de init).
-  const phoneModels = useMemo(() => buildPhoneModels(catalog), [catalog]);
+
+  // Validez por equipo: cada DeviceFields resuelve su compatibilidad en el backend
+  // y avisa si la pantalla quedó sin elegir (no se puede saber desde acá sin las opciones).
+  const [deviceScreenValid, setDeviceScreenValid] = useState<Record<number, boolean>>({});
+  const onScreenValid = useCallback((i: number, valid: boolean) => {
+    setDeviceScreenValid(prev => (prev[i] === valid ? prev : { ...prev, [i]: valid }));
+  }, []);
 
   const devicesValid = devices.length > 0 &&
-    devices.every(d => d.model.trim() && d.serviceTypes.length > 0 &&
-      screenOk(d.serviceTypes, d.screenProductId, compatibleScreens(phoneModels, d.model)));
+    devices.every((d, i) => d.model.trim() && d.serviceTypes.length > 0 && (deviceScreenValid[i] ?? true));
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
@@ -1473,7 +1552,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   };
 
   useEffect(() => {
-    api.getProducts('', null).then(setCatalog);
+    // Ya NO se carga el catálogo completo (1126 filas): la compatibilidad y los
+    // precios del modelo los resuelve el backend por modelo (find_compatible_products).
     loadTechnicians();
   }, []);
 
@@ -1547,29 +1627,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     setClientOpen(false);
   };
 
-  useEffect(() => {
-    const q = normPhoneModel(model);
-    if (q.length >= 1 && phoneModels.length > 0) {
-      // El teléfono se sugiere como MODELO INDIVIDUAL (una vez), no por pantalla/repuesto
-      const filtered = phoneModels
-        .filter(e => e.norm.includes(q) || e.products.some(p =>
-          normPhoneModel([p.brand ?? '', p.model ?? '', p.name].join(' ')).includes(q)))
-        .slice(0, 10);
-      setModelSuggestions(filtered);
-      setModelOpen(filtered.length > 0 && !modelPicked.current);
-    } else {
-      setModelSuggestions([]);
-      setModelOpen(false);
-    }
-  }, [model, phoneModels]);
+  // Compatibilidad del modelo (backend) para el modo edición de UNA orden
+  const { candidates, loading: compatLoading } = useCompatibleProducts(model);
+  const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
+  const isScreenJobEdit = serviceTypes.includes('Cambio pantalla');
 
-  const selectModel = (sugg: PhoneModelEntry) => {
+  // Auto-selección si hay UNA sola pantalla con stock
+  useEffect(() => {
+    if (!isScreenJobEdit || screenProductId != null) return;
+    const inStock = screenOptions.filter(o => o.in_stock);
+    if (inStock.length === 1) { setScreenProductId(inStock[0].product.id); setScreenConfirm(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenOptions, isScreenJobEdit, screenProductId]);
+
+  const selectModel = (label: string) => {
     modelPicked.current = true;
-    setModel(sugg.label);
-    const patch = applyModelPrice(sugg, payment === 'Divisas (USD Cash)', amountTouched.current, discountTouched.current);
-    if ('amount' in patch) setAmount(patch.amount ?? 0);
-    if ('discount' in patch) setDiscount(patch.discount ?? 0);
-    setModelOpen(false);
+    setModel(label);
+    const entry = asPhoneEntry(label, candidates);
+    if (entry.products.length > 0) {
+      const patch = applyModelPrice(entry, payment === 'Divisas (USD Cash)', amountTouched.current, discountTouched.current);
+      if ('amount' in patch) setAmount(patch.amount ?? 0);
+      if ('discount' in patch) setDiscount(patch.discount ?? 0);
+    }
   };
 
   // Normaliza una cédula para buscar: quita prefijo V-/E-, espacios y guiones
@@ -1577,18 +1656,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
   const needCi = !service && !clientId;
 
-  // Pantalla exacta en edición: opciones compatibles + si quedó sin elegir (bloquea guardar)
-  const screenOptions = useMemo(() => compatibleScreens(phoneModels, model), [phoneModels, model]);
-
   // Catálogo sin precios para este modelo: el descuento se escribe a mano (hint honesto)
-  const editNoCatalogPrice = useMemo(() => {
-    if (!model.trim()) return false;
-    const q = normPhoneModel(model);
-    const entry = phoneModels.find(e => e.norm === q);
-    return !!entry && entry.products.every(p => p.price_sale <= 0);
-  }, [model, phoneModels]);
-  const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions) === false
-    ? 'Elige la pantalla exacta a instalar (o el modelo debe estar en el catálogo)'
+  const editNoCatalogPrice = useMemo(
+    () => candidates.length > 0 && candidates.every(c => c.product.price_sale <= 0),
+    [candidates],
+  );
+  const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions, screenConfirm, status) === false
+    ? (status === 'Entregado'
+        ? 'La pantalla elegida está AGOTADA: confirma la entrega sin stock registrado'
+        : 'Elige la pantalla exacta a instalar')
     : null;
 
   const save = async () => {
@@ -1836,42 +1912,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <>
           <SectionTitle step={2} title="Equipo y diagnóstico" />
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Modelo *</label>
-              <Input value={model} onChange={e => { modelPicked.current = false; setModel(e.target.value); }}
-                placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)..." />
-              {modelOpen && modelSuggestions.length > 0 && (
-                <div className="rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
-                  {modelSuggestions.map(sugg => (
-                    <button key={sugg.norm} className="w-full text-left px-3 py-2.5 text-sm hover:bg-accent border-b last:border-0 transition-colors"
-                      onClick={() => selectModel(sugg)}>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{sugg.label}</span>
-                        <span className="text-muted-foreground text-xs shrink-0">
-                          {sugg.products.length} repuesto{sugg.products.length === 1 ? '' : 's'}
-                        </span>
-                      </div>
-                      {sugg.products.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1.5">
-                          {sugg.products.slice(0, 8).map(p => (
-                            <span key={p.id} className={cn(
-                              'text-[11px] px-1.5 py-0.5 rounded-md',
-                              p.stock <= 0 ? 'bg-danger/10 text-danger' : 'bg-muted text-muted-foreground'
-                            )}>
-                              {partLabel(p)} · {p.stock <= 0 ? 'agotado' : `stock ${p.stock}`}
-                            </span>
-                          ))}
-                          {sugg.products.length > 8 && (
-                            <span className="text-[11px] text-muted-foreground">+{sugg.products.length - 8}</span>
-                          )}
-                        </div>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <ModelCombobox
+                value={model}
+                onChange={selectModel}
+                placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)…"
+              />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Monto ($)</label>
               <Input type="number" step={0.01} min={0} value={amount}
                 onChange={e => { amountTouched.current = true; setAmount(Number(e.target.value)); }} />
@@ -1929,11 +1978,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             )}
           </div>
 
-          {serviceTypes.includes('Cambio pantalla') && (
+          {isScreenJobEdit && (
             <ScreenSelect
               screenProductId={screenProductId}
               screenOptions={screenOptions}
+              loading={compatLoading}
+              confirmed={screenConfirm}
               onChange={setScreenProductId}
+              onConfirm={setScreenConfirm}
             />
           )}
 
@@ -1950,7 +2002,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <div className="space-y-3">
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
-                    phoneModels={phoneModels} methods={methods} index={i}
+                    methods={methods} index={i} onScreenValid={onScreenValid}
                     onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
                 ))}
               </div>

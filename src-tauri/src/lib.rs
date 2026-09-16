@@ -1,5 +1,8 @@
 pub mod bcv;
+pub mod catalog;
 pub mod db;
+pub mod phones;
+pub mod tech;
 pub mod printer;
 pub mod updates;
 mod commands;
@@ -114,6 +117,23 @@ commands::get_sales_stats,
             commands::has_previous_version,
             commands::search_payments,
             commands::get_payment_daily_detail,
+            commands::normalize_catalog,
+            commands::restore_prices,
+            commands::get_products_page,
+            commands::get_inventory_stats,
+            commands::get_phone_models,
+            commands::find_compatible_screens,
+            commands::find_compatible_products,
+            commands::get_inventory_movements_page,
+            commands::merge_products,
+            commands::get_duplicate_groups,
+            commands::get_technician_profile,
+            commands::get_phone_brands,
+            commands::get_phones,
+            commands::get_phone_detail,
+            commands::rename_phone,
+            commands::add_phone,
+            commands::merge_phones,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

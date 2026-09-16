@@ -1,8 +1,29 @@
-# 📋 Registro — Estado del Proyecto (2026-08-05)
+# 📋 Registro — Estado del Proyecto (2026-09-15)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
 > y [AGENTS.md](AGENTS.md) (harness + registro de problemas).
+>
+> ⚠️ **MODO DEV (instrucción del usuario, 2026-09-15):** mientras se termina el módulo de
+> inventario **no se publica release ni se hace push a producción**; la limpieza de datos se
+> corre sobre copias (`backup/*.db`) o sobre la base de dev (`REGISTRO_DB=dev_registro.db`).
+
+---
+
+## 0. Módulo de inventario — trabajo en curso (2026-09-15)
+
+| Fase | Qué se hizo | Evidencia |
+|---|---|---|
+| F1 | Auditoría del catálogo + mapa canónico de reglas | `tools/audit_inventory.mjs`, `tools/canonical_brands.json`, copia `backup/registro_pre_normalizacion_20260915.db` |
+| F2 | Reglas canónicas en Rust + limpieza con respaldo e idempotencia | `src-tauri/src/catalog.rs`, `normalize_catalog`; invariante de stock **702/702 intacto** |
+| F3 | Precios restaurados desde la lista CELL WORLD | 957/957 fichas, 982 filas, 0 sin match → 971 SKU con precio (valor a costo $4.407 / venta $5.508,75) |
+| F4 | 10 comandos nuevos (página, KPIs, teléfonos, pantallas, movimientos, duplicados, precios, limpieza) | `cargo test` **75/75** |
+| F5/F6 | Módulo único con pestañas, tabla paginada, sin columna "Efectivo ($)", sin "Pantallas" en el sidebar | `src/components/Inventory.tsx` + `src/components/inventory/`; `npm run build` ✓ y `npm run lint` 0 errores |
+| F7 | Servicio: modelo canónico → pantallas rankeadas → confirmación de agotada → descuento exacto con número de orden | `Services.tsx`, `ModelCombobox.tsx`; test `test_service_stock_faltante_and_order_reference` |
+
+Baseline de la auditoría (para comparar cuando se aplique en la tienda): 1126 productos,
+29 marcas literales (14 fuera del mapa), 222 modelos con varios teléfonos, 896 nombres no
+canónicos, 38 grupos duplicados, 702 unidades, 1126 sin precio (antes de F3).
 
 ---
 
@@ -12,9 +33,8 @@ Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servici
 celulares: inventario, ventas, órdenes de reparación, abonos, libro diario con tasa BCV,
 impresora térmica y **actualizaciones automáticas con rollback**.
 
-- **Versión actual:** 0.1.4 (publicada en GitHub Releases; "Ver más tarde" descarga en segundo plano + aviso al reiniciar)
-- **Últimos commits:** `637514c` (puesta en marcha) → `275937e` (F8 updater) → `f783ce6` (ESTADO + docs) → `902bf80` (P3 stats técnico + dedup) → `cffee34` (v0.1.3 UI fixes) → `fee012c` (v0.1.4 ver-más-tarde) — en `main`, pusheado
-- **Repo:** https://github.com/shaman2527/Service_Tecnico — **PUBLICO** (se descartó privado: GitHub no sirve assets de releases privadas sin auth; el updater no lleva token) — release v0.1.4 publicada (token OK)
+- **Versión en código:** 0.2.5 · **Última release publicada:** v0.2.5 (2026-08-24) — *las mejoras del inventario del 2026-09-15 están SOLO en el repo (modo dev), sin publicar*
+- **Repo:** https://github.com/shaman2527/Service_Tecnico — **PUBLICO** (se descartó privado: GitHub no sirve assets de releases privadas sin auth; el updater no lleva token)
 
 ---
 
@@ -152,3 +172,36 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 ---
 
 *Actualizado: 2026-08-04 · ver también `tools/progress/history.md` (historial append-only) y AGENTS.md (Entropy Registry).*
+
+---
+
+## 6. Actualización 2026-09-15 (tarde) — padrón de teléfonos y limpieza
+
+- **Padrón de teléfonos (tabla `phones`)**: nombre comercial real (`Galaxy A06`, `Moto G52`, `iPhone 13 Mini`, `Redmi Note 11`),
+  clave única (`brand|modelo sin línea`, con INCELL = genérica) → **1154 teléfonos, 0 claves repetidas, 341 entradas fusionadas,
+  217 marcados “por revisar”** (sin familia, se renombran desde la app). Se reconstruye desde la compatibilidad del catálogo y se
+  **reconcilia** (borra filas viejas del catálogo, nunca las manuales).
+- **Fusión de productos duplicados**: deja **UNA** ficha por modelo conservando la de **mayor compatibilidad** (une los teléfonos de las
+  demás) → **1126 → 1083 fichas**; movimientos/ventas/servicios/pedidos repuntados a la que se queda.
+- **Stock y precios en 0** (los datos de inventario/precio de prueba no son reales): `stock`, `price_cost`, `price_sale`, `price_usd`
+  → 0 en los 1083. Historial (4 movimientos) y servicios (4) intactos. Respaldos en `backup/backup/registro_pre_wipe_*.db`.
+- **UI**: KPIs compactos en una franja; pestaña **Ajustes** (antes “Precios y datos”) en lenguaje de tienda con botones
+  “1. Revisar qué cambiaría / 2. Cargar los precios / Ordenar los nombres”; el campo **Modelo** del servicio muestra solo nombres
+  (stock únicamente al elegir la pantalla) y el inventario **se refresca solo** al guardar/fusionar/aplicar.
+- **Herramientas nuevas de auditoría**: `tools/phones_report.mjs`, `tools/phones_aliases.mjs`, `tools/phones_by_category.mjs`,
+  `tools/verify_clean_inventory.mjs` (+ las ya existentes `audit_inventory.mjs`, `snapshot_db.mjs`).
+- **Tests Rust: 78/78** (catalog x12 incl. padrón/dedupe/INCELL, inventario unificado x5, precios, printer, multi-equipo, refund E2E).
+- **Pendiente inmediato**: F2 comandos del padrón (marcas/lista/ficha/renombrar/añadir/fusionar), F3 tabla de modelos con filtros y
+  **orden de 3 estados** en cada columna, F4 ficha por categoría + renombrar los 217, F5 servicio con nombre real,
+  F6 **asistente de cargar inventario** y la regla **“solo Pantalla”** (1122 teléfonos desde categoría Pantalla).
+- **Sigue todo en MODO DEV**: sin release, sin push, siempre sobre copia con respaldo.
+
+## 7. Cierre 2026-09-15 (noche)
+
+- **Perfil profesional del técnico** funcionando (Dashboard → “Servicios por Técnico” → botón **Ver perfil**): período, KPIs,
+  gráfica de trabajo por día, gráfica por tipo de trabajo y tabla de servicios con orden por columna. Backend `tech.rs`
+  (`get_technician_profile`) con test pasando; el bug del rango (fecha con hora) quedó corregido.
+- La tarjeta del técnico se movió **antes de “Stock Bajo”** en el Dashboard.
+- Suite Rust **81/81**; `npm run build` ✓. App de dev corriendo sobre la copia de prueba.
+- **Pendiente**: F3 tabla de modelos con filtros + orden de 3 estados · renombrar los 217 · asistente de cargar inventario ·
+  regla “solo Pantalla”. Sin release ni push (modo dev).

@@ -1,0 +1,254 @@
+[
+  {
+    "category": "Pantalla",
+    "brand": "Redmi",
+    "model": "Red Note 11",
+    "variant": "",
+    "compatibility": "[\"Red Note 11\",\"Note 11S 4G\",\"Redmi Note 11\",\"Redmi 11S 4g\"]",
+    "expect": {
+      "brand": "Xiaomi",
+      "model": "Redmi Note 11",
+      "variant": "",
+      "compatibility": "[\"Xiaomi Redmi Note 11\",\"Xiaomi Note 11S 4G\",\"Xiaomi Redmi 11S 4G\"]",
+      "name": "Pantalla Xiaomi Redmi Note 11 / Note 11S 4G / Redmi 11S 4G"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Xiaomi",
+    "model": "REDMI 10 5g",
+    "variant": "",
+    "compatibility": "[\"Redmi 10 5g\"]",
+    "expect": {
+      "brand": "Xiaomi",
+      "model": "Redmi 10 5G",
+      "variant": "",
+      "compatibility": "[\"Xiaomi Redmi 10 5G\"]",
+      "name": "Pantalla Xiaomi Redmi 10 5G"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Blu",
+    "model": "G73 / G73L / HONOR X7",
+    "variant": "",
+    "compatibility": "[\"G73\",\"G73L\",\"HONOR X7\"]",
+    "expect": {
+      "brand": "Blu",
+      "model": "G73",
+      "variant": "",
+      "compatibility": "[\"Blu G73\",\"Blu G73L\",\"Honor X7\"]",
+      "name": "Pantalla Blu G73 / G73L / Honor X7"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Huawei",
+    "model": "HONOR 10 LITE  / 20i / 20 LITE",
+    "variant": "",
+    "compatibility": "[\"HONOR 10 LITE\",\"20i\",\"20 LITE\"]",
+    "expect": {
+      "brand": "Huawei",
+      "model": "Honor 10 Lite",
+      "variant": "",
+      "compatibility": "[\"Honor 10 Lite\",\"Honor 20 Lite\",\"Honor 20I\"]",
+      "name": "Pantalla Huawei Honor 10 Lite / Honor 20 Lite / Honor 20I"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Apple",
+    "model": "iPhone 11",
+    "variant": "INCELL",
+    "compatibility": "[\"iPhone 11\"]",
+    "expect": {
+      "brand": "Apple",
+      "model": "iPhone 11",
+      "variant": "INCELL",
+      "compatibility": "[\"Apple iPhone 11\"]",
+      "name": "Pantalla Apple iPhone 11 (INCELL)"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Apple",
+    "model": "13 PRO MAX AM",
+    "variant": "OLED",
+    "compatibility": "[\"Apple 13 PRO MAX\",\"13 Pro Max AM\"]",
+    "expect": {
+      "brand": "Apple",
+      "model": "13 Pro Max AM",
+      "variant": "OLED",
+      "compatibility": "[\"Apple 13 Pro Max AM\",\"Apple 13 Pro Max\"]",
+      "name": "Pantalla Apple 13 Pro Max AM / 13 Pro Max (OLED)"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Motorola",
+    "model": "G51-5G",
+    "variant": "",
+    "compatibility": "[\"Motorola G51 5G\",\"G51-5G\"]",
+    "expect": {
+      "brand": "Motorola",
+      "model": "G51 5G",
+      "variant": "",
+      "compatibility": "[\"Motorola G51 5G\"]",
+      "name": "Pantalla Motorola G51 5G"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Infinix",
+    "model": "HOT 30I",
+    "variant": "",
+    "compatibility": "[\"Infinix Hot 30i\"]",
+    "expect": {
+      "brand": "Infinix",
+      "model": "Hot 30i",
+      "variant": "",
+      "compatibility": "[\"Infinix Hot 30i\"]",
+      "name": "Pantalla Infinix Hot 30i"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Tecno",
+    "model": "SPARK 9 PRO / 8P",
+    "variant": "",
+    "compatibility": "[]",
+    "expect": {
+      "brand": "Tecno",
+      "model": "Spark 9 Pro",
+      "variant": "",
+      "compatibility": "[]",
+      "name": "Pantalla Tecno Spark 9 Pro / 8P"
+    }
+  },
+  {
+    "category": "Táctil Tablet",
+    "brand": "",
+    "model": "AMAZON FIRE 7 HD 2019",
+    "variant": "",
+    "compatibility": "",
+    "expect": {
+      "brand": "Amazon",
+      "model": "Fire 7 HD 2019",
+      "variant": "",
+      "compatibility": "",
+      "name": "Táctil Tablet Amazon Fire 7 HD 2019"
+    }
+  },
+  {
+    "category": "Táctil Tablet",
+    "brand": "",
+    "model": "287 3G",
+    "variant": "",
+    "compatibility": "[]",
+    "expect": {
+      "brand": "Genérico",
+      "model": "287 3G",
+      "variant": "",
+      "compatibility": "[]",
+      "name": "Táctil Tablet Genérico 287 3G"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Xiaomi",
+    "model": "Mi A2",
+    "variant": "",
+    "compatibility": "[\"Mi A2\",\"Redmi A2\"]",
+    "expect": {
+      "brand": "Xiaomi",
+      "model": "Mi A2",
+      "variant": "",
+      "compatibility": "[\"Xiaomi Mi A2\",\"Xiaomi Redmi A2\"]",
+      "name": "Pantalla Xiaomi Mi A2 / Redmi A2"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Lg",
+    "model": "K50S",
+    "variant": "",
+    "compatibility": "[\"LG K50S\"]",
+    "expect": {
+      "brand": "LG",
+      "model": "K50S",
+      "variant": "",
+      "compatibility": "[\"LG K50S\"]",
+      "name": "Pantalla LG K50S"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Zte",
+    "model": "A34 / A54 / A50",
+    "variant": "",
+    "compatibility": "[\"ZTE A34\",\"A54\",\"A50\"]",
+    "expect": {
+      "brand": "ZTE",
+      "model": "A34",
+      "variant": "",
+      "compatibility": "[\"ZTE A34\",\"ZTE A50\",\"ZTE A54\"]",
+      "name": "Pantalla ZTE A34 / A50 / A54"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Generico",
+    "model": "A80 PLUS",
+    "variant": "",
+    "compatibility": "[\"A80 Plus\"]",
+    "expect": {
+      "brand": "Genérico",
+      "model": "A80 Plus",
+      "variant": "",
+      "compatibility": "[\"Genérico A80 Plus\"]",
+      "name": "Pantalla Genérico A80 Plus"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Honor",
+    "model": "MAGIC 5 LITE 5G  / X9A / X40",
+    "variant": "ORIGINAL",
+    "compatibility": "[\"Honor MAGIC 5 LITE 5G\",\"X9A\",\"X40\"]",
+    "expect": {
+      "brand": "Honor",
+      "model": "Magic 5 Lite 5G",
+      "variant": "ORIGINAL",
+      "compatibility": "[\"Honor Magic 5 Lite 5G\",\"Honor X40\",\"Honor X9A\"]",
+      "name": "Pantalla Honor Magic 5 Lite 5G / X40 / X9A (ORIGINAL)"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Samsung",
+    "model": "A06 4G",
+    "variant": "",
+    "compatibility": "[\"Samsung A06 4G\",\"Samsung A06\"]",
+    "expect": {
+      "brand": "Samsung",
+      "model": "A06 4G",
+      "variant": "",
+      "compatibility": "[\"Samsung A06 4G\",\"Samsung A06\"]",
+      "name": "Pantalla Samsung A06 4G / A06"
+    }
+  },
+  {
+    "category": "Pantalla",
+    "brand": "Xiaomi",
+    "model": "Redmi Poco x6 pro",
+    "variant": "",
+    "compatibility": "[\"Redmi Poco x6 pro\"]",
+    "expect": {
+      "brand": "Xiaomi",
+      "model": "Redmi Poco X6 Pro",
+      "variant": "",
+      "compatibility": "[\"Xiaomi Redmi Poco X6 Pro\"]",
+      "name": "Pantalla Xiaomi Redmi Poco X6 Pro"
+    }
+  }
+]
