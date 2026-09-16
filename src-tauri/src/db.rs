@@ -49,7 +49,7 @@ pub struct ClientSummary {
 /// Con esta lista el orden es fijo: 0..13 = producto, **14 = `c.name`**.
 pub(crate) const PRODUCT_COLS: &str = "p.id, p.name, p.category_id, p.brand, p.model, \
      p.variant, p.compatibility, p.price_cost, p.price_sale, p.stock, p.min_stock, \
-     p.created_at, p.updated_at, p.price_usd, c.name as category_name";
+     p.created_at, p.updated_at, p.price_usd, c.name as category_name, COALESCE(p.supplier,'') as supplier";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Product {
@@ -68,6 +68,9 @@ pub struct Product {
     pub updated_at: Option<String>,
     pub category_name: Option<String>,
     pub price_usd: f64,
+    /// Proveedor que trajo esta mercancía (lo llena la carga de inventario; editable en la ficha)
+    #[serde(default)]
+    pub supplier: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -984,6 +987,13 @@ impl Database {
         if !has_search_text {
             let _ = conn.execute_batch("ALTER TABLE products ADD COLUMN search_text TEXT;");
         }
+        // PROVEEDOR de la mercancía (F29): el local quiere saber quién le trajo cada pantalla
+        // que entra. Se llena al cargar el inventario (y se puede corregir en la ficha del
+        // producto). Columna nueva al FINAL del orden físico: NUNCA usar SELECT * posicional.
+        let has_supplier: bool = conn.prepare("SELECT supplier FROM products LIMIT 1").is_ok();
+        if !has_supplier {
+            let _ = conn.execute_batch("ALTER TABLE products ADD COLUMN supplier TEXT;");
+        }
         {
             let pending: Vec<(i64, String, String, String, String, String)> = {
                 let mut stmt = conn.prepare(
@@ -1397,7 +1407,7 @@ impl Database {
                 model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
                 price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
                 min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
-                category_name: r.get(14)?, price_usd: r.get(13)?,
+                category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
             })
         })?;
         let mut items = Vec::new();
@@ -1564,7 +1574,7 @@ impl Database {
                 model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
                 price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
                 min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
-                category_name: r.get(14)?, price_usd: r.get(13)?,
+                category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
             })
         })?;
 
@@ -1802,6 +1812,17 @@ impl Database {
         Ok(())
     }
 
+    /// Proveedor que trajo esta mercancía (lo anota la carga de inventario; se puede corregir
+    /// en la ficha del producto). Vacío = se borra el dato.
+    pub fn set_product_supplier(&self, id: i64, supplier: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE products SET supplier=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+            params![supplier.trim(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_product(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM products WHERE id=?", params![id]).map_err(|e| {
@@ -1856,6 +1877,7 @@ impl Database {
                 updated_at: r.get(12)?,
                 category_name: r.get(14)?,
                 price_usd: r.get(13)?,
+                supplier: r.get(15).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -1876,7 +1898,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -1902,7 +1924,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -3529,7 +3551,7 @@ impl Database {
                 brand: r.get(3)?, model: r.get(4)?, variant: r.get(5)?,
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
-                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?,
+                updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();

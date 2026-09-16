@@ -8,7 +8,7 @@ import type {
   ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage,
   CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile,
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
-  LoadPreview, LoadRow, LoadReport
+  LoadPreview, LoadRow, LoadReport, LoadCandidate
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -156,8 +156,16 @@ export const api = {
   // `keepIds` = fichas que la vista previa ya tenía asignadas: el barrido nunca las toca.
   previewInventoryLoad: (text: string) =>
     tauriInvoke<LoadPreview>('preview_inventory_load', { text }),
-  applyInventoryLoad: (rows: LoadRow[], zeroMissing: boolean, keepIds: number[]) =>
-    tauriInvoke<LoadReport>('apply_inventory_load', { rows, zeroMissing, keepIds }),
+  applyInventoryLoad: (rows: LoadRow[], zeroMissing: boolean, keepIds: number[], supplier: string) =>
+    tauriInvoke<LoadReport>('apply_inventory_load', { rows, zeroMissing, keepIds, supplier }),
+  /** Proveedor que trajo la mercancía (lo anota la carga de inventario; se corrige en la ficha) */
+  setProductSupplier: (id: number, supplier: string) =>
+    tauriInvoke<void>('set_product_supplier', { id, supplier }),
+
+  /** Busca pantallas para asignar a mano una línea del conteo (el nombre del catálogo y el de
+   *  la lista escrita a mano no siempre coinciden). */
+  searchInventoryLoadTargets: (query: string, limit = 12) =>
+    tauriInvoke<LoadCandidate[]>('search_inventory_load_targets', { query, limit }),
 
   normalizeCatalog: (dryRun: boolean = true) =>
     tauriInvoke<CatalogReport>('normalize_catalog', { dryRun }),

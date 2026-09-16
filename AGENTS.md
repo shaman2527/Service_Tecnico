@@ -562,6 +562,15 @@ Antes de hacer commit:
 - **Respaldo antes de escribir:** **`VACUUM INTO`** (foto consistente que incluye el WAL) con nombre único; si falla, cae a
   `PRAGMA wal_checkpoint(TRUNCATE)` **leyendo el flag `busy`** (con `execute_batch` la fila se descarta y un checkpoint
   ocupado pasaba desapercibido: el respaldo quedaba viejo sin aviso).
+- **Asignar a mano (F28):** el nombre de la lista escrita a mano y el del catálogo no siempre coinciden («6 c/m
+  Accesorios» contra «Pantalla Xiaomi Redmi 6 C / Redmi M Acasonor / Redmi M Accesorios»; **`c/m` = con marco**). Cada
+  fila tiene un buscador —**«Buscar la pantalla»** / «Buscar otra…»— que consulta `loadlist::search_targets` (comando
+  `search_inventory_load_targets`): busca por tokens sobre `search_text` **solo en las categorías de pantalla**, con
+  `limit` 1..50 y mínimo 2 caracteres. Lo asignado a mano se comporta igual que un cruce: suma por ficha, entra en
+  `keepIds` y no cuenta como `unassigned`. Medido con la lista real: 712 → **713 u.** y 260 → **261 líneas** cruzadas
+  (`tools/verify_inventory_load_real.mjs` 9/9).
+- **Ayuda al usuario:** la sección *Inventario* del Centro de Ayuda explica el conteo (marca por línea, `(N)` unidades,
+  `A30/A50`, `c/m` = con marco, buscar a mano, respaldo) y las acciones del dueño sobre el padrón (F24).
 - **Regla «solo Pantalla» (F26):** `catalog::PHONE_CATEGORIES = [1 Pantalla, 18 Táctil, 19 Táctil Tablet]` se usa en
   **`rebuild_phones`** (qué teléfonos existen) y en **`phones::phone_index`** (qué repuestos/stock cuenta cada teléfono).
   La pestaña **Productos** abre con el filtro de categoría en «Pantalla» (se busca la categoría **por nombre**, no por id),

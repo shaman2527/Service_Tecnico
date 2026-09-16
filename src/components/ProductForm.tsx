@@ -25,6 +25,7 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
   const [priceUsd, setPriceUsd] = useState(product?.price_usd ?? 0);
   const [stock, setStock] = useState(product?.stock ?? 0);
   const [minStock, setMinStock] = useState(product?.min_stock ?? 2);
+  const [supplier, setSupplier] = useState(product?.supplier ?? '');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -52,8 +53,11 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
       const compatJson = JSON.stringify(compatList);
       if (product) {
         await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
+        // el proveedor va por su propio comando (update_product no lo toca)
+        if ((product.supplier ?? '') !== supplier.trim()) await api.setProductSupplier(product.id, supplier.trim());
       } else {
-        await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
+        const id = await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
+        if (supplier.trim()) await api.setProductSupplier(id, supplier.trim());
       }
       onSaved();
     } finally {
@@ -154,6 +158,19 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
               <Input type="number" min={0} value={minStock}
                 onChange={e => setMinStock(Number(e.target.value))} />
             </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-sm font-medium" htmlFor="product-supplier">Proveedor</label>
+            <Input
+              id="product-supplier"
+              value={supplier}
+              onChange={e => setSupplier(e.target.value)}
+              placeholder="Quién trajo esta mercancía (lo anota la carga de inventario)"
+            />
+            <p className="text-xs text-muted-foreground">
+              Se llena solo al cargar el inventario del local; acá lo podés corregir.
+            </p>
           </div>
         </div>
         <DialogFooter>

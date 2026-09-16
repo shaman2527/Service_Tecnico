@@ -254,7 +254,7 @@ fallos falsos) → ahora usan `std::env::temp_dir()` + `std::process::id()`.
 3. Pendientes de tienda que no son de código: guardar copia de la llave privada del updater, probar la impresora física y
    cambiar el PIN 1234 (ver §3).
 
-## 11. F25 + F26 — cargar el inventario desde la app y regla «solo Pantalla» (2026-09-16, MODO DEV)
+## 11. F25 + F26 + F28 + F29 — cargar el inventario desde la app y regla «solo Pantalla» (2026-09-16, MODO DEV)
 
 ### F25 — Asistente de carga de inventario
 Para cuando se cuenta la mercancía del mostrador: **Inventario → Ajustes → «Cargar la lista del local»**.
@@ -316,8 +316,7 @@ copia consistente de la base):
   **249 → 260**, líneas sin pantalla **12 → 1** (queda «6 c/m Accesorios», que en el catálogo se llama «6 c/m Acasonor»:
   un error de tipeo del catálogo), unidades que se aplican **682 → 712** de 713, fichas que el barrido dejaría en 0
   **87 → 47**. Es decir: **30 unidades reales que se perdían y 40 fichas (93 unidades) que se vaciaban de más**.
-- **Limitación conocida (feature 28, pendiente):** una línea SIN ningún candidato no se puede asignar a mano desde el
-  asistente (no hay selector): hay que corregir el nombre en Productos o desmarcar el barrido. El reporte la informa.
+- **Limitación que quedó cerrada por F28** (ver abajo): una línea SIN ningún candidato no se podía asignar a mano.
 
 ### F26 — regla «solo Pantalla»
 - `catalog::PHONE_CATEGORIES = [1 Pantalla, 18 Táctil, 19 Táctil Tablet]` es la regla del local: el **padrón**
@@ -329,21 +328,68 @@ copia consistente de la base):
   `backup/pre_f26_solo_pantalla_20260916.db`. **Ojo:** con solo `1` (primera versión) se perdían 55 teléfonos que solo
   tenían repuestos de Táctil/Táctil Tablet — de ahí el conjunto de tres categorías.
 
+### F28 — asignar a mano CUALQUIER pantalla a una línea (cierra el módulo)
+El nombre de la lista escrita a mano y el del catálogo no siempre coinciden. Caso real de la lista del local:
+**«6 c/m Accesorios (1)»** contra la ficha **«Pantalla Xiaomi Redmi 6 C / Redmi M Acasonor / Redmi M Accesorios»**
+(`c/m` = **con marco**: la pantalla viene con el marco). Antes esa línea quedaba sin pantalla y, con el barrido marcado,
+bloqueaba la carga (a propósito, para no vaciar mercancía que sí está).
+
+- **Cada fila tiene buscador:** botón **«Buscar la pantalla»** (o «Buscar otra…» si ya tenía candidatos) que abre un
+  buscador por texto sobre las fichas de las **categorías de pantalla** (nombre + marca + modelo + compatibilidad: la
+  misma búsqueda por tokens del inventario). Al elegir una, la fila queda **«asignada a mano»** y se comporta igual que
+  un cruce automático: suma unidades por ficha, entra en `keepIds` (el barrido no la vacía) y deja de contar como
+  `unassigned`.
+- **Backend:** `loadlist::search_targets(conn, query, limit)` (solo lectura, `limit` acotado 1..50 y mínimo 2 caracteres:
+  una sola letra devolvería medio catálogo) + comando **`search_inventory_load_targets`**.
+- **Medido en vivo con la lista REAL (261 líneas / 713 u.):** 260 cruzadas + 1 sin pantalla (712 u.) → se busca
+  «acasonor», se asigna → **261 cruzadas, 713 unidades en 226 pantallas** y el aviso de «línea sin pantalla»
+  desaparece. `tools/verify_inventory_load_real.mjs` **12/12** (sin aplicar: el stock no se toca).
+- **Ayuda al usuario:** el Centro de Ayuda (sección *Inventario*) explica el conteo (marca por línea, `(N)` unidades,
+  `A30/A50`, **`c/m` = con marco**, corregir a mano y el respaldo) y los botones de escritura del padrón (F24).
+- **Revisión adversarial aplicada:** la **cantidad sin leer** es un campo propio (`LoadRow.qty_issue`) que **no se borra**
+  al asignar a mano y que **bloquea la carga** (antes, asignar la ficha escribía 0 o 100.000 u. en silencio); Escape cierra
+  el buscador y no el asistente (`onEscapeKeyDown` de Radix — el handler de React era código muerto); la carrera de
+  respuestas del buscador se resuelve con un contador; el error de búsqueda se muestra (antes decía «ninguna coincide»);
+  `Atrás` avisa si hay correcciones; la etiqueta «asignada a mano» es **por fila**; y la fila avisa si hay **fichas
+  parecidas** (duplicados) para fusionarlas en Productos.
+
+### F29 — carga rápida y proveedor que trajo la mercancía
+Lo que el local pidió para que la carga sirva de verdad: **no tener que verificar tanto** y dejar anotado **quién trajo
+cada pantalla**.
+
+- **Carga rápida:** cada fila tiene un tilde **«Cargar»**. El operario puede **excluir** una línea (no es una línea sin
+  resolver: no bloquea el barrido, no cuenta como `unassigned` y queda informada en el resumen) y, cuando el barrido está
+  marcado y quedan líneas sin pantalla, el asistente ofrece el botón **«Excluir esas líneas y cargar el resto»** — antes
+  había que elegir entre no cargar nada o asignarle una ficha equivocada.
+- **Proveedor:** campo **«Proveedor que trajo la mercancía»** para toda la carga **+ proveedor por línea** (la línea manda
+  sobre el general). Se guarda en **`products.supplier`** (columna nueva, migración idempotente al final del orden físico)
+  de cada pantalla cargada, el paso 3 informa «N pantallas quedaron con su proveedor anotado», y se puede **ver y
+  corregir** en la ficha del producto (comando `set_product_supplier`) y en el inventario (chip junto al nombre). Sin
+  proveedor **no se pisa** el que ya estaba.
+- **Medido en vivo:** `tools/verify_inventory_load.mjs` **30/30** (incluye que el proveedor quede guardado en la ficha) y
+  `tools/verify_inventory_load_real.mjs` **12/12** (con la lista real: exclusión de un clic → 712 u., re-incluir y asignar
+  a mano → 713 u.).
+
 ### Verificación
-- `cargo test` **107/107** (12 de F25: parseo con `c/m`/numéricos/marca estricta, tope de cantidad, cruce con gate de
-  marca, suma de líneas que comparten ficha, aviso del barrido con el faltante, aplicar con
-  respaldo/movimientos/idempotencia, suma de repetidas e inválidas, **gate del barrido**, lista vacía, `keep_ids` y marca
-  canónica sin falsos positivos) + hook manual `test_manual_preview_real_list` para medir la lista real sobre una copia.
-- **CDP en vivo** `tools/verify_inventory_load.mjs` **20/20**: el Inventario abre en «Pantalla» con el aviso de KPI; el
+- `cargo test` **111/111** (17 de F25/F28/F29: parseo con `c/m`/numéricos/marca estricta, tope de cantidad, cruce con gate
+  de marca, suma de líneas que comparten ficha, aviso del barrido con el faltante, aplicar con
+  respaldo/movimientos/idempotencia, suma de repetidas e inválidas, **gate del barrido**, lista vacía, `keep_ids`, marca
+  canónica sin falsos positivos, **búsqueda a mano**, **gate de la cantidad sin leer**, **exclusión de línea** y **el
+  proveedor que trajo la mercancía**) + hook manual `test_manual_preview_real_list` para medir la lista real sobre una copia.
+- **CDP en vivo** `tools/verify_inventory_load.mjs` **30/30**: el Inventario abre en «Pantalla» con el aviso de KPI; el
   asistente está en Ajustes; el paso 1 acepta la lista pegada; el cruce muestra 3 líneas / 2 cruzadas / 1 sin producto
   **con su aviso**; cantidades editables y con etiqueta accesible; **avisa las pantallas que quedarían en 0** y las
-  **unidades que NO se cargan**; el **barrido no deja en 0 mercancía que la lista menciona** (pide resolver la línea);
-  cerrar sin aplicar no toca el stock; y al cargar **se ve el paso 3** (resumen + respaldo) **sin saltar de pestaña**.
+  **unidades que NO se cargan**; el **barrido no deja en 0 mercancía que la lista menciona**; **la línea sin pantalla se
+  busca y se asigna a mano** (entra en el total y queda marcada); **el proveedor se anota y queda guardado**; cerrar sin
+  aplicar no toca el stock; al cargar **se ve
+  el paso 3** (resumen + respaldo) **sin saltar de pestaña**; y la **Ayuda** explica el conteo.
+- **CDP con la lista REAL** `tools/verify_inventory_load_real.mjs` **12/12** (261 líneas / 713 u., sin aplicar nada):
+  260 cruzadas → exclusión de un clic (712 u.) → se re-incluye y se asigna a mano la única línea sin pantalla →
+  **261 cruzadas y 713 unidades**; stock `6 → 6`.
 - Regresión: `tools/verify_models_tab.mjs` **23/23** (con 1079/142) y `tools/verify_phones_edit.mjs` (**dueño 9/9**,
   **cajera 6/6** — este último exige app arrancada limpia: el gate del backend queda abierto mientras vive el proceso).
-- `harness_security` PASS · `harness_truth` PASS · `tools/cli parallel` ✅ · spec:
-  `tools/progress/specs/F25-F26-carga-y-solo-pantalla.md` · **feature 28 abierta** (asignar a mano una pantalla a una línea
-  sin candidatos).
+- `harness_security` PASS · `harness_truth` PASS · `tools/cli parallel` ✅ · specs:
+  `tools/progress/specs/F25-F26-carga-y-solo-pantalla.md` · **sin features abiertas (1-29 cerradas)**.
 
 ## 10. F24 — renombrar y fusionar la lista de teléfonos (2026-09-16, MODO DEV)
 

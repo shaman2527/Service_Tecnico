@@ -673,15 +673,32 @@ pub fn preview_inventory_load(db: State<Database>, text: String)
     crate::loadlist::preview_load(&conn, &text).map_err(|e| e.to_string())
 }
 
+/// Proveedor que trajo la mercancía de una ficha (el asistente de carga lo anota solo; acá se
+/// corrige a mano desde la ficha del producto).
+#[tauri::command]
+pub fn set_product_supplier(db: State<Database>, id: i64, supplier: String) -> Result<(), String> {
+    db.set_product_supplier(id, &supplier).map_err(|e| e.to_string())
+}
+
+/// Busqueda de pantallas para ASIGNAR A MANO una linea del conteo (solo lectura).
+#[tauri::command]
+pub fn search_inventory_load_targets(db: State<Database>, query: String, limit: Option<i64>)
+    -> Result<Vec<crate::loadlist::LoadCandidate>, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::loadlist::search_targets(&conn, &query, limit.unwrap_or(12)).map_err(|e| e.to_string())
+}
+
 /// Aplica la vista previa: respaldo de la base + stock por producto + movimiento.
 /// `keep_ids` = fichas que la vista previa ya tenía asignadas: el barrido no las toca.
+/// `supplier` = proveedor general de la carga (cada línea puede traer el suyo).
 #[tauri::command]
 pub fn apply_inventory_load(db: State<Database>, rows: Vec<crate::loadlist::LoadRow>,
-                            zero_missing: bool, keep_ids: Vec<i64>)
+                            zero_missing: bool, keep_ids: Vec<i64>, supplier: Option<String>)
     -> Result<crate::loadlist::LoadReport, String> {
     db.require_owner()?;
     let conn = db.conn.lock().unwrap();
-    crate::loadlist::apply_load(&conn, &db.db_path, &rows, zero_missing, &keep_ids)
+    crate::loadlist::apply_load(&conn, &db.db_path, &rows, zero_missing, &keep_ids,
+                                supplier.as_deref().unwrap_or(""))
 }
 // --- Perfil profesional del tecnico (Dashboard) ---
 

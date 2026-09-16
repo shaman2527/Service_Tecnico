@@ -145,9 +145,40 @@ await clickDialog('Atrás');
 await clickButton('Cancelar');
 await sleep(600);
 
+// ASIGNAR A MANO (F28): la línea que el cruce no pudo resolver se busca y se asigna desde el
+// asistente («6 c/m Accesorios» vs «Pantalla Redmi 6 c/m Acasonor»: el nombre no coincide)
+await clickButton('Cargar la lista del local');
+await sleep(800);
+await pegar('Samsung\nA06 4G (6)\nZZZ 999 (5)\n');
+await clickDialog('Revisar el cruce');
+await sleep(1800);
+const abrirBuscador = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button')].map(b => b.innerText.trim()).find(t => /^Buscar la pantalla$/i.test(t)) ?? null)()`);
+check('F28: una línea sin pantalla ofrece buscarla a mano', abrirBuscador !== null, String(abrirBuscador));
+await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Buscar la pantalla$/i.test(b.innerText.trim()))`);
+await sleep(700);
+await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar la pantalla"]')`);
+await typeText('a06 4g');
+await sleep(1800);
+const hits = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button[data-load-hit]')].map(b => b.innerText.trim()).slice(0, 5))()`);
+check('F28: el buscador encuentra la pantalla por nombre o modelo', hits.some(h => /A06 4G/i.test(h)), hits.join(' | '));
+await clickCenter(`document.querySelector('[role="dialog"] button[data-load-hit]')`);
+await sleep(900);
+const asignada = await evalx(`(() => document.querySelector('[role="dialog"]')?.innerText.includes('asignada a mano') ?? false)()`);
+check('F28: la pantalla elegida queda asignada a la línea', asignada === true);
+const botonAmano = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button')].map(b => b.innerText.trim()).find(t => /^Cargar \\d+ pantalla/i.test(t)) ?? null)()`);
+check('F28: la asignación a mano entra en el total (6 + 5 en la misma ficha)',
+  /^Cargar 1 pantalla/.test(String(botonAmano)) && /11 u\./.test(String(botonAmano)), String(botonAmano));
+const sinPantallaAhora = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] span')].map(s => s.innerText).find(t => /que NO se cargan/i.test(t)) ?? null)()`);
+check('F28: ya no queda ninguna línea sin pantalla', sinPantallaAhora === null, String(sinPantallaAhora));
+await clickDialog('Atrás');
+await clickButton('Cancelar');
+await sleep(600);
+const stockTrasAsignar = await totalPantallas();
+check('F28: asignar a mano y salir no toca el stock', stockTrasAsignar === stockDespues, `${stockDespues} → ${stockTrasAsignar}`);
 // --- F25 E2E por la UI: cargar una lista que refleja lo que YA hay y VER el resumen ---
 // (regresión de la revisión: al aplicar, la pestaña saltaba a Productos y el paso 3
 //  —el resumen— nunca se veía porque el diálogo se desmontaba)
+// PROVEEDOR + carga real: se carga una lista que refleja lo que YA hay, anotando el proveedor
 await clickButton('Cargar la lista del local');
 await sleep(800);
 await pegar('Samsung\nGalaxy A06 4G (6)\n');
@@ -155,6 +186,13 @@ await clickDialog('Revisar el cruce');
 await sleep(1800);
 const botonCargar = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button')].map(b => b.innerText.trim()).find(t => /^Cargar \\d+ pantalla/i.test(t)) ?? null)()`);
 check('F25: el botón dice cuántas PANTALLAS y unidades va a cargar', /^Cargar 1 pantalla/.test(String(botonCargar)), String(botonCargar));
+// el proveedor que trajo la mercancía (general de la carga)
+await clickCenter(`document.querySelector('#prov-carga')`);
+await typeText('Prov Verificacion');
+await sleep(600);
+check('F29: el asistente pide el proveedor que trajo la mercancía',
+  /Prov Verificacion/.test(String(await evalx(`document.querySelector('#prov-carga')?.value ?? ''`))),
+  String(await evalx(`document.querySelector('#prov-carga')?.value ?? ''`)));
 await clickDialog('Cargar 1 pantalla');
 await sleep(2500);
 const repDlg = await dialogText();
@@ -168,11 +206,28 @@ const movs = await evalx(`(() => document.querySelector('[role="dialog"]')?.inne
 check('F25: el resumen dice cuántos movimientos se anotaron', movs !== null, `${movs} movimientos`);
 const backup = await evalx(`(() => document.querySelector('[role="dialog"]')?.innerText.match(/registro_pre_carga_[\\w.]*/)?.[0] ?? null)()`);
 check('F25: el resumen muestra el respaldo que se guardó', /registro_pre_carga_/.test(String(backup)), String(backup));
+check('F29: el resumen dice que el proveedor quedó anotado',
+  /proveedor anotado/i.test(repDlg ?? ''), (String(repDlg).match(/\d+ pantallas quedaron con su proveedor anotado/) ?? [''])[0]);
+const provGuardado = await evalx(`(async () => {
+  const p = await window.__TAURI_INTERNALS__.invoke('get_products', { search: 'A06 4G', categoryId: 1 });
+  return (p[0] && p[0].supplier) ? p[0].supplier : '';
+})()`);
+check('F29: el proveedor quedó guardado en la pantalla cargada', /Prov Verificacion/.test(String(provGuardado)), String(provGuardado));
 await clickDialog('Listo');
 await sleep(600);
 const stockFinal = await totalPantallas();
 check('F25: el stock quedó igual (la lista reflejaba lo que había)', stockFinal === stockDespues, `${stockDespues} → ${stockFinal}`);
 check('F25: al cerrar el asistente no queda ningún diálogo abierto', !(await dialogOpen()));
+
+// --- el Centro de Ayuda explica el conteo (lo que el local lee para usarlo) ---
+await clickCenter(`[...document.querySelectorAll('aside button')].find(b => b.innerText.trim().startsWith('Ayuda'))`);
+await sleep(1500);
+await clickCenter(`[...document.querySelectorAll('button, [role="button"]')].find(b => /Inventario \\(un solo módulo\\)/i.test(b.innerText))`);
+await sleep(1200);
+const ayuda = await evalx(`(() => document.body.innerText.replace(/\\s+/g, ' '))()`);
+check('F25: la Ayuda explica cómo contar la mercancía (marca por línea, c/m, buscar a mano)',
+  /Contar la mercancía/i.test(ayuda) && /con marco/i.test(ayuda) && /Buscar la pantalla/i.test(ayuda),
+  (String(ayuda).match(/Contar la mercancía.{0, 90}/) ?? [''])[0]);
 
 const failed = out.filter(r => !r.ok);
 console.log(`\n${out.length - failed.length}/${out.length} comprobaciones OK${failed.length ? ` — FALLAN: ${failed.map(f => f.name).join('; ')}` : ''}`);

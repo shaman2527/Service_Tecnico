@@ -125,5 +125,41 @@ Base: `tools/inventario_real.txt` (261 líneas / 713 unidades) contra una copia 
 unidades aplicadas **682 → 712** de 713, fichas que el barrido dejaría en 0 **87 → 47**. La línea que queda sin pantalla es
 «6 c/m Accesorios (1)» porque en el catálogo se llama «Pantalla Redmi 6 c/m **Acasonor**» (error de tipeo del catálogo).
 
-**Limitación conocida → feature 28 (pendiente):** una línea **sin ningún candidato** no se puede asignar a mano desde el
-asistente (no hay buscador en la fila); se corrige el nombre en Productos o se desmarca el barrido. El reporte la informa.
+**Limitación cerrada por F28** (ver §7): una línea **sin ningún candidato** ya se puede asignar a mano desde el asistente.
+
+## 7. F28 — asignar a mano cualquier pantalla (cierra el módulo)
+
+**Problema real:** la lista escrita a mano y el catálogo no siempre se llaman igual. Caso de la lista del local:
+«6 c/m Accesorios (1)» contra la ficha «Pantalla Xiaomi Redmi 6 C / Redmi M Acasonor / Redmi M Accesorios»
+(`c/m` = **con marco**). El cruce no puede adivinarlo y, con el barrido marcado, el gate bloqueaba la carga.
+
+**Solución:** cada fila de la vista previa tiene un **buscador de pantallas** («Buscar la pantalla» / «Buscar otra…»)
+que consulta el catálogo **solo de las categorías de pantalla** por texto (nombre + marca + modelo + compatibilidad, la
+misma búsqueda por tokens del inventario). La ficha elegida entra en la fila como si el cruce la hubiera encontrado.
+
+| # | Criterio | Cómo se verifica |
+|---|---|---|
+| AC-10 | La búsqueda devuelve fichas de pantalla por nombre/marca/modelo en cualquier orden, nunca de otra categoría | test `loadlist::tests::test_buscar_pantallas_a_mano` |
+| AC-11 | La búsqueda exige 2+ caracteres y acota el límite (no vuelca medio catálogo) | test `test_buscar_pantallas_a_mano` (una letra → vacío) |
+| AC-12 | Lo asignado a mano suma unidades por ficha, entra en `keepIds` y no cuenta como `unassigned` | test `test_buscar_pantallas_a_mano` (aplica 1 u. y comprueba el reporte) |
+| AC-13 | En vivo, la línea sin pantalla de la lista real se resuelve desde el asistente y quedan las 713 unidades | `tools/verify_inventory_load_real.mjs` **9/9** |
+| AC-14 | El asistente sigue sin tocar el stock si se sale sin aplicar | `verify_inventory_load.mjs` + `verify_inventory_load_real.mjs` |
+| AC-15 | La Ayuda del usuario explica el conteo (`c/m` = con marco, buscar a mano, respaldo) | `verify_inventory_load.mjs` (chequeo de la Ayuda) |
+
+**Resultado medido (lista real, 261 líneas / 713 u.):** antes de asignar: 260 cruzadas, 1 sin pantalla, botón
+«Cargar 225 pantallas (712 u.)» → después de buscar «acasonor» y asignar: **261 cruzadas, «Cargar 226 pantallas
+(713 u.)»** y sin avisos de líneas pendientes. Stock `6 → 6` (no se aplicó).
+
+## 8. F29 — carga rápida y proveedor (cierra el circuito del conteo)
+
+| # | Criterio | Cómo se verifica |
+|---|---|---|
+| AC-16 | El operario puede EXCLUIR una línea: no se carga, no bloquea el barrido y no cuenta como «sin resolver» | test `loadlist::tests::test_apply_excluir_una_linea_no_bloquea_el_barrido` |
+| AC-17 | El asistente ofrece «Excluir esas líneas y cargar el resto» cuando el barrido está marcado y quedan líneas sin pantalla | `tools/verify_inventory_load_real.mjs` (con la lista real) |
+| AC-18 | La cantidad sin leer bloquea la carga aunque se le asigne una pantalla a mano | test `test_apply_no_carga_con_la_cantidad_sin_leer` |
+| AC-19 | El proveedor que trajo la mercancía se anota en cada pantalla cargada; la línea manda sobre el general y no se pisa con vacío | test `test_apply_anota_el_proveedor_que_trajo_la_mercancia` |
+| AC-20 | El proveedor se ve y se corrige en la ficha del producto y en la tabla del inventario | comando `set_product_supplier` + `ProductForm` + chip en `ProductsTab`; CDP `verify_inventory_load.mjs` 30/30 |
+
+**Resultado medido (lista real, 261 líneas / 713 u.):** con la línea sin pantalla pendiente el botón dice **712 u.**;
+el atajo de carga rápida la excluye (**1 línea excluida (1 u.)**, sigue en 712 u. pero sin bloqueo); re-incluirla y
+asignarla a mano la lleva a **713 u. en 226 pantallas**. Nada de esto toca el stock si se sale sin aplicar (`6 → 6`).

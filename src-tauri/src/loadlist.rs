@@ -59,6 +59,11 @@ pub struct LoadRow {
     pub brand: String,
     pub model: String,
     pub qty: i64,
+    /// la cantidad de esta línea NO se pudo leer (o era absurda): la fila se avisa y NO se aplica
+    /// mientras siga así. Es un campo propio (no solo el texto de `issue`) porque el operario
+    /// puede asignarle una pantalla a mano y eso no arregla la cantidad: sin este flag, asignar
+    /// la ficha borraba el aviso y se escribía 100.000 o 0 unidades en silencio (medido en revisión).
+    pub qty_issue: bool,
     /// producto elegido (por defecto, la mejor coincidencia)
     pub product_id: Option<i64>,
     pub product_name: String,
@@ -68,8 +73,21 @@ pub struct LoadRow {
     pub shared: i64,
     /// unidades que recibe el producto sumando todas sus líneas
     pub sum_qty: i64,
+    /// el operario dijo que esta línea NO se cargue (no es una línea sin resolver): el barrido y
+    /// los avisos la ignoran y no bloquea la carga
+    pub excluded: bool,
+    /// proveedor que trajo ESTA pantalla (vacío = el proveedor general de la carga)
+    #[serde(default)]
+    pub supplier: String,
     /// aviso para el operario ("no está en el catálogo", "sin número…")
     pub issue: Option<String>,
+}
+
+/// Ficha que el barrido dejaría en 0 si se aplica con «la lista es todo».
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ZeroTarget {
+    pub product_id: i64,
+    pub stock: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -87,6 +105,9 @@ pub struct LoadPreview {
     /// fichas que quedan en 0 si se aplica con «la lista es todo»
     pub zero_count: i64,
     pub zero_units: i64,
+    /// las mismas fichas con su stock: la UI recalcula el aviso contra las filas VIVAS (si el
+    /// operario asigna a mano una de ellas, ya no se barre y el aviso tiene que decir la verdad)
+    pub zero_ids: Vec<ZeroTarget>,
     pub brands: i64,
     pub skipped: i64,
 }
@@ -108,6 +129,12 @@ pub struct LoadReport {
     pub unassigned: i64,
     /// unidades que se quedaron sin cargar por eso
     pub unassigned_units: i64,
+    /// líneas que el operario excluyó a mano (no cuentan como «sin resolver»)
+    pub excluded: i64,
+    /// unidades de esas líneas (tampoco se cargan, pero por decisión del operario)
+    pub excluded_units: i64,
+    /// fichas a las que se les anotó el proveedor que trajo la mercancía
+    pub suppliered: i64,
     pub backup: String,
 }
 
@@ -387,18 +414,21 @@ pub fn preview_load(conn: &Connection, text: &str) -> SqlResult<LoadPreview> {
             brand: line.brand.clone(),
             model: line.model.clone(),
             qty: line.qty,
+            qty_issue: line.qty_issue,
             product_id: chosen.as_ref().map(|c| c.product_id),
             product_name: chosen.as_ref().map(|c| c.product_name.clone()).unwrap_or_default(),
             stock_now: chosen.as_ref().map(|c| c.stock).unwrap_or(0),
             candidates: candidates.into_iter().take(MAX_CANDIDATES).collect(),
             shared: 0,
             sum_qty: line.qty.max(0),
+            excluded: false,
+            supplier: String::new(),
             issue: if line.qty_issue {
-                Some("No entiendo la cantidad de esta línea: escribila solo con números, ej. «A30 (2)».".to_string())
+                Some("No entiendo la cantidad de esta línea: escribila con números (máx. 100.000) y revisá que sean las unidades reales.".to_string())
             } else if chosen.is_none() && has_candidates {
                 Some("Revisá esta línea: no pude elegir una pantalla.".to_string())
             } else if chosen.is_none() {
-                Some("No encuentro esa pantalla en el catálogo: revisá el nombre o cargala desde Productos.".to_string())
+                Some("No encuentro esa pantalla en el catálogo: revisá el nombre, buscala a mano o cargala desde Productos.".to_string())
             } else if line.qty == 0 {
                 Some("La lista no dice cuántas unidades hay (queda en 0).".to_string())
             } else {
@@ -425,9 +455,10 @@ pub fn preview_load(conn: &Connection, text: &str) -> SqlResult<LoadPreview> {
     }
 
     // lo que el barrido («la lista es todo») dejaría en 0: pantallas con stock que ninguna
-    // línea toca — se muestra ANTES de aplicar
+    // línea toca — se muestra ANTES de aplicar. Se devuelven las fichas (id + stock) para que la
+    // UI recalcule el aviso contra las filas VIVAS: si el operario asigna una a mano, ya no se barre.
     let touched: std::collections::BTreeSet<i64> = per_product.keys().copied().collect();
-    let (zero_count, zero_units) = {
+    let zero_ids: Vec<ZeroTarget> = {
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(stock,0) FROM products
              WHERE COALESCE(category_id,0) IN (SELECT value FROM json_each(?1)) AND COALESCE(stock,0) <> 0",
@@ -436,9 +467,13 @@ pub fn preview_load(conn: &Connection, text: &str) -> SqlResult<LoadPreview> {
         let pend: Vec<(i64, i64)> = stmt
             .query_map(params![cats_json], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<SqlResult<Vec<_>>>()?;
-        let pend: Vec<(i64, i64)> = pend.into_iter().filter(|(id, _)| !touched.contains(id)).collect();
-        (pend.len() as i64, pend.iter().map(|(_, s)| s.abs()).sum::<i64>())
+        pend.into_iter()
+            .filter(|(id, _)| !touched.contains(id))
+            .map(|(id, stock)| ZeroTarget { product_id: id, stock })
+            .collect()
     };
+    let zero_count = zero_ids.len() as i64;
+    let zero_units: i64 = zero_ids.iter().map(|z| z.stock.abs()).sum();
 
     let applied_units: i64 = per_product.values().sum();
     Ok(LoadPreview {
@@ -450,10 +485,62 @@ pub fn preview_load(conn: &Connection, text: &str) -> SqlResult<LoadPreview> {
         applied_products: per_product.len() as i64,
         zero_count,
         zero_units,
+        zero_ids,
         brands: brands.len() as i64,
         skipped,
         rows,
     })
+}
+
+// ---------------------------------------------------------------- buscar a mano
+
+/// Busca pantallas del catálogo por texto para ASIGNAR A MANO una línea del conteo.
+///
+/// Existe porque el nombre del catálogo y el de la lista escrita a mano no siempre coinciden
+/// («6 c/m Accesorios» en la lista vs «Pantalla Redmi 6 c/m Acasonor» en el catálogo): el
+/// operario tiene que poder elegir la ficha correcta sin salir del asistente.
+/// Busca por tokens sobre `search_text` (nombre+marca+modelo+compatibilidad), igual que el
+/// inventario, y devuelve las fichas de las categorías de pantalla con stock primero.
+pub fn search_targets(conn: &Connection, query: &str, limit: i64) -> SqlResult<Vec<LoadCandidate>> {
+    let tokens = catalog::search_tokens(query);
+    // una sola letra no busca: devolvería medio catálogo (la UI ya pide 2, el backend lo exige)
+    if tokens.is_empty() || catalog::norm(query).chars().count() < 2 {
+        return Ok(Vec::new());
+    }
+    let cats_json = serde_json::to_string(crate::catalog::PHONE_CATEGORIES).unwrap_or_else(|_| "[1]".to_string());
+    // ?1 = categorías, ?2 = tope; la búsqueda por tokens empieza en ?3
+    let (clause, values) = catalog::search_clause(&tokens, 3);
+    let sql = format!(
+        "SELECT p.id, COALESCE(p.name,''), COALESCE(p.category_id,0), COALESCE(p.stock,0),
+                COALESCE(p.price_sale,0)
+         FROM products p
+         WHERE COALESCE(p.category_id,0) IN (SELECT value FROM json_each(?1))
+           AND COALESCE(p.search_text,'') <> ''{clause}
+         ORDER BY CASE WHEN COALESCE(p.stock,0) > 0 THEN 0 ELSE 1 END, p.name
+         LIMIT ?2"
+    );
+    let cats = crate::phones::category_names(conn)?;
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params_dyn: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params_dyn.push(Box::new(cats_json));
+    params_dyn.push(Box::new(limit.clamp(1, 50)));
+    for v in values {
+        params_dyn.push(Box::new(v));
+    }
+    let refs: Vec<&dyn rusqlite::types::ToSql> = params_dyn.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(refs.as_slice(), |r| {
+        let cat_id: i64 = r.get(2)?;
+        Ok(LoadCandidate {
+            product_id: r.get(0)?,
+            product_name: r.get(1)?,
+            category: cats.get(&cat_id).cloned().unwrap_or_default(),
+            stock: r.get(3)?,
+            price_sale: r.get(4)?,
+            // a mano: la calidad no la decide el cruce, la decide el operario
+            quality: "a mano".to_string(),
+        })
+    })?;
+    rows.collect()
 }
 
 // ---------------------------------------------------------------- aplicar
@@ -471,6 +558,7 @@ pub fn apply_load(
     rows: &[LoadRow],
     zero_missing: bool,
     keep_ids: &[i64],
+    supplier: &str,
 ) -> Result<LoadReport, String> {
     // La categoría NO la elige el cliente: es la regla del local (`PHONE_CATEGORIES`). Antes
     // un invoke a mano con otro id podía barrer el stock de Batería/Flex entera.
@@ -478,28 +566,48 @@ pub fn apply_load(
 
     // Varias líneas pueden describir la MISMA pantalla física («13C (6)» + «Redmi 13C (12)»):
     // las unidades se SUMAN (antes «mandaba la primera» y se perdían unidades reales).
+    // Las líneas EXCLUIDAS a mano por el operario no se cargan ni cuentan para nada.
     let mut per_product: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
     let mut skipped_rows: i64 = 0;
     for row in rows {
+        if row.excluded {
+            continue;
+        }
         if let Some(pid) = row.product_id {
             *per_product.entry(pid).or_insert(0) += row.qty.max(0);
         }
     }
 
+    // GATE DE LA CANTIDAD: una línea cuya cantidad no se pudo leer (o era absurda) no puede
+    // aplicarse — ni siquiera asignándole una pantalla a mano: escribiría 0 o 100.000 unidades
+    // en silencio (hallazgo de la revisión de F28).
+    let sin_cantidad: Vec<&LoadRow> = rows.iter().filter(|r| r.qty_issue && !r.excluded).collect();
+    if !sin_cantidad.is_empty() {
+        return Err(format!(
+            "Hay {} línea(s) con la cantidad sin leer ({}): corregí la cantidad en la vista previa \
+             (o excluí la línea si no se carga) antes de cargar. No se cargó nada.",
+            sin_cantidad.len(),
+            sin_cantidad.iter().map(|r| r.raw.clone()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
     // GATE DEL BARRIDO: si la lista es TODO el inventario, ninguna línea con unidades puede
     // quedarse sin pantalla asignada — su ficha real terminaría en 0 por no haber coincidido
     // el nombre (medido: 79 de 87 fichas barridas estaban escritas en la lista).
-    let (sin_asignar, unidades_sin_asignar) = rows.iter().fold((0i64, 0i64), |(n, u), r| {
-        if r.product_id.is_none() {
-            (n + 1, u + r.qty.max(0))
-        } else {
-            (n, u)
-        }
-    });
+    let (sin_asignar, unidades_sin_asignar) = rows
+        .iter()
+        .filter(|r| !r.excluded)
+        .fold((0i64, 0i64), |(n, u), r| {
+            if r.product_id.is_none() {
+                (n + 1, u + r.qty.max(0))
+            } else {
+                (n, u)
+            }
+        });
     if zero_missing && unidades_sin_asignar > 0 {
         return Err(format!(
             "Hay {sin_asignar} línea(s) de la lista sin pantalla asignada ({unidades_sin_asignar} unidades): \
-             asignalas a mano (si tienen alternativas), corregí el nombre de la pantalla en Inventario → Productos, \
+             buscalas a mano, corregí el nombre de la pantalla en Inventario → Productos, excluí la línea \
              o desmarcá «las pantallas que no están en la lista quedan en 0». \
              No cargué nada para no dejar en 0 mercancía que sí está en la lista."
         ));
@@ -548,6 +656,8 @@ pub fn apply_load(
         skipped: skipped_rows,
         unassigned: sin_asignar,
         unassigned_units: unidades_sin_asignar,
+        excluded: rows.iter().filter(|r| r.excluded).count() as i64,
+        excluded_units: rows.iter().filter(|r| r.excluded).map(|r| r.qty.max(0)).sum(),
         ..Default::default()
     };
 
@@ -580,6 +690,19 @@ pub fn apply_load(
         touched.insert(*pid);
         report.updated += 1;
         report.units += new;
+        // PROVEEDOR: el de la línea si lo tiene, si no el general de la carga (lo que el local
+        // quiere saber: quién le trajo esa pantalla). No se pisa con vacío.
+        let prov = rows
+            .iter()
+            .filter(|r| r.product_id == Some(*pid))
+            .map(|r| r.supplier.trim())
+            .find(|s| !s.is_empty())
+            .unwrap_or_else(|| supplier.trim());
+        if !prov.is_empty() {
+            tx.execute("UPDATE products SET supplier=?1 WHERE id=?2", params![prov, pid])
+                .map_err(|e| e.to_string())?;
+            report.suppliered += 1;
+        }
         let delta = new - old;
         if delta != 0 {
             tx.execute(
@@ -779,7 +902,7 @@ mod tests {
         assert_eq!(pv.zero_units, 8, "6 + |-2|: lo que el barrido va a mover");
         let report = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &pv.rows, true, &[]).unwrap()
+            apply_load(&conn, &path, &pv.rows, true, &[], "").unwrap()
         };
         assert_eq!(report.zeroed, 2);
 
@@ -833,6 +956,46 @@ mod tests {
         }
     }
 
+    /// Asignar a mano: la búsqueda tiene que encontrar una ficha que el cruce NO encontró
+    /// («6 c/m Accesorios» en la lista vs «Pantalla Redmi 6 c/m Acasonor» en el catálogo),
+    /// sin salirse de las categorías de pantalla.
+    #[test]
+    fn test_buscar_pantallas_a_mano() {
+        let (db, path) = setup("test_load_search.db");
+        db.add_product("Pantalla Redmi 6 c/m Acasonor", Some(1), "Xiaomi", "6 c/m Acasonor", "", r#"["Redmi 6"]"#, 5.0, 12.0, 1, 0, 0.0).unwrap();
+        db.add_product("Batería Redmi Acasonor", Some(4), "Xiaomi", "6", "", r#"["Redmi 6"]"#, 3.0, 8.0, 9, 0, 0.0).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let hits = search_targets(&conn, "acasonor", 12).unwrap();
+        assert_eq!(hits.len(), 1, "{:?}", hits.iter().map(|c| &c.product_name).collect::<Vec<_>>());
+        assert_eq!(hits[0].product_name, "Pantalla Redmi 6 c/m Acasonor");
+        assert_eq!(hits[0].quality, "a mano", "la calidad la decide el operario");
+        assert_eq!(hits[0].stock, 1);
+        assert_eq!(hits[0].category, "Pantalla");
+
+        // por tokens y en cualquier orden (misma búsqueda que el inventario)
+        assert_eq!(search_targets(&conn, "redmi acasonor", 12).unwrap().len(), 1);
+        assert_eq!(search_targets(&conn, "Redmi 6", 12).unwrap().len(), 1, "el texto pegado tal cual también");
+        // una sola letra no busca (no vuelca medio catálogo)
+        assert!(search_targets(&conn, "a", 12).unwrap().is_empty());
+        // y NUNCA devuelve repuestos de otra categoría (el buscador es de pantallas)
+        assert!(!search_targets(&conn, "acasonor", 12).unwrap().iter().any(|c| c.category.contains("Batería")));
+
+        // una vez asignada a mano, la ficha entra en `keep_ids` como cualquier otra
+        let asignada = hits[0].product_id;
+        let rows = vec![LoadRow { qty: 1, product_id: Some(asignada), ..Default::default() }];
+        drop(conn);
+        let report = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows, true, &[asignada], "Cell World").unwrap()
+        };
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.units, 1, "la unidad de la línea a mano se carga");
+        assert_eq!(report.unassigned, 0);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn test_apply_carga_stock_con_respaldo_y_movimientos() {
         let (db, path) = setup("test_load_apply.db");
@@ -842,7 +1005,7 @@ mod tests {
         };
         let report = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &pv.rows, true, &[]).unwrap()
+            apply_load(&conn, &path, &pv.rows, true, &[], "").unwrap()
         };
         // A30 (3 unidades, tenía 4) + Spark 8P (2, tenía 0); el A50 (0) ya estaba en 0
         assert_eq!(report.updated, 2);
@@ -871,7 +1034,7 @@ mod tests {
         };
         let r2 = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &pv2.rows, true, &[]).unwrap()
+            apply_load(&conn, &path, &pv2.rows, true, &[], "").unwrap()
         };
         assert_eq!(r2.movements, 0, "ya no hay nada que mover");
         drop(db);
@@ -901,7 +1064,7 @@ mod tests {
         ];
         let report = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &rows, false, &[]).unwrap()
+            apply_load(&conn, &path, &rows, false, &[], "").unwrap()
         };
         assert_eq!(report.updated, 1, "solo la pantalla válida");
         assert_eq!(report.units, 11, "2 + 9: las unidades reales no se pierden");
@@ -929,7 +1092,7 @@ mod tests {
         let solo = vec![LoadRow { qty: 999_999_999, product_id: Some(pantalla_id), ..Default::default() }];
         let r2 = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &solo, false, &[]).unwrap()
+            apply_load(&conn, &path, &solo, false, &[], "").unwrap()
         };
         assert_eq!(r2.units, 100_000, "cantidad acotada");
         drop(db);
@@ -948,7 +1111,7 @@ mod tests {
         let rows = vec![LoadRow { qty: 4, product_id: Some(pantalla_id), ..Default::default() }];
         let report = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &rows, true, &[]).unwrap()
+            apply_load(&conn, &path, &rows, true, &[], "").unwrap()
         };
         // el A10 (6) y el J7 (faltante de 2) son pantallas que la lista no nombra → a 0;
         // la batería (categoría 4) ni se mira: el barrido no lo elige quien llama
@@ -1007,7 +1170,7 @@ mod tests {
         ];
         let err = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &rows, true, &[]).unwrap_err()
+            apply_load(&conn, &path, &rows, true, &[], "").unwrap_err()
         };
         assert!(err.contains("sin pantalla asignada"), "{err}");
         assert!(err.contains("desmarcá"), "el error dice cómo seguir: {err}");
@@ -1023,7 +1186,7 @@ mod tests {
         // sin el barrido sí se carga, y el reporte dice qué quedó afuera
         let r = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &rows, false, &[]).unwrap()
+            apply_load(&conn, &path, &rows, false, &[], "").unwrap()
         };
         assert_eq!(r.updated, 1);
         assert_eq!(r.unassigned, 1, "una línea sin pantalla");
@@ -1038,9 +1201,153 @@ mod tests {
         let (db, path) = setup("test_load_vacio.db");
         let err = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &[], true, &[]).unwrap_err()
+            apply_load(&conn, &path, &[], true, &[], "").unwrap_err()
         };
         assert!(err.contains("todo el inventario en 0"), "{err}");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// La cantidad sin leer NO se arregla asignando la pantalla a mano: la línea sigue sin poder
+    /// aplicarse (antes, asignar a mano borraba el aviso y se escribían 0 o 100.000 unidades).
+    #[test]
+    fn test_apply_no_carga_con_la_cantidad_sin_leer() {
+        let (db, path) = setup("test_load_qty_gate.db");
+        let a30: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT id FROM products WHERE name='Pantalla Samsung A30'", [], |r| r.get(0)).unwrap()
+        };
+        let rows = vec![
+            LoadRow { qty: 3, product_id: Some(a30), ..Default::default() },
+            LoadRow {
+                raw: "A30 (dos)".to_string(),
+                brand: "Samsung".to_string(),
+                model: "A30".to_string(),
+                qty: 0,
+                qty_issue: true,
+                // el operario le asignó la pantalla a mano: la cantidad sigue sin leerse
+                product_id: Some(a30),
+                ..Default::default()
+            },
+        ];
+        let err = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows, false, &[], "").unwrap_err()
+        };
+        assert!(err.contains("cantidad sin leer"), "{err}");
+        assert!(err.contains("A30 (dos)"), "el error dice cuál línea: {err}");
+        let conn = db.conn.lock().unwrap();
+        let stock: i64 = conn
+            .query_row("SELECT COALESCE(stock,0) FROM products WHERE id=?1", params![a30], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stock, 4, "no se tocó nada");
+
+        // y si el operario EXCLUYE esa línea, la carga sigue con el resto
+        drop(conn);
+        let rows2 = vec![
+            LoadRow { qty: 3, product_id: Some(a30), ..Default::default() },
+            LoadRow { qty: 0, qty_issue: true, excluded: true, ..Default::default() },
+        ];
+        let r = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows2, true, &[], "").unwrap()
+        };
+        assert_eq!(r.updated, 1);
+        assert_eq!(r.excluded, 1, "el reporte dice que una línea quedó excluida");
+        assert_eq!(r.unassigned, 0, "una línea excluida no es una línea sin resolver");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// «Carga rápida»: las líneas que el operario excluye a mano no se cargan, NO bloquean el
+    /// barrido y no se cuentan como «sin resolver» (antes había que elegir entre no cargar nada o
+    /// asignar una ficha equivocada).
+    #[test]
+    fn test_apply_excluir_una_linea_no_bloquea_el_barrido() {
+        let (db, path) = setup("test_load_excluir.db");
+        let a30: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT id FROM products WHERE name='Pantalla Samsung A30'", [], |r| r.get(0)).unwrap()
+        };
+        let rows = vec![
+            LoadRow { qty: 5, product_id: Some(a30), ..Default::default() },
+            // la línea que no se pudo cruzar: el operario la excluye
+            LoadRow {
+                raw: "6 c/m Accesorios (1)".to_string(),
+                brand: "Xiaomi".to_string(),
+                model: "6 c/m Accesorios".to_string(),
+                qty: 1,
+                excluded: true,
+                ..Default::default()
+            },
+        ];
+        let report = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows, true, &[], "").unwrap()
+        };
+        assert_eq!(report.updated, 1, "solo la línea que sí cruzó");
+        assert_eq!(report.units, 5);
+        assert_eq!(report.excluded, 1);
+        assert_eq!(report.excluded_units, 1);
+        assert_eq!(report.unassigned_units, 0, "excluir no es quedar sin resolver");
+        let conn = db.conn.lock().unwrap();
+        let stock = |name: &str| -> i64 {
+            conn.query_row("SELECT COALESCE(stock,0) FROM products WHERE name=?1", params![name], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stock("Pantalla Samsung A30"), 5);
+        assert_eq!(stock("Pantalla Samsung A10"), 0, "el barrido igual corrió");
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// El PROVEEDOR que trajo la mercancía queda anotado en cada pantalla cargada: el de la línea
+    /// si lo tiene, si no el general de la carga.
+    #[test]
+    fn test_apply_anota_el_proveedor_que_trajo_la_mercancia() {
+        let (db, path) = setup("test_load_proveedor.db");
+        let (a30, spark) = {
+            let conn = db.conn.lock().unwrap();
+            let a30: i64 = conn
+                .query_row("SELECT id FROM products WHERE name='Pantalla Samsung A30'", [], |r| r.get(0))
+                .unwrap();
+            let spark: i64 = conn
+                .query_row("SELECT id FROM products WHERE name='Pantalla Tecno Spark 8P'", [], |r| r.get(0))
+                .unwrap();
+            (a30, spark)
+        };
+        let rows = vec![
+            LoadRow { qty: 4, product_id: Some(a30), ..Default::default() },
+            // este llegó de otro proveedor: la línea manda sobre el general
+            LoadRow { qty: 2, product_id: Some(spark), supplier: "Importadora Sur".to_string(), ..Default::default() },
+        ];
+        let report = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows, false, &[], "Cell World").unwrap()
+        };
+        assert_eq!(report.suppliered, 2);
+        let conn = db.conn.lock().unwrap();
+        let prov = |name: &str| -> String {
+            conn.query_row("SELECT COALESCE(supplier,'') FROM products WHERE name=?1", params![name], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(prov("Pantalla Samsung A30"), "Cell World", "el general de la carga");
+        assert_eq!(prov("Pantalla Tecno Spark 8P"), "Importadora Sur", "el de la línea manda");
+        assert_eq!(prov("Batería Samsung A30"), "", "la batería no se toca (otra categoría)");
+
+        // sin proveedor no se pisa el que ya estaba
+        drop(conn);
+        let rows2 = vec![LoadRow { qty: 4, product_id: Some(a30), ..Default::default() }];
+        let r2 = {
+            let conn = db.conn.lock().unwrap();
+            apply_load(&conn, &path, &rows2, false, &[], "").unwrap()
+        };
+        assert_eq!(r2.suppliered, 0);
+        let conn = db.conn.lock().unwrap();
+        let prov_final: String = conn
+            .query_row("SELECT COALESCE(supplier,'') FROM products WHERE name='Pantalla Samsung A30'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(prov_final, "Cell World", "conserva el proveedor anterior");
+        drop(conn);
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
@@ -1063,7 +1370,7 @@ mod tests {
         let rows = vec![LoadRow { qty: 2, product_id: Some(a30), ..Default::default() }];
         let report = {
             let conn = db.conn.lock().unwrap();
-            apply_load(&conn, &path, &rows, true, &[a10]).unwrap()
+            apply_load(&conn, &path, &rows, true, &[a10], "").unwrap()
         };
         let conn = db.conn.lock().unwrap();
         let stock = |name: &str| -> i64 {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ChevronLeft, ChevronRight, Copy, Layers, MoveHorizontal, PackageSearch,
-  Pencil, Search, TriangleAlert,
+  Pencil, Search, TriangleAlert, Truck,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -208,6 +208,11 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
                         <Badge variant="outline" className="text-[10px] gap-1 text-warning border-warning/50">
                           <Copy className="size-3" /> repetido
                         </Badge>
+                      )}
+                      {p.supplier && (
+                        <span className="flex items-center gap-1 text-[10px] text-muted-foreground" title="Proveedor que trajo esta mercancía">
+                          <Truck className="size-3" /> {p.supplier}
+                        </span>
                       )}
                     </div>
                   </TableCell>

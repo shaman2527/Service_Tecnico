@@ -455,7 +455,7 @@ pub fn get_phone_detail(conn: &Connection, phone_id: i64) -> SqlResult<Option<Ph
                         model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
                         price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
                         min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
-                        price_usd: r.get(13)?, category_name: r.get(14)?,
+                        price_usd: r.get(13)?, category_name: r.get(14)?, supplier: r.get(15).unwrap_or_default(),
                     })
                 },
             ) {

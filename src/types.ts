@@ -55,6 +55,8 @@ export interface Product {
   created_at: string | null;
   updated_at: string | null;
   category_name: string | null;
+  /** Proveedor que trajo esta mercancía (lo anota la carga de inventario) */
+  supplier?: string;
 }
 
 // --- Inventario unificado (2026-09-15) ---
@@ -191,6 +193,8 @@ export interface LoadRow {
   brand: string;
   model: string;
   qty: number;
+  /** la cantidad no se pudo leer (o era absurda): la línea NO se aplica mientras siga así */
+  qty_issue: boolean;
   product_id: number | null;
   product_name: string;
   stock_now: number;
@@ -199,6 +203,10 @@ export interface LoadRow {
   shared: number;
   /** unidades que recibe la ficha sumando todas sus líneas */
   sum_qty: number;
+  /** el operario dijo que esta línea NO se cargue (no es una línea sin resolver) */
+  excluded?: boolean;
+  /** proveedor que trajo esta pantalla (vacío = el proveedor general de la carga) */
+  supplier?: string;
   issue: string | null;
 }
 
@@ -216,6 +224,8 @@ export interface LoadPreview {
   /** fichas que quedan en 0 si se carga con «la lista es todo» */
   zero_count: number;
   zero_units: number;
+  /** las mismas fichas con su stock: la UI recalcula el aviso contra las filas vivas */
+  zero_ids: { product_id: number; stock: number }[];
   brands: number;
   skipped: number;
 }
@@ -231,6 +241,11 @@ export interface LoadReport {
   unassigned: number;
   /** unidades que se quedaron sin cargar por eso */
   unassigned_units: number;
+  /** líneas que el operario excluyó a mano */
+  excluded: number;
+  excluded_units: number;
+  /** fichas a las que se les anotó el proveedor */
+  suppliered: number;
   backup: string;
 }
 

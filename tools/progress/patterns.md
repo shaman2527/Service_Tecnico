@@ -285,3 +285,38 @@ Alternativa mientras siga así: escribir a mano en `tools/progress/patterns.md` 
 - **Los conteos esperados de un script son la expectativa independiente**: `verify_models_tab.mjs` los tiene escritos
   (1079/142, pisables por `EXPECT_PHONES`/`EXPECT_REVIEW`); si cambian los datos hay que actualizarlos a mano, que es
   justamente lo que hace que el script detecte cambios que nadie pidió.
+
+### Lecciones de F28 (asignar a mano) y del entorno de verificación
+
+- **Un cruce automático nunca va a adivinar los nombres del local: hay que dejar corregir a mano.** La lista física dice
+  «6 c/m Accesorios» y el catálogo dice «Pantalla Xiaomi Redmi 6 C / Redmi M Acasonor / Redmi M Accesorios» (`c/m` = con
+  marco). La solución no es aflojar el cruce (eso mete unidades en la ficha equivocada) sino darle al operario un
+  **buscador por fila**: la ficha que elige vale igual que un cruce perfecto y entra en `keepIds` para que el barrido no
+  la vacíe.
+- **Un buscador necesita un mínimo de caracteres y un tope.** Con una sola letra la consulta devolvía las primeras
+  fichas del catálogo (ruido y riesgo de asignar mal): mínimo 2 caracteres **en el backend**, no solo en la UI, y
+  `limit` acotado (1..50). El test guarda ese contrato.
+- **Para automatizar un clic hay que poder identificarlo:** los resultados del buscador llevan `data-load-hit`; sin eso el
+  script tocaba el `Select` de otra fila (mismo texto visible) y la verificación fallaba por un motivo que no era el
+  producto. Regla: cuando un script tiene que elegir entre elementos parecidos, el elemento necesita un ancla estable.
+- **En esta PC `tauri dev` NO usa el server de Vite: la ventana carga `http://tauri.localhost` y sirve el `dist`
+  EMBEBIDO en el binario.** Consecuencia práctica: los cambios de frontend **no** aparecen con HMR ni recargando la
+  página; hay que `npm run build` **y** recompilar/relanzar la app. Cómo distinguirlo en 5 segundos:
+  `location.origin` (¿`tauri.localhost` o `localhost:5173`?) y comparar `performance.getEntriesByType('resource')` con
+  `dist/assets/` (si el chunk cargado no es el recién compilado, el binario es viejo). Esto explica varios «el cambio no
+  se ve» de la jornada y hay que tenerlo presente ANTES de depurar la UI.
+- **Los scripts de verificación CDP tienen que ser idempotentes y arrancar de cero**: recargan la SPA al empezar (si no,
+  quedaban en modo cajera de una corrida anterior), y con listas grandes (261 líneas) hay que **esperar al render**
+  (poll del botón de aplicar) en vez de un `sleep` fijo: el cruce de una lista real tarda más que el de 3 líneas.
+- **La documentación del usuario es parte del módulo:** si el mostrador no sabe que `c/m` es «con marco» o que puede
+  buscar la pantalla a mano, la función existe pero no se usa. El chequeo de la Ayuda quedó dentro de la verificación en
+  vivo (`verify_inventory_load.mjs`), así que si alguien borra esa sección, la verificación falla.
+
+### Lecciones de F28/F29 (asignar a mano, carga rápida y proveedor)
+- **Un seguro que se puede saltear sin querer no es un seguro.** `qty_issue` vivía solo como TEXTO en `issue`: al asignar una pantalla a mano el texto se borraba y, con él, las dos protecciones (la fila no se aplicaba sola + el gate del barrido). Regla: un estado que bloquea una escritura va como **campo propio** (booleano en la estructura), nunca como texto de un mensaje.
+- **El operario tiene que poder decir «esta línea no se carga».** Sin un estado de exclusión explícito, la única salida del gate era asignar una ficha equivocada (stock mal puesto) o desmarcar el barrido para todo el catálogo. La exclusión es una decisión legítima: se registra, se informa en el resumen y no se confunde con «sin resolver».
+- **Un atajo de un clic convierte un bloqueo en un flujo:** «Excluir esas líneas y cargar el resto» deja el gate (seguridad) y la salida rápida (usabilidad) al mismo tiempo.
+- **Escape en Radix se maneja en `onEscapeKeyDown`, no con `onKeyDown` en el input**: Radix escucha `keydown` en **captura sobre `document`**, así que el handler de React corre después y el diálogo ya se cerró (código muerto que se lleva por delante toda la lista y las correcciones).
+- **Un `catch` silencioso que muestra «no hay resultados» es un bug de datos:** el operario concluye que la ficha no existe y la crea duplicada. Todo fallo de búsqueda tiene que verse como error, distinto de «0 resultados».
+- **El proveedor es metadata del negocio, no del movimiento:** va en la ficha (`products.supplier`, migración idempotente al final del orden físico) y se puede corregir después; el movimiento sigue contando qué pasó con el stock.
+- **Los scripts de verificación con flujos nuevos hay que ajustarlos a la UI nueva:** al agregar la columna «Cargar», el primer chequeo de exclusión tocó la fila equivocada (el `input` de la primera fila) y el número final salió mal. Para seleccionar una fila por su ESTADO (excluida) conviene un selector por estado (clase/atributo), no por posición.
