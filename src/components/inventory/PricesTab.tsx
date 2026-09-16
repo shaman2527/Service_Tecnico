@@ -1,15 +1,17 @@
 import { useState } from 'react';
-import { BadgeDollarSign, Check, Loader2, Tags, Wand2 } from 'lucide-react';
+import { BadgeDollarSign, Check, Loader2, PackagePlus, Tags, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { api } from '@/db';
 import type { CatalogReport, PriceRestoreReport } from '@/types';
 import { toast } from 'sonner';
+import { LoadInventoryDialog } from './LoadInventoryDialog';
 
 // AJUSTES del inventario, en lenguaje de tienda (sin tecnicismos):
 //   1) Traer los precios de la lista de la tienda.
 //   2) Dejar los nombres de marca y modelo parejos.
+//   3) Cargar el inventario físico (asistente: pegar la lista → cruce → aplicar).
 // Cada acción se REVISA antes de aplicar y todo se respalda solo.
 
 function Fila({ label, value }: { label: string; value: string | number }) {
@@ -21,10 +23,16 @@ function Fila({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-export function PricesTab({ onChanged }: { onChanged: () => void }) {
+/**
+ * `onChanged` refresca los datos y salta a la pestaña Productos (precios/nombres).
+ * `onRefresh` solo refresca: lo usa el asistente de carga, que tiene que quedarse abierto
+ * para mostrar su resumen (antes saltaba de pestaña y el resumen nunca se veía).
+ */
+export function PricesTab({ onChanged, onRefresh }: { onChanged: () => void; onRefresh: () => void }) {
   const [priceCheck, setPriceCheck] = useState<PriceRestoreReport | null>(null);
   const [catalogCheck, setCatalogCheck] = useState<CatalogReport | null>(null);
   const [busy, setBusy] = useState<'precios' | 'nombres' | null>(null);
+  const [showLoad, setShowLoad] = useState(false);
 
   const revisarPrecios = async () => {
     setBusy('precios');
@@ -174,10 +182,42 @@ export function PricesTab({ onChanged }: { onChanged: () => void }) {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <PackagePlus className="size-4 text-primary" /> Inventario del local (contar la mercancía)
+          </CardTitle>
+          <CardDescription>
+            Para cuando contás lo que hay en el mostrador: pegás (o abrís) la lista tal como la tenés escrita —una marca por
+            línea y debajo sus modelos, con la cantidad entre paréntesis: <em>A30/A50 (2)</em> — y la app la cruza contra el
+            catálogo. <span className="font-medium text-foreground">Antes de aplicar ves y corregís</span> qué pantalla
+            recibe cada cantidad, y se guarda copia de seguridad.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div>
+            <Button onClick={() => setShowLoad(true)}>
+              <PackagePlus data-icon="inline-start" /> Cargar la lista del local
+            </Button>
+          </div>
+          <span className="text-[11px] text-muted-foreground">
+            Lo que dice la lista manda: si una pantalla no está en la lista queda en <strong>0</strong> y todo movimiento
+            queda anotado en «Movimientos» con el motivo <em>Carga de inventario</em>. No se tocan precios ni compatibilidad.
+          </span>
+        </CardContent>
+      </Card>
+
+      {showLoad && (
+        <LoadInventoryDialog
+          onClose={() => setShowLoad(false)}
+          onApplied={() => { toast.success('Inventario cargado'); onRefresh(); }}
+        />
+      )}
+
       <Separator />
       <p className="text-[11px] text-muted-foreground">
-        Ninguna de estas dos acciones borra productos ni toca el stock. Si algo saliera mal, la copia de seguridad queda
-        guardada en la carpeta <span className="font-medium text-foreground">backup</span> junto a la base de datos.
+        Ninguna de estas acciones borra productos. Si algo saliera mal, la copia de seguridad queda guardada en la carpeta{' '}
+        <span className="font-medium text-foreground">backup</span> junto a la base de datos.
       </p>
     </div>
   );

@@ -40,6 +40,17 @@ pub struct ClientSummary {
     pub notes: Option<String>,
 }
 
+/// Columnas de `products` para los `SELECT` que devuelven la ficha completa.
+///
+/// REGLA DEL PROYECTO: nunca `SELECT p.*`. Las migraciones usan `ALTER TABLE`, que
+/// agrega la columna al FINAL del orden físico (`search_text` quedó en 14) y el mapeo
+/// posicional pasaba a leer la columna equivocada: `category_name: r.get(14)` devolvía
+/// `search_text` y la columna «Categoría» de Inventario mostraba el texto de búsqueda.
+/// Con esta lista el orden es fijo: 0..13 = producto, **14 = `c.name`**.
+pub(crate) const PRODUCT_COLS: &str = "p.id, p.name, p.category_id, p.brand, p.model, \
+     p.variant, p.compatibility, p.price_cost, p.price_sale, p.stock, p.min_stock, \
+     p.created_at, p.updated_at, p.price_usd, c.name as category_name";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Product {
     pub id: i64,
@@ -586,6 +597,11 @@ pub struct Database {
     pub conn: Mutex<Connection>,
     /// Ruta del archivo .db (para respaldos antes de operaciones masivas)
     pub db_path: PathBuf,
+    /// Sesión de DUEÑO desbloqueada: la activa `verify_pin` con el PIN correcto y la
+    /// usan los comandos que ESCRIBEN la lista de modelos (padrón `phones`). Una sesión
+    /// de cajera (o un invoke directo sin PIN) no puede tocarla. Si no hay PIN
+    /// configurado, la instalación es de un solo usuario y se permite (ver `owner_can_edit`).
+    owner_unlocked: std::sync::atomic::AtomicBool,
 }
 
 impl Database {
@@ -595,9 +611,35 @@ impl Database {
         let db = Database {
             conn: Mutex::new(conn),
             db_path: db_path.clone(),
+            owner_unlocked: std::sync::atomic::AtomicBool::new(false),
         };
         db.init()?;
         Ok(db)
+    }
+
+    /// ¿Esta sesión puede ESCRIBIR la lista de modelos (padrón)? Ver `owner_unlocked`.
+    /// FAIL-CLOSED: si no se puede leer el estado del PIN, NO se permite escribir (la misma
+    /// regla del gate de acceso, lección 2026-08-04).
+    pub fn owner_can_edit(&self) -> bool {
+        match self.get_pin_status() {
+            Ok(false) => true, // instalación sin PIN: un solo usuario
+            Ok(true) => self.owner_unlocked.load(std::sync::atomic::Ordering::Relaxed),
+            Err(_) => false,
+        }
+    }
+
+    /// Error listo para devolver al frontend cuando la sesión no es del dueño.
+    pub fn require_owner(&self) -> Result<(), String> {
+        if self.owner_can_edit() {
+            Ok(())
+        } else {
+            Err("Solo el dueño puede cambiar la lista de modelos: entra con el PIN del dueño.".to_string())
+        }
+    }
+
+    /// Cierra la sesión de dueño (por si la UI agrega un botón de bloqueo).
+    pub fn lock_owner(&self) {
+        self.owner_unlocked.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn init(&self) -> SqlResult<()> {
@@ -1343,7 +1385,7 @@ impl Database {
         values.push(Box::new(offset.max(0)));
         let offset_idx = values.len();
         let sql = format!(
-            "SELECT p.*, c.name as category_name FROM products p
+            "SELECT {PRODUCT_COLS} FROM products p
              LEFT JOIN categories c ON p.category_id = c.id{where_sql}
              ORDER BY {order} LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
         );
@@ -1429,36 +1471,38 @@ impl Database {
         struct Acc {
             label: String,
             brand: String,
-            ids: std::collections::BTreeSet<i64>,
+            products: i64,
             stock: i64,
         }
+        // FUENTE ÚNICA: el PADRÓN (`phones`), no la compatibilidad cruda. Así el
+        // formulario de servicio ofrece el MISMO nombre que el taller ve (y corrige)
+        // en Inventario → Modelos, y una sola ficha por teléfono.
         let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
         {
+            // repuestos/stock de todos los teléfonos en UNA pasada (mismo cálculo que la
+            // pestaña Modelos: clave + alias, sin contar dos veces el mismo repuesto)
+            let totals = crate::phones::phone_totals_map(&conn)?;
             let mut stmt = conn.prepare(
-                "SELECT id, COALESCE(brand,''), COALESCE(compatibility,''), COALESCE(stock,0)
-                 FROM products WHERE COALESCE(compatibility,'') NOT IN ('','[]')",
+                "SELECT COALESCE(key,''), COALESCE(brand,''), COALESCE(name,''), COALESCE(source,'catalogo')
+                 FROM phones",
             )?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
             })?;
             for row in rows {
-                let (id, brand, compat, stock) = row?;
-                for phone in crate::catalog::compat_phones(&compat, &brand) {
-                    let key = crate::catalog::phone_key(&phone);
-                    let entry = map.entry(key).or_insert_with(|| Acc {
-                        label: phone.label.clone(),
-                        brand: phone.brand.clone(),
-                        ..Default::default()
-                    });
-                    // etiqueta preferida: la más específica (con submarca)
-                    if phone.label.len() > entry.label.len() {
-                        entry.label = phone.label.clone();
-                        entry.brand = phone.brand.clone();
-                    }
-                    if entry.ids.insert(id) {
-                        entry.stock += stock;
-                    }
+                let (key, brand, name, source) = row?;
+                let (products, stock) = totals.get(&key).copied().unwrap_or((0, 0));
+                // los teléfonos dados de ALTA a mano salen siempre (aunque todavía no tengan
+                // repuesto cargado): el taller los agregó justamente para poder usarlos
+                if products == 0 && source != "manual" {
+                    continue;
                 }
+                map.insert(key, Acc { label: name, brand, products, stock });
             }
         }
 
@@ -1466,13 +1510,16 @@ impl Database {
         let mut list: Vec<PhoneModelRow> = map
             .into_iter()
             .filter(|(_, a)| {
-                tokens.is_empty() || tokens.iter().all(|t| crate::catalog::norm(&a.label).contains(t))
+                // se busca por marca + nombre: el nombre comercial del padrón no repite la
+                // marca («110» es un Nokia 110), así que «nokia» tiene que encontrarlo
+                tokens.is_empty()
+                    || tokens.iter().all(|t| crate::catalog::norm(&format!("{} {}", a.brand, a.label)).contains(t))
             })
             .map(|(key, a)| PhoneModelRow {
                 label: a.label,
                 brand: a.brand,
                 key,
-                screens: a.ids.len() as i64,
+                screens: a.products,
                 stock: a.stock,
                 with_stock: if a.stock > 0 { 1 } else { 0 },
             })
@@ -1488,13 +1535,23 @@ impl Database {
     /// repuesto que corresponda); `Some(1)` → solo pantallas.
     pub fn find_compatible_products(&self, model: &str, category_id: Option<i64>, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
         let conn = self.conn.lock().unwrap();
-        let target = crate::catalog::phone_model_norm(model);
-        if target.is_empty() {
+        let base = crate::catalog::phone_model_norm(model);
+        if base.is_empty() {
             return Ok(Vec::new());
         }
+        // El nombre puede venir del PADRÓN (nombre comercial: «Galaxy A06 4G», «Poco X3»)
+        // o escrito a mano. Se prueban TAMBIÉN sus alias (cómo está escrito en el
+        // inventario) para que renombrar un teléfono no le haga perder sus repuestos.
+        let mut targets: Vec<String> = vec![base];
+        for a in crate::phones::lookup_aliases(&conn, model)? {
+            let t = crate::catalog::phone_model_norm(&a);
+            if !t.is_empty() && !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
 
-        let mut sql = String::from(
-            "SELECT p.*, c.name as category_name FROM products p
+        let mut sql = format!(
+            "SELECT {PRODUCT_COLS} FROM products p
              LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1",
         );
         if let Some(cid) = category_id {
@@ -1517,11 +1574,13 @@ impl Database {
             let brand = p.brand.clone().unwrap_or_default();
             let compat = p.compatibility.clone().unwrap_or_default();
             let mut best: Option<&'static str> = None;
-            for phone in crate::catalog::compat_phones(&compat, &brand) {
-                if let Some(q) = crate::catalog::match_quality(&target, &phone.model) {
-                    let rank = |s: &str| match s { "exacta" => 0, "prefijo" => 1, _ => 2 };
-                    if best.map(|b| rank(q) < rank(b)).unwrap_or(true) {
-                        best = Some(q);
+            for target in &targets {
+                for phone in crate::catalog::compat_phones(&compat, &brand) {
+                    if let Some(q) = crate::catalog::match_quality(target, &phone.model) {
+                        let rank = |s: &str| match s { "exacta" => 0, "prefijo" => 1, _ => 2 };
+                        if best.map(|b| rank(q) < rank(b)).unwrap_or(true) {
+                            best = Some(q);
+                        }
                     }
                 }
             }
@@ -1758,8 +1817,8 @@ impl Database {
 
     pub fn get_products(&self, search: &str, category_id: Option<i64>) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from(
-            "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1"
+        let mut sql = format!(
+            "SELECT {PRODUCT_COLS} FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1"
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -1808,9 +1867,9 @@ impl Database {
 
     pub fn get_low_stock_products(&self) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.stock <= p.min_stock ORDER BY p.stock ASC"
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PRODUCT_COLS} FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.stock <= p.min_stock ORDER BY p.stock ASC"
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok(Product {
                 id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?,
@@ -1829,14 +1888,14 @@ impl Database {
     // (stock negativo, min_stock definido y bajo, o que han tenido salidas en inventory_movements)
     pub fn get_reorder_suggestions(&self) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT p.*, c.name as category_name FROM products p
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PRODUCT_COLS} FROM products p
              LEFT JOIN categories c ON p.category_id = c.id
              WHERE p.stock < 0
                 OR (p.min_stock > 0 AND p.stock <= p.min_stock)
                 OR EXISTS (SELECT 1 FROM inventory_movements m WHERE m.product_id = p.id AND m.type = 'salida' AND p.stock <= 0)
              ORDER BY p.stock ASC"
-        )?;
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok(Product {
                 id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?,
@@ -3452,7 +3511,7 @@ impl Database {
         let (clause, values) = crate::catalog::search_clause(&tokens, 1);
         let limit_idx = values.len() + 1;
         let sql = format!(
-            "SELECT p.*, c.name as category_name FROM products p
+            "SELECT {PRODUCT_COLS} FROM products p
              LEFT JOIN categories c ON p.category_id = c.id
              WHERE 1=1{clause}
              ORDER BY p.name LIMIT ?{limit_idx}"
@@ -3747,7 +3806,11 @@ impl Database {
         let stored: Option<Option<String>> = conn
             .query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
             .optional()?;
-        Ok(stored.flatten().as_deref() == Some(pin))
+        let ok = stored.flatten().as_deref() == Some(pin);
+        // el PIN correcto = sesión de DUEÑO desbloqueada (la usa el gate de escritura
+        // de la lista de modelos: `owner_can_edit`). Un PIN incorrecto la apaga.
+        self.owner_unlocked.store(ok, std::sync::atomic::Ordering::Relaxed);
+        Ok(ok)
     }
 
     pub fn remove_pin(&self, pin: &str) -> SqlResult<bool> {
@@ -6121,7 +6184,7 @@ mod tests {
         // "SPARK 10 PRO" y "SPARK 10" y "SPARK 10 PRO FHD" — subcadenas que confunden al LIKE
         let p_pro = db.add_product("Pantalla Tecno SPARK 10 PRO", Some(1), "Tecno", "SPARK 10 PRO",
             "", r#"["Tecno SPARK 10 PRO"]"#, 10.0, 15.0, 3, 0, 0.0).unwrap();
-        let p_base = db.add_product("Pantalla Tecno SPARK 10", Some(1), "Tecno", "SPARK 10",
+        let _p_base = db.add_product("Pantalla Tecno SPARK 10", Some(1), "Tecno", "SPARK 10",
             "", r#"["Tecno SPARK 10"]"#, 10.0, 15.0, 3, 0, 0.0).unwrap();
         let _p_fhd = db.add_product("Pantalla Tecno SPARK 10 PRO FHD", Some(1), "Tecno", "SPARK 10 PRO",
             "FHD", r#"["Tecno SPARK 10 PRO"]"#, 11.0, 16.0, 3, 0, 0.0).unwrap();
@@ -6424,8 +6487,8 @@ discount_amount: 0.0,
         assert_eq!(db.get_services("", "", "", "").unwrap().len(), 0, "Rollback: no queda ninguna fila");
         assert_eq!(db.next_order_num().unwrap(), "DEV-0001", "Los números no se consumen al hacer rollback");
         // Falla vacía es OPCIONAL: la orden de 2 equipos se guarda normal (la falla queda '')
-        let noFault = ServiceDeviceInput { fault: String::new(), ..d.clone() };
-        db.add_service_order("C", "1", "", "", None, "", None, &[d.clone(), noFault]).unwrap();
+        let no_fault = ServiceDeviceInput { fault: String::new(), ..d.clone() };
+        db.add_service_order("C", "1", "", "", None, "", None, &[d.clone(), no_fault]).unwrap();
         let saved = db.get_services("", "", "", "").unwrap();
         assert_eq!(saved.len(), 2, "Falla vacía no bloquea la orden");
         assert!(saved.iter().any(|s| s.fault.as_deref().unwrap_or("").is_empty()), "La falla vacía se guarda tal cual");
@@ -6763,6 +6826,57 @@ discount_amount: 0.0,
 
     // --- Inventario unificado (F4): página, KPIs, teléfonos, pantallas, movimientos ---
 
+    /// Feature 27: `category_name` tiene que ser el NOMBRE REAL de la categoría.
+    /// Con `SELECT p.*, c.name` el mapeo posicional leía `search_text` (cid 14) y la
+    /// columna «Categoría» del inventario mostraba el texto normalizado de búsqueda.
+    #[test]
+    fn test_product_category_name_is_real_category() {
+        let test_path = PathBuf::from("test_category_name.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.add_product("Pantalla Xiaomi Redmi Note 11", Some(1), "Xiaomi", "Note 11", "", r#"["Xiaomi Redmi Note 11"]"#, 5.0, 12.0, 3, 1, 7.0).unwrap();
+        // min_stock 1 con stock 0 → entra en «bajo mínimo» y en sugerencias de reposición
+        db.add_product("Táctil Xiaomi Redmi Note 11", Some(2), "Xiaomi", "Note 11", "", r#"["Xiaomi Redmi Note 11"]"#, 2.0, 6.0, 0, 1, 0.0).unwrap();
+
+        let cats: std::collections::HashMap<i64, String> = db
+            .get_categories()
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id, c.name))
+            .collect();
+
+        let ok = |label: &str, items: &[Product]| {
+            assert!(!items.is_empty(), "{label}: sin resultados");
+            for p in items {
+                let expected = p.category_id.and_then(|id| cats.get(&id)).cloned();
+                assert_eq!(
+                    p.category_name, expected,
+                    "{label}: category_name = {:?}, esperaba el nombre real de la categoría — producto {}",
+                    p.category_name, p.name
+                );
+                assert!(p.price_usd >= 0.0, "{label}: price_usd sigue leyéndose en 13");
+            }
+        };
+
+        ok("get_products", &db.get_products("", None).unwrap());
+        ok("get_products_page", &db.get_products_page("", None, None, None, None, 50, 0).unwrap().items);
+        ok("get_low_stock_products", &db.get_low_stock_products().unwrap());
+        ok("get_reorder_suggestions", &db.get_reorder_suggestions().unwrap());
+        ok("suggest_products", &db.suggest_products("note", 10).unwrap());
+        ok("find_compatible_products", &db.find_compatible_products("Note 11", None, 10).unwrap().into_iter().map(|c| c.product).collect::<Vec<_>>());
+
+        // la categoría concreta: id 1 = Pantalla (la de la ficha de la pantalla)
+        let all = db.get_products("", None).unwrap();
+        let pantalla = all.iter().find(|p| p.name.starts_with("Pantalla")).unwrap();
+        assert_eq!(pantalla.category_id, Some(1));
+        assert_eq!(pantalla.category_name.as_deref(), Some("Pantalla"), "no el search_text del producto");
+        let otra = all.iter().find(|p| p.name.starts_with("Táctil")).unwrap();
+        assert_eq!(otra.category_name, cats.get(&otra.category_id.unwrap()).cloned(), "categoría id {:?}", otra.category_id);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
     #[test]
     fn test_get_products_page_filters_and_total() {
         let test_path = PathBuf::from("test_products_page.db");
@@ -6847,26 +6961,39 @@ discount_amount: 0.0,
         db.add_product("Pantalla Samsung A06 4G", Some(1), "Samsung", "A06 4G", "",
             r#"["Samsung A06 4G"]"#, 8.0, 15.0, 2, 0, 0.0).unwrap();
 
+        // La lista viene del PADRÓN: nombre comercial (línea + modelo) y una sola ficha
+        // por teléfono, con la marca aparte.
         let phones = db.get_phone_models("", 100).unwrap();
         let note11: Vec<_> = phones.iter().filter(|p| p.label.contains("Note 11")).collect();
         assert_eq!(note11.len(), 1, "el mismo teléfono NO se duplica: {:?}", phones.iter().map(|p| &p.label).collect::<Vec<_>>());
-        assert_eq!(note11[0].label, "Xiaomi Redmi Note 11", "gana la etiqueta más específica");
+        assert_eq!(note11[0].label, "Redmi Note 11", "nombre comercial del padrón");
+        assert_eq!(note11[0].brand, "Xiaomi");
         assert_eq!(note11[0].screens, 2);
         assert_eq!(note11[0].stock, 4, "0 + 4 unidades");
 
         // búsqueda de teléfonos
         let sam = db.get_phone_models("a06", 100).unwrap();
         assert_eq!(sam.len(), 1);
-        assert_eq!(sam[0].label, "Samsung A06 4G");
+        assert_eq!(sam[0].label, "Galaxy A06 4G", "nombre comercial del padrón");
+        assert_eq!(sam[0].brand, "Samsung");
 
-        // pantallas compatibles RANKEADAS: primero la coincidencia EXACTA y, dentro
-        // de cada nivel, la que tiene stock (el fit manda; el stock se muestra con badge)
+        // el nombre del PADRÓN («Galaxy A06 4G») encuentra su pantalla aunque el inventario
+        // la tenga escrita con la marca («Samsung A06 4G»): se resuelven los alias
+        let sam_screens = db.find_compatible_screens("Galaxy A06 4G", 10).unwrap();
+        assert_eq!(sam_screens.len(), 1, "la pantalla del Samsung A06");
+        assert_eq!(sam_screens[0].match_quality, "exacta", "los alias la vuelven coincidencia exacta");
+
+        // pantallas compatibles RANKEADAS: primero la coincidencia EXACTA y, dentro de cada
+        // nivel, la que TIENE STOCK. Ahora las dos variantes son «exacta» (los alias del
+        // padrón —«Note 11»— también cuentan), así que gana la que hay en vitrina (OLED).
         let screens = db.find_compatible_screens("Redmi Note 11", 10).unwrap();
         assert_eq!(screens.len(), 2, "las dos variantes sirven");
-        assert_eq!(screens[0].match_quality, "exacta", "la que lista el teléfono tal cual");
-        assert_eq!(screens[0].product.variant.as_deref(), Some("INCELL"));
-        assert_eq!(screens[1].product.variant.as_deref(), Some("OLED"));
-        assert!(screens[1].in_stock, "la segunda sí tiene stock (4)");
+        assert_eq!(screens[0].match_quality, "exacta");
+        assert_eq!(screens[1].match_quality, "exacta");
+        assert_eq!(screens[0].product.variant.as_deref(), Some("OLED"), "exacta y con stock");
+        assert!(screens[0].in_stock);
+        assert_eq!(screens[1].product.variant.as_deref(), Some("INCELL"));
+        assert!(!screens[1].in_stock, "exacta pero sin stock: queda segunda");
         // la búsqueda por una variante del nombre ("11S 4G" vs "Redmi 11S 4G")
         // cae en 'prefijo'/'parcial' y encuentra la pantalla que la declara
         let screens2 = db.find_compatible_screens("11S 4G", 10).unwrap();

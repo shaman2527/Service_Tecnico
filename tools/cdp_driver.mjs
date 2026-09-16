@@ -14,18 +14,35 @@ ws.onmessage = (ev) => {
   if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
 };
 
+// 25s: el WebView2 tarda en contestar mientras arranca la app (IPC frío + primera carga
+// de Vite). Con 10s una verificación podía morir por «timeout: Runtime.evaluate» en el
+// arranque aunque la app estuviera perfecta.
 const send = (method, params = {}) =>
   new Promise((res, rej) => {
     const msgId = ++id;
     pending.set(msgId, res);
     ws.send(JSON.stringify({ id: msgId, method, params }));
-    setTimeout(() => { if (pending.has(msgId)) { pending.delete(msgId); rej(new Error(`timeout: ${method}`)); } }, 10000);
+    setTimeout(() => { if (pending.has(msgId)) { pending.delete(msgId); rej(new Error(`timeout: ${method}`)); } }, 25000);
   });
 
 const evalx = async (expr) => {
-  const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
-  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || "eval error");
-  return r.result?.result?.value;
+  // `awaitPromise` es obligatorio para evaluar expresiones async
+  // (`invoke(...).then(...)`, `(async () => { … })()`): sin él, Chrome devuelve el
+  // objeto Promise serializado como `{}` (lección 2026-09-16).
+  let lastErr = null;
+  for (let i = 0; i < 2; i++) {
+    try {
+      const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
+      if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || "eval error");
+      return r.result?.result?.value;
+    } catch (e) {
+      lastErr = e;
+      // un timeout en el arranque se reintenta: el page todavía estaba cargando
+      if (!/^timeout:/.test(String(e?.message))) throw e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw lastErr;
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,7 +50,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clickCenter = async (expr, { retries = 8, delay = 400 } = {}) => {
   let v = null;
   for (let i = 0; i < retries; i++) {
-    v = await evalx(`(() => { const el = (${expr}); if (!el) return null; const r = el.getBoundingClientRect(); if (r.width === 0 && r.height === 0) return null; return JSON.stringify({x: r.x + r.width/2, y: r.y + r.height/2}); })()`);
+    // `scrollIntoView` primero: un botón fuera de la pantalla tiene coordenadas que caen
+    // afuera de la ventana y el click no llega (falso «no encontrado»/«no abre nada»).
+    v = await evalx(`(() => {
+      const el = (${expr});
+      if (!el) return null;
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return null;
+      if (r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth) return null;
+      return JSON.stringify({x: r.x + r.width/2, y: r.y + r.height/2});
+    })()`);
     if (v) break;
     await sleep(delay);
   }
@@ -56,10 +83,16 @@ const typeText = async (text) => {
   }
 };
 
+/** Pega texto VARIAS LÍNEAS en el elemento enfocado (los \n no viajan como teclas). */
+const insertText = async (text) => {
+  await send("Input.insertText", { text });
+  await sleep(200);
+};
+
 const clickXY = async (x, y) => {
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
   await sleep(700);
 };
 
-export { evalx, clickCenter, clickXY, keyNav, typeText, sleep };
+export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep };

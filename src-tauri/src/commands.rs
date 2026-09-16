@@ -600,7 +600,9 @@ pub fn get_duplicate_groups(db: State<Database>) -> Result<Vec<crate::db::Duplic
     db.get_duplicate_groups().map_err(|e| e.to_string())
 }
 
-// --- F2: padron de telefonos (lista de modelos del taller) ---
+// --- F2/F4: padron de telefonos (lista de modelos del taller) ---
+// ESCRITURA solo para el DUENO, con gate en el BACKEND (no solo en la UI): el PIN
+// correcto desbloquea la sesion (`verify_pin` -> `Database::owner_unlocked`).
 
 #[tauri::command]
 pub fn get_phone_brands(db: State<Database>) -> Result<Vec<crate::phones::PhoneBrandRow>, String> {
@@ -610,11 +612,12 @@ pub fn get_phone_brands(db: State<Database>) -> Result<Vec<crate::phones::PhoneB
 
 #[tauri::command]
 pub fn get_phones(db: State<Database>, brand: Option<String>, search: String,
-                  only_with_products: bool, only_stock: bool, sort: String, dir: String,
+                  only_with_products: bool, only_stock: bool, only_review: bool,
+                  sort: String, dir: String,
                   limit: i64, offset: i64) -> Result<crate::phones::PhonePage, String> {
     let conn = db.conn.lock().unwrap();
     crate::phones::get_phones(&conn, brand.as_deref(), &search, only_with_products, only_stock,
-                              &sort, &dir, limit, offset).map_err(|e| e.to_string())
+                              only_review, &sort, &dir, limit, offset).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -623,22 +626,62 @@ pub fn get_phone_detail(db: State<Database>, phone_id: i64) -> Result<Option<cra
     crate::phones::get_phone_detail(&conn, phone_id).map_err(|e| e.to_string())
 }
 
+/// Puede esta sesion ESCRIBIR la lista de modelos? (la UI esconde los botones si no)
+#[tauri::command]
+pub fn can_edit_phones(db: State<Database>) -> Result<bool, String> {
+    Ok(db.owner_can_edit())
+}
+
+/// Vista previa de un renombrado: NO escribe nada (nombre nuevo, choque de clave, repuestos).
+#[tauri::command]
+pub fn preview_rename_phone(db: State<Database>, id: i64, brand: String, line: String, model: String)
+    -> Result<Option<crate::phones::RenamePreview>, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::phones::preview_rename_phone(&conn, id, &brand, &line, &model).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn rename_phone(db: State<Database>, id: i64, brand: String, line: String, model: String) -> Result<(), String> {
+    db.require_owner()?;
     let conn = db.conn.lock().unwrap();
     crate::phones::rename_phone(&conn, id, &brand, &line, &model).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn add_phone(db: State<Database>, brand: String, line: String, model: String) -> Result<i64, String> {
+    db.require_owner()?;
     let conn = db.conn.lock().unwrap();
     crate::phones::add_phone(&conn, &brand, &line, &model).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn merge_phones(db: State<Database>, keep_id: i64, remove_id: i64) -> Result<(), String> {
+    db.require_owner()?;
     let conn = db.conn.lock().unwrap();
     crate::phones::merge_phones(&conn, keep_id, remove_id).map_err(|e| e.to_string())
+}
+
+// --- F25: asistente para CARGAR EL INVENTARIO del local (pegar/abrir lista → cruce →
+// vista previa → aplicar con respaldo). Escritura solo para el dueno.
+// La categoria NO se pasa: es la regla del local (`catalog::PHONE_CATEGORIES`).
+
+/// Cruce de la lista pegada contra el catalogo (NO escribe nada).
+#[tauri::command]
+pub fn preview_inventory_load(db: State<Database>, text: String)
+    -> Result<crate::loadlist::LoadPreview, String> {
+    let conn = db.conn.lock().unwrap();
+    crate::loadlist::preview_load(&conn, &text).map_err(|e| e.to_string())
+}
+
+/// Aplica la vista previa: respaldo de la base + stock por producto + movimiento.
+/// `keep_ids` = fichas que la vista previa ya tenía asignadas: el barrido no las toca.
+#[tauri::command]
+pub fn apply_inventory_load(db: State<Database>, rows: Vec<crate::loadlist::LoadRow>,
+                            zero_missing: bool, keep_ids: Vec<i64>)
+    -> Result<crate::loadlist::LoadReport, String> {
+    db.require_owner()?;
+    let conn = db.conn.lock().unwrap();
+    crate::loadlist::apply_load(&conn, &db.db_path, &rows, zero_missing, &keep_ids)
 }
 // --- Perfil profesional del tecnico (Dashboard) ---
 

@@ -48,7 +48,7 @@
   "subBrandKeyStrippable": {
     "Xiaomi": ["red", "redmi", "red note"]
   },
-  "_familyBrands_comment": "Familias (líneas comerciales) que identifican una marca por sí solas: 'Camon 20' dentro de un producto Infinix es TECNO. Solo familias inequívocas (no 'Note', que lo usan varias).",
+  "_familyBrands_comment": "Familias (líneas comerciales) que identifican una marca por sí solas: 'Camon 20' dentro de un producto Infinix es TECNO. Solo familias inequívocas (no 'Note', que lo usan varias). 'honor' y 'realme' son marcas propias: 'Huawei Honor X6A' y 'Oppo Realme C35' son Honor y Realme (decisión del local, 2026-09-16).",
   "familyBrands": {
     "camon": "Tecno",
     "spark": "Tecno",
@@ -63,6 +63,8 @@
     "redmi": "Xiaomi",
     "poco": "Xiaomi",
     "magic": "Honor",
+    "honor": "Honor",
+    "realme": "Realme",
     "nova": "Huawei",
     "blade": "ZTE"
   },

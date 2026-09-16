@@ -146,6 +146,10 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
               >
                 <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
                 <span className="truncate">{o.label}</span>
+                {/* la marca aparte: el nombre comercial del padrón no la repite («110» = Nokia 110) */}
+                {o.brand && !normPhoneModel(o.label).startsWith(normPhoneModel(o.brand)) && (
+                  <span className="shrink-0 text-[11px] text-muted-foreground">{o.brand}</span>
+                )}
               </button>
             );
           })}

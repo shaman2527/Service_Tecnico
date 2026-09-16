@@ -177,7 +177,8 @@ const sections = [
         </p>
         <ul className="list-disc pl-5 space-y-1">
           <li><span className="font-medium text-foreground">Productos:</span> el catálogo completo con KPIs arriba (con stock, agotados, faltantes, bajo mínimo, sin precio, capital a costo), búsqueda por producto/marca/modelo/teléfono compatible, filtros por categoría y estado del stock, y la tabla paginada (50 por página). Cada ficha muestra sus teléfonos compatibles como chips (el “+N” despliega el resto).</li>
-          <li><span className="font-medium text-foreground">Por modelo:</span> escribes el teléfono (ej. <em>Redmi Note 11</em>) y ves qué repuestos del catálogo le sirven, con la coincidencia y el stock real. Es la misma compatibilidad que usa el formulario de servicio.</li>
+          <li><span className="font-medium text-foreground">Modelos:</span> el padrón de teléfonos del taller (se arma solo desde la compatibilidad del catálogo). Filtra por <span className="font-medium text-foreground">marca</span> (que también es columna), busca por teléfono/modelo o como esté escrito en el inventario, y usa las vistas <em>Con repuestos</em>, <em>Con stock</em> y <em>Por revisar</em>. Cada encabezado ordena en 3 pasos: <em>ascendente → descendente → sin orden</em>. La columna <span className="font-medium text-foreground">Estado</span> marca los teléfonos <em>por revisar</em> (nombre sin familia comercial, ej. «8P»). El botón <span className="font-medium text-foreground">Ficha</span> abre los repuestos de ese teléfono agrupados por categoría con stock y precio; el botón de capas salta a <em>Repuesto por modelo</em>. Es solo consulta: no cambia stock ni precios.</li>
+          <li><span className="font-medium text-foreground">Repuesto por modelo:</span> escribes el teléfono (ej. <em>Redmi Note 11</em>) y ves qué repuestos del catálogo le sirven, con la coincidencia y el stock real. Es la misma compatibilidad que usa el formulario de servicio.</li>
           <li><span className="font-medium text-foreground">Movimientos:</span> entradas y salidas con su motivo, fecha y la referencia (número de orden <code className="text-[11px]">DEV-00xx</code> o pedido). Aquí se auditan los faltantes.</li>
           <li><span className="font-medium text-foreground">Precios y datos</span> (solo dueño): restaurar costo/venta desde la lista CELL WORLD y limpiar marcas/modelos/nombres del catálogo, siempre con vista previa y respaldo.</li>
         </ul>
@@ -340,7 +341,7 @@ const sections = [
         </div>
         <div>
           <p className="font-medium text-foreground">¿Cómo sé qué repuestos tengo en stock?</p>
-          <p>En <Badge variant="outline">Inventario</Badge> → pestaña <span className="font-medium text-foreground">Productos</span> (filtro “Con stock”) o pestaña <span className="font-medium text-foreground">Por modelo</span> para ver qué le sirve a un teléfono concreto. También en el Dashboard (Stock Bajo) y en Pedidos. Al buscar un producto en una venta ves el stock en vivo.</p>
+          <p>En <Badge variant="outline">Inventario</Badge> → pestaña <span className="font-medium text-foreground">Productos</span> (filtro “Con stock”) o pestaña <span className="font-medium text-foreground">Repuesto por modelo</span> para ver qué le sirve a un teléfono concreto (la pestaña <span className="font-medium text-foreground">Modelos</span> lista todos los teléfonos del taller con su stock). También en el Dashboard (Stock Bajo) y en Pedidos. Al buscar un producto en una venta ves el stock en vivo.</p>
         </div>
         <div>
           <p className="font-medium text-foreground">¿Cómo veo qué vendí o qué entró un día específico?</p>

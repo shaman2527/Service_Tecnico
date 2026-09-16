@@ -15,7 +15,11 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     watch: {
-      ignored: ['**/src-tauri/**'],
+      // src-tauri lo vigila el CLI de Tauri, no Vite.
+      // Los `.tmpdir/*.tmp` son los temporales que dejan los editores/agentes al guardar:
+      // si el watcher intenta vigilarlos, Vite MUERE con EBUSY (resource busy or locked)
+      // y con él `tauri dev` (lección 2026-09-16).
+      ignored: ['**/src-tauri/**', '**/.*.tmpdir/**', '**/*.tmp', '**/.*.tmp'],
     },
   },
 })

@@ -6,7 +6,9 @@ import type {
   ServiceDeviceInput, DaySummary, ExportResult, Expense, ProfitSummary,
   ReceivablesSummary, InventoryValue, PaymentSearchResult,
   ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage,
-  CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile
+  CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile,
+  PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
+  LoadPreview, LoadRow, LoadReport
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -111,6 +113,52 @@ export const api = {
       .catch(() => mock<TechnicianProfile | null>(null) as unknown as Promise<TechnicianProfile>),
   getDuplicateGroups: () =>
     tauriInvoke<DuplicateGroup[]>('get_duplicate_groups').catch(() => mock<DuplicateGroup[]>([])),
+
+  // --- Padrón de teléfonos (F3: pestaña Modelos) ---
+  // OJO: estas dos llamadas NO se tragan el error dentro de Tauri. En modo navegador
+  // (sin backend) devuelven vacío para no romper el mock; si el backend real falla,
+  // el error sube y la pestaña Modelos lo muestra (antes se veía «sin resultados»).
+  getPhoneBrands: () =>
+    tauriInvoke<PhoneBrandRow[]>('get_phone_brands').catch(e => {
+      if (isTauri) throw e;
+      return mock<PhoneBrandRow[]>([]);
+    }),
+  getPhones: (brand: string | null = null, search: string = '', onlyWithProducts: boolean = false,
+    onlyStock: boolean = false, onlyReview: boolean = false, sort: string = 'nombre',
+    dir: string = 'asc', limit: number = 50, offset: number = 0) =>
+    tauriInvoke<PhonePage>('get_phones', {
+      brand, search, onlyWithProducts, onlyStock, onlyReview, sort, dir, limit, offset
+    }).catch(e => {
+      if (isTauri) throw e;
+      return mock<PhonePage>({ items: [], total: 0 });
+    }),
+  getPhoneDetail: (phoneId: number) =>
+    tauriInvoke<PhoneDetail | null>('get_phone_detail', { phoneId }).catch(e => {
+      if (isTauri) throw e;
+      return mock<PhoneDetail | null>(null);
+    }),
+  /** ¿Esta sesión puede escribir la lista de modelos? (dueño desbloqueado con su PIN) */
+  canEditPhones: () =>
+    tauriInvoke<boolean>('can_edit_phones').catch(() => mock<boolean>(!isTauri)),
+  /** Vista previa de un renombrado: nombre nuevo, choque de clave y repuestos que conserva */
+  previewRenamePhone: (id: number, brand: string, line: string, model: string) =>
+    tauriInvoke<RenamePreview | null>('preview_rename_phone', { id, brand, line, model }),
+  renamePhone: (id: number, brand: string, line: string, model: string) =>
+    tauriInvoke<void>('rename_phone', { id, brand, line, model }),
+  addPhone: (brand: string, line: string, model: string) =>
+    tauriInvoke<number>('add_phone', { brand, line, model }),
+  mergePhones: (keepId: number, removeId: number) =>
+    tauriInvoke<void>('merge_phones', { keepId, removeId }),
+
+  // --- F25: asistente de carga de inventario (pegar lista → cruce → aplicar) ---
+  // La categoría NO se manda: el backend trabaja siempre con las categorías de pantalla
+  // del local (Pantalla/Táctil/Táctil Tablet) — un invoke a mano no puede barrer otra cosa.
+  // `keepIds` = fichas que la vista previa ya tenía asignadas: el barrido nunca las toca.
+  previewInventoryLoad: (text: string) =>
+    tauriInvoke<LoadPreview>('preview_inventory_load', { text }),
+  applyInventoryLoad: (rows: LoadRow[], zeroMissing: boolean, keepIds: number[]) =>
+    tauriInvoke<LoadReport>('apply_inventory_load', { rows, zeroMissing, keepIds }),
+
   normalizeCatalog: (dryRun: boolean = true) =>
     tauriInvoke<CatalogReport>('normalize_catalog', { dryRun }),
   restorePrices: (path: string | null = null, onlyZero: boolean = true, dryRun: boolean = true) =>

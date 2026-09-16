@@ -17,6 +17,7 @@ import type { Category, InventoryStats, Product } from '@/types';
 import { partLabel } from '@/lib/utils';
 import { StockBadge } from './StockBadge';
 import { CompatChips } from './CompatChips';
+import { Kpi, KpiStrip } from './Kpi';
 
 const PAGE_SIZE = 50;
 
@@ -30,22 +31,6 @@ const STOCK_FILTERS = [
   { value: 'sin_compat', label: 'Sin compatibilidad' },
 ];
 
-function Kpi({ label, value, tone, hint }: {
-  label: string;
-  value: string | number;
-  tone?: 'danger' | 'warning' | 'success';
-  hint?: string;
-}) {
-  const toneClass = tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : tone === 'success' ? 'text-success' : 'text-foreground';
-  return (
-    <div className="flex items-baseline gap-1.5 whitespace-nowrap" title={hint}>
-      <span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
-      <span className={`text-sm font-semibold tabular-nums ${toneClass}`}>{value}</span>
-      {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
-    </div>
-  );
-}
-
 export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDuplicates, onByModel }: {
   categories: Category[];
   onEdit: (p: Product) => void;
@@ -56,6 +41,8 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   refreshKey: number;
 }) {
   const [search, setSearch] = useState('');
+  // Regla del local: el taller trabaja PANTALLAS → el inventario abre filtrado en esa
+  // categoría (se puede cambiar el filtro para ver el resto del catálogo).
   const [catFilter, setCatFilter] = useState<string>('todas');
   const [stockFilter, setStockFilter] = useState('todos');
   const [sort, setSort] = useState('nombre');
@@ -63,8 +50,17 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   const [items, setItems] = useState<Product[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [catDefaultApplied, setCatDefaultApplied] = useState(false);
 
   const dupSet = useMemo(() => new Set(stats?.duplicate_ids ?? []), [stats]);
+
+  // primera vez que llegan las categorías: si existe «Pantalla», se filtra por ella
+  useEffect(() => {
+    if (catDefaultApplied || categories.length === 0) return;
+    const pantalla = categories.find(c => c.name.trim().toLowerCase() === 'pantalla');
+    setCatDefaultApplied(true);
+    if (pantalla) setCatFilter(String(pantalla.id));
+  }, [categories, catDefaultApplied]);
 
   useEffect(() => { setPage(0); }, [search, catFilter, stockFilter, sort]);
 
@@ -94,11 +90,13 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   const to = Math.min(total, (page + 1) * PAGE_SIZE);
   const anyPrice = useMemo(() => items.some(p => p.price_sale > 0 || p.price_cost > 0), [items]);
   const cols = anyPrice ? 9 : 8;
+  // los KPI son de todo el catálogo: se avisa cuando la tabla está filtrada
+  const filterActive = catFilter !== 'todas' || stockFilter !== 'todos' || search.trim() !== '';
 
   return (
     <div className="flex flex-col gap-4">
       {stats && (
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-lg border border-border bg-muted/30 px-3 py-2">
+        <KpiStrip>
           <Kpi label="Productos" value={stats.sku} hint={`${stats.brands} marcas`} />
           <Kpi label="Con stock" value={stats.with_stock} tone="success" hint={stats.with_stock > 0 ? `${stats.units} u.` : undefined} />
           <Kpi label="Agotados" value={stats.out_of_stock} tone={stats.out_of_stock > 0 ? 'warning' : undefined} />
@@ -106,7 +104,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           {stats.low_stock > 0 && <Kpi label="Bajo mínimo" value={stats.low_stock} tone="warning" />}
           {stats.no_price > 0 && <Kpi label="Sin precio" value={stats.no_price} tone="warning" />}
           <Kpi label="Capital a costo" value={`$${stats.value_cost.toFixed(2)}`} hint={`venta $${stats.value_sale.toFixed(2)}`} />
-        </div>
+        </KpiStrip>
       )}
 
       {stats && stats.duplicate_groups > 0 && (
@@ -130,7 +128,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           />
         </div>
         <Select value={catFilter} onValueChange={setCatFilter}>
-          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-44" aria-label="Filtrar por categoría"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="todas">Todas las categorías</SelectItem>
             {categories.map(c => (
@@ -139,7 +137,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           </SelectContent>
         </Select>
         <Select value={stockFilter} onValueChange={setStockFilter}>
-          <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-48" aria-label="Filtrar por stock"><SelectValue /></SelectTrigger>
           <SelectContent>
             {STOCK_FILTERS.map(f => (
               <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
@@ -147,7 +145,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           </SelectContent>
         </Select>
         <Select value={sort} onValueChange={setSort}>
-          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-44" aria-label="Ordenar la tabla"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="nombre">Nombre (A-Z)</SelectItem>
             <SelectItem value="stock">Más stock primero</SelectItem>
@@ -157,6 +155,13 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           </SelectContent>
         </Select>
       </div>
+
+      {filterActive && (
+        <p className="text-[11px] text-muted-foreground">
+          Los números de arriba son de <strong>todo el catálogo</strong>; la tabla de abajo está filtrada
+          ({total} {total === 1 ? 'producto' : 'productos'}).
+        </p>
+      )}
 
       <Card>
         <CardContent className="p-0">

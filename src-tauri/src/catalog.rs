@@ -186,6 +186,16 @@ pub fn canonical_brand(raw: &str) -> String {
     raw.trim().to_string()
 }
 
+/// ¿El texto ES una marca (o su alias), sin nada más? Lo usa el asistente de carga de
+/// inventario para reconocer los encabezados de sección de la lista del local
+/// («Samsung», «Iphone», «zte»).
+pub fn is_brand_alias(text: &str) -> bool {
+    let r = rules();
+    let n = norm(text);
+    r.brand_aliases.iter().any(|(alias, _)| *alias == n)
+        || r.sub_aliases.iter().any(|(alias, _)| *alias == n)
+}
+
 /// Marca explícita al inicio de un texto ("HONOR X7" -> "Honor"), si la hay.
 pub fn explicit_brand(text: &str) -> Option<String> {
     let r = rules();
@@ -463,6 +473,26 @@ pub fn phone_model_norm(label_or_model: &str) -> String {
     n
 }
 
+/// ¿`needle` aparece dentro de `hay` como PALABRA completa?
+/// Con `contains()` a secas los modelos se cruzaban por prefijos numéricos: «a33 bateria»
+/// contenía «a3» (ficha del A3, otro teléfono) y «15» cruzaba con «redmi 15c». Falsos
+/// positivos medidos en la revisión de F25, con unidades infladas a la ficha equivocada.
+pub fn contains_word(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    for (start, _) in hay.match_indices(needle) {
+        let end = start + needle.len();
+        let before_ok = start == 0 || bytes[start - 1] == b' ';
+        let after_ok = end == bytes.len() || bytes[end] == b' ';
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// Calidad de coincidencia entre lo buscado y el teléfono de un producto.
 /// Devuelve `None` si no coinciden.
 pub fn match_quality(target_model_norm: &str, phone_model: &str) -> Option<&'static str> {
@@ -480,9 +510,10 @@ pub fn match_quality(target_model_norm: &str, phone_model: &str) -> Option<&'sta
     if pref(&pn, target_model_norm) || pref(target_model_norm, &pn) {
         return Some("prefijo");
     }
-    // parcial solo con 4+ caracteres: evita que "12" matchee medio catálogo
+    // parcial solo con 4+ caracteres y por PALABRA completa (ver `contains_word`): evita que
+    // "12" matchee medio catálogo y que "a3" cruce con "a33"
     if target_model_norm.len() >= 4
-        && (pn.contains(target_model_norm) || target_model_norm.contains(&pn))
+        && (contains_word(&pn, target_model_norm) || contains_word(target_model_norm, &pn))
     {
         return Some("parcial");
     }
@@ -678,13 +709,24 @@ pub fn normalize_fields(
 
 // ---------------------------------------------------- padrón de teléfonos
 
-/// Nombre comercial real de un teléfono: separa la LÍNEA (Galaxy / Moto / Redmi…
+/// Regla del local (2026-09-16): **el taller instala pantallas**, así que el padrón de
+/// teléfonos se arma con las categorías de pantalla: `1` = Pantalla, `18` = Táctil y
+/// `19` = Táctil Tablet (el táctil es el vidrio del mismo trabajo y el local lo vende).
+/// El resto del catálogo (baterías, flex, repuestos, accesorios) **no crea teléfonos**.
+pub const PHONE_CATEGORIES: &[i64] = &[1, 18, 19];
+
+/// La categoría "principal" del padrón (la primera del listado anterior).
+pub const PHONE_CATEGORY: i64 = PHONE_CATEGORIES[0];
+
+/// Nombre comercial real de un teléfono: separa la LÍNEA (Galaxy / Moto / Redmi / Poco…
 /// cuando es segura) del MODELO, y devuelve (line, display).
 ///   Samsung  A06           -> ("Galaxy", "Galaxy A06")
 ///   Motorola G52           -> ("Moto",   "Moto G52")
 ///   Apple    13 Mini       -> ("",       "iPhone 13 Mini")
 ///   Xiaomi   Redmi Note 11 -> ("Redmi",  "Redmi Note 11")
 ///   Tecno    Spark 20      -> ("",       "Spark 20")
+///   Xiaomi   Poco X3       -> ("Poco",   "Poco X3")   (sin «Mi» ni «Redmi» delante)
+///   Honor    X6A           -> ("Honor",  "Honor X6A") (la marca es la línea)
 pub fn real_name(brand: &str, model: &str) -> (String, String) {
     let m = model.trim();
     let mn = norm(m);
@@ -714,13 +756,40 @@ pub fn real_name(brand: &str, model: &str) -> (String, String) {
                 ("iPhone".to_string(), m.to_string())
             }
         }
+        // Honor y Realme son marcas propias (dejaron de ser submarcas de Huawei/Oppo):
+        // el nombre comercial las lleva delante, la clave no.
+        "Honor" => {
+            if mn.starts_with("honor") {
+                ("Honor".to_string(), strip_first(m))
+            } else {
+                ("Honor".to_string(), m.to_string())
+            }
+        }
+        "Realme" => {
+            if mn.starts_with("realme") {
+                ("Realme".to_string(), strip_first(m))
+            } else {
+                ("Realme".to_string(), m.to_string())
+            }
+        }
         "Xiaomi" => {
             let first = words(m).first().map(|w| norm(w)).unwrap_or_default();
-            match first.as_str() {
-                "redmi" => ("Redmi".to_string(), strip_first(m)),
-                "poco" => ("Poco".to_string(), strip_first(m)),
-                "mi" => ("Mi".to_string(), strip_first(m)),
-                _ => (String::new(), m.to_string()),
+            // «Mi Poco C40» y «Redmi Poco X3» son «Poco C40» y «Poco X3»: Poco es su propia
+            // línea (decisión del local 2026-09-16) y el «Mi»/«Redmi» que la precede es ruido.
+            let after_pre = match first.as_str() {
+                "mi" | "redmi" => words(m).into_iter().skip(1).collect::<Vec<_>>().join(" "),
+                _ => m.to_string(),
+            };
+            if first == "poco" {
+                ("Poco".to_string(), strip_first(m))
+            } else if norm(&after_pre).starts_with("poco") {
+                ("Poco".to_string(), words(&after_pre).into_iter().skip(1).collect::<Vec<_>>().join(" "))
+            } else {
+                match first.as_str() {
+                    "redmi" => ("Redmi".to_string(), strip_first(m)),
+                    "mi" => ("Mi".to_string(), strip_first(m)),
+                    _ => (String::new(), m.to_string()),
+                }
             }
         }
         _ => (String::new(), m.to_string()),
@@ -751,10 +820,12 @@ pub fn model_without_line(model: &str, line: &str) -> String {
 }
 
 /// Clave del teléfono en el PADRÓN (la misma que usa `rebuild_phones`).
-/// Apple: el "iPhone" es parte del nombre; el resto: marca + modelo sin línea.
+/// Apple: el "iPhone" es parte del nombre. Poco: la línea es la MARCA comercial del
+/// teléfono (decisión del local 2026-09-16), así «Poco X3» y «Redmi Poco X3» —que hoy
+/// dan `xiaomi|x3` y `xiaomi|poco x3`— caen en la MISMA clave. El resto: marca + modelo sin línea.
 pub fn phone_registry_key(phone: &Phone) -> String {
     let (line, display) = real_name(&phone.brand, &phone.model);
-    let model = if phone.brand == "Apple" {
+    let model = if phone.brand == "Apple" || line == "Poco" {
         display
     } else {
         model_without_line(&phone.model, &line)
@@ -812,12 +883,42 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
 
     // 1) juntar todos los teléfonos declarados por los productos
     let mut map: BTreeMap<String, (String, String, String, String, BTreeSet<String>)> = BTreeMap::new();
+    // CLAVES RECLAMADAS por filas escritas a mano: si el taller RENOMBRÓ un teléfono,
+    // sus alias (cómo estaba escrito en el inventario) reclaman la clave vieja para que
+    // el catálogo no vuelva a crear la fila con el nombre que ya se corrigió.
+    let claimed: BTreeSet<String> = {
+        let mut set = BTreeSet::new();
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(aliases,'[]'), COALESCE(brand,''), COALESCE(key,'') FROM phones WHERE source='manual'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (aliases, brand, own_key) = row?;
+            for a in parse_compat(&aliases) {
+                let phone = canonical_phone(&a, &brand);
+                let k = phone_registry_key(&phone);
+                // la clave propia de la fila no se reclama (esa fila existe)
+                if k != own_key {
+                    set.insert(k);
+                }
+            }
+        }
+        set
+    };
     let products: Vec<(i64, String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(brand,''), COALESCE(compatibility,'')
-             FROM products WHERE COALESCE(compatibility,'') NOT IN ('','[]') ORDER BY id",
+             FROM products
+             WHERE COALESCE(compatibility,'') NOT IN ('','[]')
+               AND COALESCE(category_id,0) IN (
+                   SELECT value FROM json_each(?1)
+               )
+             ORDER BY id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let cats_json = serde_json::to_string(PHONE_CATEGORIES).unwrap_or_else(|_| "[1]".to_string());
+        let rows = stmt.query_map(params![cats_json], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         rows.collect::<SqlResult<Vec<_>>>()?
     };
     let products_count = products.len() as i64;
@@ -831,8 +932,13 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
             let (line, display) = real_name(&phone.brand, &phone.model);
             // En Apple el "iPhone" ES parte del nombre del teléfono (no una línea
             // publicitaria): la clave usa el nombre completo para no duplicar
-            // "iPhone 11" con "11".
+            // "iPhone 11" con "11". En Poco pasa lo mismo desde 2026-09-16.
             let key = phone_registry_key(&phone);
+            // el taller ya corrigió ese nombre a mano → no se resucita la fila vieja
+            if claimed.contains(&key) {
+                dropped_entries += 1;
+                continue;
+            }
             let key_model = phone_registry_key(&phone).split('|').nth(1).unwrap_or("").to_string();
             // si la clave ya existe, esta entrada se está DEDUPLICANDO
             if map.contains_key(&key) {
@@ -853,9 +959,13 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
     }
 
     // 2) comparar con lo que ya hay en la tabla
-    let existing: BTreeMap<String, (i64, String, String, String)> = {
+    // `source` viaja en la tupla: una fila MANUAL (renombrada o fusionada por el taller)
+    // NO se pisa — sobrescribirle los alias borraría el vínculo con los repuestos.
+    let existing: BTreeMap<String, (i64, String, String, String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, key, COALESCE(brand,''), COALESCE(line,''), COALESCE(name,'') FROM phones",
+            "SELECT id, key, COALESCE(brand,''), COALESCE(line,''), COALESCE(name,''),
+                    COALESCE(source,'catalogo')
+             FROM phones",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -864,12 +974,13 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
         let mut out = BTreeMap::new();
         for row in rows {
-            let (id, key, brand, line, name) = row?;
-            out.insert(key, (id, brand, line, name));
+            let (id, key, brand, line, name, source) = row?;
+            out.insert(key, (id, brand, line, name, source));
         }
         out
     };
@@ -911,7 +1022,17 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
                     )?;
                 }
             }
-            Some((id, ex_brand, ex_line, ex_name)) => {
+            Some((id, ex_brand, ex_line, ex_name, ex_source)) => {
+                // fila MANUAL (renombrada o fusionada por el taller): el catálogo NO la pisa
+                // (pisarle los alias borraría su vínculo con los repuestos y la reclamación
+                // de la clave vieja). Solo se refresca el flag de revisión.
+                if ex_source == "manual" {
+                    report.unchanged += 1;
+                    if !dry_run {
+                        let _ = conn.execute("UPDATE phones SET needs_review=?1 WHERE id=?2", params![needs_review, id]);
+                    }
+                    continue;
+                }
                 if ex_brand != brand || ex_line != line || ex_name != display {
                     report.updated += 1;
                     if report.samples.len() < 12 {
@@ -1424,7 +1545,7 @@ pub fn normalize_catalog(conn: &Connection, dry_run: bool) -> SqlResult<CatalogR
         }
 
         let mut changed = false;
-        let mut note = |field: &str, before: &str, after: &str, samples: &mut Vec<CatalogSample>| {
+        let note = |field: &str, before: &str, after: &str, samples: &mut Vec<CatalogSample>| {
             if samples.len() < 14 {
                 samples.push(CatalogSample {
                     id: row.id,
@@ -1740,6 +1861,83 @@ mod tests {
         assert_eq!(real_name("Xiaomi", "Poco X6 Pro"), ("Poco".to_string(), "Poco X6 Pro".to_string()));
         assert_eq!(real_name("Tecno", "Spark 20"), ("".to_string(), "Spark 20".to_string()));
         assert_eq!(real_name("ZTE", "Blade A34"), ("".to_string(), "Blade A34".to_string()));
+        // Poco es línea propia: «Mi Poco X» y «Redmi Poco X» se muestran como «Poco X»
+        assert_eq!(real_name("Xiaomi", "Mi Poco C40"), ("Poco".to_string(), "Poco C40".to_string()));
+        assert_eq!(real_name("Xiaomi", "Redmi Poco X3"), ("Poco".to_string(), "Poco X3".to_string()));
+        assert_eq!(real_name("Xiaomi", "Poco F3"), ("Poco".to_string(), "Poco F3".to_string()));
+        // «Mi 10 Lite» sigue siendo la línea Mi (no todo lo que trae Mi es Poco)
+        assert_eq!(real_name("Xiaomi", "Mi 10 Lite"), ("Mi".to_string(), "Mi 10 Lite".to_string()));
+        assert_eq!(real_name("Xiaomi", "Redmi Note 11"), ("Redmi".to_string(), "Redmi Note 11".to_string()));
+        // Honor y Realme son marcas propias: la marca es la línea del nombre
+        assert_eq!(real_name("Honor", "X6A"), ("Honor".to_string(), "Honor X6A".to_string()));
+        assert_eq!(real_name("Honor", "Honor X6A"), ("Honor".to_string(), "Honor X6A".to_string()));
+        assert_eq!(real_name("Realme", "C35"), ("Realme".to_string(), "Realme C35".to_string()));
+        assert_eq!(real_name("Realme", "Realme C35"), ("Realme".to_string(), "Realme C35".to_string()));
+    }
+
+    /// Contención por PALABRA completa: los modelos comparten prefijos numéricos y con
+    /// `contains()` a secas se cruzaban entre sí (falsos positivos medidos en la revisión de
+    /// F25: «a3» con «a33 bateria», «15» con «redmi 15c» — unidades a la ficha equivocada).
+    #[test]
+    fn test_contencion_por_palabra_completa() {
+        assert!(contains_word("redmi 15", "15"), "el 15 es una palabra del nombre");
+        assert!(contains_word("redmi 9a umidigi", "9a"), "«9a» es palabra y el nombre sigue");
+        assert!(!contains_word("redmi 15c", "15"), "el 15 no puede cruzar con el 15C");
+        assert!(!contains_word("a33 bateria", "a3"), "el a3 no puede cruzar con el a33");
+        assert!(!contains_word("pantalla samsung a30", "a3"));
+        assert!(contains_word("spark 10 pro", "spark 10"), "«spark 10» está al inicio");
+        assert!(!contains_word("", "a30"));
+        assert!(!contains_word("a30", ""));
+
+        // y en la calidad de coincidencia: el A3 no matchea el A33 ni el 15 el 15C
+        assert_eq!(match_quality("a33 bateria", "A3"), None, "otro teléfono");
+        assert_eq!(match_quality("a33", "A33"), Some("exacta"));
+        assert_eq!(match_quality("redmi 15", "REDMI 15C"), None);
+        assert_eq!(match_quality("spark 10", "SPARK 10 PRO"), Some("prefijo"));
+        assert_eq!(match_quality("redmi 9a umidigi", "9A"), Some("parcial"));
+    }
+
+    /// Reglas aprobadas por el local (2026-09-16): Poco es línea propia (la clave conserva
+    /// «poco») y Honor/Realme mandan sobre la marca madre.
+    #[test]
+    fn test_reglas_poco_honor_realme() {
+        // --- POCO: «Poco X3» y «Redmi Poco X3» son el MISMO teléfono ---
+        let poco_x3 = phone_registry_key(&canonical_phone("Poco X3", "Xiaomi"));
+        let redmi_poco_x3 = phone_registry_key(&canonical_phone("Redmi Poco X3", "Xiaomi"));
+        let mi_poco_x3 = phone_registry_key(&canonical_phone("Mi Poco X3", "Xiaomi"));
+        assert_eq!(poco_x3, "xiaomi|poco x3", "la clave conserva la línea Poco");
+        assert_eq!(poco_x3, redmi_poco_x3, "«Poco X3» y «Redmi Poco X3» son el mismo teléfono");
+        assert_eq!(poco_x3, mi_poco_x3, "«Mi Poco X3» también");
+        // y NO se mezclan con el Redmi X3 ni con el Poco X3 Pro
+        assert_ne!(poco_x3, phone_registry_key(&canonical_phone("Redmi X3", "Xiaomi")));
+        assert_ne!(poco_x3, phone_registry_key(&canonical_phone("Poco X3 Pro", "Xiaomi")));
+
+        // --- HONOR: la familia manda sobre la marca escrita (path real del padrón) ---
+        let honor_full = compat_phones(r#"["Huawei Honor X6A"]"#, "Huawei");
+        assert_eq!(honor_full.len(), 1);
+        assert_eq!(honor_full[0].brand, "Honor", "la marca es Honor, no Huawei");
+        let honor_solo = compat_phones(r#"["Honor X6A"]"#, "Honor");
+        assert_eq!(
+            phone_registry_key(&honor_full[0]),
+            phone_registry_key(&honor_solo[0]),
+            "«Huawei Honor X6A» y «Honor X6A» son el mismo teléfono"
+        );
+        assert_eq!(phone_registry_key(&honor_solo[0]), "honor|x6a");
+        assert_eq!(real_name(&honor_solo[0].brand, &honor_solo[0].model).1, "Honor X6A", "nombre comercial");
+
+        // --- REALME: ídem (dejó de ser submarca de Oppo) ---
+        let realme_full = compat_phones(r#"["Oppo Realme C35"]"#, "Oppo");
+        assert_eq!(realme_full[0].brand, "Realme");
+        let realme_solo = compat_phones(r#"["Realme C35"]"#, "Realme");
+        assert_eq!(phone_registry_key(&realme_full[0]), phone_registry_key(&realme_solo[0]));
+        assert_eq!(phone_registry_key(&realme_solo[0]), "realme|c35");
+
+        // el camino completo del padrón (compatibilidad del producto) aplica las mismas reglas
+        let phones = compat_phones(r#"["Huawei Honor X6A","Oppo Realme C35","Redmi Poco X3","Poco X3"]"#, "Blu");
+        let keys: Vec<String> = phones.iter().map(phone_registry_key).collect();
+        assert_eq!(keys.iter().filter(|k| *k == "honor|x6a").count(), 1);
+        assert_eq!(keys.iter().filter(|k| *k == "realme|c35").count(), 1);
+        assert_eq!(keys.iter().filter(|k| *k == "xiaomi|poco x3").count(), 2, "las dos formas del Poco X3: {keys:?}");
     }
 
     #[test]
@@ -1765,11 +1963,13 @@ mod tests {
                 key TEXT NOT NULL UNIQUE, aliases TEXT NOT NULL DEFAULT '[]',
                 source TEXT NOT NULL DEFAULT 'catalogo', needs_review INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT, updated_at TEXT);
-             -- el MISMO teléfono escrito de 3 formas distintas
-             INSERT INTO products (id, name, brand, model, compatibility) VALUES
-                (1, 'Pantalla Redmi Note 11', 'Xiaomi', 'Redmi Note 11', '[\"Red Note 11\",\"Redmi Note 11\",\"Note 11\"]'),
-                (2, 'Pantalla Samsung A06 4G', 'Samsung', 'A06 4G', '[\"Samsung A06 4G\",\"Galaxy A06 4G\"]'),
-                (3, 'Pantalla Tecno Spark 20', 'Tecno', 'Spark 20', '[\"Tecno Spark 20\"]');",
+             -- el MISMO teléfono escrito de 3 formas distintas (categoría Pantalla: el padrón
+             -- se arma solo con esa categoría, regla del local)
+             INSERT INTO products (id, name, brand, model, compatibility, category_id) VALUES
+                (1, 'Pantalla Redmi Note 11', 'Xiaomi', 'Redmi Note 11', '[\"Red Note 11\",\"Redmi Note 11\",\"Note 11\"]', 1),
+                (2, 'Pantalla Samsung A06 4G', 'Samsung', 'A06 4G', '[\"Samsung A06 4G\",\"Galaxy A06 4G\"]', 1),
+                (3, 'Pantalla Tecno Spark 20', 'Tecno', 'Spark 20', '[\"Tecno Spark 20\"]', 1),
+                (4, 'Batería Samsung A06', 'Samsung', 'A06', '[\"Samsung A06\"]', 4);",
         )
         .unwrap();
 

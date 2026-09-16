@@ -111,6 +111,129 @@ export interface MovementPage {
   total: number;
 }
 
+// --- Padrón de teléfonos (F3: pestaña Modelos) ---
+
+/** Índice de marcas del padrón (mismo patrón que el de productos). */
+export interface PhoneBrandRow {
+  brand: string;
+  phones: number;
+  with_products: number;
+  with_stock: number;
+  /** teléfonos sin familia comercial: hay que revisarlos (renombrar) */
+  needs_review: number;
+}
+
+/** Un teléfono del padrón con sus repuestos y stock reales. */
+export interface PhoneListRow {
+  id: number;
+  brand: string;
+  line: string;
+  model: string;
+  name: string;
+  /** clave interna del padrón (marca + modelo sin línea, normalizados); no se muestra */
+  key: string;
+  needs_review: boolean;
+  aliases: string[];
+  products: number;
+  stock: number;
+  categories: string;
+}
+
+/** Lo que pasaría al renombrar un teléfono (vista previa: no escribe nada). */
+export interface RenamePreview {
+  name: string;
+  brand: string;
+  line: string;
+  model: string;
+  key: string;
+  /** nombre del teléfono que YA tiene esa clave (para ofrecer fusionarlos) */
+  clash: string | null;
+  products: number;
+  stock: number;
+}
+
+export interface PhonePage {
+  items: PhoneListRow[];
+  total: number;
+}
+
+/** Repuestos de un teléfono agrupados por categoría (Pantalla primero). */
+export interface PhoneCategoryBlock {
+  category_id: number;
+  category: string;
+  items: Product[];
+}
+
+export interface PhoneDetail {
+  phone: PhoneListRow;
+  blocks: PhoneCategoryBlock[];
+}
+
+/** Sentido del orden por columna: sin orden → asc → desc (3 estados). */
+export type SortDir = 'asc' | 'desc';
+
+// --- F25: asistente para cargar el inventario físico del local ---
+
+/** Candidato del catálogo para una línea de la lista pegada. */
+export interface LoadCandidate {
+  product_id: number;
+  product_name: string;
+  category: string;
+  stock: number;
+  price_sale: number;
+  /** exacta | prefijo | parcial */
+  quality: string;
+}
+
+/** Una línea de la lista ya cruzada con el catálogo (editable en la vista previa). */
+export interface LoadRow {
+  raw: string;
+  brand: string;
+  model: string;
+  qty: number;
+  product_id: number | null;
+  product_name: string;
+  stock_now: number;
+  candidates: LoadCandidate[];
+  /** otras líneas de la lista que caen en la misma ficha (sus unidades se suman) */
+  shared: number;
+  /** unidades que recibe la ficha sumando todas sus líneas */
+  sum_qty: number;
+  issue: string | null;
+}
+
+export interface LoadPreview {
+  rows: LoadRow[];
+  lines: number;
+  matched: number;
+  unmatched: number;
+  /** unidades que dice la lista */
+  units: number;
+  /** unidades que se van a cargar (sumando las líneas que comparten ficha) */
+  applied_units: number;
+  /** fichas distintas que se van a tocar */
+  applied_products: number;
+  /** fichas que quedan en 0 si se carga con «la lista es todo» */
+  zero_count: number;
+  zero_units: number;
+  brands: number;
+  skipped: number;
+}
+
+export interface LoadReport {
+  updated: number;
+  zeroed: number;
+  movements: number;
+  units: number;
+  /** LÍNEAS que no se cargaron (otra categoría o ficha inexistente) */
+  skipped: number;
+  /** líneas de la lista que quedaron sin pantalla asignada (no se cargaron) */
+  unassigned: number;
+  /** unidades que se quedaron sin cargar por eso */
+  unassigned_units: number;
+  backup: string;
+}
+
 /** Un producto dentro de un grupo de duplicados. */
 export interface DuplicateItem {
   id: number;

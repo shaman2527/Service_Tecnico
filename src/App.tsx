@@ -4,6 +4,7 @@ import {
   PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
 } from 'lucide-react';import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
+import { Toaster } from './components/ui/sonner';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import UpdateDialog from './components/UpdateDialog';
 import { api } from './db';
@@ -304,6 +305,10 @@ function App() {
         open={showUpdate}
         onOpenChange={o => setShowUpdate(o)}
       />
+
+      {/* avisos de la app (guardados, fusiones, errores de la impresora…): sin este
+          componente los toast NO se ven en ningún lado */}
+      <Toaster richColors position="top-right" />
     </div>
   );
 }

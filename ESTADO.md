@@ -205,3 +205,200 @@ impresora térmica y **actualizaciones automáticas con rollback**.
 - Suite Rust **81/81**; `npm run build` ✓. App de dev corriendo sobre la copia de prueba.
 - **Pendiente**: F3 tabla de modelos con filtros + orden de 3 estados · renombrar los 217 · asistente de cargar inventario ·
   regla “solo Pantalla”. Sin release ni push (modo dev).
+
+## 8. F3 — Pestaña «Modelos» del padrón (2026-09-16, MODO DEV)
+
+**Hecho:** pestaña **Modelos** en Inventario (tabla del padrón `phones`), **marca como columna y como filtro** (Select con
+conteos por marca), **orden de 3 estados** (`sin orden → ascendente → descendente`) en Teléfono/Marca/Repuestos/Stock/Estado,
+búsqueda por tokens, vistas `Todos / Con repuestos / Con stock / Por revisar` + botón «Ver los 217 por revisar»,
+paginación server-side, KPIs (Teléfonos 1154 · Con repuestos · Con stock · Por revisar 217) y **ficha de solo lectura**
+con los repuestos **por categoría (Pantalla primero)**. La pestaña de consulta se renombró «Por modelo» →
+**«Repuesto por modelo»** para no confundirla con el padrón (y el Centro de Ayuda se actualizó).
+
+- **Backend:** `get_phones` gana `only_review` y el sentido (`dir`) ahora manda en **todas** las columnas con el nombre
+  como desempate ascendente (antes solo 3 columnas y con un `reverse()` que invertía el desempate); `PhoneBrandRow`
+  gana `needs_review`. **Sin comandos de escritura nuevos** (renombrar/fusionar = feature 24).
+- **Archivos:** `src/components/inventory/ModelsTab.tsx`, `PhoneDetailDialog.tsx`, `Kpi.tsx`, `src/lib/phoneOrder.ts`,
+  `tools/verify_models_tab.mjs`, `tools/progress/specs/F3-modelos-tabla.md`; tocados `Inventory.tsx`, `ProductsTab.tsx`
+  (KPIs compartidos), `Help.tsx`, `types.ts`, `db.ts`, `phones.rs`, `commands.rs`.
+- **Verificación:** suite Rust **82/82** (test nuevo de orden de 3 estados + filtro por revisar); `npm run build` ✓ y
+  `npm run lint` **0 errores** (sin warnings nuevos); **CDP en vivo 23/23** (`tools/verify_models_tab.mjs` sobre
+  `backup/registro_pre_normalizacion_20260915.db`); **contraste SQL↔comandos 12/12** (1154/teléfonos, 217 por revisar,
+  26 marcas, Samsung 261, órdenes asc/desc de nombre y marca); gates: `harness_security` PASS, `harness_truth` PASS,
+  `npx tsx tools/cli/index.ts parallel` (security+review+build) ✅ y revisión adversarial con subagente.
+- **Nota de herramienta:** `harness_*` necesitaba `tools/config/` como DIRECTORIO (con la config en `tools/config.ts`
+  respondía «No Harness ENGINEERING copy found»); se agregó `tools/config/harness.json`. `harness_review` sigue sin poder
+  correr (espera `tools/reviewer/parallel-review.ts`, que esta copia v2.0 no trae): se reemplazó por el CLI del proyecto
+  + subagente revisor.
+
+### Revisión adversarial de F3 (subagente independiente) — 1 bloqueante + 10 hallazgos, todos corregidos
+
+| # | Sev. | Qué | Fix |
+|---|---|---|---|
+| 1 | **BLOQUEANTE** | `get_phone_detail` sacaba las **categorías** de la clave canónica y los **repuestos/stock** de la unión con alias: tras **renombrar** (clave nueva + alias del inventario, justo el flujo de la feature 24) la ficha salía **vacía** diciendo «0 repuestos» y «N u. en stock» a la vez. | `merged_stats` reescrito (unión clave+alias = única fuente de repuestos, stock por ID y categorías); la ficha usa `by_cat`; `get_phone_brands` también. **Test de regresión `test_phone_detail_and_brands_survive_rename`** (83/83). |
+| 2 | MAYOR | `SELECT p.*, c.name` + `r.get(14)`: `search_text` está en cid 14 → `category_name` leía basura (visible en la columna «Categoría» de Productos). | Corregido en `phones.rs` con **lista explícita de columnas**; los 6 sitios de `db.rs` quedan como **feature 27** (bug pre-existente, verificado en vivo: `get_products` devuelve `category_name` = texto de búsqueda). |
+| 3-6, 9 | MENOR | Copy del estado vacío, reset de página en el efecto (consulta con offset viejo), `page` sin acotar («Mostrando 351–300 de 300»), `.catch` silencioso (un fallo de IPC se veía como «sin resultados»), botón de icono sin `aria-label`. | Copy condicionada + singular/plural; reset de página en los handlers; clamp a la última página real; `db.ts` ya no se traga el error dentro de Tauri y la pestaña muestra **Alert + Reintentar**; `aria-label`. |
+| 7, 10, 11 | MENOR | Paginación que corta en memoria (aceptado, 1154 filas); `limit`/`offset` sin validar; roles (la pestaña es solo lectura y el backend del proyecto no tiene gates de rol). | `limit.clamp(0,1000)` + `saturating_add`; documentado. **Para F4:** `rename_phone`/`add_phone`/`merge_phones` ya están registrados y cualquier rol puede invocarlos → gatear en UI **y** backend. |
+| 8 | MENOR | `to_lowercase()` por comparación y sin quitar acentos. | Claves de orden precalculadas con `catalog::norm` (Ñ/É ordenan con N/E). |
+
+Además el revisor detectó que los tests usaban **nombres de DB fijos** (dos `cargo test` en paralelo se pisaban y daban
+fallos falsos) → ahora usan `std::env::temp_dir()` + `std::process::id()`.
+
+**Extra de esta sesión (fuera del alcance de F3, ya aplicado):** `vite.config.ts` ignora los temporales de los editores
+(`**/.*.tmpdir/**`, `**/*.tmp`) — sin eso, editar cualquier `.tsx` con la app corriendo mataba el dev server y con él
+`tauri dev` (`EBUSY`). Y `tools/cdp_driver.mjs` envía `awaitPromise` (sin él las evaluaciones async devolvían `{}`).
+
+**Pendiente (en este orden):**
+1. Corregir a mano los teléfonos que siguen «por revisar» (**142**) desde Inventario → Modelos → «Corregir».
+2. Cuando esté conforme con el módulo de inventario: levantar el MODO DEV (release + push) — lo decide el usuario.
+3. Pendientes de tienda que no son de código: guardar copia de la llave privada del updater, probar la impresora física y
+   cambiar el PIN 1234 (ver §3).
+
+## 11. F25 + F26 — cargar el inventario desde la app y regla «solo Pantalla» (2026-09-16, MODO DEV)
+
+### F25 — Asistente de carga de inventario
+Para cuando se cuenta la mercancía del mostrador: **Inventario → Ajustes → «Cargar la lista del local»**.
+
+1. **Pegar o abrir** la lista tal como está escrita (una marca por línea y debajo sus modelos:
+   `A30/A50 (2)` = 2 unidades de la pantalla que sirve para los dos).
+2. La app **cruza** cada línea contra el catálogo — **solo pantallas**, con **gate de marca** y calidad
+   exacta/prefijo/parecida, hasta 6 alternativas por línea — y muestra una **vista previa editable**: cantidad fila por
+   fila y el producto que la recibe. Lo que no encuentra **lo avisa** (nunca inventa una ficha).
+3. Al aplicar: **respaldo** de la base (`backup/registro_pre_carga_<fecha>.db`), stock por producto y **movimiento**
+   «Carga de inventario»; la opción (marcada por defecto) deja en **0** las pantallas que no están en la lista, porque la
+   lista es todo lo que hay. **No toca precios ni compatibilidad** y **exige el PIN del dueño**.
+4. Módulo `src-tauri/src/loadlist.rs` (parseo + cruce + aplicar), comandos `preview_inventory_load` /
+   `apply_inventory_load`, UI `src/components/inventory/LoadInventoryDialog.tsx` (3 pasos, con abrir `.txt`).
+
+**Endurecido en DOS vueltas de revisión adversarial (misma jornada):**
+
+Primera vuelta:
+
+- **Las líneas que caen en la MISMA ficha SUMAN** sus unidades (`13C (6)` + `Redmi 13C (12)` → 18): antes mandaba la
+  primera y **se perdían unidades reales**. La vista previa avisa «otra línea comparte pantalla» y el botón dice
+  **fichas** (no líneas) y unidades reales.
+- **La categoría NO la elige quien llama**: el barrido usa siempre `catalog::PHONE_CATEGORIES` (Pantalla/Táctil/Táctil
+  Tablet). Antes un invoke a mano con `categoryId=48` podía **vaciar Batería/Flex** entera.
+- **`c/m` (con marco) no es modelo** y la conectividad (`4G`, `5G`…) no se cruza sola. El encabezado de marca exige que
+  el texto **sea** una marca conocida («Note» ya no re-marca la sección).
+- **Un modelo solo de números vale si trae unidades**: `13 (25)` = 25 iPhone 13; sin número sigue siendo basura.
+- **Cantidad ilegible** («A30 (dos)») → la fila se avisa y **no se aplica sola**.
+- **El barrido se muestra ANTES de aplicar** (fichas y unidades que quedarían en 0); un **stock negativo** que vuelve a 0
+  se registra como **entrada**.
+- **El resumen se VE**: al aplicar, la pestaña ya **no** salta a Productos (el diálogo se desmontaba y el paso 3 nunca se
+  veía). `PricesTab` recibe `onRefresh` para refrescar sin desmontar el asistente.
+
+Segunda vuelta (hallazgos con **evidencia medida** sobre `tools/inventario_real.txt` — 261 líneas / 713 unidades — y una
+copia consistente de la base):
+
+- **GATE DEL BARRIDO (lo más grave):** si la lista es TODO el inventario y alguna línea con unidades quedó **sin pantalla
+  asignada**, la carga **no se hace** y el error dice qué hacer (asignarla, corregir el nombre en Productos o desmarcar el
+  barrido). Medido antes: de las 87 fichas que el barrido dejaba en 0, **79 (152 unidades) estaban escritas en la lista**
+  —solo que con un nombre que no cruzó— y quedaban movimientos de «salida» de mercancía que nunca salió.
+- **keep_ids:** el barrido **nunca toca** las fichas que la vista previa ya tenía asignadas, así cambiarle el producto a una
+  línea (o desmarcarla) no deja en 0 una mercancía que sí está.
+- **Marca canónica en el gate:** la marca del producto se canonicaliza igual que la de la sección (`Redmi` → `Xiaomi`).
+  Comparar la marca cruda dejaba **fuera del cruce 57 fichas «Redmi» (119 unidades)**; una ficha **sin marca** sigue siendo
+  candidata.
+- **Contención por PALABRA completa** (`catalog::contains_word`): «a3» ya no cruza con «a33 bateria» ni «15» con
+  «redmi 15c» — antes se inflaban unidades en la ficha de OTRO teléfono (el A33 cargaba una pantalla del A3).
+- **El texto completo de la línea es objetivo del cruce:** fichas que se llaman igual que la línea («A17 c/m 4G/5G»)
+  quedaban sin candidato y el barrido se las llevaba a 0.
+- **Respaldo honesto de verdad:** se hace con **`VACUUM INTO`** (foto completa que incluye el `-wal`); si no se puede, cae a
+  checkpoint + copia y **aborta si el checkpoint queda ocupado** (antes `execute_batch` descartaba la fila `busy` y el
+  respaldo podía quedar viejo sin aviso).
+- **Cantidad absurda** acotada YA en el parseo (la vista previa, el botón y el reporte dicen el mismo número) y la línea
+  queda **avisada** para que la corrija el operario.
+- **El reporte dice la verdad:** `unassigned`/`unassigned_units` (líneas y unidades que NO se cargaron) se muestran en el
+  paso 3, `skipped` cuenta **líneas** (no fichas), y la tira de la vista previa avisa «N líneas sin pantalla (M u. que NO
+  se cargan)».
+- **Resultado medido sobre la lista real del local** (misma base y misma lista, antes → después): líneas cruzadas
+  **249 → 260**, líneas sin pantalla **12 → 1** (queda «6 c/m Accesorios», que en el catálogo se llama «6 c/m Acasonor»:
+  un error de tipeo del catálogo), unidades que se aplican **682 → 712** de 713, fichas que el barrido dejaría en 0
+  **87 → 47**. Es decir: **30 unidades reales que se perdían y 40 fichas (93 unidades) que se vaciaban de más**.
+- **Limitación conocida (feature 28, pendiente):** una línea SIN ningún candidato no se puede asignar a mano desde el
+  asistente (no hay selector): hay que corregir el nombre en Productos o desmarcar el barrido. El reporte la informa.
+
+### F26 — regla «solo Pantalla»
+- `catalog::PHONE_CATEGORIES = [1 Pantalla, 18 Táctil, 19 Táctil Tablet]` es la regla del local: el **padrón**
+  (`rebuild_phones`) y sus **números** (`phones::phone_index`) se arman **solo con esas categorías**.
+- La pestaña **Productos** abre **filtrada en Pantalla** (se busca la categoría por nombre, no por id), el filtro se puede
+  quitar para ver el resto del catálogo, y un aviso aclara que **los KPI de arriba son de todo el catálogo**.
+- Resultado en la copia de trabajo: padrón **1134 → 1079** teléfonos y «por revisar» **161 → 142** (25 marcas), con los
+  **1083 productos y 6 unidades intactos** (48 fichas quedan fuera del padrón por no ser pantallas). Respaldo:
+  `backup/pre_f26_solo_pantalla_20260916.db`. **Ojo:** con solo `1` (primera versión) se perdían 55 teléfonos que solo
+  tenían repuestos de Táctil/Táctil Tablet — de ahí el conjunto de tres categorías.
+
+### Verificación
+- `cargo test` **107/107** (12 de F25: parseo con `c/m`/numéricos/marca estricta, tope de cantidad, cruce con gate de
+  marca, suma de líneas que comparten ficha, aviso del barrido con el faltante, aplicar con
+  respaldo/movimientos/idempotencia, suma de repetidas e inválidas, **gate del barrido**, lista vacía, `keep_ids` y marca
+  canónica sin falsos positivos) + hook manual `test_manual_preview_real_list` para medir la lista real sobre una copia.
+- **CDP en vivo** `tools/verify_inventory_load.mjs` **20/20**: el Inventario abre en «Pantalla» con el aviso de KPI; el
+  asistente está en Ajustes; el paso 1 acepta la lista pegada; el cruce muestra 3 líneas / 2 cruzadas / 1 sin producto
+  **con su aviso**; cantidades editables y con etiqueta accesible; **avisa las pantallas que quedarían en 0** y las
+  **unidades que NO se cargan**; el **barrido no deja en 0 mercancía que la lista menciona** (pide resolver la línea);
+  cerrar sin aplicar no toca el stock; y al cargar **se ve el paso 3** (resumen + respaldo) **sin saltar de pestaña**.
+- Regresión: `tools/verify_models_tab.mjs` **23/23** (con 1079/142) y `tools/verify_phones_edit.mjs` (**dueño 9/9**,
+  **cajera 6/6** — este último exige app arrancada limpia: el gate del backend queda abierto mientras vive el proceso).
+- `harness_security` PASS · `harness_truth` PASS · `tools/cli parallel` ✅ · spec:
+  `tools/progress/specs/F25-F26-carga-y-solo-pantalla.md` · **feature 28 abierta** (asignar a mano una pantalla a una línea
+  sin candidatos).
+
+## 10. F24 — renombrar y fusionar la lista de teléfonos (2026-09-16, MODO DEV)
+
+Ya se puede **corregir la lista maestra desde la app** (Inventario → Modelos, solo el dueño):
+
+- **Reglas canónicas aplicadas** (decisión del usuario): «**Poco**» es línea propia → el nombre es «Poco X3» (sin «Mi» ni
+  «Redmi» delante) y la **clave conserva `poco`**, así que «Poco X3» y «Redmi Poco X3» son el MISMO teléfono;
+  «**Honor**» y «**Realme**» mandan sobre la marca madre («Huawei Honor X6A» → «Honor X6A», «Oppo Realme C35» → «Realme C35»).
+- **Resultado en la copia de trabajo:** **1154 → 1135** teléfonos y **217 → 162** «por revisar» (tras fusionar «8P» con
+  «Spark 8P» desde la app quedó en **1134 / 161**). Cero productos, stock o precios tocados. Respaldo previo en
+  `backup/pre_f24_reglas_20260916.db`.
+- **UI (solo dueño):** «**Corregir**» (marca + línea + modelo con **vista previa** del nombre, aviso si ya existe otro
+  teléfono con ese nombre y oferta de fusionar, mostrando los repuestos que conserva), «**juntar**» (fusiona dos fichas del
+  mismo teléfono: la que abrís se queda y hereda los alias) y «**Agregar teléfono**».
+- **Backend:** `rename_phone` ahora calcula la clave con la MISMA función que el padrón (antes dejaba el nombre viejo
+  duplicado en la próxima reconstrucción); `add_phone` avisa si ya existe; **comando nuevo `preview_rename_phone`** (solo
+  lectura) y **`can_edit_phones`**; el catálogo **no resucita** las claves reclamadas por los alias de las filas escritas a
+  mano (renombrar no deja rastro del nombre viejo); `get_phone_models` (lista del formulario de servicio) lee el **padrón**,
+  así el nombre corregido es el que se ve al registrar un servicio, y la búsqueda de repuestos del servicio **resuelve los
+  alias** (renombrar no rompe la pantalla compatible).
+- **Gate de escritura real:** el PIN del dueño desbloquea la sesión (`owner_unlocked`); `rename_phone`/`add_phone`/`merge_phones`
+  exigen esa sesión. Verificado en vivo con una sesión de cajera: los botones no aparecen **y** el backend rechaza el
+  `invoke` con «Solo el dueño puede cambiar la lista de modelos…».
+- **Verificación:** `cargo test` **89/89** (tests nuevos de reglas Poco/Honor/Realme, vista previa, renombrar sin duplicado y
+  gate de dueño) · build ✓ · lint 0 errores · **CDP 23/23** (F3) + **9/9** (dueño) + **6/6** (cajera) + escrituras reales
+  (fusión/alta/renombrado) · `harness_security` y `harness_truth` PASS · CLI parallel ✅.
+- Spec y scripts: `tools/progress/specs/F24-renombrar-fusionar.md`, `tools/verify_phones_edit.mjs`,
+  `tools/verify_phones_write.mjs`.
+
+### Revisión adversarial de F24 (subagente independiente) — 1 bloqueante + 2 mayores + 7 menores, corregidos
+
+| # | Sev. | Qué | Fix |
+|---|---|---|---|
+| 1 | **BLOQUEANTE** | Si el renombrado **cambia la marca**, la clave vieja no quedaba reclamada (los alias se canonicalizan con la marca NUEVA) → el siguiente rebuild **recreaba la ficha vieja** y la renombrada quedaba sin repuestos (reproducido por el revisor: `creados 1`). | `rename_phone` guarda el **nombre y marca+modelo VIEJOS como alias** + test `test_rename_con_cambio_de_marca_no_recrea_la_ficha_vieja`. |
+| 2 | MAYOR | El rebuild **pisaba** las filas `source='manual'` (brand/line/model/name/**aliases**), borrando el vínculo con los repuestos. | `existing` trae `source` y el rebuild omite las manuales + test `test_rebuild_no_pisa_las_filas_manuales`. |
+| 3 | MAYOR | `rename_phone`/`merge_phones` no validaban que las filas existieran (el merge podía borrar una ficha sin guardar sus alias). | Error claro («ya no está en la lista…») + test `test_rename_y_merge_validan_que_existan`. |
+| 4-10 | MENOR | Vista previa con choque mal etiquetada; `owner_can_edit` **fail-open**; `can_edit_phones` sin uso en la UI; `get_phone_models` escondía las altas manuales; **los toast no se veían** (no había `<Toaster />` montado — defecto global); icono/aria del botón de fusionar; comentario doc partido. | Cada uno corregido (ahora la UI consulta `can_edit_phones`, el gate es fail-closed, las altas manuales salen en el selector —buscando también por marca—, `App.tsx` monta `<Toaster richColors />`, icono `Merge` + `aria-label`). |
+
+**Corregido además antes de la revisión (encontrado al comprobar idempotencia):** fusionar dos fichas del CATÁLOGO no se
+sostenía (la sobreviviente quedaba como `catalogo`, no reclamaba la clave vieja y el rebuild recreaba el teléfono juntado);
+`merge_phones` ahora marca la que queda como `manual` → rebuild en seco **creados 0 · sin cambios 1134**.
+**Estado final:** `cargo test` **93/93** · build ✓ · lint 0 errores · CDP 23/23 + 9/9 + 6/6 · security/truth PASS · CLI parallel ✅.
+
+## 9. F27 — columna «Categoría» del inventario (2026-09-16, MODO DEV)
+
+Bug **pre-existente** (detectado por la revisión adversarial de F3): `products` tiene 15 columnas físicas y
+`search_text` quedó en **cid 14** por un `ALTER TABLE`; los 6 `SELECT p.*, c.name as category_name` de `db.rs`
+mapeaban `category_name: r.get(14)` → leían el texto de búsqueda. La columna **«Categoría»** de
+Inventario → Productos mostraba «pantalla infinix hot 30i go 2023 …».
+
+- **Fix:** constante **`PRODUCT_COLS`** (lista explícita; `0..13` producto y **14 = `c.name`**) aplicada en
+  `get_products_page`, `find_compatible_products`, `get_products`, `get_low_stock_products`, `get_reorder_suggestions`
+  y `suggest_products`. Cero `SELECT p.*` en el backend. Test nuevo `test_product_category_name_is_real_category`
+  (recorre los 6 comandos y compara contra la tabla `categories`).
+- **Verificado:** `cargo test` **85/85**, build ✓, lint 0 errores; en vivo los 4 comandos devuelven «Pantalla» y la
+  **columna de la UI ya dice «Pantalla»** (CDP); sin regresión en Modelos (23/23) ni en el contraste SQL (12/12);
+  KPIs iguales a SQL (1083 SKU · 1 con stock · 6 u. · 26 marcas); security/truth PASS y CLI parallel ✅.
+- Spec: `tools/progress/specs/F27-category-name.md`.

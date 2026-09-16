@@ -482,8 +482,146 @@ Antes de hacer commit:
   El texto escrito se ve siempre (`query` manda mientras el campo tiene foco, `text-foreground` forzado) y si el modelo no
   está en el padrón avisa `(no está en la lista — se guarda tal cual)`.
 - **Refresco automático**: `refreshKey` en `Inventory.tsx` → al guardar/editar/eliminar producto, fusionar duplicados o
-  aplicar precios/nombres, las pestañas **Productos / Por modelo / Movimientos** vuelven a consultar solas
+  aplicar precios/nombres, las pestañas **Productos / Modelos / Por modelo / Movimientos** vuelven a consultar solas
   (antes había que refrescar la app para ver la carga).
+
+### Pestaña «Modelos» — padrón de teléfonos con marca y orden de 3 estados (F3, 2026-09-15 noche)
+- **Dónde:** `src/components/inventory/ModelsTab.tsx` (tabla) + `PhoneDetailDialog.tsx` (ficha) + `Kpi.tsx` (franja
+  compartida con Productos) + **`src/lib/phoneOrder.ts`** (lógica PURA del orden). Pestañas del Inventario ahora:
+  `Productos | Modelos | Repuesto por modelo | Movimientos | Ajustes` (la de consulta se renombró «Por modelo» →
+  **«Repuesto por modelo»** para no confundirla con el padrón; el valor de la pestaña sigue siendo `modelo`).
+- **Orden de 3 estados (convención del proyecto):** `sin orden → ascendente → descendente → sin orden`, en un solo sitio
+  reutilizable (`nextOrder`, `orderParams`, `headerState` en `src/lib/phoneOrder.ts`). El encabezado es un **botón dentro
+  del `<th>`** y el `<th>` lleva `aria-sort` (`ascending|descending|none`); iconos `ChevronsUpDown/ChevronUp/ChevronDown`.
+  Ordena **Teléfono, Marca, Repuestos, Stock y Estado** (el Perfil del técnico ya usaba el mismo patrón).
+- **Backend:** `get_phones(brand, search, onlyWithProducts, onlyStock, onlyReview, sort, dir, limit, offset)` —
+  `dir` manda sobre la clave primaria de **todas** las columnas (`nombre`, `marca`, `repuestos`, `stock`, `revisar`) con el
+  nombre como desempate ascendente (antes solo 3 columnas lo respetaban, con un `reverse()` que invertía el desempate).
+  `PhoneBrandRow` ahora trae `needs_review` para el KPI/índice de marcas. **Ningún comando de escritura**: renombrar,
+  agregar y fusionar quedan para la feature 24.
+- **Filtros y KPIs:** búsqueda por tokens (marca/nombre/modelo/alias), Select de **marca** con conteos
+  (`Samsung (261) · N por revisar`), vistas `Todos / Con repuestos / Con stock / Por revisar` y botón directo
+  «Ver los N por revisar» (217 en la copia de trabajo). KPIs: Teléfonos · Con repuestos · Con stock · Por revisar.
+- **Ficha (solo lectura):** `get_phone_detail` agrupado por categoría (**Pantalla primero**), con stock y precio, alias
+  («también escrito: …») y aviso cuando el teléfono está **por revisar** o no tiene repuestos.
+- **Verificación en vivo (CDP):** `node tools/verify_models_tab.mjs` (23 comprobaciones: KPIs, filtro/columna de marca,
+  los 3 estados con `aria-sort`, vista «Por revisar» = 217, paginación, ficha por categoría y que el padrón no cambie).
+  Requiere la app con `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` y `REGISTRO_DB` apuntando a la
+  copia de trabajo. Contraste SQL↔comandos (12/12) verificado contra `backup/registro_pre_normalizacion_20260915.db`
+  (1154 teléfonos · 217 por revisar · 26 marcas · Samsung 261).
+- **Revisión adversarial (subagente) — 1 bloqueante y 10 hallazgos, todos corregidos:**
+  - **BLOQUEANTE (corregido):** `get_phone_detail` sacaba las **categorías** de la clave canónica y los
+    **repuestos/stock** de la unión con alias → tras **renombrar** un teléfono (clave nueva + alias del inventario, el
+    flujo exacto de la feature 24) la ficha salía **vacía** contradiciendo su propio stock. Ahora `merged_stats` es la
+    única fuente: unión (clave + alias) → repuestos por ID distinto, stock sumado por ID y categorías. Test de regresión
+    `test_phone_detail_and_brands_survive_rename`; `get_phone_brands` usa el mismo cálculo.
+  - **MAYOR (corregido en este archivo):** `SELECT p.*, c.name` + `r.get(14)` leía `search_text` (cid 14) en lugar del
+    nombre de la categoría → la ficha ahora usa **lista explícita de columnas**. Los 6 SELECT `p.*` de `db.rs` tienen el
+    mismo bug (columna «Categoría» de Productos muestra el texto de búsqueda): **feature 27**, pendiente.
+  - MENORES corregidos: copy del estado vacío, `page` acotado a la última página real, reset de página en los handlers
+    (antes se lanzaba una consulta con el offset viejo), **error de IPC visible** (`db.ts` ya no se traga el error dentro
+    de Tauri; la pestaña muestra Alert + «Reintentar»), `aria-label` en el botón de icono, `limit.clamp(0,1000)` +
+    `saturating_add`, claves de orden con `catalog::norm`.
+  - **Para la feature 24 (renombrar/fusionar):** la pestaña es solo lectura hoy; `rename_phone`/`add_phone`/`merge_phones`
+    ya están registrados y **cualquier rol puede invocarlos por IPC** → gatear en la UI **y** en el backend.
+- **Higiene de tests:** los fixtures de `phones.rs` usan `std::env::temp_dir()` + `std::process::id()` (antes, dos
+  `cargo test` en paralelo compartían el nombre del `.db` y reportaban fallos falsos).
+
+### Cargar el inventario del local + regla «solo Pantalla» (F25/F26, 2026-09-16) — MODO DEV
+- **Para qué:** contar la mercancía del mostrador desde la app (**Inventario → Ajustes → «Cargar la lista del local»**):
+  se pega (o se abre el `.txt`) la lista tal como la tiene el local y la app la cruza contra el catálogo.
+- **Formato de la lista:** una **marca por línea** (`Samsung`, `Tecno`, `Iphone`…; valen los alias) abre una sección;
+  debajo, sus modelos. `modelo (N)` = **N unidades**; `A30/A50` = la MISMA pantalla sirve para los dos teléfonos;
+  lo que no se entiende se ignora y se cuenta (`skipped`).
+- **Cruce (`loadlist.rs`):** solo productos de las categorías de pantalla (`catalog::PHONE_CATEGORIES`), con **gate de
+  marca** (una línea Samsung jamás cruza con una ficha Tecno; los productos sin marca sí son candidatos) y calidad
+  `exacta → prefijo → parcial` (la misma función que usa el servicio); a igualdad gana la ficha **con stock**. Hasta 15
+  alternativas por línea para elegir a mano y **nunca se inventa una ficha**: si no hay match, la fila queda sin producto
+  con el aviso. Los `targets` del cruce se normalizan con **`phone_model_norm`** (sin marca y sin espacios): `match_quality`
+  compara contra esa forma — pasarle el texto crudo («Samsung A30») hacía que **nada** matcheara.
+- **Aplicar:** **respaldo** primero (`backup/registro_pre_carga_<fecha>.db`, con checkpoint del WAL) → `stock = cantidad`
+  + **movimiento** «Carga de inventario» (solo si cambia) → opción (por defecto) de dejar en **0** las pantallas que no
+  están en la lista, con su movimiento. **No toca precios ni compatibilidad** y **exige sesión de dueño**.
+- **Regla de oro del aplicar: las unidades se SUMAN por ficha** (dos líneas que describen la misma pantalla, p. ej.
+  «13C (6)» y «Redmi 13C (12)», dejan 18). Antes «mandaba la primera» y se perdían unidades reales de la lista del local.
+- **GATE DEL BARRIDO (crítico):** si `zero_missing` y alguna línea con unidades quedó **sin pantalla asignada**, la carga
+  **NO se hace** (error que dice las tres salidas: asignarla, corregir el nombre en Productos, desmarcar el barrido).
+  Medido con la lista real: de 87 fichas que el barrido dejaba en 0, **79 (152 u.) estaban escritas en la lista**.
+  Además la UI manda **`keepIds`** (las fichas que la vista previa ya tenía) y el barrido **nunca** las toca: cambiarle el
+  producto a una línea no puede vaciar la ficha anterior. `rows=[]` + barrido tampoco vacía nada.
+- **Defensivo:** ids inexistentes y fichas de **otra categoría** se ignoran (contadas en `skipped`, que cuenta **LÍNEAS**);
+  las cantidades se acotan a 0..100.000 **en el parseo** (vista previa = botón = reporte) y una cantidad absurda queda
+  avisada; el **barrido NO lo elige quien llama** (siempre `PHONE_CATEGORIES`); un stock **negativo** que vuelve a 0 se
+  registra como **entrada**; el reporte informa `unassigned`/`unassigned_units` (lo que NO se cargó). Tests en
+  `loadlist::tests` (12) + hook manual `test_manual_preview_real_list` para medir la lista real sobre una copia.
+- **Cruce — dos trampas medidas:** (a) la marca del producto se **canonicaliza** igual que la de la sección (`Redmi` →
+  `Xiaomi`): comparar la marca cruda dejaba **57 fichas (119 u.) fuera del cruce**; (b) la contención es por **palabra
+  completa** (`catalog::contains_word`, `norm()` conserva espacios): «a3» no cruza con «a33» ni «15» con «redmi 15c»
+  (antes se inflaban unidades en la ficha de OTRO teléfono). Y el **texto completo de la línea** también es target, para
+  que una ficha que se llama igual que la línea («A17 c/m 4G/5G») sea candidata.
+- **Respaldo antes de escribir:** **`VACUUM INTO`** (foto consistente que incluye el WAL) con nombre único; si falla, cae a
+  `PRAGMA wal_checkpoint(TRUNCATE)` **leyendo el flag `busy`** (con `execute_batch` la fila se descarta y un checkpoint
+  ocupado pasaba desapercibido: el respaldo quedaba viejo sin aviso).
+- **Regla «solo Pantalla» (F26):** `catalog::PHONE_CATEGORIES = [1 Pantalla, 18 Táctil, 19 Táctil Tablet]` se usa en
+  **`rebuild_phones`** (qué teléfonos existen) y en **`phones::phone_index`** (qué repuestos/stock cuenta cada teléfono).
+  La pestaña **Productos** abre con el filtro de categoría en «Pantalla» (se busca la categoría **por nombre**, no por id),
+  se puede quitar para ver el resto, y un aviso aclara que **los KPI son de todo el catálogo** (no del filtro).
+  Datos: padrón **1134 → 1079** y «por revisar» **161 → 142**, con productos/stock intactos. Con solo `1` se perdían 55
+  teléfonos que únicamente tenían repuestos de Táctil/Táctil Tablet.
+- **El resumen tiene que VERSE (lección):** el asistente aplica y muestra el paso 3 **sin cambiar de pestaña** — si el
+  padre cambia de tab al aplicar (`onChanged` → `setTab('productos')`), React desmonta el diálogo y el operario nunca ve
+  el respaldo ni los movimientos. `PricesTab` recibe **`onRefresh`** (refrescar sin desmontar) además de `onChanged`.
+- **Verificación en vivo:** `tools/verify_inventory_load.mjs` (20/20, incluye el gate del barrido, las unidades que NO se
+  cargan y el paso 3 por la UI). `tools/cdp_driver.mjs` hace **`scrollIntoView` antes de cada clic**, expone
+  **`insertText`** para pegar texto multilínea y usa **timeout de 25 s con un reintento** en `Runtime.evaluate` (el
+  WebView2 tarda en contestar mientras arranca; con 10 s la verificación moría por timeout con la app sana). Los scripts
+  CDP **recargan la SPA al empezar** (si no, una corrida anterior deja la sesión en modo cajera y se pisan). **Ojo:**
+  `tauri dev` reinicia la app si cambia cualquier archivo bajo `src-tauri/` (incluidos `tests/`): una verificación CDP en
+  curso contra la ventana vieja se queda sin respuesta — no dejar archivos cambiando mientras se verifica, y matar
+  `registro.exe`/`cargo` antes de editar `.rs` (ReplaceFileW EIO).
+- **`verify_phones_edit.mjs --cashier` exige app recién arrancada:** el gate del backend (`Database::owner_unlocked`) se
+  abre con el PIN y vive **mientras vive el proceso**, no por sesión de UI (la cajera no ve los botones, pero un invoke a
+  mano se acepta si el dueño ya entró en esa misma corrida).
+
+### Renombrar y fusionar la lista de teléfonos (F24, 2026-09-16) — MODO DEV
+- **Para qué:** el taller corrige la lista maestra desde la app (Inventario → Modelos, **solo el dueño**): «Corregir»
+  (marca + línea + modelo con **vista previa** del nombre comercial, aviso si ya existe otro teléfono con ese nombre,
+  oferta de fusionar y cuántos repuestos conserva), «juntar» (fusiona dos fichas del mismo teléfono escrito distinto) y
+  «Agregar teléfono».
+- **Reglas canónicas del local (`tools/canonical_brands.json` + `catalog.rs`):**
+  - **POCO es línea propia**: el nombre comercial es «Poco X3» (sin «Mi» ni «Redmi» delante) y la **clave conserva
+    `poco`**, igual que el `iPhone` en Apple → «Poco X3» y «Redmi Poco X3» caen en la MISMA clave (`xiaomi|poco x3`).
+  - **HONOR y REALME mandan sobre la marca madre** (`familyBrands`: `honor→Honor`, `realme→Realme`): «Huawei Honor X6A»
+    → «Honor X6A» (`honor|x6a`), «Oppo Realme C35» → «Realme C35» (`realme|c35`). `real_name` los trata como línea
+    (el nombre comercial lleva la marca delante).
+  - **Resultado sobre la copia de trabajo:** 1154 → **1135** teléfonos y 217 → **162** «por revisar»; tras fusionar «8P»
+    con «Spark 8P» desde la app: **1134 / 161**. Claves viejas eliminadas: `huawei|honor*`, `oppo|realme*`, `honor|honor*`,
+    `xiaomi|x3`. **Ningún producto, stock o precio tocado.** Respaldo: `backup/pre_f24_reglas_20260916.db`.
+- **UNA sola forma de calcular nombre y clave:** `phones.rs::resolve_naming` (marca+línea+modelo → `real_name` +
+  `phone_registry_key`). Lo usan `rename_phone`, `add_phone` y `preview_rename_phone`. **Antes** `rename_phone` usaba
+  `registry_key(brand, model)` sin quitar la línea: la fila no coincidía con el padrón y `rebuild_phones` volvía a crear
+  el nombre viejo (**duplicado**).
+- **El catálogo no resucita un nombre corregido:** `rebuild_phones` ignora las claves **reclamadas por los alias de las
+  filas `source='manual'`**, y `merge_phones` guarda además la marca+modelo del borrado como alias. Los repuestos no se
+  pierden nunca: el vínculo es el alias (`merged_stats` une clave + alias).
+- **Comandos nuevos:** `preview_rename_phone(id, brand, line, model)` (solo lectura: nombre, clave, choque, repuestos/stock)
+  y `can_edit_phones`. `rename_phone`/`add_phone`/`merge_phones` exigen **sesión de dueño**.
+- **Gate de escritura en el BACKEND** (`Database::owner_unlocked`): `verify_pin` con el PIN correcto desbloquea la sesión;
+  `owner_can_edit`/`require_owner` la exigen (si NO hay PIN configurado se permite: instalación de un solo usuario).
+  Verificado en vivo con una sesión de cajera: los botones no aparecen **y** el `invoke` directo falla con
+  «Solo el dueño puede cambiar la lista de modelos…».
+- **`get_phone_models` (lista del formulario de servicio) lee el PADRÓN** (antes derivaba de la compatibilidad con
+  etiquetas propias): el nombre corregido es el que ve el técnico, con una sola ficha por teléfono. Y
+  `find_compatible_products` **resuelve los alias del padrón** (`phones::lookup_aliases`), así renombrar no le hace perder
+  la pantalla compatible al servicio (verificado: «Galaxy A06 4G» encuentra su pantalla como `exacta`).
+- **Verificación:** `cargo test` **89/89** (reglas Poco/Honor/Realme, vista previa, renombrar sin duplicado, gate de dueño) ·
+  build ✓ · lint 0 errores · CDP **23/23** (F3) + **9/9** (dueño) + **6/6** (cajera) + escrituras reales
+  (`tools/verify_phones_write.mjs`: fusión, alta y renombrado). Spec: `tools/progress/specs/F24-renombrar-fusionar.md`.
+- **Infra de desarrollo (2026-09-16):** `vite.config.ts` ignora los temporales de los editores
+  (`'**/.*.tmpdir/**'`, `'**/*.tmp'`, `'**/.*.tmp'`) — sin eso, editar un `.tsx` con `tauri dev` corriendo mataba Vite
+  (`EBUSY`) y con él la app; y `tools/cdp_driver.mjs` envía `awaitPromise` (sin él las evaluaciones async devolvían `{}`).
+  Si `tauri dev` no puede reemplazar `target\debug\registro.exe` («Acceso denegado», os error 5) es que sobrevivió una
+  instancia anterior: matar `registro.exe` + los `cargo run` antes de relanzar (o se verifica contra el binario viejo).
 
 ### Lecciones de la jornada (para no repetirlas)
 - **`conn.last_insert_rowid()` se captura ANTES de cualquier otra escritura**: llamar `rebuild_phones` dentro de

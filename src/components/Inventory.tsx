@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Layers, MoveHorizontal, Package, Tag, Wand2 } from 'lucide-react';
+import { Layers, MoveHorizontal, Package, Smartphone, Tag, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -7,6 +7,7 @@ import { api } from '../db';
 import type { Category, InventoryStats, Product } from '../types';
 import { ProductForm } from './ProductForm';
 import { ProductsTab } from './inventory/ProductsTab';
+import { ModelsTab } from './inventory/ModelsTab';
 import { ByModelTab } from './inventory/ByModelTab';
 import { MovementsTab } from './inventory/MovementsTab';
 import { PricesTab } from './inventory/PricesTab';
@@ -14,10 +15,11 @@ import { DuplicatesDialog } from './inventory/DuplicatesDialog';
 
 // MÓDULO ÚNICO de inventario (2026-09-15). Antes había dos pantallas sobre la
 // misma tabla ("Inventario" y "Pantallas"); ahora es una sola con pestañas:
-//   Productos   → gestión del catálogo (KPIs, filtros, tabla paginada)
-//   Por modelo  → consulta "¿qué repuesto le sirve a este teléfono?"
-//   Movimientos → auditoría de entradas/salidas con su orden o pedido
-//   Precios     → herramientas de datos (solo dueño)
+//   Productos             → gestión del catálogo (KPIs, filtros, tabla paginada)
+//   Modelos               → padrón de teléfonos del taller (marca, repuestos, por revisar)
+//   Repuesto por modelo   → consulta "¿qué repuesto le sirve a este teléfono?"
+//   Movimientos           → auditoría de entradas/salidas con su orden o pedido
+//   Ajustes               → herramientas de datos (solo dueño)
 export default function Inventory({ role = 'owner', initialTab = 'productos', initialModel = '' }: {
   role?: 'owner' | 'cashier' | 'loading';
   initialTab?: string;
@@ -75,7 +77,8 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
             <TabsTrigger value="productos"><Tag data-icon="inline-start" /> Productos</TabsTrigger>
-            <TabsTrigger value="modelo"><Layers data-icon="inline-start" /> Por modelo</TabsTrigger>
+            <TabsTrigger value="modelos"><Smartphone data-icon="inline-start" /> Modelos</TabsTrigger>
+            <TabsTrigger value="modelo"><Layers data-icon="inline-start" /> Repuesto por modelo</TabsTrigger>
             <TabsTrigger value="movimientos"><MoveHorizontal data-icon="inline-start" /> Movimientos</TabsTrigger>
             {role === 'owner' && <TabsTrigger value="precios"><Wand2 data-icon="inline-start" /> Ajustes</TabsTrigger>}
           </TabsList>
@@ -91,6 +94,10 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
             />
           </TabsContent>
 
+          <TabsContent value="modelos">
+            <ModelsTab refreshKey={refreshKey} canEdit={role === 'owner'} onByModel={openByModel} />
+          </TabsContent>
+
           <TabsContent value="modelo">
             <ByModelTab refreshKey={refreshKey} initialModel={modelQuery} onEdit={p => { setEditing(p); setShowForm(true); }} />
           </TabsContent>
@@ -101,7 +108,10 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
 
           {role === 'owner' && (
             <TabsContent value="precios">
-              <PricesTab onChanged={() => { refreshAll(); setTab('productos'); }} />
+              {/* onChanged = refresca y salta a Productos (precios/nombres);
+                  onRefresh = solo refresca: el asistente de carga tiene que poder
+                  mostrar su resumen sin que la pestaña se desmonte. */}
+              <PricesTab onChanged={() => { refreshAll(); setTab('productos'); }} onRefresh={refreshAll} />
             </TabsContent>
           )}
         </Tabs>

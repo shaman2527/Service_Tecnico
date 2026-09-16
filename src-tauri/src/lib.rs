@@ -1,6 +1,7 @@
 pub mod bcv;
 pub mod catalog;
 pub mod db;
+pub mod loadlist;
 pub mod phones;
 pub mod tech;
 pub mod printer;
@@ -131,6 +132,10 @@ commands::get_sales_stats,
             commands::get_phone_brands,
             commands::get_phones,
             commands::get_phone_detail,
+            commands::can_edit_phones,
+            commands::preview_rename_phone,
+            commands::preview_inventory_load,
+            commands::apply_inventory_load,
             commands::rename_phone,
             commands::add_phone,
             commands::merge_phones,

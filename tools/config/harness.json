@@ -1,0 +1,25 @@
+{
+  "$comment": "Marcador de configuracion del harness. La configuracion REAL y viva del proyecto es tools/config.ts (mismo objeto CONFIG). Este directorio existe porque el detector de las herramientas harness_* (DSH) exige que la copia del harness tenga spec/ + governance/ + config/.",
+  "projectName": "Registro - Sistema de Servicio Tecnico",
+  "configModule": "../config.ts",
+  "featureList": "../feature_list.json",
+  "progressDir": "../progress",
+  "paths": {
+    "sourceDir": "src",
+    "apiDir": "src-tauri/src",
+    "progressDir": "tools/progress",
+    "artifactsDir": "tools/progress/artifacts",
+    "specsDir": "tools/progress/specs"
+  },
+  "commands": {
+    "build": "npm run build",
+    "lint": "npm run lint",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "dev": "npm run dev"
+  },
+  "stack": {
+    "frontend": "react-19 + vite + typescript + tailwind-v4 + shadcn-ui",
+    "backend": "tauri-2 + rust + rusqlite (sqlite)",
+    "packageManager": "npm"
+  }
+}
