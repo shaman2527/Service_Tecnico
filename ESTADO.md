@@ -27,6 +27,31 @@ canónicos, 38 grupos duplicados, 702 unidades, 1126 sin precio (antes de F3).
 
 ---
 
+## 0.a Validación pre-producción: bloqueantes B2 y B6 cerrados (2026-09-16) — MODO DEV
+
+El usuario pidió validar todo antes de producción ("quiero la app al 100%"). Se corrió una
+validación integral en vivo y se cerraron dos bloqueantes REALES de datos/negocio (B2 de la
+lista previa + B6, nuevo, encontrado por el smoke integral).
+
+| Qué | Antes (medido) | Ahora | Evidencia |
+|---|---|---|---|
+| **B2 · gate de marca de la pantalla a instalar** | El formulario auto-elegía la pantalla de OTRA marca cuando era la única con stock: **36 de 263** teléfonos del padrón (p. ej. `Honor 10 Lite`→`Infinix Hot 10 Lite`, `A11`→`Samsung A11 A115`, `Realme 11 5G`→`Xiaomi Redmi Note 11 5G`, `7 Pro`→Tecno, `G50`/`G60`→Motorola). Al entregar se descontaba el bin EQUIVOCADO | Cada candidata trae `brand_match` + `brand_known`; el orden pone **marca primero**; `autoScreen` (regla pura) solo auto-elige UNA con stock **de la misma marca** y coincidencia exacta/prefijo, en el wizard **y en edición**; aviso «otra marca» en el selector y en el asistente de cierre. Texto AMBIGUO (`A11` = Umidigi A11 y Samsung Galaxy A11) → **sin certeza: no se marca ni se auto-elige** | `cargo test -- --ignored test_manual_brand_gate_report` (263 → 279 auto-selecciones seguras, 0 cruzadas) · `db::tests::test_brand_gate_screens` · `catalog::tests::test_same_brand_gate` · `tools/queue_test.ts` 61/61 · `node tools/verify_screen_brand_gate.mjs` **23/23 en vivo** |
+| **B6 · «hoy» usaba la fecha UTC** | `toISOString().slice(0,10)` en Ventas/Servicios/Libro Diario/perfil de técnico: a partir de las **20:00** en Venezuela (UTC−4) los listados de «hoy» quedaban VACÍOS con las ventas ya registradas, y el rango del Libro Diario se corría un día. Las ventanas del backend (`date('now','-N days')`) también eran UTC | Helpers `localDate`/`addDays`/`monthStart` en los 4 componentes y `date('now','localtime','-N days')` en las 7 consultas de ventana | `tools/local_date_test.ts` **17/17** (también con `$env:TZ="America/Caracas"`) · verificado en vivo: la venta del día (22:14) vuelve a aparecer en la lista «Hoy» |
+
+Revisión adversarial (2 revisores independientes sobre el diff, porque `harness_review` está roto
+en este entorno): encontraron 2 hallazgos BLOQUEANTES que ya están corregidos y con test —
+(1) el **modo EDICIÓN** seguía con la regla vieja de auto-selección, (2) `lookup_brand` elegía marca
+por orden de fila en textos ambiguos (invertía el gate)— y 3 menores también corregidos
+(auto-precio del descuento dependiente del orden de la lista, `addDays` con fechas que no son
+`YYYY-MM-DD`, aviso «otra marca» cuando la marca es DESCONOCIDA). **Riesgo de datos del cliente:
+ninguno** — el cambio no escribe ni migra nada y no invalida órdenes viejas (un `screen_product_id`
+ya guardado sigue siendo válido y es el que se descuenta).
+
+Abiertos: **B1** (123 SKU con stock sin precio de venta → decisión del local) · **B3** (rol solo en
+la UI) · **B4** (PIN en texto plano) · **B5** (security gate del harness = falso verde).
+
+---
+
 ## 0.b Asistente de Cierre de Servicio (F30, 2026-09-16) — MODO DEV
 
 El taller recibe mucho cliente; cerrar una entrega CON cobro costaba ~13 interacciones y 3 diálogos.

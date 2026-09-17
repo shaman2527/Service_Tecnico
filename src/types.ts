@@ -106,6 +106,14 @@ export interface ScreenCandidate {
   product: Product;
   match_quality: 'exacta' | 'prefijo' | 'parcial';
   in_stock: boolean;
+  /** La compatibilidad del repuesto nombra la marca del teléfono (o el repuesto es de esa
+   *  marca). `false` = solo coincidió el texto del modelo: se puede elegir a mano, pero el
+   *  formulario NUNCA la elige solo. */
+  brand_match: boolean;
+  /** Se CONOCE la marca del teléfono (el padrón o el texto la dicen). Con `false` no hay
+   *  certeza —modelo libre, o texto ambiguo entre marcas— y `brand_match: false` NO significa
+   *  «es de otra marca»: la UI no avisa nada y el operario decide. */
+  brand_known: boolean;
 }
 
 export interface MovementPage {

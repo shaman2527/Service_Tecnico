@@ -213,6 +213,17 @@ pub fn explicit_brand(text: &str) -> Option<String> {
     None
 }
 
+/// ¿Dos marcas son la MISMA? Compara marcas CANÓNICAS (`Redmi` = `Xiaomi`,
+/// `Iphone` = `Apple`, `Lg` = `LG`). Una marca vacía o «Genérico» NUNCA coincide: sin marca
+/// no hay prueba de que el repuesto sirva, y el gate de marca del servicio
+/// (`find_compatible_products`) se apoya en esto para no ofrecer la pantalla de otro
+/// teléfono que solo coincide en el texto del modelo.
+pub fn same_brand(a: &str, b: &str) -> bool {
+    let na = norm(&canonical_brand(a));
+    let nb = norm(&canonical_brand(b));
+    !na.is_empty() && na == nb && na != "generico"
+}
+
 fn canonical_token(token: &str, brand: &str) -> String {
     let r = rules();
     let t = token.trim();
@@ -1646,6 +1657,23 @@ mod tests {
         assert_eq!(canonical_brand("Google Pixel"), "Google");
         assert_eq!(canonical_brand("Samsung"), "Samsung");
         assert_eq!(canonical_brand(""), "Genérico");
+    }
+
+    /// Gate de marca del servicio (B2): dos marcas son la misma solo si lo son de verdad.
+    #[test]
+    fn test_same_brand_gate() {
+        assert!(same_brand("Redmi", "Xiaomi"));   // submarca del mismo fabricante
+        assert!(same_brand("Iphone", "Apple"));
+        assert!(same_brand("lg", "LG"));
+        assert!(same_brand("Samsung", "samsung"));
+        assert!(!same_brand("Honor", "Infinix"));
+        assert!(!same_brand("Umidigi", "Samsung"));
+        assert!(!same_brand("Realme", "Xiaomi"));
+        // sin marca NO hay coincidencia: es lo que evita elegir la pantalla de otro teléfono
+        assert!(!same_brand("", "Honor"));
+        assert!(!same_brand("Genérico", "Honor"));
+        assert!(!same_brand("Genérico", ""));     // dos «sin marca» tampoco prueban nada
+        assert!(!same_brand("Genérico", "Genérico"));
     }
 
     #[test]

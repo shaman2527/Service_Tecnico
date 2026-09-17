@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { api } from '../db';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
-import { methodCurrency, currencySymbol, titleCase } from '@/lib/utils';
+import { methodCurrency, currencySymbol, titleCase, localDate, monthStart } from '@/lib/utils';
 import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 
 export default function Sales() {
@@ -35,15 +35,15 @@ export default function Sales() {
       start = dateStart;
       end = dateEnd;
     } else if (period === 'hoy') {
-      const d = new Date().toISOString().slice(0, 10);
+      const d = localDate();
       start = d;
       end = d;
     } else if (period === '7d') days = 7;
     else if (period === '30d') days = 30;
     else if (period === 'mes') {
-      const now = new Date();
-      start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-      end = now.toISOString().slice(0, 10);
+      const hoy = localDate();
+      start = monthStart(hoy);
+      end = hoy;
     }
     const [s, m] = await Promise.all([
       api.getSales(search, days, start, end),

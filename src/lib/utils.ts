@@ -34,6 +34,34 @@ export function isRefund(p: { amount: number }): boolean {
   return p.amount < 0;
 }
 
+// FECHAS DEL DÍA DEL LOCAL. NUNCA usar `toISOString().slice(0,10)` para «hoy»: devuelve el
+// día en UTC, así que en Venezuela (UTC−4) a partir de las 20:00 da el día SIGUIENTE y los
+// listados de «hoy» (Ventas, Servicios, Libro Diario) quedan VACÍOS con las ventas ya
+// registradas. Bug real encontrado en la validación pre-producción del 2026-09-16 (22:08
+// local = 2026-09-17 UTC: la venta del día no aparecía en la lista).
+/** Fecha LOCAL en formato YYYY-MM-DD. */
+export function localDate(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Suma (o resta) días a una fecha YYYY-MM-DD en el calendario LOCAL.
+ *  Si la entrada no es exactamente YYYY-MM-DD (p. ej. «2026-09-16 10:00») se devuelve tal cual,
+ *  para no degradar en silencio un comparativo de período. */
+export function addDays(isoDate: string, days: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((isoDate || '').trim());
+  if (!m) return isoDate;
+  return localDate(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + days));
+}
+
+/** Primer día del mes de una fecha YYYY-MM-DD (para el filtro «Este mes»). Vacío → vacío. */
+export function monthStart(isoDate: string): string {
+  const m = /^(\d{4})-(\d{2})/.exec((isoDate || '').trim());
+  return m ? `${m[1]}-${m[2]}-01` : '';
+}
+
 // Órdenes en estado FINAL: no esperan pago, entrega ni trabajo (nunca "pendiente").
 export function isFinalized(status: string | null | undefined): boolean {
   return status === 'Devuelto' || status === 'Cancelado' || status === 'Cancelado / Devuelto';

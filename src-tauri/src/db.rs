@@ -324,6 +324,14 @@ pub struct ScreenCandidate {
     /// "exacta" | "prefijo" | "parcial"
     pub match_quality: String,
     pub in_stock: bool,
+    /// La compatibilidad del repuesto NOMBRA la marca del teléfono (o el repuesto es de
+    /// esa marca). `false` = solo coincidió el texto del modelo (`Honor 10 Lite` con una
+    /// pantalla de `Infinix Hot 10 Lite`): sirve para mostrarla, nunca para elegirla sola.
+    pub brand_match: bool,
+    /// Se CONOCE la marca del teléfono (el padrón o el texto la dicen). Con `false` no hay
+    /// certeza —modelo escrito a mano, o texto ambiguo entre marcas— y `brand_match` no
+    /// significa «es de otra marca»: la UI no debe avisar nada.
+    pub brand_known: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1539,8 +1547,9 @@ impl Database {
         Ok(list)
     }
 
-    /// Productos compatibles con un modelo, RANKEADOS: primero las coincidencias
-    /// exactas y, dentro de cada nivel, los que tienen stock.
+    /// Productos compatibles con un modelo, RANKEADOS: primero los de la MISMA MARCA que el
+    /// teléfono, después las coincidencias exactas y, dentro de cada nivel, los que tienen
+    /// stock.
     /// `category_id = None` → todas las categorías (para sugerir precios del
     /// repuesto que corresponda); `Some(1)` → solo pantallas.
     pub fn find_compatible_products(&self, model: &str, category_id: Option<i64>, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
@@ -1559,6 +1568,16 @@ impl Database {
                 targets.push(t);
             }
         }
+        // GATE DE MARCA: la marca del teléfono sale del PADRÓN (ficha del modelo) y, si el
+        // modelo se escribió a mano con la marca delante («Honor 10 Lite»), del texto. Sirve
+        // para que «10 Lite» no traiga la pantalla de un Infinix Hot 10 Lite: el texto del
+        // modelo solo (sin marca) cruzaba teléfonos de marcas distintas con medidas y
+        // conectores distintos (A11 Umidigi → A11 Samsung, Realme 11 5G → Redmi Note 11 5G).
+        let phone_brand = match crate::phones::lookup_brand(&conn, model)? {
+            Some(b) if !b.trim().is_empty() => b,
+            _ => crate::catalog::explicit_brand(model).unwrap_or_default(),
+        };
+        let gate = !phone_brand.trim().is_empty();
 
         let mut sql = format!(
             "SELECT {PRODUCT_COLS} FROM products p
@@ -1584,6 +1603,7 @@ impl Database {
             let brand = p.brand.clone().unwrap_or_default();
             let compat = p.compatibility.clone().unwrap_or_default();
             let mut best: Option<&'static str> = None;
+            let mut brand_match = false;
             for target in &targets {
                 for phone in crate::catalog::compat_phones(&compat, &brand) {
                     if let Some(q) = crate::catalog::match_quality(target, &phone.model) {
@@ -1591,17 +1611,29 @@ impl Database {
                         if best.map(|b| rank(q) < rank(b)).unwrap_or(true) {
                             best = Some(q);
                         }
+                        // la MARCA la resuelve compat_phones: la entrada puede nombrar otra
+                        // marca («HONOR X7» dentro de una ficha Genérico) y eso cuenta como
+                        // coincidencia de marca — la compatibilidad curada manda
+                        if gate && crate::catalog::same_brand(&phone.brand, &phone_brand) {
+                            brand_match = true;
+                        }
                     }
                 }
             }
             if let Some(q) = best {
-                out.push(ScreenCandidate { in_stock: p.stock > 0, product: p, match_quality: q.to_string() });
+                out.push(ScreenCandidate {
+                    in_stock: p.stock > 0,
+                    brand_match,
+                    brand_known: gate,
+                    product: p,
+                    match_quality: q.to_string(),
+                });
             }
         }
         let rank = |s: &str| match s { "exacta" => 0, "prefijo" => 1, _ => 2 };
         out.sort_by(|a, b| {
-            rank(&a.match_quality)
-                .cmp(&rank(&b.match_quality))
+            b.brand_match.cmp(&a.brand_match)
+                .then(rank(&a.match_quality).cmp(&rank(&b.match_quality)))
                 .then(b.in_stock.cmp(&a.in_stock))
                 .then(b.product.stock.cmp(&a.product.stock))
                 .then(a.product.name.cmp(&b.product.name))
@@ -1979,7 +2011,7 @@ impl Database {
         }
         if let Some(d) = days {
             let _ = param_values.len();
-            sql.push_str(&format!(" AND date(s.date) >= date('now', '-{} days')", d));
+            sql.push_str(&format!(" AND date(s.date) >= date('now','localtime', '-{} days')", d));
         }
         if !start_date.is_empty() {
             let idx = param_values.len() + 1;
@@ -2019,7 +2051,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT s.product_name, s.product_id, SUM(s.quantity) as qty, SUM(s.total) as total, COUNT(*) as count
-             FROM sales s WHERE date(s.date) >= date('now', ?1)
+             FROM sales s WHERE date(s.date) >= date('now','localtime', ?1)
              GROUP BY s.product_name ORDER BY total DESC"
         )?;
         let rows = stmt.query_map(params![format!("-{} days", days)], |r| {
@@ -2872,12 +2904,12 @@ impl Database {
         };
 
         let (today_usd, today_bs) = sum_sales("date(date) = date('now','localtime')")?;
-        let (week_usd, week_bs) = sum_sales("date(date) >= date('now','-6 days')")?;
+        let (week_usd, week_bs) = sum_sales("date(date) >= date('now','localtime','-6 days')")?;
         let week_units: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(quantity),0) FROM sales WHERE date(date) >= date('now','-6 days')", [], |r| r.get(0),
+            "SELECT COALESCE(SUM(quantity),0) FROM sales WHERE date(date) >= date('now','localtime','-6 days')", [], |r| r.get(0),
         )?;
         let week_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sales WHERE date(date) >= date('now','-6 days')", [], |r| r.get(0),
+            "SELECT COUNT(*) FROM sales WHERE date(date) >= date('now','localtime','-6 days')", [], |r| r.get(0),
         )?;
 
         let mut stmt = conn.prepare(
@@ -2888,7 +2920,7 @@ impl Database {
              FROM sales s
              LEFT JOIN products p ON s.product_id = p.id
              LEFT JOIN categories c ON p.category_id = c.id
-             WHERE date(s.date) >= date('now','-6 days')
+             WHERE date(s.date) >= date('now','localtime','-6 days')
              GROUP BY c.name
              ORDER BY 3 + 4 DESC"
         )?;
@@ -2906,7 +2938,7 @@ impl Database {
                     COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') != 'USD' THEN s.total ELSE 0 END),0)
              FROM sales s
              LEFT JOIN products p ON s.product_id = p.id
-             WHERE date(s.date) >= date('now','-6 days')
+             WHERE date(s.date) >= date('now','localtime','-6 days')
              GROUP BY s.product_name, p.model, p.brand
              ORDER BY 5 + 6 DESC
              LIMIT 6"
@@ -3638,7 +3670,7 @@ impl Database {
             "SELECT m.*, p.name as product_name FROM inventory_movements m LEFT JOIN products p ON m.product_id = p.id WHERE 1=1"
         );
         if let Some(d) = days {
-            sql.push_str(&format!(" AND date(m.date) >= date('now', '-{} days')", d));
+            sql.push_str(&format!(" AND date(m.date) >= date('now','localtime', '-{} days')", d));
         }
         sql.push_str(" ORDER BY m.date DESC");
         let mut stmt = conn.prepare(&sql)?;
@@ -7114,5 +7146,239 @@ discount_amount: 0.0,
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// GATE DE MARCA de la pantalla a instalar (B2 de la validación pre-producción).
+    /// Casos REALES medidos en el catálogo del local: el modelo sin marca cruzaba teléfonos
+    /// de marcas distintas y el formulario elegía SOLO una pantalla de otra marca:
+    ///   «Honor 10 Lite» → «Infinix Hot 10 Lite» (5 unidades)
+    ///   «A11» (Umidigi) → «Samsung A11» (5 unidades)
+    ///   «Realme 11 5G»  → «Xiaomi Redmi Note 11 5G» (4 unidades)
+    /// La marca del teléfono sale del PADRÓN (`phones`); si el modelo se escribe a mano con
+    /// la marca delante, del texto.
+    #[test]
+    fn test_brand_gate_screens() {
+        let test_path = PathBuf::from("test_registro_brand_gate.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Pantallas: la de OTRA marca tiene stock a montones; la del teléfono está agotada.
+        // Si el gate no funcionara, gana la de otra marca solo por tener stock.
+        let honor = db.add_product("Pantalla Honor 10 Lite", Some(1), "Honor", "10 Lite", "",
+            r#"["Honor 10 Lite"]"#, 5.0, 12.0, 0, 0, 0.0).unwrap();
+        let infinix = db.add_product("Pantalla Infinix Hot 10 Lite", Some(1), "Infinix", "Hot 10 Lite", "",
+            r#"["Hot 10 Lite"]"#, 4.0, 9.0, 5, 0, 0.0).unwrap();
+        // Ficha sin marca propia que SÍ nombra el teléfono en su compatibilidad: cuenta como
+        // coincidencia de marca (la compatibilidad curada manda sobre la columna brand).
+        let generico = db.add_product("Pantalla 10 Lite compatible", Some(1), "", "10 Lite", "",
+            r#"["Honor 10 Lite"]"#, 3.0, 8.0, 0, 0, 0.0).unwrap();
+        // El padrón dice que «10 Lite» es un Honor
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO phones (brand, line, model, name, key, aliases, source)
+                 VALUES ('Honor', '', '10 Lite', 'Honor 10 Lite', 'honor 10 lite', '[\"10 Lite\"]', 'catalogo')",
+                [],
+            ).unwrap();
+        }
+
+        let cands = db.find_compatible_products("Honor 10 Lite", Some(1), 20).unwrap();
+        let by_id: Vec<(i64, bool, String, bool)> = cands.iter()
+            .map(|c| (c.product.id, c.brand_match, c.match_quality.clone(), c.in_stock))
+            .collect();
+        assert!(by_id.len() >= 3, "esperaba las 3 fichas, salió {by_id:?}");
+        // 1) las PRIMERAS son de la marca del teléfono aunque estén agotadas
+        assert!(cands[0].brand_match, "la primera debe ser de la marca del teléfono: {by_id:?}");
+        assert_ne!(cands[0].product.id, infinix, "el Infinix no puede ir primero: {by_id:?}");
+        // 2) la ficha sin marca que nombra el Honor también cuenta como su marca
+        assert!(cands.iter().any(|c| c.product.id == generico && c.brand_match));
+        // 3) la de Infinix queda marcada como OTRA marca y fuera del primer lugar
+        let inf = cands.iter().find(|c| c.product.id == infinix).expect("falta el Infinix");
+        assert!(!inf.brand_match, "la pantalla Infinix NO es la del Honor");
+        assert!(inf.in_stock);
+        let pos_honor = cands.iter().position(|c| c.product.id == honor).unwrap();
+        let pos_inf = cands.iter().position(|c| c.product.id == infinix).unwrap();
+        assert!(pos_honor < pos_inf, "marca antes que stock: {by_id:?}");
+        // 4) el frontend solo auto-elige cuando hay UNA con stock Y de la marca: acá hay una
+        //    sola con stock (Infinix) y NO es de la marca → no se elige sola
+        let auto: Vec<i64> = cands.iter().filter(|c| c.in_stock && c.brand_match).map(|c| c.product.id).collect();
+        assert!(auto.is_empty(), "nada debe auto-elegirse acá: {auto:?}");
+
+        // --- A11: el texto ES AMBIGUO en el padrón («A11» = Umidigi A11 y Samsung Galaxy A11,
+        //     que es como la lista del local escribe la pantalla Samsung) → SIN CERTEZA: no se
+        //     marca ninguna candidata y el formulario NO auto-elige (lo decide el operario) ---
+        let umidigi = db.add_product("Pantalla Umidigi A11", Some(1), "Umidigi", "A11", "",
+            r#"["Umidigi A11"]"#, 5.0, 12.0, 0, 0, 0.0).unwrap();
+        let samsung = db.add_product("Pantalla Samsung A11", Some(1), "Samsung", "A11", "",
+            r#"["Samsung A11"]"#, 4.0, 10.0, 3, 0, 0.0).unwrap();
+        {
+            let c = db.conn.lock().unwrap();
+            // la pantalla Samsung es «A11» a secas en el inventario del local
+            c.execute("UPDATE products SET compatibility='[\"A11\"]' WHERE id=?1", params![samsung]).unwrap();
+            let marca = crate::phones::lookup_brand(&c, "A11").unwrap();
+            assert_eq!(marca, None, "«A11» es ambiguo (Umidigi A11 y Samsung Galaxy A11): sin certeza");
+        }
+        let a11 = db.find_compatible_products("A11", Some(1), 20).unwrap();
+        assert!(a11.iter().any(|c| c.product.id == samsung) && a11.iter().any(|c| c.product.id == umidigi));
+        assert!(a11.iter().all(|c| !c.brand_match && !c.brand_known),
+            "con el texto ambiguo NO se marca marca: {:?}",
+            a11.iter().map(|c| (c.product.id, c.brand_match, c.brand_known)).collect::<Vec<_>>());
+        let auto_a11: Vec<i64> = a11.iter().filter(|c| c.in_stock && c.brand_match).map(|c| c.product.id).collect();
+        assert!(auto_a11.is_empty(), "nada se auto-elige con marca ambigua: {auto_a11:?}");
+
+        // escrito a mano CON marca («Samsung A11») la marca SÍ se conoce y el gate funciona
+        let a11s = db.find_compatible_products("Samsung A11", Some(1), 20).unwrap();
+        let s2 = a11s.iter().find(|c| c.product.id == samsung).expect("falta el Samsung (2)");
+        assert!(s2.brand_match && s2.brand_known);
+        let u2 = a11s.iter().find(|c| c.product.id == umidigi).expect("falta el Umidigi (2)");
+        assert!(!u2.brand_match, "un Umidigi A11 no es la pantalla de un Samsung A11");
+
+        // --- Realme 11 5G contra Redmi Note 11 5G (Xiaomi) ---
+        let realme = db.add_product("Pantalla Realme 11 5G", Some(1), "Realme", "11 5G", "",
+            r#"["Realme 11 5G"]"#, 6.0, 14.0, 0, 0, 0.0).unwrap();
+        let redmi = db.add_product("Pantalla Xiaomi Redmi Note 11 5G", Some(1), "Xiaomi", "Redmi Note 11", "5G",
+            r#"["Redmi Note 11 5G"]"#, 5.0, 13.0, 4, 0, 0.0).unwrap();
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO phones (brand, line, model, name, key, aliases, source)
+                 VALUES ('Realme', '11', '11 5G', 'Realme 11 5G', 'realme 11 5g', '[]', 'catalogo')",
+                [],
+            ).unwrap();
+        }
+        let r5g = db.find_compatible_products("Realme 11 5G", Some(1), 20).unwrap();
+        let rl = r5g.iter().find(|c| c.product.id == realme).expect("falta el Realme");
+        let rd = r5g.iter().find(|c| c.product.id == redmi).expect("falta el Redmi (parcial por texto)");
+        assert!(rl.brand_match && !rd.brand_match, "Redmi ≠ Realme");
+        assert!(r5g.iter().position(|c| c.product.id == realme).unwrap()
+              < r5g.iter().position(|c| c.product.id == redmi).unwrap());
+
+        // modelo que NO está en el padrón y sin marca en el texto → sin gate (no se rompe nada)
+        let libre = db.find_compatible_products("Zzz 999", Some(1), 20).unwrap();
+        assert!(libre.is_empty());
+
+        // AMBIGÜEDAD = SIN CERTEZA: el mismo texto apunta a DOS marcas («A11» es Umidigi y
+        // Samsung Galaxy A11; «10 Lite» es Honor y Xiaomi Mi 10 Lite). Devolver una por orden
+        // de fila invertiría el gate (marcaría como «de otra marca» la pantalla correcta), así
+        // que no se marca ninguna y el formulario deja elegir al operario.
+        let xiaomi10 = db.add_product("Pantalla Xiaomi Mi 10 Lite", Some(1), "Xiaomi", "Mi 10 Lite", "",
+            r#"["Mi 10 Lite"]"#, 4.0, 11.0, 6, 0, 0.0).unwrap();
+        {
+            let c = db.conn.lock().unwrap();
+            // el padrón tiene las DOS fichas y las dos coinciden con el texto «10 Lite»
+            c.execute(
+                "INSERT INTO phones (brand, line, model, name, key, aliases, source)
+                 VALUES ('Xiaomi', 'Mi', '10 Lite', 'Xiaomi Mi 10 Lite', 'xiaomi mi 10 lite', '[\"10 Lite\"]', 'catalogo')",
+                [],
+            ).unwrap();
+            c.execute(
+                "INSERT INTO phones (brand, line, model, name, key, aliases, source)
+                 VALUES ('Honor', '', '10 Lite', 'Honor 10 Lite', 'honor 10 lite', '[\"10 Lite\"]', 'catalogo')",
+                [],
+            ).unwrap();
+        }
+        let amb = db.find_compatible_products("10 Lite", Some(1), 20).unwrap();
+        assert!(!amb.is_empty(), "el texto ambiguo igual devuelve candidatas para mostrar");
+        assert!(amb.iter().all(|c| !c.brand_match), "sin certeza de marca NO se marca ninguna: {:?}",
+            amb.iter().map(|c| (c.product.id, c.brand_match, c.brand_known)).collect::<Vec<_>>());
+        assert!(amb.iter().all(|c| !c.brand_known), "la UI necesita saber que la marca es desconocida");
+        // y la que era del Xiaomi queda fuera de la auto-selección (regla del frontend)
+        let auto_amb: Vec<i64> = amb.iter().filter(|c| c.in_stock && c.brand_match).map(|c| c.product.id).collect();
+        assert!(auto_amb.is_empty(), "nada se auto-elige con marca ambigua: {auto_amb:?} (incluye {xiaomi10})");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// Informe manual del GATE DE MARCA sobre una copia del catálogo REAL (B2). NO toca la
+    /// base que se le pasa: la COPIA a un temporal y mide ahí (el original solo se lee).
+    ///   node tools/snapshot_db.mjs --out backup/medicion.db
+    ///   $env:REGISTRO_BRANDGATE_DB="C:\...\backup\medicion.db"
+    ///   cargo test -- --ignored test_manual_brand_gate_report --nocapture
+    /// Cuenta, para cada teléfono del padrón: cuántos tenían el problema (una sola pantalla
+    /// con stock y de OTRA marca → el formulario la elegía sola) y cuántos se auto-eligen
+    /// ahora con la regla nueva (una sola con stock, de la marca y coincidencia exacta/prefijo).
+    #[test]
+    #[ignore = "manual: mide el gate de marca sobre la copia indicada en REGISTRO_BRANDGATE_DB"]
+    fn test_manual_brand_gate_report() {
+        let src = std::env::var("REGISTRO_BRANDGATE_DB").expect("define REGISTRO_BRANDGATE_DB");
+        let tmp = std::env::temp_dir().join("registro_brandgate_report.db");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).expect("no pude copiar la base a un temporal");
+        let db = Database::new(&tmp).expect("no pude abrir la copia");
+
+        let labels: Vec<String> = {
+            let c = db.conn.lock().unwrap();
+            let mut stmt = c.prepare("SELECT COALESCE(name,'') FROM phones WHERE TRIM(name) <> '' ORDER BY name").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        // El informe se apoya en el PADRÓN: si la copia no lo tiene (o quedó vacío) los números
+        // saldrían todos en 0 y parecería que el gate no encuentra nada. Mejor fallar claro.
+        assert!(!labels.is_empty(),
+            "el padrón está VACÍO en {src}: usá una copia con padrón (node tools/snapshot_db.mjs --out backup/medicion.db)");
+        println!("(copia temporal: la base pasada NO se toca)");
+
+        let (mut con_opciones, mut viejo_auto, mut cruzadas, mut nuevo_auto, mut sin_marca, mut parciales) = (0, 0, 0, 0, 0, 0);
+        let mut muestras: Vec<String> = Vec::new();
+        let mut perdidas: Vec<String> = Vec::new();
+        for label in &labels {
+            let c = match db.find_compatible_products(label, Some(1), 40) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if c.is_empty() {
+                continue;
+            }
+            con_opciones += 1;
+            if !c.iter().any(|x| x.brand_match) {
+                sin_marca += 1;
+            }
+            let con_stock: Vec<_> = c.iter().filter(|x| x.in_stock).collect();
+            // regla VIEJA: una sola con stock → se elegía sola, fuera de la marca que fuera
+            if con_stock.len() == 1 {
+                viejo_auto += 1;
+                if !con_stock[0].brand_match {
+                    cruzadas += 1;
+                    if muestras.len() < 20 {
+                        muestras.push(format!("{}  →  {}", label, con_stock[0].product.name));
+                    }
+                } else if con_stock[0].match_quality == "parcial" {
+                    // era de la marca pero por coincidencia PARCIAL: ahora la elige el
+                    // operario (antes se elegía sola y podía ser otro modelo de la marca)
+                    parciales += 1;
+                    if perdidas.len() < 20 {
+                        perdidas.push(format!("{}  →  {}  ({})", label, con_stock[0].product.name, con_stock[0].match_quality));
+                    }
+                }
+            }
+            // regla NUEVA: una sola con stock, DE LA MARCA y coincidencia exacta/prefijo
+            let propias: Vec<_> = c.iter()
+                .filter(|x| x.in_stock && x.brand_match && x.match_quality != "parcial")
+                .collect();
+            if propias.len() == 1 {
+                nuevo_auto += 1;
+            }
+        }
+
+        println!("base medida: {src}");
+        println!("teléfonos en el padrón: {}", labels.len());
+        println!("con pantallas compatibles: {con_opciones}");
+        println!("  · sin ninguna candidata de la MISMA marca: {sin_marca}");
+        println!("regla VIEJA — se elegían solos (una sola con stock): {viejo_auto}");
+        println!("  · de esos, de OTRA marca (el bug B2): {cruzadas}");
+        println!("regla NUEVA — se eligen solos (una sola con stock, de la marca, exacta/prefijo): {nuevo_auto}");
+        println!("  · de los viejos, de la marca pero coincidencia PARCIAL (ahora los elige el operario): {parciales}");
+        println!("casos que ya NO se eligen solos (eran de OTRA marca):");
+        for m in &muestras {
+            println!("  {m}");
+        }
+        println!("casos que ahora se resuelven a mano (misma marca, coincidencia parcial):");
+        for m in &perdidas {
+            println!("  {m}");
+        }
+
+        drop(db);
+        let _ = std::fs::remove_file(&tmp);
     }
 }

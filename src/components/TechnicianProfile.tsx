@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api } from '@/db';
 import type { TechnicianProfile as Profile } from '@/types';
-import { cn, initialsOf } from '@/lib/utils';
+import { cn, initialsOf, localDate } from '@/lib/utils';
 
 type SortKey = 'fecha' | 'orden' | 'cliente' | 'modelo' | 'trabajos' | 'estado' | 'monto';
 type Dir = 'asc' | 'desc' | null;
@@ -26,7 +26,9 @@ const PERIODS = [
   { key: 'rango', label: 'Rango' },
 ];
 
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+// Fecha LOCAL (no UTC): ver `localDate` en lib/utils.ts — con toISOString() «hoy» pasaba al
+// día siguiente después de las 20:00 en Venezuela.
+const iso = (d: Date) => localDate(d);
 
 function rangeFor(key: string, from: string, to: string): { start: string; end: string } {
   const now = new Date();

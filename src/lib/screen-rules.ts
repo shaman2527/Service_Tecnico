@@ -30,3 +30,31 @@ export const screenOk = (serviceTypes: string[], screenProductId: number | null,
   if (status === 'Entregado' && !chosen.in_stock) return confirmed;
   return true;
 };
+
+/**
+ * Auto-selección de la pantalla a instalar. SOLO se elige sola cuando hay UNA única
+ * candidata con stock, DE LA MISMA MARCA del teléfono (`brand_match`) y con coincidencia
+ * exacta o por prefijo.
+ *
+ * Antes se elegía la única con stock aunque fuera de otra marca. Medido con el informe
+ * `cargo test -- --ignored test_manual_brand_gate_report` sobre el catálogo real (1136 fichas
+ * del padrón, snapshot `node tools/snapshot_db.mjs`): de 263 teléfonos que se auto-elegían, 36
+ * elegían solos la pantalla de OTRA marca («7 Pro» → Tecno, «A11 Pro» → Samsung A11, «G50» →
+ * Motorola, «Galaxy Note 10 AM» → Infinix) y el descuento caía en el repuesto equivocado. Con
+ * la regla nueva son 279 auto-selecciones seguras (misma marca, exacta/prefijo) y 0 cruzadas.
+ * Si no hay certeza, la elige el operario a mano.
+ */
+export const autoScreen = (options: ScreenCandidate[]): ScreenCandidate | null => {
+  const own = options.filter(o => o.in_stock && o.brand_match && o.match_quality !== 'parcial');
+  return own.length === 1 ? own[0] : null;
+};
+
+/** ¿La pantalla elegida es de OTRA marca que el teléfono? Solo cuando la marca del teléfono
+ *  se CONOCE (`brand_known`): si no hay certeza no se avisa nada (avisar de más entrena al
+ *  operario a ignorar el aviso). No bloquea: el operario puede confirmarla a mano. */
+export const isCrossBrand = (candidate: ScreenCandidate | null | undefined) =>
+  !!candidate && candidate.brand_known !== false && candidate.brand_match === false;
+
+/** ¿Hay que avisar que esta candidata es de otra marca? (misma regla, sobre la opción). */
+export const warnsCrossBrand = (candidate: ScreenCandidate) =>
+  candidate.brand_known !== false && !candidate.brand_match;

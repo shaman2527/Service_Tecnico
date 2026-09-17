@@ -7,7 +7,7 @@
 //       (tsx resuelve los imports TS sin extensión del proyecto; `node` solo no puede)
 
 import { rankQueue, scoreQueueMatch, queueFlags, ACTIVE_QUEUE } from '../src/lib/queue';
-import { onlyScreens, screenOk } from '../src/lib/screen-rules';
+import { onlyScreens, screenOk, autoScreen, isCrossBrand, warnsCrossBrand } from '../src/lib/screen-rules';
 import type { Service, ScreenCandidate, Product } from '../src/types';
 
 let checks = 0;
@@ -110,8 +110,9 @@ const prod = (over: Partial<Product>): Product => ({
   min_stock: 0, created_at: '', updated_at: '', price_usd: 10, search_text: '',
   ...over,
 } as Product);
-const cand = (id: number, stock: number, category = 1): ScreenCandidate => ({
-  product: prod({ id, stock, category_id: category }), in_stock: stock > 0, match_quality: 'exacta',
+const cand = (id: number, stock: number, category = 1, brandMatch = true, quality: ScreenCandidate['match_quality'] = 'exacta', brandKnown = true): ScreenCandidate => ({
+  product: prod({ id, stock, category_id: category }), in_stock: stock > 0, match_quality: quality,
+  brand_match: brandMatch, brand_known: brandKnown,
 } as ScreenCandidate);
 
 ok('sin trabajo de pantalla → no exige nada', screenOk(['Software / Formateo'], null, [cand(1, 5)]));
@@ -122,6 +123,32 @@ ok('pantalla AGOTADA al entregar → exige confirmación', !screenOk(['Cambio pa
 ok('pantalla AGOTADA confirmada → ok', screenOk(['Cambio pantalla'], 2, [cand(1, 5), cand(2, 0)], true, 'Entregado'));
 ok('al RECIBIR (no entregado) la agotada no exige confirmar', screenOk(['Cambio pantalla'], 2, [cand(2, 0)], false, 'Recibido'));
 eq('onlyScreens deja solo categoría 1', onlyScreens([cand(1, 5), cand(2, 5, 2)]).length, 1);
+
+// ── GATE DE MARCA de la pantalla que se elige sola (B2 pre-producción) ────────────────
+// Caso real: «Honor 10 Lite» solo tenía con stock la pantalla de un «Infinix Hot 10 Lite»
+// y el formulario la elegía sola → el descuento caía en el repuesto equivocado.
+eq('una sola con stock y de la marca → se elige sola', autoScreen([cand(1, 3)])?.product.id, 1);
+eq('una sola con stock pero de OTRA marca → NO se elige sola',
+  autoScreen([cand(1, 3, 1, false)]), null);
+eq('la de la marca sin stock + la de otra marca con stock → NO se elige sola',
+  autoScreen([cand(1, 0), cand(2, 5, 1, false)]), null);
+eq('dos de la marca con stock → decide el operario', autoScreen([cand(1, 3), cand(2, 4)]), null);
+eq('la de la marca con stock aunque haya otra de la marca agotada', autoScreen([cand(1, 3), cand(2, 0)])?.product.id, 1);
+eq('coincidencia PARCIAL de la misma marca → no se elige sola',
+  autoScreen([cand(1, 3, 1, true, 'parcial')]), null);
+ok('cand con marca → no es de otra marca', !isCrossBrand(cand(1, 3)));
+ok('cand de otra marca → isCrossBrand', isCrossBrand(cand(1, 3, 1, false)));
+ok('sin candidata elegida → isCrossBrand false', !isCrossBrand(null));
+// MARCA DESCONOCIDA (modelo libre, o texto ambiguo como «A11» = Umidigi A11 y Samsung Galaxy
+// A11): NO se avisa «otra marca» —avisar de más entrena a ignorar el aviso— y tampoco se elige
+// sola. Antes esta combinación pintaba el Alert rojo sobre una pantalla correcta.
+const sinMarca = cand(1, 5, 1, false, 'exacta', false);
+ok('marca desconocida → no se avisa «otra marca»', !warnsCrossBrand(sinMarca));
+ok('marca desconocida → isCrossBrand false', !isCrossBrand(sinMarca));
+eq('marca desconocida → no se auto-elige', autoScreen([sinMarca]), null);
+ok('marca conocida y distinta → sí avisa', warnsCrossBrand(cand(1, 5, 1, false, 'exacta', true)));
+ok('sin marca conocida la agotada confirmada sigue igual',
+  screenOk(['Cambio pantalla'], 2, [cand(2, 0)], true, 'Entregado'));
 
 console.log(`\nqueue + screen-rules: ${checks} comprobaciones · ${checks - failures} OK · ${failures} fallos`);
 if (failures > 0) process.exit(1);

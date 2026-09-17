@@ -27,10 +27,10 @@ import { PaymentMethodPicker } from './PaymentMethodPicker';
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
 import { FormStepper } from './FormStepper';
 import { ScreenSelect, useCompatibleProducts } from './ScreenPicker';
-import { asPhoneEntry, onlyScreens, screenOk } from '@/lib/screen-rules';
+import { asPhoneEntry, autoScreen, onlyScreens, screenOk } from '@/lib/screen-rules';
 import { updateOrderKeepingFields } from '@/lib/service-update';
 import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
@@ -342,13 +342,13 @@ export default function Services() {
     }
     const now = new Date();
     if (days === 0) {
-      const d = now.toISOString().slice(0, 10);
+      const d = localDate(now);
       setDateStart(d);
       setDateEnd(d);
     } else {
-      const start = new Date(now.getTime() - (days - 1) * 86400000);
-      setDateStart(start.toISOString().slice(0, 10));
-      setDateEnd(now.toISOString().slice(0, 10));
+      const hoy = localDate(now);
+      setDateStart(addDays(hoy, -(days - 1)));
+      setDateEnd(hoy);
     }
   };
 
@@ -936,11 +936,14 @@ function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouche
     if (isDivisas) {
       const withUsd = sugg.products.filter(p => p.price_usd > 0);
       if (withUsd.length > 0) {
-        const usdPrice = Math.min(...withUsd.map(p => p.price_usd));
-        patch.amount = usdPrice;
+        // El MISMO repuesto que da el precio de contado da el precio de lista: el descuento
+        // sugerido (que se guarda en la orden) tiene que salir de esa ficha y no de la primera
+        // de la lista — el backend ordena por marca y «primera» cambió con el gate de marca.
+        const base0 = withUsd.reduce((a, b) => (b.price_usd < a.price_usd ? b : a));
+        patch.amount = base0.price_usd;
         if (!discountTouched) {
-          const base = prices.size === 1 ? [...prices][0] : withUsd[0].price_sale;
-          patch.discount = Math.max(0, base - usdPrice);
+          const base = prices.size === 1 ? [...prices][0] : base0.price_sale;
+          patch.discount = Math.max(0, base - base0.price_usd);
         }
         return patch;
       }
@@ -1033,12 +1036,13 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
     onScreenValid?.(index, screenValid);
   }, [index, screenValid, onScreenValid]);
 
-  // Si hay UNA sola pantalla con stock para ese modelo, se elige sola (evita
-  // que el operario entregue una agotada por descuido).
+  // Si hay UNA sola pantalla con stock, DE LA MISMA MARCA del teléfono, se elige sola (evita
+  // que el operario entregue una agotada por descuido y que se descuente la pantalla de OTRO
+  // teléfono por coincidir el texto del modelo). Regla pura en lib/screen-rules.ts.
   useEffect(() => {
     if (!isScreenJob || device.screenProductId != null) return;
-    const inStock = screenOptions.filter(o => o.in_stock);
-    if (inStock.length === 1) onChange({ screenProductId: inStock[0].product.id, screenConfirm: false });
+    const auto = autoScreen(screenOptions);
+    if (auto) onChange({ screenProductId: auto.product.id, screenConfirm: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenOptions, isScreenJob, device.screenProductId]);
 
@@ -1462,11 +1466,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   const isScreenJobEdit = serviceTypes.includes('Cambio pantalla');
 
-  // Auto-selección si hay UNA sola pantalla con stock
+  // Auto-selección: UNA sola pantalla con stock Y de la MISMA marca del teléfono (regla pura
+  // `autoScreen`; antes esta puerta —el modo EDICIÓN— seguía con la regla vieja «una sola con
+  // stock» y podía asignar la pantalla de OTRO teléfono al guardar).
   useEffect(() => {
     if (!isScreenJobEdit || screenProductId != null) return;
-    const inStock = screenOptions.filter(o => o.in_stock);
-    if (inStock.length === 1) { setScreenProductId(inStock[0].product.id); setScreenConfirm(false); }
+    const auto = autoScreen(screenOptions);
+    if (auto) { setScreenProductId(auto.product.id); setScreenConfirm(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenOptions, isScreenJobEdit, screenProductId]);
 

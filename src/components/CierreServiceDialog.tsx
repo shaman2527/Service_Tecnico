@@ -13,7 +13,7 @@ import type { ScreenCandidate, Service } from '@/types';
 import { cn, currencySymbol, methodCurrency, parseServiceTypes, shortMethodLabel } from '@/lib/utils';
 // Regla del proyecto (AGENTS.md): entregar una pantalla AGOTADA exige confirmación explícita
 // — `screenOk` es la MISMA función que usa el formulario de servicio, no una copia.
-import { screenOk } from '@/lib/screen-rules';
+import { screenOk, warnsCrossBrand } from '@/lib/screen-rules';
 import {
   convertAmount, finalAmount, quickAmounts, saldoChipValue, puntoCommission, DEFAULT_PUNTO_FEE, type PayCur,
 } from '@/lib/payment-math';
@@ -333,7 +333,9 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
                 </div>
               ) : (
                 <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                  {candidatos.map(({ product: p, in_stock, match_quality }) => (
+                  {candidatos.map(o => {
+                    const { product: p, in_stock, match_quality } = o;
+                    return (
                     <button
                       key={p.id}
                       type="button"
@@ -347,12 +349,20 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
                         {p.id === screenId && <Check className="size-3.5 text-primary" />}
                         {p.name} <span className="text-muted-foreground">({match_quality})</span>
                       </span>
-                      <Badge variant={in_stock ? 'default' : 'outline'}
-                        className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white' : 'text-warning border-warning/50')}>
-                        {in_stock ? `stock ${p.stock}` : 'agotada'}
-                      </Badge>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {/* Misma regla que el formulario: acá también se elige la pantalla que
+                            descuenta inventario, así que el aviso de marca viaja igual. */}
+                        {warnsCrossBrand(o) && (
+                          <Badge variant="outline" className="text-[10px] text-warning border-warning/50">otra marca</Badge>
+                        )}
+                        <Badge variant={in_stock ? 'default' : 'outline'}
+                          className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white' : 'text-warning border-warning/50')}>
+                          {in_stock ? `stock ${p.stock}` : 'agotada'}
+                        </Badge>
+                      </span>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               {elegidaAgotada && (

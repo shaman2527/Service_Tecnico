@@ -4,6 +4,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { api } from '../db';
 import { cn, partLabel } from '@/lib/utils';
+import { isCrossBrand, warnsCrossBrand } from '@/lib/screen-rules';
 import type { ScreenCandidate } from '../types';
 
 // Elección de la PANTALLA EXACTA que se instala: el hook que consulta la compatibilidad y el
@@ -67,8 +68,10 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
 
       {!loading && screenOptions.length > 0 && (
         <div className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
-          {screenOptions.map(({ product: p, in_stock, match_quality }) => {
+          {screenOptions.map(o => {
+            const { product: p, in_stock, match_quality } = o;
             const active = p.id === screenProductId;
+            const otraMarca = warnsCrossBrand(o);
             return (
               <button
                 key={p.id}
@@ -87,6 +90,9 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
                   </span>
                 </span>
                 <span className="flex items-center gap-1.5 shrink-0">
+                  {otraMarca && (
+                    <Badge variant="outline" className="text-[10px] text-warning border-warning/50">otra marca</Badge>
+                  )}
                   {match_quality !== 'exacta' && (
                     <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
                   )}
@@ -110,10 +116,29 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
         <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
       )}
 
-      {!loading && chosen && !chosenOut && (
+      {!loading && chosen && !chosenOut && !isCrossBrand(chosen) && (
         <p className="text-xs text-emerald-600 flex items-center gap-1">
           <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario (stock actual {chosen.product.stock})
         </p>
+      )}
+
+      {!loading && chosen && isCrossBrand(chosen) && (
+        <Alert variant="destructive" className="py-2">
+          <AlertTriangle className="size-4" />
+          <AlertTitle className="text-xs">Ojo: es una pantalla de OTRA marca</AlertTitle>
+          <AlertDescription className="text-xs flex flex-col gap-1">
+            <span>
+              La compatibilidad del catálogo no nombra la marca de este teléfono («{partLabel(chosen.product)}»).
+              Puede servir si el operario lo confirmó midiendo el repuesto, pero revisa que sea la medida y el
+              conector correctos antes de entregarla.
+            </span>
+            <span className={chosenOut ? 'text-destructive' : 'text-emerald-600'}>
+              {chosenOut
+                ? `Se entregaría SIN stock registrado (queda en ${chosen.product.stock - 1}, faltante).`
+                : `Al entregar se descuenta «${partLabel(chosen.product)}» (stock actual ${chosen.product.stock}).`}
+            </span>
+          </AlertDescription>
+        </Alert>
       )}
 
       {!loading && chosenOut && (

@@ -200,6 +200,72 @@ pub fn phone_totals_map(conn: &Connection) -> SqlResult<HashMap<String, (i64, i6
 /// el servicio para encontrar los repuestos AUNQUE el taller haya renombrado el teléfono
 /// (el vínculo con el inventario son justamente los alias).
 pub fn lookup_aliases(conn: &Connection, text: &str) -> SqlResult<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for (_brand, name, model, aliases) in matching_rows(conn, text)? {
+        out.push(name);
+        if !model.is_empty() {
+            out.push(model);
+        }
+        out.extend(aliases);
+    }
+    out.retain(|s| !s.trim().is_empty());
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Marca de la ficha del PADRÓN a la que corresponde un texto libre (nombre comercial,
+/// modelo, clave o alias). La usa el servicio para no ofrecer —ni elegir sola— la pantalla
+/// de OTRA marca cuando el modelo coincide por texto (p. ej. «Honor 10 Lite» con una
+/// pantalla de «Infinix Hot 10 Lite»). `None` = no hay certeza (el teléfono no está en el
+/// padrón, o DOS fichas con el mismo texto tienen marcas distintas).
+///
+/// La AMBIGÜEDAD es importante: «A11» es a la vez `Umidigi A11` y `Samsung Galaxy A11`, y
+/// «10 Lite» es `Honor 10 Lite` y `Xiaomi Mi 10 Lite`. Devolver una de las dos por orden de
+/// fila invertiría el gate (marcaría como «de otra marca» justo la pantalla correcta). Sin
+/// certeza se devuelve `None` y el formulario deja que el operario elija a mano.
+pub fn lookup_brand(conn: &Connection, text: &str) -> SqlResult<Option<String>> {
+    let target = crate::catalog::norm(text);
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let rows = matching_rows(conn, text)?;
+    // ¿cuántas marcas CANÓNICAS distintas coinciden con el mismo texto?
+    let mut brands: Vec<String> = Vec::new();
+    for (brand, _name, _model, _aliases) in &rows {
+        if brand.trim().is_empty() {
+            continue;
+        }
+        let n = crate::catalog::norm(&crate::catalog::canonical_brand(brand));
+        if n.is_empty() || n == "generico" || brands.contains(&n) {
+            continue;
+        }
+        brands.push(n);
+    }
+    if brands.len() != 1 {
+        return Ok(None);
+    }
+    // Una sola marca: si una ficha coincide por NOMBRE exacto, es esa.
+    let mut any: Option<String> = None;
+    for (brand, name, _model, _aliases) in rows {
+        if brand.trim().is_empty() {
+            continue;
+        }
+        if crate::catalog::norm(&name) == target {
+            return Ok(Some(brand));
+        }
+        if any.is_none() {
+            any = Some(brand);
+        }
+    }
+    Ok(any)
+}
+
+/// Filas del padrón que corresponden a un texto libre, con la MISMA regla de coincidencia
+/// para `lookup_aliases` y `lookup_brand` (fuente única: nombre, modelo, clave, «marca
+/// modelo» o alias). Devuelve `(brand, name, model, alias)`.
+#[allow(clippy::type_complexity)]
+fn matching_rows(conn: &Connection, text: &str) -> SqlResult<Vec<(String, String, String, Vec<String>)>> {
     let target = crate::catalog::norm(text);
     if target.is_empty() {
         return Ok(Vec::new());
@@ -218,7 +284,7 @@ pub fn lookup_aliases(conn: &Connection, text: &str) -> SqlResult<Vec<String>> {
             r.get::<_, String>(4)?,
         ))
     })?;
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, String, String, Vec<String>)> = Vec::new();
     for row in rows {
         let (name, model, brand, key, aliases_json) = row?;
         let aliases = parse_aliases(&aliases_json);
@@ -228,16 +294,9 @@ pub fn lookup_aliases(conn: &Connection, text: &str) -> SqlResult<Vec<String>> {
             || crate::catalog::norm(&format!("{brand} {model}")) == target
             || aliases.iter().any(|a| crate::catalog::norm(a) == target);
         if hit {
-            out.push(name.clone());
-            if !model.is_empty() {
-                out.push(model);
-            }
-            out.extend(aliases);
+            out.push((brand, name, model, aliases));
         }
     }
-    out.retain(|s| !s.trim().is_empty());
-    out.sort();
-    out.dedup();
     Ok(out)
 }
 

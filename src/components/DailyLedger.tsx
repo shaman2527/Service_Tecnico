@@ -18,6 +18,7 @@ import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
 import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult } from '../types';
 import { EXPENSE_CATEGORIES } from '../types';
+import { localDate, addDays } from '@/lib/utils';
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 const fmtBs = (n: number) => `Bs.${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -88,13 +89,12 @@ const PAYMENT_METHODS = [
 
 export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
   const isOwner = role === 'owner';
-  const today = new Date().toISOString().slice(0, 10);
+  // Fecha LOCAL del local (ver `localDate`): con toISOString() el «hoy» del Libro Diario pasaba
+  // al día siguiente después de las 20:00 en Venezuela y el día aparecía sin movimientos.
+  const today = localDate();
   const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud'>('diario');
-  const [startDate, setStartDate] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 30);
-    return d.toISOString().slice(0, 10);
-  });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() => addDays(today, -30));
+  const [endDate, setEndDate] = useState(() => localDate());
   const [totals, setTotals] = useState<DailyTotals[]>([]);
   const [closings, setClosings] = useState<DailyClosing[]>([]);
   const [activeDay, setActiveDay] = useState<DailyClosing | null>(null);
@@ -179,8 +179,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       const cur = await api.getProfitSummary(effectiveStart, effectiveEnd);
       // Período anterior del MISMO largo (para el comparativo %)
       const spanDays = Math.max(1, Math.round((Date.parse(effectiveEnd) - Date.parse(effectiveStart)) / 86400000) + 1);
-      const prevEnd = new Date(Date.parse(effectiveStart) - 86400000).toISOString().slice(0, 10);
-      const prevStart = new Date(Date.parse(prevEnd) - (spanDays - 1) * 86400000).toISOString().slice(0, 10);
+      const prevEnd = addDays(effectiveStart, -1);
+      const prevStart = addDays(prevEnd, -(spanDays - 1));
       const prev = await api.getProfitSummary(prevStart, prevEnd);
       setProfit(cur);
       setPrevProfit(prev);
