@@ -777,4 +777,18 @@ Lo de arriba es el asistente. Esta sesión agregó lo que va **antes** de él y 
 - **Ojo con `tools/verify_servicio_cierre.mjs`**: escribe en la DB real sin guarda de copia y, si no hay día
   abierto, lo abre con una tasa BCV inventada (40) — correrlo contra la app de la tienda dejaría el turno abierto
   con una tasa falsa. Exigir copia (`REGISTRO_DB`) antes de usarlo.
+- **Verificación EN VIVO de la cola (propia y de SOLO LECTURA):** `node tools/verify_cola_entregas.mjs` con la app
+  de dev abierta (CDP en 9222) → **13/13**: existe el botón «Cerrar entrega», **F4 abre la paleta**, la cola informa
+  «N en taller · M con saldo», lista las órdenes activas, cada fila dice si FALTA COBRAR, la búsqueda acota los
+  resultados y **elegir una fila abre el asistente de ESA orden**; `Escape` cierra sin dejar diálogos apilados.
+  No escribe NADA en la base y **aborta (exit 2) si ya hay un diálogo abierto**, para no leer el diálogo de otra
+  sesión ni pisarle una verificación en curso. Lección del script: hay que cerrar con `process.exit(...)` porque
+  el WebSocket de CDP queda abierto y el script «parece colgado» aunque haya terminado bien.
+- **La app de dev escribe en la COPIA, no en `registro.db`**: durante las verificaciones de F30 la app corría
+  contra `backup/registro_pre_normalizacion_20260915.db` (MODO DEV, correcto). Ojo al auditar datos: mirar
+  `registro.db` o `dev_registro.db` y creer que ahí está lo que ve la app es un falso negativo. Esa copia quedó
+  con **5 órdenes de prueba sin borrar** («Prueba Cierre A/B…», ids 8-10, 17-18, con `order_num` deformados
+  `''`, `-8`, `-9`, `-10`, `-11`) de las corridas del script de la otra sesión: 3 de ellas aparecen en la cola
+  como «en taller». Son datos de PRUEBA de la copia de dev (no de la tienda) y no se tocaron desde esta sesión:
+  conviene borrarlas antes de sacar conclusiones de la cola o de la caja de esa copia.
 

@@ -11,7 +11,7 @@
 // NO escribe en la DB: no cierra días, no cobra, no entrega, no crea órdenes.
 // Uso:  node tools/verify_cola_entregas.mjs        (con la app de dev abierta y CDP en 9222)
 
-import { evalx, sleep } from './cdp_driver.mjs';
+import { evalx, clickCenter, sleep } from './cdp_driver.mjs';
 
 const out = [];
 const check = (name, ok, detail) => {
@@ -47,6 +47,14 @@ const waitReady = async (timeout = 40000) => {
 console.log('— Cola de entregas (F30/F4) — verificación en vivo SOLO LECTURA —');
 if (!(await waitReady())) { check('la app responde', false, 'no apareció el sidebar'); process.exit(1); }
 check('la app responde', true);
+
+// Si YA hay un diálogo abierto, otra sesión/herramienta está usando la app: no se toca nada
+// (abortar es más honesto que leer el diálogo de otro y reportar un falso fallo).
+const abiertosAlInicio = await dialogsOpen();
+if (abiertosAlInicio > 0) {
+  console.log(`\nABORTADO: la app tiene ${abiertosAlInicio} diálogo(s) abierto(s) — está en uso. Reintentá cuando esté libre.`);
+  process.exit(2);
+}
 
 // Ir a Servicio Técnico por el sidebar (si no estamos ahí)
 await evalx(`(() => {
@@ -104,14 +112,23 @@ if (primerOrden) {
   check('la cola tiene al menos una orden para probar la búsqueda', false, 'cola vacía');
 }
 
-// 5) elegir una fila abre el ASISTENTE de esa orden
+// 5) elegir una fila abre el ASISTENTE de esa orden (click REAL por CDP: cmdk selecciona
+//    con click/Enter, un `mousedown` sintético no dispara onSelect)
 await typeInInput('[cmdk-input]', '');
 await sleep(500);
-await evalx(`(() => { const it = document.querySelector('[cmdk-item]'); if (it) it.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return !!it; })()`);
-await sleep(1200);
+const ordenElegida = await evalx(`(() => {
+  const it = document.querySelector('[cmdk-item]');
+  return it ? (it.innerText || '').split('\\n')[0].trim() : null;
+})()`);
+await clickCenter(`document.querySelector('[cmdk-item]')`);
+await sleep(1400);
 const asistente = await dialogText();
-check('elegir una orden abre el asistente de cierre de ESA orden',
-  !!asistente && /Cerrar DEV-|Cerrar \d/.test(asistente), asistente ? asistente.split('\n')[0] : 'sin diálogo');
+// El título es «Cerrar {order_num}»: se compara de forma agnóstica al dato (en la copia de
+// dev puede haber órdenes de prueba con números raros, p.ej. «-9»), y se exige que NO sea
+// la paleta de la cola (que se titula «Cerrar una entrega»).
+const esAsistente = !!asistente && asistente.trimStart().startsWith('Cerrar ') && !asistente.includes('Cerrar una entrega');
+check(`elegir la orden «${ordenElegida ?? '?'}» abre el ASISTENTE de cierre`, esAsistente,
+  asistente ? asistente.split('\n')[0] : 'sin diálogo');
 check('el asistente muestra el cobro y el botón de cerrar',
   !!asistente && /(Falta cobrar|Cobrado|Cobrar y entregar|Entregar con saldo)/.test(asistente));
 
@@ -125,4 +142,6 @@ check('la app sigue en pie (sidebar visible)', await evalx(`!!document.querySele
 const fails = out.filter(o => !o.ok);
 console.log(`\ncola de entregas: ${out.length} comprobaciones · ${out.length - fails.length} OK · ${fails.length} fallo(s)`);
 console.log('(verificación de solo lectura: no se escribió nada en la base)');
-if (fails.length > 0) process.exit(1);
+// `process.exit` SIEMPRE: el WebSocket de CDP queda abierto y sin esto el proceso no termina
+// (el script «se cuelga» aunque haya terminado bien).
+process.exit(fails.length > 0 ? 1 : 0);

@@ -35,11 +35,17 @@ entrega en un mismo paso.
 
 | Qué | Dónde | Evidencia |
 |---|---|---|
-| Cola de entregas (F4): busca por cédula/teléfono/nombre/modelo/nº de orden | `src/components/CierreQueueDialog.tsx` + `src/lib/queue.ts` | filtrado LOCAL (1 sola consulta al abrir); `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` **32/32** |
+| Cola de entregas (F4): busca por cédula/teléfono/nombre/modelo/nº de orden | `src/components/CierreQueueDialog.tsx` + `src/lib/queue.ts` | filtrado LOCAL (1 sola consulta al abrir); `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` **47/47** |
 | Asistente: pantalla que se instaló (con stock y confirmación de agotada) + cobro ($ / Bs., chips, «todo el saldo», Punto) + entrega + motivo obligatorio si queda saldo + recibo | `src/components/CierreServiceDialog.tsx` | abierto desde la tarjeta («Cerrar») o desde la cola |
 | Reglas de dinero en UN módulo | `src/lib/payment-math.ts` (lo usan `PaymentDialog` y el asistente) | `node tools/payment_math_test.ts` **595/595** de paridad con las fórmulas viejas |
 | Reglas de pantalla + stepper + actualización de orden, sin copias | `src/lib/screen-rules.ts`, `src/components/ScreenPicker.tsx`, `src/components/FormStepper.tsx`, `src/lib/service-update.ts` | movidos literalmente desde `Services.tsx` |
 | Gates | `npx tsc -b` 0 errores · `npx oxlint` 0 errores · `npm run build` OK · `harness_security` PASS · `harness_truth` PASS | `cargo test` NO se re-corrió a propósito (cero cambios en Rust y la otra sesión tenía la app en vivo) |
+| **Prueba EN VIVO propia (solo lectura)** | `node tools/verify_cola_entregas.mjs` → **13/13**: botón «Cerrar entrega» · **F4 abre la cola** («3 en taller · 3 con saldo») · cada fila dice «falta cobrar» · la búsqueda acota los resultados · **elegir una fila abre el asistente de ESA orden** · Escape cierra sin apilar diálogos | la app de dev corría contra la COPIA `backup/registro_pre_normalizacion_20260915.db`; el script no escribe NADA y aborta si ya hay un diálogo abierto (para no pisar a otra sesión) |
+
+**Datos de prueba a limpiar en la copia de dev:** esa copia quedó con 5 órdenes «Prueba Cierre A/B…»
+(ids 8-10 y 17-18, con `order_num` deformados `''`, `-8`, `-9`, `-10`, `-11`) de las corridas del script de
+la otra sesión; 3 de ellas aparecen en la cola como «en taller». Son de la COPIA (no de la tienda) y no se
+tocaron desde esta sesión.
 
 **Pendiente (no mezclar con F30):** F31 (cola y pagos en UNA consulta — fin del N+1 de hasta 120
 `getServicePayments`), F32 (`close_service_delivery` transaccional: cobro + entrega + stock + `printed`

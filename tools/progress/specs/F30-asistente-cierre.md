@@ -150,7 +150,7 @@ se editan archivos de `ui/` a mano.
 | Asistente de cierre | `src/components/CierreServiceDialog.tsx` | base creada por la sesión paralela + completada acá: usa `screenOk` (confirmación de agotada), `payment-math`, `onlyScreens`, motivo obligatorio, `Ctrl+Enter` |
 | Dinero en un solo lugar | `src/lib/payment-math.ts` | `PaymentDialog` pasó a usarlo (sus fórmulas locales se borraron) |
 | Pantalla / stepper / update | `src/lib/screen-rules.ts`, `src/components/ScreenPicker.tsx`, `src/components/FormStepper.tsx`, `src/lib/service-update.ts` | movidos literalmente desde `Services.tsx`; `deliver()` ahora usa `updateOrderKeepingFields` |
-| Pruebas puras | `tools/payment_math_test.ts`, `tools/queue_test.ts` | 595/595 y 32/32 |
+| Pruebas puras | `tools/payment_math_test.ts`, `tools/queue_test.ts` | 595/595 y 47/47 |
 
 **Verificación ejecutada**
 
@@ -160,11 +160,12 @@ se editan archivos de `ui/` a mano.
 | `npx oxlint` | 0 errores (los warnings bajaron de 88 a 86: los módulos puros ya no mezclan componentes y funciones) |
 | `npm run build` | OK (15,45 s) |
 | `node tools/payment_math_test.ts` | **595/595**, 0 diferencias vs las fórmulas viejas de `PaymentDialog` |
-| `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` | **32/32** (ranking, faltantes, pantalla agotada) |
+| `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` | **47/47** (ranking con acentos/puntuación, prioridad teléfono vs nº de orden, faltantes, pantalla agotada) |
 | `harness_security` | PASS (secrets, debug-mode, sql-injection, auth) |
 | `harness_truth` | PASS (build PASS) |
-| `cargo test` | **no re-ejecutado a propósito**: cero cambios en Rust y la sesión paralela tenía la app Tauri en vivo con `cargo` (lock del `target/`) |
-| `harness_review` | **roto en este entorno** (falta `tools/reviewer/parallel-review.ts`) → sustituido por dos revisiones adversariales con subagentes |
+| **`node tools/verify_cola_entregas.mjs` (EN VIVO, solo lectura)** | **13/13** en la app de dev: botón «Cerrar entrega» · **F4 abre la cola** («3 en taller · 3 con saldo») · cada fila dice «falta cobrar» · la búsqueda acota (3 → 1) · **elegir una fila abre el asistente de ESA orden** · Escape cierra sin apilar diálogos. No escribe nada en la base y **aborta si ya hay un diálogo abierto** (para no pisar a la otra sesión) |
+| `cargo test` | **no re-ejecutado a propósito**: cero cambios en Rust (`git status` sin nada en `src-tauri/`) y la sesión paralela tenía la app Tauri en vivo con `cargo` (lock del `target/`) |
+| `harness_review` | **roto en este entorno** (falta `tools/reviewer/parallel-review.ts`) → sustituido por **3 vueltas** de dos revisiones adversariales con subagentes (calidad y consistencia), con veredicto final **OK** |
 
 **Desviaciones honestas respecto de lo planeado en §2/§3**
 
