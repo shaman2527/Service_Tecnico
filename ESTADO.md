@@ -47,8 +47,18 @@ por orden de fila en textos ambiguos (invertía el gate)— y 3 menores también
 ninguno** — el cambio no escribe ni migra nada y no invalida órdenes viejas (un `screen_product_id`
 ya guardado sigue siendo válido y es el que se descuenta).
 
-Abiertos: **B1** (123 SKU con stock sin precio de venta → decisión del local) · **B3** (rol solo en
-la UI) · **B4** (PIN en texto plano) · **B5** (security gate del harness = falso verde).
+Abiertos: **B1** (123 SKU con stock sin precio de venta → decisión del local) · **B5** (security gate del harness = falso verde).
+
+### 0.a.1 B3 y B4 cerrados: rol en el backend + PIN hasheado (2026-09-16)
+
+| Qué | Antes | Ahora | Evidencia |
+|---|---|---|---|
+| **B3 · rol solo en la UI** | La cajera podía borrar productos, cambiar precios, fusionar fichas, cargar inventario o tocar el PIN con un `invoke()` directo: solo 4 comandos exigían dueño | `db.require_owner()?` en los **25 comandos de escritura del dueño** (catálogo, precios, inventario masivo, gastos, compras, técnicos, borrar servicios/pagos, cierres, PIN, configuración/impresora, padrón) y **ninguno** en los del mostrador (venta, orden, abono, devolución, clientes, abrir turno, recibir pedido, lecturas, impresión). La sesión de dueño **vence a las 12 h** y hay botón **«Bloquear sesión»** en el sidebar (`lock_owner`) | `commands::tests::test_b3_*` (4 tests, incluido uno que LEE `commands.rs` y falla nombrando cualquier comando de escritura que se olvide el gate) · verificado en vivo |
+| **B4 · PIN en texto plano** | `settings.pin` guardaba `"1234"`; `set_pin` no exigía nada; sin límite de intentos | PIN **hasheado** (PBKDF2-HMAC-SHA256, 60.000 iteraciones, sal aleatoria) con **migración automática** al primer desbloqueo; cambiar el PIN exige la sesión de dueño; **5 intentos fallidos → 60 s bloqueado** con mensaje | `db::tests::test_pin_hash_owner_gate_and_lockout` · en vivo: el PIN del local pasó de `"1234"` a `pbkdf2$…` y siguió entrando igual |
+
+`cargo test`: **120 pasan / 0 fallan / 6 ignorados** (hooks manuales). En vivo: smoke integral **108/108**, gate de marca **23/23**, wizard+métodos **18/18**, cola de entregas **13/13**, cierre de servicio **17/17**, métodos en cobros **15/15**; puros: queue 61/61, fechas locales 17/17, payment-math 595/595, method-picker 31/31.
+
+**Falta para producción:** decisión de **B1** (precios de los 123 SKU con stock), **B5** (que el security gate del harness escanee `.rs`/`src/` de verdad) y los pasos de release (promover `backup/plantilla_candidata.db` a `registro.db`, bump de versión, `tools/release.ps1` → publica en GitHub, prueba en PC limpia).
 
 ---
 

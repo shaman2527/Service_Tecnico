@@ -2602,6 +2602,7 @@ name = "registro"
 version = "0.2.5"
 dependencies = [
  "chrono",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

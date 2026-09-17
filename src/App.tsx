@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen,
-  PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag,
-} from 'lucide-react';import { Button } from './components/ui/button';
+  PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag, Lock,
+} from 'lucide-react';
+import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Toaster } from './components/ui/sonner';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
@@ -265,7 +266,7 @@ function App() {
           })}
         </nav>
 
-        <div className="px-5 py-4 border-t border-sidebar-border">
+        <div className="px-5 py-4 border-t border-sidebar-border flex flex-col gap-2">
           <div className={cn('flex items-center gap-2.5', collapsed && 'justify-center gap-0')}>
             <span className="size-2 rounded-full bg-success" />
             {!collapsed && (
@@ -275,6 +276,23 @@ function App() {
               </>
             )}
           </div>
+          {/* El dueño puede DEJAR LA SESIÓN BLOQUEADA al levantarse: sin esto la sesión de dueño
+              quedaba abierta todo el día (o hasta 12 h) y la cajera podía tocar el catálogo. */}
+          {role === 'owner' && (
+            <button
+              onClick={async () => {
+                await api.lockOwner().catch(() => {});
+                setRole('loading');
+                setPinInput('');
+                setPinError(null);
+              }}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground transition-colors"
+              title="Bloquear la sesión de dueño (vuelve a pedir el PIN)"
+            >
+              <Lock className="size-3.5 shrink-0" />
+              {!collapsed && <span>Bloquear sesión</span>}
+            </button>
+          )}
         </div>
       </aside>
 

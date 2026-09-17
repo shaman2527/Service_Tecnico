@@ -437,6 +437,11 @@ export const api = {
     tauriInvoke<boolean>('remove_pin', { pin }).catch(() =>
       mock<boolean>(true)),
 
+  /** Cierra la sesión de DUEÑO en el backend (botón «Bloquear sesión»): los comandos de
+   *  catálogo/precios/configuración vuelven a pedir el PIN. La cajera sigue trabajando igual. */
+  lockOwner: () =>
+    tauriInvoke<null>('lock_owner', {}).catch(() => mock<null>(null)),
+
   getPagoMovilDetail: (date: string) =>
     tauriInvoke<PagoMovilDetail[]>('get_pago_movil_detail', { date }).catch(() =>
       mock<PagoMovilDetail[]>([])),

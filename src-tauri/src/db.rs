@@ -604,15 +604,41 @@ pub struct DashboardAnalytics {
     pub service_income_today_bs: f64,
 }
 
+/// Duración máxima de la sesión de DUEÑO: UNA jornada de trabajo del local.
+/// Pasado ese tiempo desde que se puso el PIN correcto, la sesión vence y el dueño
+/// vuelve a entrar con el PIN (una sola vez por jornada en el uso normal). Sin esto,
+/// una sesión de dueño abierta a las 8 de la mañana seguía siendo válida al día
+/// siguiente (bloqueante B3 de la validación pre-producción).
+pub const OWNER_SESSION_HOURS: u64 = 12;
+
+/// Segundos desde la época (para fechar la sesión de dueño). 0 si el reloj falla.
+pub(crate) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub struct Database {
     pub conn: Mutex<Connection>,
     /// Ruta del archivo .db (para respaldos antes de operaciones masivas)
     pub db_path: PathBuf,
     /// Sesión de DUEÑO desbloqueada: la activa `verify_pin` con el PIN correcto y la
-    /// usan los comandos que ESCRIBEN la lista de modelos (padrón `phones`). Una sesión
-    /// de cajera (o un invoke directo sin PIN) no puede tocarla. Si no hay PIN
-    /// configurado, la instalación es de un solo usuario y se permite (ver `owner_can_edit`).
+    /// usan TODOS los comandos de ESCRITURA que no son de la cajera (catálogo, precios,
+    /// inventario masivo, gastos, cierres, PIN, configuración) vía `require_owner`.
+    /// Una sesión de cajera (o un invoke directo sin PIN) no puede tocarlos. Si no hay
+    /// PIN configurado, la instalación es de un solo usuario y se permite (ver `owner_gate`).
     owner_unlocked: std::sync::atomic::AtomicBool,
+    /// Hora (epoch, segundos) en que arrancó la sesión de dueño; 0 = sin fecha.
+    /// La sesión VENCE a las `OWNER_SESSION_HOURS` (ver `owner_session_active`).
+    owner_since: std::sync::atomic::AtomicU64,
+    /// La última sesión se cerró por VENCIMIENTO: el gate da un mensaje distinto
+    /// («venció») para que el operario sepa que solo tiene que volver a poner el PIN.
+    owner_expired: std::sync::atomic::AtomicBool,
+    /// Intentos fallidos de PIN seguidos (se reinicia con el PIN correcto o al bloquear).
+    pin_failures: std::sync::atomic::AtomicU32,
+    /// Hasta cuándo está bloqueada la entrada del PIN tras demasiados intentos fallidos.
+    pin_locked_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl Database {
@@ -623,34 +649,115 @@ impl Database {
             conn: Mutex::new(conn),
             db_path: db_path.clone(),
             owner_unlocked: std::sync::atomic::AtomicBool::new(false),
+            owner_since: std::sync::atomic::AtomicU64::new(0),
+            owner_expired: std::sync::atomic::AtomicBool::new(false),
+            pin_failures: std::sync::atomic::AtomicU32::new(0),
+            pin_locked_until: Mutex::new(None),
         };
         db.init()?;
         Ok(db)
     }
 
-    /// ¿Esta sesión puede ESCRIBIR la lista de modelos (padrón)? Ver `owner_unlocked`.
-    /// FAIL-CLOSED: si no se puede leer el estado del PIN, NO se permite escribir (la misma
-    /// regla del gate de acceso, lección 2026-08-04).
+    /// ¿Esta sesión puede ESCRIBIR? (la usa la UI vía `can_edit_phones` para esconder
+    /// botones). Es la misma regla que `require_owner`: `owner_gate().is_ok()`.
     pub fn owner_can_edit(&self) -> bool {
-        match self.get_pin_status() {
-            Ok(false) => true, // instalación sin PIN: un solo usuario
-            Ok(true) => self.owner_unlocked.load(std::sync::atomic::Ordering::Relaxed),
-            Err(_) => false,
-        }
+        self.owner_gate().is_ok()
     }
 
-    /// Error listo para devolver al frontend cuando la sesión no es del dueño.
+    /// GATE DE ROL del backend (FUENTE ÚNICA, bloqueante B3). TODO comando de escritura
+    /// que NO es de la cajera lo llama ANTES de tocar la base:
+    ///   catálogo/precios/inventario (productos, fusiones, normalizar, precios, cargas
+    ///   masivas, import/export de datos), gastos y compras, cierres de caja, PIN y
+    ///   configuración de la impresora.
+    /// Los comandos de mostrador (ventas, servicios, abonos, clientes, turno de caja,
+    /// impresión y TODAS las lecturas) NO lo llevan: la cajera trabaja sin PIN.
+    /// FAIL-CLOSED: si no se puede leer el estado del PIN, NO se permite escribir.
     pub fn require_owner(&self) -> Result<(), String> {
-        if self.owner_can_edit() {
-            Ok(())
-        } else {
-            Err("Solo el dueño puede cambiar la lista de modelos: entra con el PIN del dueño.".to_string())
+        self.owner_gate()
+    }
+
+    /// Implementación única del gate de rol.
+    fn owner_gate(&self) -> Result<(), String> {
+        match self.get_pin_status() {
+            // instalación sin PIN: un solo usuario (el dueño) → no hay rol que validar
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                if self.owner_session_active() {
+                    Ok(())
+                } else {
+                    Err(self.owner_gate_error())
+                }
+            }
+            Err(_) => Err(
+                "No se pudo comprobar el estado del PIN: por seguridad el cambio queda bloqueado. Cierra y vuelve a abrir la app.".to_string(),
+            ),
         }
     }
 
-    /// Cierra la sesión de dueño (por si la UI agrega un botón de bloqueo).
+    /// Sesión de dueño VIGENTE: desbloqueada con el PIN y dentro de `OWNER_SESSION_HOURS`.
+    /// Al vencer se cierra sola (el próximo PIN correcto abre una sesión nueva).
+    fn owner_session_active(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.owner_unlocked.load(Relaxed) {
+            // sesión cerrada (o PIN incorrecto): se olvida la fecha para que el próximo
+            // PIN correcto empiece a contar de cero.
+            self.owner_since.store(0, Relaxed);
+            return false;
+        }
+        let since = self.owner_since.load(Relaxed);
+        if since == 0 {
+            // desbloqueada sin fecha (solo si `verify_pin` no llegó a sellarla): se fecha acá
+            self.owner_session_set(true);
+            return true;
+        }
+        if now_secs().saturating_sub(since) >= OWNER_SESSION_HOURS * 3600 {
+            self.lock_owner();
+            self.owner_expired.store(true, Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// Mensaje en español para el operario, con lo que tiene que hacer.
+    fn owner_gate_error(&self) -> String {
+        if self.owner_expired.load(std::sync::atomic::Ordering::Relaxed) {
+            format!(
+                "La sesión de dueño venció (pasaron más de {} horas). Entra otra vez con el PIN del dueño para hacer este cambio.",
+                OWNER_SESSION_HOURS
+            )
+        } else {
+            "Solo el dueño puede hacer este cambio: entra con el PIN del dueño.".to_string()
+        }
+    }
+
+    /// La llama `verify_pin`: PIN correcto = arranca la sesión de dueño (sellada AHORA);
+    /// PIN incorrecto = la apaga y olvida la fecha. También permite testear el vencimiento.
+    pub fn owner_session_set(&self, unlocked: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.owner_unlocked.store(unlocked, Relaxed);
+        self.owner_since.store(if unlocked { now_secs() } else { 0 }, Relaxed);
+        if unlocked {
+            self.owner_expired.store(false, Relaxed);
+        }
+    }
+
+    /// Cierra la sesión de dueño: la llama el botón «Bloquear sesión» de la UI y el
+    /// vencimiento de `owner_session_active`.
     pub fn lock_owner(&self) {
-        self.owner_unlocked.store(false, std::sync::atomic::Ordering::Relaxed);
+        use std::sync::atomic::Ordering::Relaxed;
+        self.owner_unlocked.store(false, Relaxed);
+        self.owner_since.store(0, Relaxed);
+    }
+
+    /// SOLO para verificación: mueve hacia atrás la fecha de arranque de la sesión de dueño
+    /// para poder probar el vencimiento sin esperar 12 horas. No puede desbloquear nada
+    /// (adelantar el arranque solo hace que la sesión venza ANTES).
+    #[doc(hidden)]
+    pub fn owner_session_backdate(&self, secs_ago: u64) {
+        self.owner_since.store(
+            now_secs().saturating_sub(secs_ago),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn init(&self) -> SqlResult<()> {
@@ -3835,14 +3942,32 @@ impl Database {
     }
 
     // --- Settings / PIN ---
+    //
+    // El PIN NUNCA se guarda en texto plano: se guarda su HASH (PBKDF2-HMAC-SHA256 con sal
+    // aleatoria por PIN) en el formato `pbkdf2$<iteraciones>$<sal_hex>$<hash_hex>`.
+    // Una base vieja con el PIN en texto plano (4 dígitos) SIGUE FUNCIONANDO y se actualiza al
+    // hash sola la primera vez que se verifica bien: una actualización nunca deja al dueño afuera.
+    // Además: 5 intentos fallidos bloquean la entrada 60 segundos (en memoria; reiniciar la app
+    // lo limpia, aceptable en un equipo del local y documentado).
     pub fn set_pin(&self, pin: &str) -> SqlResult<()> {
         if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
             return Err(day_shift_error("El PIN debe tener exactamente 4 dígitos."));
         }
+        // Cambiar el PIN es del DUEÑO: o no hay PIN todavía (primera vez) o la sesión de dueño
+        // está abierta (la abre `verify_pin` con el PIN correcto). Un invoke directo desde una
+        // sesión de cajera NO puede cambiar el PIN. (owner_can_edit toma su propio lock: se
+        // consulta ANTES de bloquear la conexión.)
+        let hay_pin = self.get_pin_status()?;
+        if hay_pin && !self.owner_can_edit() {
+            return Err(day_shift_error(
+                "Solo el dueño puede cambiar el PIN: entrá con el PIN actual.",
+            ));
+        }
+        let stored = hash_pin(pin)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
-            params![pin],
+            params![stored],
         )?;
         Ok(())
     }
@@ -3855,15 +3980,59 @@ impl Database {
         Ok(value.flatten().map_or(false, |v| !v.is_empty()))
     }
 
+    /// Segundos que faltan para poder volver a probar el PIN (0 = se puede probar ya).
+    pub fn pin_lock_seconds(&self) -> u64 {
+        let guard = self.pin_locked_until.lock().unwrap();
+        match *guard {
+            Some(until) if until > std::time::Instant::now() => {
+                until.duration_since(std::time::Instant::now()).as_secs() + 1
+            }
+            _ => 0,
+        }
+    }
+
     pub fn verify_pin(&self, pin: &str) -> SqlResult<bool> {
-        let conn = self.conn.lock().unwrap();
-        let stored: Option<Option<String>> = conn
-            .query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
-            .optional()?;
-        let ok = stored.flatten().as_deref() == Some(pin);
-        // el PIN correcto = sesión de DUEÑO desbloqueada (la usa el gate de escritura
-        // de la lista de modelos: `owner_can_edit`). Un PIN incorrecto la apaga.
-        self.owner_unlocked.store(ok, std::sync::atomic::Ordering::Relaxed);
+        // Bloqueo por intentos: NO se compara nada mientras esté bloqueado.
+        let faltan = self.pin_lock_seconds();
+        if faltan > 0 {
+            return Err(day_shift_error(&format!(
+                "Demasiados intentos fallidos. Probá de nuevo en {faltan} segundo(s)."
+            )));
+        }
+        let stored: Option<Option<String>> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
+                .optional()?
+        };
+        let stored = stored.flatten().unwrap_or_default();
+        let (ok, upgrade) = match check_pin(pin, &stored) {
+            Some(necesita_upgrade) => (true, necesita_upgrade),
+            None => (false, false),
+        };
+        if ok {
+            // base vieja con texto plano → se guarda el hash (una sola vez, sin avisar)
+            if upgrade {
+                let hashed = hash_pin(pin)?;
+                let conn = self.conn.lock().unwrap();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+                    params![hashed],
+                );
+            }
+            self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+            *self.pin_locked_until.lock().unwrap() = None;
+        } else {
+            let n = self.pin_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n >= PIN_MAX_ATTEMPTS {
+                *self.pin_locked_until.lock().unwrap() =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(PIN_LOCK_SECS));
+                self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // el PIN correcto = sesión de DUEÑO desbloqueada y SELLADA AHORA (vence a las
+        // OWNER_SESSION_HOURS; la usa el gate de escritura `require_owner`). Un PIN
+        // incorrecto apaga la sesión y olvida la fecha.
+        self.owner_session_set(ok);
         Ok(ok)
     }
 
@@ -4830,6 +4999,70 @@ fn day_shift_error(msg: &str) -> rusqlite::Error {
     )
 }
 
+// ---------------------------------------------------------------- PIN (hash)
+/// Iteraciones de PBKDF2-HMAC-SHA256 para el PIN (2026-09-16).
+const PIN_ITERATIONS: u32 = 60_000;
+/// Intentos fallidos seguidos antes de bloquear la entrada del PIN.
+const PIN_MAX_ATTEMPTS: u32 = 5;
+/// Segundos de bloqueo tras agotar los intentos.
+const PIN_LOCK_SECS: u64 = 60;
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// Hash del PIN en el formato `pbkdf2$<iteraciones>$<sal_hex>$<hash_hex>`.
+fn hash_pin(pin: &str) -> SqlResult<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut salt = [0u8; 16];
+    SystemRandom::new()
+        .fill(&mut salt)
+        .map_err(|_| day_shift_error("No se pudo generar el sal del PIN."))?;
+    let mut out = [0u8; 32];
+    let iters = std::num::NonZeroU32::new(PIN_ITERATIONS).unwrap();
+    ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, iters, &salt, pin.as_bytes(), &mut out);
+    Ok(format!("pbkdf2${PIN_ITERATIONS}${}${}", hex_encode(&salt), hex_encode(&out)))
+}
+
+/// Comprueba el PIN contra lo guardado. Devuelve:
+///   `Some(false)` = correcto (ya estaba hasheado)
+///   `Some(true)`  = correcto pero guardado en TEXTO PLANO (base vieja: hay que re-hashear)
+///   `None`        = incorrecto (o guardado vacío)
+fn check_pin(pin: &str, stored: &str) -> Option<bool> {
+    if stored.is_empty() {
+        return None;
+    }
+    if let Some(rest) = stored.strip_prefix("pbkdf2$") {
+        let mut parts = rest.split('$');
+        let iters: u32 = parts.next()?.parse().ok()?;
+        let salt = hex_decode(parts.next()?)?;
+        let expected = hex_decode(parts.next()?)?;
+        let iters = std::num::NonZeroU32::new(iters)?;
+        return ring::pbkdf2::verify(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256, iters, &salt, pin.as_bytes(), &expected,
+        ).ok().map(|_| false);
+    }
+    // Base vieja: PIN en texto plano de 4 dígitos
+    if stored == pin {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 // Métodos de pago en bolívares (la moneda SIEMPRE se deriva del método, no del servicio)
 const BS_METHODS: [&str; 5] = ["Efectivo Bs", "Pago Móvil", "Pago Movil", "Transferencia Bs", "Punto de Venta (Bs)"];
 
@@ -4949,6 +5182,86 @@ mod tests {
     // Ejecuta un cierre tomando el lock de la conexión una sola vez
     fn conn_query<T, F: FnOnce() -> T>(f: F) -> T {
         f()
+    }
+
+    /// PIN: hash + gate de dueño + límite de intentos (B4 de la validación pre-producción).
+    /// Lo CRÍTICO es no dejar al dueño afuera: una base vieja con el PIN en texto plano tiene
+    /// que seguir funcionando (y actualizarse al hash sola) después de una actualización.
+    #[test]
+    fn test_pin_hash_owner_gate_and_lockout() {
+        let test_path = PathBuf::from("test_registro_pin.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // 1) sin PIN configurado: se crea el primero (instalación de un solo usuario)
+        assert!(!db.get_pin_status().unwrap());
+        db.set_pin("1234").unwrap();
+        assert!(db.get_pin_status().unwrap());
+
+        // 2) se guarda HASHEADO, nunca en texto plano
+        let guardado: String = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0)).unwrap()
+        };
+        assert!(guardado.starts_with("pbkdf2$"), "guardado: {guardado}");
+        assert!(!guardado.contains("1234"), "el PIN no puede quedar en texto plano: {guardado}");
+
+        // 3) dos hashes del MISMO pin son distintos (sal aleatoria)
+        let g2 = hash_pin("1234").unwrap();
+        assert_ne!(guardado, g2);
+
+        // 4) verificar bien desbloquea la sesión de DUEÑO; mal la apaga
+        assert!(db.verify_pin("1234").unwrap());
+        assert!(db.owner_can_edit());
+        assert!(!db.verify_pin("9999").unwrap());
+        assert!(!db.owner_can_edit(), "un PIN incorrecto apaga la sesión de dueño");
+
+        // 5) cambiar el PIN exige la sesión de dueño (una cajera no puede)
+        assert!(db.set_pin("5678").is_err(), "sin sesión de dueño NO se cambia el PIN");
+        assert!(db.verify_pin("1234").unwrap());
+        db.set_pin("5678").unwrap();
+        assert!(db.verify_pin("5678").unwrap());
+        assert!(!db.verify_pin("1234").unwrap(), "el PIN viejo ya no sirve");
+
+        // 6) límite de intentos: 5 fallos seguidos bloquean 60 s
+        //    (se limpia el contador primero: los pasos anteriores ya dejaron fallos contados)
+        db.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..(PIN_MAX_ATTEMPTS - 1) {
+            assert!(!db.verify_pin("0000").unwrap(), "los primeros fallos responden «incorrecto»");
+        }
+        assert_eq!(db.pin_lock_seconds(), 0, "todavía no está bloqueado con 4 fallos");
+        assert!(!db.verify_pin("0000").unwrap(), "el 5º fallo todavía responde «incorrecto»");
+        assert!(db.pin_lock_seconds() > 0, "el 5º fallo bloquea");
+        let err = db.verify_pin("5678").unwrap_err().to_string();
+        assert!(err.contains("Demasiados intentos"), "error: {err}");
+        // el PIN correcto tampoco pasa mientras está bloqueado (no se puede sondear)
+        assert!(db.verify_pin("5678").is_err());
+        // (el vencimiento por tiempo se prueba sin esperar 60 s: se limpia el bloqueo a mano)
+        *db.pin_locked_until.lock().unwrap() = None;
+        db.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(db.verify_pin("5678").unwrap());
+
+        // 7) base VIEJA con el PIN en texto plano: sigue funcionando y se actualiza al hash
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('pin','4321')", []).unwrap();
+        }
+        assert!(db.verify_pin("4321").unwrap(), "una base vieja en texto plano tiene que seguir entrando");
+        let migrado: String = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0)).unwrap()
+        };
+        assert!(migrado.starts_with("pbkdf2$"), "se actualiza al hash solo: {migrado}");
+        assert!(db.verify_pin("4321").unwrap());
+
+        // 8) quitar el PIN exige el PIN (y deja la instalación sin PIN)
+        assert!(db.remove_pin("0000").is_err());
+        assert!(db.remove_pin("4321").unwrap());
+        assert!(!db.get_pin_status().unwrap());
+        assert!(db.owner_can_edit(), "sin PIN la instalación es de un solo usuario");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
     }
 
     #[test]
@@ -7380,5 +7693,83 @@ discount_amount: 0.0,
 
         drop(db);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // --- B3: gate de ROL y vencimiento de la sesión de dueño ---
+
+    /// Base temporal de test (NUNCA toca registro.db del local ni backup/*.db).
+    fn b3_db(name: &str) -> (Database, PathBuf) {
+        let path = PathBuf::from(name);
+        let _ = std::fs::remove_file(&path);
+        let db = Database::new(&path).expect("base de test");
+        (db, path)
+    }
+
+    /// (a) El gate corta las escrituras que no son de la cajera: mensaje claro sin dueño,
+    /// y con el PIN correcto la escritura se hace de verdad.
+    #[test]
+    fn test_b3_gate_de_rol_sin_y_con_dueno() {
+        let (db, path) = b3_db("test_b3_gate_rol.db");
+        // instalación SIN PIN: un solo usuario (el dueño) → se permite
+        assert!(db.require_owner().is_ok());
+        assert!(db.owner_can_edit());
+
+        db.set_pin("1234").unwrap();
+        assert!(!db.owner_can_edit(), "con PIN configurado y sin verificarlo, NO");
+        let err = db.require_owner().unwrap_err();
+        assert!(err.contains("Solo el dueño puede"), "mensaje claro para el operario: {err}");
+
+        assert!(db.verify_pin("1234").unwrap());
+        assert!(db.require_owner().is_ok(), "con el PIN del dueño sí");
+        let pid = db.add_product("Pantalla Test", Some(1), "Xiaomi", "Red Note 11",
+                                 "Incell", "[\"Red Note 11\"]", 8.0, 15.0, 5, 2, 0.0).unwrap();
+        assert!(pid > 0, "la escritura de catálogo se hace con la sesión de dueño");
+        db.delete_product(pid).unwrap();
+
+        // el botón «Bloquear sesión» cierra el gate
+        db.lock_owner();
+        assert!(!db.owner_can_edit());
+        assert!(db.require_owner().is_err());
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// (c) La sesión de dueño VENCE a las `OWNER_SESSION_HOURS` (jornada del local): dentro
+    /// del plazo sigue valiendo (no se re-tipea el PIN en plena jornada); pasada la jornada
+    /// se cierra sola, el mensaje lo dice y el PIN correcto abre una sesión NUEVA.
+    #[test]
+    fn test_b3_la_sesion_de_dueno_vence() {
+        let (db, path) = b3_db("test_b3_sesion_vence.db");
+        db.set_pin("1234").unwrap();
+        assert!(db.verify_pin("1234").unwrap());
+        assert!(db.owner_can_edit(), "recién puesta, la sesión vale");
+
+        // 1 minuto antes del límite: todavía vale
+        db.owner_session_backdate(OWNER_SESSION_HOURS * 3600 - 60);
+        assert!(db.owner_can_edit(), "dentro de las {OWNER_SESSION_HOURS} h sigue valiendo");
+
+        // pasada la jornada: venció, se cierra sola y el mensaje lo avisa
+        db.owner_session_backdate(OWNER_SESSION_HOURS * 3600 + 60);
+        assert!(!db.owner_can_edit(), "vencida: ya no se puede escribir");
+        let err = db.require_owner().unwrap_err();
+        assert!(err.contains("venció"), "el mensaje avisa del vencimiento: {err}");
+        assert!(!db.owner_can_edit(), "la sesión vencida queda cerrada (no revive sola)");
+
+        // el PIN correcto abre una sesión NUEVA (no arrastra la fecha vieja)
+        assert!(db.verify_pin("1234").unwrap());
+        assert!(db.owner_can_edit(), "sesión nueva: se puede escribir otra vez");
+        let err = db.require_owner();
+        assert!(err.is_ok(), "y sin el mensaje de vencimiento: {err:?}");
+
+        // un PIN incorrecto cierra la sesión y olvida la fecha
+        db.lock_owner();
+        assert!(!db.verify_pin("9999").unwrap());
+        assert!(!db.owner_can_edit());
+        assert!(db.require_owner().unwrap_err().contains("Solo el dueño puede"),
+                "sin vencimiento, el mensaje es el genérico");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 }

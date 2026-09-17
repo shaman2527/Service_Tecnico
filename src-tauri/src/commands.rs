@@ -21,12 +21,13 @@ pub fn next_order_num(db: State<Database>) -> Result<String, String> {
     db.next_order_num().map_err(|e| e.to_string())
 }
 
-// --- Products ---
+// --- Products (ESCRITURA solo para el DUENO: gate de rol en el backend) ---
 
 #[tauri::command]
 pub fn add_product(db: State<Database>, name: String, category_id: Option<i64>, brand: String, model: String,
                    variant: String, compatibility: String, price_cost: f64, price_sale: f64,
                    stock: i64, min_stock: i64, price_usd: f64) -> Result<i64, String> {
+    db.require_owner()?;
     db.add_product(&name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock, price_usd)
         .map_err(|e| e.to_string())
 }
@@ -35,12 +36,14 @@ pub fn add_product(db: State<Database>, name: String, category_id: Option<i64>, 
 pub fn update_product(db: State<Database>, id: i64, name: String, category_id: Option<i64>, brand: String, model: String,
                       variant: String, compatibility: String, price_cost: f64, price_sale: f64,
                       stock: i64, min_stock: i64, price_usd: f64) -> Result<(), String> {
+    db.require_owner()?;
     db.update_product(id, &name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock, price_usd)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_product(db: State<Database>, id: i64) -> Result<(), String> {
+    db.require_owner()?;
     db.delete_product(id).map_err(|e| e.to_string())
 }
 
@@ -125,6 +128,9 @@ pub fn mark_service_printed(db: State<Database>, id: i64) -> Result<(), String> 
 
 #[tauri::command]
 pub fn delete_service(db: State<Database>, id: i64) -> Result<(), String> {
+    // Borrar una orden también borra sus abonos (plata registrada): es del dueño.
+    // La cajera sí puede crear, editar y entregar órdenes (add_service/add_service_order/update_service).
+    db.require_owner()?;
     db.delete_service(id).map_err(|e| e.to_string())
 }
 
@@ -159,16 +165,19 @@ pub fn get_technician_stats(db: State<Database>) -> Result<Vec<crate::db::Techni
 
 #[tauri::command]
 pub fn add_technician(db: State<Database>, name: String, initials: String, color: String) -> Result<i64, String> {
+    db.require_owner()?;
     db.add_technician(&name, &initials, &color).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_technician(db: State<Database>, id: i64, name: String, initials: String, color: String) -> Result<(), String> {
+    db.require_owner()?;
     db.update_technician(id, &name, &initials, &color).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_technician(db: State<Database>, id: i64) -> Result<(), String> {
+    db.require_owner()?;
     db.delete_technician(id).map_err(|e| e.to_string())
 }
 
@@ -192,6 +201,9 @@ pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, pa
 
 #[tauri::command]
 pub fn delete_service_payment(db: State<Database>, id: i64) -> Result<(), String> {
+    // Borrar un abono tacha una plata ya cobrada: es del dueño. Para devolver plata
+    // de verdad existe el camino trazable (`add_service_refund`, que la cajera SÍ usa).
+    db.require_owner()?;
     db.delete_service_payment(id).map_err(|e| e.to_string())
 }
 
@@ -205,6 +217,9 @@ pub fn add_service_refund(db: State<Database>, service_id: i64, amount: f64, pay
 
 #[tauri::command]
 pub fn add_purchase_order(db: State<Database>, supplier: String, notes: String, items_json: String) -> Result<i64, String> {
+    // Pedir al proveedor es una compra (plata del negocio): decisión del dueño.
+    // Recibir la mercancía que llegó SÍ es de la cajera (`mark_purchase_order_received`).
+    db.require_owner()?;
     db.add_purchase_order(&supplier, &notes, &items_json).map_err(|e| e.to_string())
 }
 
@@ -225,6 +240,7 @@ pub fn mark_purchase_order_received(db: State<Database>, order_id: i64) -> Resul
 
 #[tauri::command]
 pub fn delete_purchase_order(db: State<Database>, order_id: i64) -> Result<(), String> {
+    db.require_owner()?;
     db.delete_purchase_order(order_id).map_err(|e| e.to_string())
 }
 
@@ -279,6 +295,8 @@ pub fn suggest_clients(db: State<Database>, query: String, limit: i64) -> Result
 
 #[tauri::command]
 pub fn add_inventory_movement(db: State<Database>, product_id: i64, type_: String, quantity: i64, reason: String, reference: String) -> Result<(), String> {
+    // Ajuste MANUAL de stock (no es una venta ni una entrega): es del dueño.
+    db.require_owner()?;
     db.add_inventory_movement(product_id, &type_, quantity, &reason, &reference).map_err(|e| e.to_string())
 }
 
@@ -287,10 +305,12 @@ pub fn get_inventory_movements(db: State<Database>, days: Option<i64>) -> Result
     db.get_inventory_movements(days).map_err(|e| e.to_string())
 }
 
-// --- Import/Export ---
+// --- Import/Export (la carga masiva de precios y el reemplazo de la base son del dueño;
+//     `export_data` es una LECTURA y la cajera puede exportar el día) ---
 
 #[tauri::command]
 pub fn import_price_list(db: State<Database>, items_json: String) -> Result<i64, String> {
+    db.require_owner()?;
     db.import_price_list(&items_json).map_err(|e| e.to_string())
 }
 
@@ -301,6 +321,8 @@ pub fn export_data(db: State<Database>) -> Result<String, String> {
 
 #[tauri::command]
 pub fn import_data(db: State<Database>, json_data: String, merge: bool) -> Result<String, String> {
+    // Puede REEMPLAZAR toda la base (merge=false): jamás desde una sesión de cajera.
+    db.require_owner()?;
     db.import_data(&json_data, merge).map_err(|e| e.to_string())
 }
 
@@ -321,10 +343,11 @@ pub fn get_day_summary(db: State<Database>, date: String) -> Result<crate::db::D
     db.get_day_summary(&date).map_err(|e| e.to_string())
 }
 
-// --- Salud del negocio (gastos, utilidad, por cobrar, inventario) ---
+// --- Salud del negocio: LECTURAS abiertas; anotar/borrar un GASTO es del dueño ---
 
 #[tauri::command]
 pub fn add_expense(db: State<Database>, expense_date: String, category: String, amount: f64, currency: String, notes: String) -> Result<i64, String> {
+    db.require_owner()?;
     db.add_expense(&expense_date, &category, amount, &currency, &notes).map_err(|e| e.to_string())
 }
 
@@ -335,6 +358,7 @@ pub fn get_expenses(db: State<Database>, start_date: String, end_date: String) -
 
 #[tauri::command]
 pub fn delete_expense(db: State<Database>, id: i64) -> Result<(), String> {
+    db.require_owner()?;
     db.delete_expense(id).map_err(|e| e.to_string())
 }
 
@@ -358,6 +382,9 @@ pub fn get_daily_closings(db: State<Database>) -> Result<Vec<crate::db::DailyClo
     db.get_daily_closings().map_err(|e| e.to_string())
 }
 
+// --- Turno de caja: ABRIR el día es de la cajera (lo abre con la tasa BCV y la
+//     apertura); CERRAR/REABRIR el día y liquidar el Punto son del dueño ---
+
 #[tauri::command]
 pub fn open_day(db: State<Database>, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64) -> Result<i64, String> {
     db.open_day(initial_cash_usd, tasa_bcv, tasa_eur).map_err(|e| e.to_string())
@@ -373,6 +400,8 @@ pub fn close_day(db: State<Database>, close_date: String, notes: String, initial
                  actual_cash_usd: f64, actual_cash_bs: f64, actual_punto_usd: f64, actual_punto_bs: f64,
                  actual_zelle: f64, actual_pago_movil: f64, actual_transfer_bs: f64,
                  pos_settled: f64, pos_settled_bs: f64) -> Result<i64, String> {
+    // El CIERRE (arqueo + diferencia) cierra el día y no lo puede deshacer la cajera.
+    db.require_owner()?;
     db.close_day(&close_date, &notes, initial_cash_usd, tasa_bcv, tasa_eur,
                  actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
                  actual_zelle, actual_pago_movil, actual_transfer_bs, pos_settled, pos_settled_bs)
@@ -381,18 +410,22 @@ pub fn close_day(db: State<Database>, close_date: String, notes: String, initial
 
 #[tauri::command]
 pub fn reopen_day(db: State<Database>, close_date: String) -> Result<(), String> {
+    db.require_owner()?;
     db.reopen_day(&close_date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_daily_closing_settlement(db: State<Database>, id: i64, pos_settled: f64, pos_settled_bs: f64) -> Result<(), String> {
+    // Liquidar el Punto ajusta la plata de un día ya cerrado: es del dueño.
+    db.require_owner()?;
     db.update_daily_closing_settlement(id, pos_settled, pos_settled_bs).map_err(|e| e.to_string())
 }
 
-// --- Settings / PIN ---
+// --- Settings / PIN (escribirlos es del DUENO; LECTURAS y `verify_pin` son de todos) ---
 
 #[tauri::command]
 pub fn set_pin(db: State<Database>, pin: String) -> Result<(), String> {
+    db.require_owner()?;
     db.set_pin(&pin).map_err(|e| e.to_string())
 }
 
@@ -408,10 +441,21 @@ pub fn verify_pin(db: State<Database>, pin: String) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn remove_pin(db: State<Database>, pin: String) -> Result<bool, String> {
+    db.require_owner()?;
     db.remove_pin(&pin).map_err(|e| e.to_string())
 }
 
-// --- Impresora térmica (tickets / facturas de servicio) ---
+/// BLOQUEA la sesión de dueño (botón «Bloquear sesión» de la UI): a partir de acá los
+/// comandos del dueño vuelven a pedir el PIN. Cualquiera puede llamarlo — cerrar la
+/// sesión NUNCA es un privilegio (al contrario: es la salida segura).
+#[tauri::command]
+pub fn lock_owner(db: State<Database>) -> Result<(), String> {
+    db.lock_owner();
+    Ok(())
+}
+
+// --- Impresora térmica: IMPRIMIR es de la cajera (es su trabajo del mostrador);
+//     CONFIGURARLA (puerto, ancho, nombre del negocio, logo) es del dueño ---
 
 #[tauri::command]
 pub fn list_com_ports() -> Result<Vec<crate::printer::ComPortInfo>, String> {
@@ -446,6 +490,7 @@ pub fn get_printer_settings(db: State<Database>) -> Result<crate::db::PrinterSet
 #[tauri::command]
 pub fn set_printer_settings(db: State<Database>, port: String, baud: u32, width: u32, windows_printer: String,
                             business_name: String, business_line: String, logo: String) -> Result<(), String> {
+    db.require_owner()?;
     db.set_printer_settings(&port, baud, width, &windows_printer, &business_name, &business_line, &logo).map_err(|e| e.to_string())
 }
 
@@ -534,16 +579,19 @@ pub fn get_payment_daily_detail(db: State<Database>, date: String, method: Optio
     db.get_payment_daily_detail(&date, method.as_deref()).map_err(|e| e.to_string())
 }
 
-// --- Catálogo: limpieza (marcas, modelos, nombres, compatibilidad) ---
+// --- Catálogo: limpieza (marcas, modelos, nombres, compatibilidad). Solo el DUENO,
+//     incluso en modo `dry_run`: la pestaña «Ajustes» del Inventario es suya ---
 
 #[tauri::command]
 pub fn normalize_catalog(db: State<Database>, dry_run: bool) -> Result<crate::catalog::CatalogReport, String> {
+    db.require_owner()?;
     db.normalize_catalog(dry_run).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn restore_prices(db: State<Database>, path: Option<String>, only_zero: bool, dry_run: bool)
     -> Result<crate::catalog::PriceRestoreReport, String> {
+    db.require_owner()?;
     db.restore_prices_from_file(path.as_deref(), only_zero, dry_run).map_err(|e| e.to_string())
 }
 
@@ -592,6 +640,8 @@ pub fn get_inventory_movements_page(db: State<Database>, product_id: Option<i64>
 
 #[tauri::command]
 pub fn merge_products(db: State<Database>, keep_id: i64, remove_id: i64) -> Result<(), String> {
+    // Fusiona dos fichas (suma stock, repunta ventas/servicios): es del dueño.
+    db.require_owner()?;
     db.merge_products(keep_id, remove_id).map_err(|e| e.to_string())
 }
 
@@ -677,6 +727,7 @@ pub fn preview_inventory_load(db: State<Database>, text: String)
 /// corrige a mano desde la ficha del producto).
 #[tauri::command]
 pub fn set_product_supplier(db: State<Database>, id: i64, supplier: String) -> Result<(), String> {
+    db.require_owner()?;
     db.set_product_supplier(id, &supplier).map_err(|e| e.to_string())
 }
 
@@ -709,4 +760,179 @@ pub fn get_technician_profile(db: State<Database>, technician_id: Option<i64>,
     let conn = db.conn.lock().unwrap();
     crate::tech::get_technician_profile(&conn, technician_id, &start_date, &end_date)
         .map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// B3 (validación pre-producción): GATE DE ROL en el backend.
+// La UI elige el rol (PIN del dueño vs «Entrar como cajera»), pero el que MANDA es
+// este archivo: un `invoke()` directo desde la consola de la app no puede saltearlo.
+// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Base temporal de test. NUNCA toca registro.db del local ni backup/*.db.
+    fn temp_db(name: &str) -> (Database, PathBuf) {
+        let path = PathBuf::from(name);
+        let _ = std::fs::remove_file(&path);
+        let db = Database::new(&path).expect("base de test");
+        (db, path)
+    }
+
+    /// (a) El gate de rol **falla sin dueño** (con mensaje claro en español) y **deja pasar con
+    /// el PIN del dueño**. Se prueba la MISMA función que llaman los comandos
+    /// (`db.require_owner()?`): que cada comando de escritura la llame lo verifica el test
+    /// estructural de abajo, que lee este archivo.
+    /// NOTA: no se usa `tauri::test` (mock runtime): con el feature `test` de Tauri el binario
+    /// de tests no arranca en esta PC (STATUS_ENTRYPOINT_NOT_FOUND), así que se prueba la capa
+    /// de base —que es donde vive la regla— y la cobertura de los comandos queda a cargo del
+    /// test estructural.
+    #[test]
+    fn test_b3_el_gate_de_dueno_funciona() {
+        let (db, path) = temp_db("test_b3_cmd_catalogo.db");
+        db.set_pin("1234").unwrap();
+
+        // --- sin sesión de dueño (una cajera con la app abierta) ---
+        let err = db.require_owner().unwrap_err();
+        assert!(err.contains("Solo el dueño puede"), "mensaje claro para el operario: {err}");
+
+        // --- con el PIN del dueño, el gate abre y las escrituras del catálogo pasan ---
+        assert!(db.verify_pin("1234").unwrap());
+        db.require_owner().unwrap();
+        let pid = db.add_product("Pantalla Test", Some(1), "Xiaomi", "Red Note 11", "", "[]",
+                                 8.0, 15.0, 3, 0, 0.0).unwrap();
+        assert!(pid > 0);
+        db.update_product(pid, "Pantalla Test 2", Some(1), "Xiaomi", "Red Note 11", "", "[]",
+                          8.0, 16.0, 3, 0, 0.0).unwrap();
+        assert_eq!(db.get_products("", None).unwrap()[0].price_sale, 16.0);
+
+        // --- un PIN incorrecto la apaga, y `lock_owner` (botón «Bloquear sesión») también ---
+        assert!(!db.verify_pin("0000").unwrap());
+        assert!(db.require_owner().is_err());
+        assert!(db.verify_pin("1234").unwrap());
+        db.lock_owner();
+        let err = db.require_owner().unwrap_err();
+        assert!(err.contains("Solo el dueño puede"), "tras bloquear la sesión: {err}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// (b) El trabajo de MOSTRADOR sigue funcionando SIN sesión de dueño: turno, venta, orden
+    /// de servicio, abono y devolución. Si esto se rompe, la cajera no puede cobrar.
+    #[test]
+    fn test_b3_la_cajera_cobra_sin_sesion_de_dueno() {
+        let (db, path) = temp_db("test_b3_cmd_cajera.db");
+        db.set_pin("1234").unwrap();
+        assert!(!db.owner_can_edit(), "la cajera NO tiene sesión de dueño");
+
+        // abrir el día es de la cajera (es quien abre el turno con la tasa BCV)
+        assert!(db.open_day(10.0, 40.5, 45.0).unwrap() > 0);
+        // venta de mostrador
+        db.add_sale(None, "Forro", 1, 3.0, 3.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0,
+                    "", "USD", 0.0).unwrap();
+        // orden de servicio
+        let sid = db.add_service("DEV-B3", "Cliente", "0412-0000000", "Samsung A32", "No enciende",
+                                 "Cambio batería", "[\"Cambio batería\"]", 25.0, "Divisas (USD Cash)",
+                                 "", 0.0, "", "USD", "V-1", "", "{}", None, "", None, "", None, 0.0).unwrap();
+        assert!(sid > 0);
+        db.mark_service_printed(sid).unwrap();
+        // abono y devolución (el camino trazable para devolver plata)
+        db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono").unwrap();
+        db.add_service_refund(sid, 5.0, "Divisas (USD Cash)", "", "USD", "Devolución: prueba").unwrap();
+        let svc = db.get_service_by_id(sid).unwrap().unwrap();
+        assert!((svc.paid_amount - 5.0).abs() < 0.01, "abono 10 − devolución 5 = 5, quedó {}", svc.paid_amount);
+        // clientes (se crean en el mostrador)
+        assert!(db.add_or_find_client("Cliente", "0412-0000000", "V-1", "").unwrap() > 0);
+        // y las lecturas del mostrador
+        assert_eq!(db.get_sales("", None, "", "").unwrap().len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// (c) La sesión de dueño VENCE (12 h por defecto): pasado el límite los comandos del dueño
+    /// vuelven a pedir el PIN, el mensaje lo dice, y el mostrador sigue trabajando igual.
+    #[test]
+    fn test_b3_la_sesion_de_dueno_vence() {
+        let (db, path) = temp_db("test_b3_cmd_vence.db");
+        db.set_pin("1234").unwrap();
+        assert!(db.verify_pin("1234").unwrap());
+        let pid = db.add_product("Pantalla Test", Some(1), "Xiaomi", "Red Note 11", "", "[]",
+                                 8.0, 15.0, 3, 0, 0.0).unwrap();
+
+        // 1 minuto ANTES del límite: la sesión sigue valiendo (el dueño no re-tipea el PIN en
+        // plena jornada)
+        db.owner_session_backdate(crate::db::OWNER_SESSION_HOURS * 3600 - 60);
+        assert!(db.require_owner().is_ok());
+        db.update_product(pid, "Pantalla Test", Some(1), "Xiaomi", "Red Note 11", "", "[]",
+                          8.0, 15.0, 2, 0, 0.0).unwrap();
+
+        // pasado el límite: el comando del dueño vuelve a pedir el PIN
+        db.owner_session_backdate(crate::db::OWNER_SESSION_HOURS * 3600 + 60);
+        let err = db.require_owner().unwrap_err();
+        assert!(err.contains("venció"), "el mensaje avisa del vencimiento: {err}");
+        // la cajera sigue trabajando igual (su trabajo no depende de la sesión de dueño)
+        db.open_day(10.0, 40.5, 45.0).unwrap();
+        db.add_sale(None, "Forro", 1, 3.0, 3.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0,
+                    "", "USD", 0.0).unwrap();
+        // y el PIN correcto abre una sesión NUEVA
+        assert!(db.verify_pin("1234").unwrap());
+        db.require_owner().unwrap();
+        db.delete_product(pid).unwrap();
+        assert_eq!(db.get_products("", None).unwrap().len(), 0);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Guardia anti-regresión del bloqueante B3: TODO comando de ESCRITURA que no es de la
+    /// cajera tiene el gate, y los de mostrador NO lo tienen (para no trabar la venta).
+    /// Lee este mismo archivo: si alguien agrega un comando de escritura y se olvida el
+    /// gate, el test falla con el nombre del comando.
+    #[test]
+    fn test_b3_todos_los_comandos_de_escritura_tienen_el_gate() {
+        let src = &include_str!("commands.rs")[..include_str!("commands.rs")
+            .find("\n#[cfg(test)]").expect("marca del módulo de tests")];
+        let cuerpo = |nombre: &str| -> &str {
+            let marca = format!("pub fn {nombre}(");
+            let i = src.find(&marca).unwrap_or_else(|| panic!("no existe el comando {nombre}"));
+            let resto = &src[i..];
+            let fin = resto[1..].find("#[tauri::command]").map(|j| j + 1).unwrap_or(resto.len());
+            &resto[..fin]
+        };
+
+        // ESCRITURA del DUEÑO (catálogo, precios, inventario masivo, gastos y compras,
+        // cierres de caja, PIN y configuración, padrón de modelos)
+        for cmd in [
+            "add_product", "update_product", "delete_product", "merge_products",
+            "set_product_supplier", "add_inventory_movement", "import_price_list", "import_data",
+            "normalize_catalog", "restore_prices", "apply_inventory_load",
+            "add_expense", "delete_expense",
+            "add_purchase_order", "delete_purchase_order",
+            "add_technician", "update_technician", "delete_technician",
+            "delete_service", "delete_service_payment",
+            "close_day", "reopen_day", "update_daily_closing_settlement",
+            "set_pin", "remove_pin", "set_printer_settings",
+            "rename_phone", "add_phone", "merge_phones",
+        ] {
+            assert!(cuerpo(cmd).contains("require_owner()"),
+                    "B3: al comando «{cmd}» le falta el gate de rol (db.require_owner()?)");
+        }
+
+        // MOSTRADOR: la cajera trabaja sin PIN — estos NO pueden pedir dueño
+        for cmd in [
+            "add_sale", "add_service", "add_service_order", "update_service", "mark_service_printed",
+            "add_service_payment", "add_service_refund", "add_client", "add_or_find_client", "save_client",
+            "open_day", "mark_purchase_order_received",
+            "get_products", "get_services", "get_sales", "get_daily_totals",
+            "export_data", "export_daily_report", "export_daily_report_xlsx",
+            "print_receipt", "print_to_windows_printer",
+            "get_pin_status", "verify_pin", "lock_owner",
+        ] {
+            assert!(!cuerpo(cmd).contains("require_owner()"),
+                    "B3: «{cmd}» lo usa la cajera y NO debe pedir el PIN del dueño");
+        }
+    }
 }
