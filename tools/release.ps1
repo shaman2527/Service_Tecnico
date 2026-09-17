@@ -1,4 +1,4 @@
-# release.ps1 — Publica una versión nueva: build firmado + latest.json + GitHub Release + respaldo Google Drive.
+﻿# release.ps1 - Publica una versión nueva: build firmado + latest.json + GitHub Release + respaldo Google Drive.
 # Uso: .\tools\release.ps1 -Version 0.1.2 -Notes "Fix X, mejora Y"
 # Requisitos: gh auth login (una vez) + llave privada en C:\Users\$env:USERNAME\.tauri\registro.key
 # Drive (opcional, respaldo si GitHub está bloqueado): tools\drive_ids.json con
@@ -8,7 +8,13 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$Notes = "Mejoras y correcciones",
     [string]$DriveLatestId = "",
-    [string]$DriveSetupId = ""
+    [string]$DriveSetupId = "",
+    # Solo instalador LOCAL: hace tests + gate + build firmado + copias, y NO publica nada
+    # (ni latest.json en GitHub ni Release). Para probar en esta PC sin tocar a los clientes.
+    [switch]$NoPublish,
+    # Con -NoPublish: si el gate de la plantilla encuentra BLOQUEANTES, avisa fuerte y sigue.
+    # NUNCA se permite junto a una publicación (los datos del local no se publican a medias).
+    [switch]$AceptarBloqueantes
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +58,16 @@ Pop-Location
 Step "gate de release (plantilla de la base)"
 node tools/release_gate.mjs
 if ($LASTEXITCODE -ne 0) {
-    throw "La plantilla NO está lista para publicar (ver el detalle arriba). No fuerces la publicación sin resolver los bloqueantes."
+    if ($NoPublish -and $AceptarBloqueantes) {
+        Write-Host "`n*** ATENCION: el gate encontró BLOQUEANTES (arriba) y seguimos igual porque es un build LOCAL (-NoPublish -AceptarBloqueantes)." -ForegroundColor Yellow
+        Write-Host "*** Los SKU con stock y sin precio NO se pueden cobrar en una PC nueva hasta cargarles precio." -ForegroundColor Yellow
+        Write-Host "*** Esto NO se puede publicar así: release.ps1 sin -NoPublish vuelve a frenar acá.`n" -ForegroundColor Yellow
+    } else {
+        throw "La plantilla NO está lista para publicar (ver el detalle arriba). No fuerces la publicación sin resolver los bloqueantes."
+    }
+}
+if ($AceptarBloqueantes -and -not $NoPublish) {
+    throw "-AceptarBloqueantes solo vale junto con -NoPublish (no se publica una plantilla con bloqueantes)."
 }
 
 # 4) Build firmado (genera setup.exe + .sig)
@@ -99,7 +114,7 @@ Set-Content "src-tauri\target\release\bundle\nsis\latest.json" $latest -Encoding
 Write-Host "Manifesto:" -ForegroundColor Green
 $latest
 
-# 7) Manifesto Drive (respaldo si GitHub está bloqueado — endpoint 2 del updater)
+# 7) Manifesto Drive (respaldo si GitHub está bloqueado - endpoint 2 del updater)
 Step "latest_drive.json (Google Drive)"
 $driveConfig = "tools\drive_ids.json"
 if (-not $DriveLatestId -and (Test-Path $driveConfig)) {
@@ -142,22 +157,28 @@ Copy-Item $setup $instDir -Force
 Copy-Item "src-tauri\target\release\bundle\nsis\latest.json" $instDir -Force
 if (Test-Path "src-tauri\target\release\bundle\nsis\latest_drive.json") { Copy-Item "src-tauri\target\release\bundle\nsis\latest_drive.json" $instDir -Force }
 
-# 9) GitHub Release (solo si gh está autenticado) — SIEMPRE al repo PUBLICO de releases
-Step "GitHub Release v$Version (repo público $releaseRepo)"
-gh auth status 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    gh release create "v$Version" `
-        "$setup" "$sig" "src-tauri\target\release\bundle\nsis\latest.json" `
-        --repo $releaseRepo `
-        --title "Registro v$Version" --notes $Notes
-    if ($LASTEXITCODE -ne 0) { throw "gh release create falló (intenta: gh auth login)" }
-    Write-Host "Release publicada en $releaseRepo. El endpoint del updater ya sirve latest.json." -ForegroundColor Green
+# 9) Publicacion (GitHub Release). Con -NoPublish NO se publica NADA.
+if ($NoPublish) {
+    Step "SIN PUBLICAR (-NoPublish)"
+    Write-Host "No se publico NADA: ni release en GitHub, ni manifiesto para el updater." -ForegroundColor Yellow
+    Write-Host "Los clientes siguen en su version actual (este instalador es solo para esta PC)." -ForegroundColor Yellow
+    Write-Host "Instalador LOCAL: $setup" -ForegroundColor Green
 } else {
-    Write-Host "gh no autenticado — la release NO se publicó." -ForegroundColor Yellow
-    Write-Host "Pasos manuales:" -ForegroundColor Yellow
-    Write-Host "  1. gh auth login"
-    Write-Host "  2. gh release create v$Version `"$setup`" `"$sig`" src-tauri\target\release\bundle\nsis\latest.json --repo $releaseRepo --title `"Registro v$Version`" --notes `"$Notes`""
+    Step "GitHub Release v$Version (repo publico $releaseRepo)"
+    gh auth status 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        gh release create "v$Version" "$setup" "$sig" "src-tauri\target\release\bundle\nsis\latest.json" --repo $releaseRepo --title "Registro v$Version" --notes $Notes
+        if ($LASTEXITCODE -ne 0) { throw "gh release create fallo (intenta: gh auth login)" }
+        Write-Host "Release publicada en $releaseRepo. El endpoint del updater ya sirve latest.json." -ForegroundColor Green
+    } else {
+        Write-Host "gh no autenticado - la release NO se publico." -ForegroundColor Yellow
+        $cmdManual = 'gh release create v' + $Version + ' "' + $setup + '" "' + $sig + '" src-tauri\target\release\bundle\nsis\latest.json --repo ' + $releaseRepo
+        Write-Host "Paso manual: gh auth login  y luego:  $cmdManual" -ForegroundColor Yellow
+    }
 }
 
-Write-Host "`nLISTO. Instalador en: instaladores\Registro Servicio Tecnico_${Version}_x64-setup.exe" -ForegroundColor Green
-Write-Host "Recordatorio: si GitHub está bloqueado, sube latest_drive.json y el setup a Drive (misma carpeta, reemplazar archivos)." -ForegroundColor Green
+Write-Host "LISTO. Instalador en: instaladores\Registro Servicio Tecnico_${Version}_x64-setup.exe" -ForegroundColor Green
+if ($NoPublish) {
+    Write-Host "MODO LOCAL: no se publico nada. Ejecuta esa setup.exe en la PC que quieras actualizar." -ForegroundColor Yellow
+}
+Write-Host "Recordatorio: si GitHub esta bloqueado, sube latest_drive.json y el setup a Drive (misma carpeta, reemplazar archivos)." -ForegroundColor Green
