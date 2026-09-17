@@ -792,3 +792,70 @@ Lo de arriba es el asistente. Esta sesión agregó lo que va **antes** de él y 
   como «en taller». Son datos de PRUEBA de la copia de dev (no de la tienda) y no se tocaron desde esta sesión:
   conviene borrarlas antes de sacar conclusiones de la cola o de la caja de esa copia.
 
+---
+
+## F31 — Wizard de recepción rápido + acceso directo a los métodos de pago (2026-09-16, MODO DEV)
+
+**Pedido del local:** «optimizar el wizard de registrar un cliente, que sea rápido y funcional sin dañar nada,
+profesional» + «en los métodos de pago tener como predeterminado lo que más se usa —Punto de Venta (Bs), Pago
+Móvil, Efectivo $— y las demás dejarlas en un desplegable».
+
+**A) Métodos de pago con acceso directo.** Componente COMPARTIDO `src/components/PaymentMethodPicker.tsx` (reglas
+puras en `src/lib/payment-methods.ts`): los **3 favoritos** son chips grandes (`METODOS_FAVORITOS` = Punto de
+Venta (Bs) · Pago Móvil · Divisas (USD Cash) = EFECTIVO $) y **los otros 4 van detrás de «Otros métodos…»**
+(Punto de Venta ($), Transferencia Zelle, Transferencia Bs, Efectivo Bs). Reemplazó la lista plana de 7 métodos
+que estaba **copiada en 6 archivos**: crear servicio (`DeviceFields`), editar servicio (Finanzas), Pago/Abono,
+Ventas, Devolución y el asistente de cierre. El **filtro por método del Libro Diario NO se toca** (ahí hay que
+poder ver TODOS para reconciliar). El método elegido del desplegable se muestra igual como badge, así **nunca hay
+un estado invisible**; si el local renombra/borra un método, el selector cae al desplegable completo (no queda sin
+forma de elegir) — está fijado con test (`tools/method_picker_test.ts`, **18/18**).
+
+**B) Wizard de recepción más rápido** (sin cambiar ninguna regla): `Enter` **avanza** de paso cuando el paso está
+completo (Ctrl+Enter sigue guardando; no se dispara si el campo ya usó el Enter —el buscador de modelos hace
+`preventDefault` al elegir— ni desde un `Textarea`), **auto-foco** al primer campo del paso (Cliente → modelo del
+equipo 1), **el TELÉFONO también busca al cliente existente** (`suggestClients` ya buscaba por nombre/teléfono/
+cédula: ahora se dispara desde el campo Teléfono y un toque completa nombre + cédula + dirección sin pisar lo
+tipeado), **«Falta: …»** dice qué impide avanzar/guardar en vez de dejar el botón apagado sin explicación
+(incluye «abrir el día en Libro Diario»), el paso **Blindaje va rotulado (opcional)** con su resumen en el paso
+Revisar, y `Cédula *` marca lo obligatorio.
+
+**Verificación:** `tsc -b` 0 errores · `oxlint` 0 errores · `npm run build` OK · `method_picker_test` 18/18 ·
+`queue_test` 47/47 · `payment_math_test` 595/595 · **EN VIVO** `tools/verify_wizard_metodos.mjs` **14/14** y
+`tools/verify_metodos_en_cobros.mjs` **13/13** (Ventas, Pago/Abono y Devolución con los 3 chips y el resto
+escondido; **no se escribió nada**: mismas 7 órdenes y 2 pagos antes y después). CERO cambios en Rust.
+
+**Lecciones de verificación en vivo (importantes para la próxima):**
+- La ventana que se maneja por CDP puede estar sirviendo los **assets EMBEBIDOS** (`http://tauri.localhost/` +
+  `/assets/index-*.js`): entonces `npm run build` NO alcanza — hay que **`cargo build`** (re-embebe) y **relanzar**
+  el exe. Para que `cargo build` no falle con «Acceso denegado (os error 5)» hay que **matar `registro.exe` y los
+  `cargo` ANTES** (ya documentado para `tauri dev`, aplica igual acá).
+- Navegar la ventana a `http://localhost:5173` da el código nuevo pero **rompe el IPC** («verify_pin not allowed.
+  Plugin not found»): los permisos están atados al origen de la app.
+- `location.reload()` **vuelve a pedir el PIN** (gate fail-closed): los scripts se desbloquean solos con el PIN
+  del local (1234).
+- En los scripts CDP: el `value` de un `<input>` **no** aparece en `innerText` (leerlo del DOM), los `Select` de
+  Radix necesitan **click real** (`clickCenter`, no `dispatchEvent`), y el texto del stepper nombra TODOS los pasos
+  (para probar que avanzó hay que mirar «Paso N de M», no buscar la palabra «Equipo»).
+- La copia de dev `backup/registro_pre_normalizacion_20260915.db` quedó con **7 servicios, TODOS «Entregado»** (sin
+  órdenes activas): la lista de Servicio Técnico abre vacía por el filtro «Activos en taller» → para ver tarjetas
+  hay que pasar el filtro a «Todos los estados».
+
+**Revisión adversarial (2 subagentes) y arreglos.** Veredictos: **BLOQUEANTE** (calidad) y **OK con observaciones**
+(consistencia). Los 10 hallazgos quedaron arreglados; los tres que más enseñan:
+1. **El chip del método más usado se veía «PUNTO Bs Bs.»** porque `currencySymbol('VES')` devuelve `'Bs. '` **con
+   espacio final** y el helper no lo recortaba. Rompía el AC-1 y **ninguna prueba lo veía**: el test puro no tocaba
+   ese helper y el CDP solo CONTABA chips. Lección: cuando una prueba cuenta elementos en vez de mirar su TEXTO,
+   no prueba nada. Ahora `simboloSiAporta` vive en `lib/payment-methods.ts` (probado, 31/31 con 13 casos nuevos) y
+   la prueba en vivo exige el texto exacto (`PUNTO Bs`, `EFECTIVO $`, un solo `Bs`) y **un solo chevron**.
+2. **Ctrl+Enter salteaba los gates del botón** (y F31 lo acababa de anunciar en el pie): `save()` no revalidaba
+   `needCi`/`dayOpen`/`saving` → se podía guardar un cliente nuevo **sin cédula** (el dato que va en el recibo).
+   Lección: al publicitar un atajo hay que cerrar sus puertas, no solo el `disabled` del botón.
+3. **El mensaje «Falta: …» y el botón se contradecían** (decía cédula y «Siguiente» avanzaba igual): ahora el paso
+   Cliente la exige y **el último paso espeja exactamente el `disabled` de Guardar** (cédula, monto, modelo,
+   trabajos, pantalla por equipo). Lección: si el aviso y el gate se calculan por separado, divergen.
+   También: doble chevron en el desplegable (yo agregaba uno y `ui/select.tsx` ya pone el suyo), un método fuera de
+   la lista quedaba invisible (ahora se muestra como badge), el combobox de modelo se adueña del Enter (antes, sin
+   coincidencia exacta, el Enter hacía avanzar de paso), la búsqueda por teléfono reintenta con el texto tal cual
+   (los teléfonos guardados con guion no aparecían), el autofoco del combobox se revirtió (abría su lista de 60
+   modelos al entrar al paso) y la comisión del Punto quedó en `DEFAULT_PUNTO_FEE` (estaba `3.5` hardcodeado 2 veces).
+

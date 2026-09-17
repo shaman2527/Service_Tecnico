@@ -7,7 +7,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { api } from '@/db';
 import type { ScreenCandidate, Service } from '@/types';
@@ -20,6 +19,8 @@ import {
 } from '@/lib/payment-math';
 // Actualizar la orden conservando TODOS sus campos (una sola forma de hacerlo en la UI).
 import { updateOrderKeepingFields } from '@/lib/service-update';
+// F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
+import { PaymentMethodPicker } from './PaymentMethodPicker';
 
 // F30 — ASISTENTE DE CIERRE: entregar un equipo rápido y sin pensar.
 //
@@ -427,25 +428,26 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
 
                 <div className="flex flex-col gap-1">
                   <label className="text-[11px] text-muted-foreground">Método</label>
-                  <Select value={payMethod} onValueChange={v => {
-                    const nextCur = methodCurrency(v);
-                    setPayMethod(v);
-                    // Cambiar de método CONVIERTE el monto (no cambia su significado): campo en
-                    // Bs. 7000 → método en dólares = $9.35. SIN TASA no hay conversión posible:
-                    // se deja el campo COMO ESTÁ (ni se borra lo tecleado ni se le cambia el
-                    // rótulo, que haría que Bs. 7000 se registraran como $7000) y el gate
-                    // `cobroImposible` bloquea con la explicación.
-                    if (nextCur !== payCur && tasaBcv > 0) {
-                      setPayAmount(convertAmount(payAmount, payCur, nextCur, tasaBcv));
-                      setPayCur(nextCur);
-                    }
-                    setPayFee(v.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
-                  }}>
-                    <SelectTrigger className="h-8 w-48" aria-label="Método de pago"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {methods.map(m => <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
+                  {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+                  <PaymentMethodPicker
+                    methods={methods}
+                    value={payMethod}
+                    size="sm"
+                    onChange={v => {
+                      const nextCur = methodCurrency(v);
+                      setPayMethod(v);
+                      // Cambiar de método CONVIERTE el monto (no cambia su significado): campo en
+                      // Bs. 7000 → método en dólares = $9.35. SIN TASA no hay conversión posible:
+                      // se deja el campo COMO ESTÁ (ni se borra lo tecleado ni se le cambia el
+                      // rótulo, que haría que Bs. 7000 se registraran como $7000) y el gate
+                      // `cobroImposible` bloquea con la explicación.
+                      if (nextCur !== payCur && tasaBcv > 0) {
+                        setPayAmount(convertAmount(payAmount, payCur, nextCur, tasaBcv));
+                        setPayCur(nextCur);
+                      }
+                      setPayFee(v.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
+                    }}
+                  />
                 </div>
 
                 {payIsPunto && (

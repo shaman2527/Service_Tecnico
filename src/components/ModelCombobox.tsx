@@ -90,9 +90,12 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
             if (allowFreeText) onChange(text);
           }}
           onKeyDown={e => {
-            if (e.key === 'Enter' && exact) {
+            // El combobox es DUEÑO del Enter: confirma lo que se escribió (el texto ya se comitea por
+            // tecla) y no lo deja burbujear. Antes, sin coincidencia exacta el Enter seguía subiendo
+            // y en el wizard de recepción hacía AVANZAR de paso sin querer.
+            if (e.key === 'Enter') {
               e.preventDefault();
-              pick(exact.label, exact);
+              if (exact) pick(exact.label, exact);
             } else if (e.key === 'Escape') {
               setOpen(false);
             }

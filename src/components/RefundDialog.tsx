@@ -3,9 +3,10 @@ import { Undo2, AlertTriangle, CheckCircle2, CircleX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
+// F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
+import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { methodCurrency, currencySymbol, isFinalized } from '@/lib/utils';
 import type { Service } from '../types';
 
@@ -152,17 +153,15 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
           </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Método de devolución</label>
-            <Select value={refundMethod} onValueChange={v => {
-              setRefundMethod(v);
-              setRefundCurrency(methodCurrency(v));
-            }}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {methods.map(m => (
-                  <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+            <PaymentMethodPicker
+              methods={methods}
+              value={refundMethod}
+              onChange={v => {
+                setRefundMethod(v);
+                setRefundCurrency(methodCurrency(v));
+              }}
+            />
             {refundIsBs && (
               <p className="text-xs text-amber-600">
                 Este método es en bolívares: la devolución se registra en Bs. y se resta con la tasa BCV del día.

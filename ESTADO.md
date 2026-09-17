@@ -60,6 +60,30 @@ subagentes.
 
 ---
 
+## 0.c Wizard de recepción rápido + métodos de pago con acceso directo (F31, 2026-09-16) — MODO DEV
+
+Pedido del local: wizard de registrar cliente **rápido y profesional**, y en los métodos de pago los 3 que
+más se usan a un toque —**Punto de Venta (Bs), Pago Móvil, Efectivo $**— con **el resto en un desplegable**.
+
+| Qué | Dónde | Evidencia |
+|---|---|---|
+| Selector de método compartido: 3 chips (PUNTO Bs · PAGO MOVIL · EFECTIVO $) + «Otros métodos…» con los 4 restantes | `src/components/PaymentMethodPicker.tsx` + `src/lib/payment-methods.ts` | `node tools/node_modules/tsx/dist/cli.mjs tools/method_picker_test.ts` **31/31** |
+| Se usa en TODOS los cobros: crear servicio, editar, Pago/Abono, Ventas, Devolución y asistente de cierre | `Services.tsx` (x2), `PaymentDialog.tsx`, `Sales.tsx`, `RefundDialog.tsx`, `CierreServiceDialog.tsx` | EN VIVO: `tools/verify_metodos_en_cobros.mjs` **13/13** (Ventas ✓ · Pago/Abono ✓ · Devolución ✓; el asistente se omite porque esa copia no tenía órdenes activas) |
+| Wizard más rápido: **Enter avanza** (Ctrl+Enter guarda), auto-foco por paso, **el teléfono trae al cliente conocido**, aviso **«Falta: …»**, Blindaje rotulado (opcional) y su resumen en Revisar | `Services.tsx` (`ServiceForm`) | EN VIVO: `tools/verify_wizard_metodos.mjs` **18/18** |
+| Sin regresión y sin escrituras | — | `tsc -b` 0 errores · `oxlint` 0 errores · `npm run build` OK · `queue_test` 47/47 · `payment_math_test` 595/595 · **mismas 7 órdenes y 2 pagos antes/después** de la prueba en vivo · **CERO cambios en Rust**, `utils.ts` (recibo) y `PrintReceiptDialog` intactos |
+
+**Pendiente (no mezclar):** los favoritos son una constante (`METODOS_FAVORITOS`): si el local quiere
+cambiarlos desde la app, hace falta una tabla + pantalla en Ajustes. Siguen pendientes F32 (cierre
+transaccional), F31-viejo (cola/pagos en una consulta) y F33 (vuelto, contador de entregas).
+
+**Lecciones de verificación en vivo (están también en `AGENTS.md`):** la ventana puede estar sirviendo los
+**assets embebidos** (`tauri.localhost` + `/assets/index-*.js`) → `npm run build` no alcanza: hay que
+`cargo build` (matando antes `registro.exe` y los `cargo`) y relanzar; navegar a `localhost:5173` rompe el
+IPC; `location.reload()` vuelve a pedir el PIN (los scripts se desbloquean con 1234); en CDP el `value` de un
+input no sale en `innerText` y los `Select` de Radix necesitan click real.
+
+---
+
 ## 1. Resumen
 
 Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servicio técnico de

@@ -10,6 +10,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Badge } from '@/components/ui/badge';
 
 import { api } from '../db';
+// F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
+import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { methodCurrency, currencySymbol, titleCase } from '@/lib/utils';
 import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 
@@ -420,14 +422,12 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Método de Pago</label>
-              <Select value={method} onValueChange={m => { setMethod(m); setSaveError(null); if (!m.includes('Móvil') && !m.includes('Movil') && !m.includes('Zelle')) setReference(''); if (m !== 'Divisas (USD Cash)') setDiscount(0); }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {methods.map(m => (
-                    <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+              <PaymentMethodPicker
+                methods={methods}
+                value={method}
+                onChange={m => { setMethod(m); setSaveError(null); if (!m.includes('Móvil') && !m.includes('Movil') && !m.includes('Zelle')) setReference(''); if (m !== 'Divisas (USD Cash)') setDiscount(0); }}
+              />
               {methodCurrency(method) === 'VES' && (
                 <p className="text-xs text-amber-600">
                   {tasaBcv > 0

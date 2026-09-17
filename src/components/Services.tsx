@@ -21,12 +21,15 @@ import CierreQueueDialog from './CierreQueueDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { ModelCombobox } from './ModelCombobox';
+// F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
+import { PaymentMethodPicker } from './PaymentMethodPicker';
 // Piezas compartidas con el asistente de cierre (Harness F30): el stepper del wizard y la
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
 import { FormStepper } from './FormStepper';
 import { ScreenSelect, useCompatibleProducts } from './ScreenPicker';
 import { asPhoneEntry, onlyScreens, screenOk } from '@/lib/screen-rules';
 import { updateOrderKeepingFields } from '@/lib/service-update';
+import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
@@ -997,7 +1000,7 @@ function colorDot(color: string): string {
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
 // modelo (con sugerencias), monto, trabajos/fallas, blindaje colapsable y finanzas propias.
-function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid }: {
+function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
   methods: { id: number; name: string }[];
@@ -1007,6 +1010,8 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   hideChecklist?: boolean;
   /** informa al formulario si este equipo tiene resuelta la pantalla */
   onScreenValid?: (index: number, valid: boolean) => void;
+  /** F31: al entrar al paso «Equipos» el foco cae en el modelo del primer equipo */
+  autoFocus?: boolean;
 }) {
   const [showChecklist, setShowChecklist] = useState(false);
 
@@ -1080,6 +1085,7 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           <ModelCombobox
             value={device.model}
             onChange={selectModel}
+            autoFocus={autoFocus}
             placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)…"
           />
         </div>
@@ -1188,18 +1194,17 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
           <label className="text-sm font-medium">Método de Pago</label>
-          <Select value={device.payment} onValueChange={v => {
-            const patch: Partial<FormDevice> = { payment: v };
-            if (v.includes('Punto')) patch.bankFeePercent = 3.5;
-            onChange(patch);
-          }}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {methods.map(m => (
-                <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+          <PaymentMethodPicker
+            methods={methods}
+            value={device.payment}
+            size="sm"
+            onChange={v => {
+              const patch: Partial<FormDevice> = { payment: v };
+              if (v.includes('Punto')) patch.bankFeePercent = DEFAULT_PUNTO_FEE;
+              onChange(patch);
+            }}
+          />
         </div>
         {isPos && (
           <div className="space-y-2">
@@ -1493,9 +1498,17 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     : null;
 
   const save = async () => {
+    // F31: los MISMOS gates que el botón, también por Ctrl+Enter (antes el atajo los salteaba y se
+    // podía guardar un cliente nuevo sin cédula o con el día cerrado, sin ningún aviso).
+    const bloqueos: string[] = [];
+    if (saving) bloqueos.push('ya se está guardando');
+    if (dayOpen === false) bloqueos.push('abrir el día en Libro Diario');
+    if (needCi && !clientCi.trim()) bloqueos.push('cédula del cliente nuevo');
+    if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
     if (service) {
       if (!client || !model || serviceTypes.length === 0 || screenMissing) return;
     } else if (!client || !devicesValid) return;
+    setAvisoGuardar(null);
     setSaving(true);
     try {
       let cid = clientId;
@@ -1569,14 +1582,17 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   // (siempre done — el operario decide al recibir); la falla también es opcional.
   const steps = service
     ? [
-        { label: 'Cliente', done: client.trim().length > 0 },
+        { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
         { label: 'Equipo', done: !!model && serviceTypes.length > 0 },
         { label: 'Blindaje', done: true },
         { label: 'Finanzas', done: amount > 0 },
         { label: 'Cierre', done: true },
       ]
     : [
-        { label: 'Cliente', done: client.trim().length > 0 },
+        // La cédula del cliente NUEVO es obligatoria para guardar: se pide ya en el paso 1 para que
+        // «Siguiente» y el aviso «Falta: …» digan lo mismo (antes el botón avanzaba y el guardado
+        // fallaba al final).
+        { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
         { label: 'Equipos', done: devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0) },
         { label: 'Blindaje', done: true },
         { label: 'Revisar', done: devices.every(d => d.amount > 0) },
@@ -1588,11 +1604,100 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     if (i < wizStep || stepCurrent === -1) setWizStep(i);
   };
 
+  // ── F31: recepción más rápida ────────────────────────────────────────────────────────────
+
+  // Aviso de por qué NO se guardó (por ejemplo al usar Ctrl+Enter con el día cerrado o sin cédula).
+  const [avisoGuardar, setAvisoGuardar] = useState<string | null>(null);
+
+  // Al entrar a un paso el foco va al primer campo (menos mouse, menos tipeo en el mostrador).
+  const clientRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (wizStep === 0) clientRef.current?.focus();
+  }, [wizStep]);
+
+  // El cliente casi siempre dice el TELÉFONO: con 5+ dígitos se buscan clientes conocidos y un
+  // toque los trae completos. `suggest_clients` del backend ya busca por nombre, teléfono y
+  // cédula (con la cédula primero) — antes solo se disparaba desde el campo Cliente.
+  // Se prueban las DOS formas: solo dígitos (teléfonos guardados sin separadores) y el texto tal
+  // como se escribió (teléfonos guardados con guion, que el `LIKE` del backend no normaliza).
+  const [phoneSugs, setPhoneSugs] = useState<Client[]>([]);
+  useEffect(() => {
+    const digitos = phone.replace(/\D/g, '');
+    const crudo = phone.trim();
+    if (service || clientId != null || digitos.length < 5) { setPhoneSugs([]); return; }
+    let alive = true;
+    const limpiar = (list: Client[]) => list.filter(c => c.phone && c.name !== client.trim());
+    const t = setTimeout(() => {
+      api.suggestClients(digitos, 4)
+        .then(async list => {
+          if (!alive) return;
+          if (list.length > 0 || crudo === digitos) { setPhoneSugs(limpiar(list)); return; }
+          const conGuion = await api.suggestClients(crudo, 4).catch(() => [] as Client[]);
+          if (alive) setPhoneSugs(limpiar(conGuion));
+        })
+        .catch(() => { if (alive) setPhoneSugs([]); });
+    }, 250);
+    return () => { alive = false; clearTimeout(t); };
+  }, [phone, service, clientId, client]);
+
+  // Qué le falta AL PASO ACTUAL para poder avanzar/guardar: se dice en pantalla en lugar de dejar
+  // el botón apagado sin explicación (el último paso espeja EXACTAMENTE el `disabled` del botón).
+  const faltaEnPaso = (() => {
+    const falta: string[] = [];
+    if (dayOpen === false) falta.push('abrir el día en Libro Diario');
+    if (wizStep === 0) {
+      if (!client.trim()) falta.push('nombre del cliente');
+      if (needCi && !clientCi.trim()) falta.push('cédula del cliente nuevo');
+    } else if (wizStep === 1) {
+      if (service) {
+        if (!model.trim()) falta.push('modelo del equipo');
+        if (serviceTypes.length === 0) falta.push('trabajo o falla');
+        if (screenMissing) falta.push(screenMissing);
+      } else {
+        devices.forEach((d, i) => {
+          const n = devices.length > 1 ? ` del equipo ${i + 1}` : '';
+          if (!d.model.trim()) falta.push(`modelo${n}`);
+          if (d.serviceTypes.length === 0) falta.push(`trabajo o falla${n}`);
+        });
+      }
+    } else if (wizStep === steps.length - 1) {
+      // Último paso: lo mismo que bloquea el botón Guardar (así nunca queda un botón apagado mudo).
+      if (!client.trim()) falta.push('nombre del cliente');
+      if (needCi && !clientCi.trim()) falta.push('cédula del cliente nuevo');
+      if (service) {
+        if (!(amount > 0)) falta.push('monto');
+        if (!model.trim()) falta.push('modelo del equipo');
+        if (serviceTypes.length === 0) falta.push('trabajo o falla');
+        if (screenMissing) falta.push(screenMissing);
+      } else {
+        devices.forEach((d, i) => {
+          const n = devices.length > 1 ? ` del equipo ${i + 1}` : '';
+          if (!(d.amount > 0)) falta.push(`monto${n}`);
+          if (!d.model.trim()) falta.push(`modelo${n}`);
+          if (d.serviceTypes.length === 0) falta.push(`trabajo o falla${n}`);
+          // Equipo con «Cambio pantalla» y sin pantalla elegida: es lo que apaga Guardar en crear
+          if (deviceScreenValid[i] === false) falta.push(`elegir la pantalla${n}`);
+        });
+      }
+    }
+    return falta;
+  })();
+
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden"
         onKeyDown={e => {
-          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') save();
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { save(); return; }
+          // F31: Enter en un campo de texto AVANZA al paso siguiente cuando el paso está completo
+          // (nunca guarda: eso sigue siendo Ctrl+Enter o el botón del último paso). No se dispara
+          // si el propio campo ya usó el Enter —el buscador de modelo hace preventDefault al
+          // elegir— ni desde un textarea, donde Enter es un salto de línea.
+          const t = e.target as HTMLElement | null;
+          if (e.key === 'Enter' && !e.defaultPrevented && !e.shiftKey
+            && t?.tagName === 'INPUT' && wizStep < steps.length - 1 && steps[wizStep].done) {
+            e.preventDefault();
+            setWizStep(w => w + 1);
+          }
         }}>
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
@@ -1623,7 +1728,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Cliente *</label>
-              <Input value={client} onChange={e => { clientPicked.current = false; setClient(e.target.value); setClientId(null); }}
+              <Input ref={clientRef} value={client} onChange={e => { clientPicked.current = false; setClient(e.target.value); setClientId(null); }}
                 onBlur={() => {
                   // Cédula de primero: si lo escrito coincide con un cliente EXISTENTE,
                   // toma sus datos automáticamente; si no, registra nuevo al guardar.
@@ -1650,12 +1755,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             <div className="space-y-2">
               <label className="text-sm font-medium">Teléfono</label>
               <Input value={phone} onChange={e => setPhone(e.target.value)} placeholder="0412-1234567" />
+              {/* F31: el cliente conocido aparece al escribir su teléfono (un toque lo trae) */}
+              {phoneSugs.length > 0 && (
+                <div className="rounded-md border bg-popover shadow-md overflow-hidden">
+                  <p className="px-3 pt-2 text-[11px] text-muted-foreground">Cliente conocido con ese teléfono:</p>
+                  {phoneSugs.map(c => (
+                    <button key={c.id} type="button"
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-accent border-b last:border-0 transition-colors"
+                      onClick={() => { selectClient(c); setPhoneSugs([]); }}>
+                      <span className="font-medium">{c.name}</span>
+                      {c.ci && <span className="text-muted-foreground text-xs ml-2">{c.ci}</span>}
+                      {c.phone && <span className="text-muted-foreground text-xs ml-2">{c.phone}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Cédula</label>
+              <label className="text-sm font-medium">Cédula {needCi && '*'}</label>
               <Input value={clientCi} onChange={e => setClientCi(e.target.value)} placeholder="V-12345678" />
               {needCi && !clientCi.trim() && (
                 <p className="text-xs text-danger">Obligatoria para cliente nuevo</p>
@@ -1827,7 +1947,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <div className="space-y-3">
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
-                    methods={methods} index={i} onScreenValid={onScreenValid}
+                    methods={methods} index={i} onScreenValid={onScreenValid} autoFocus={false} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */
                     onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
                 ))}
               </div>
@@ -1845,7 +1965,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
           {wizStep === 2 && (
             <>
-              <SectionTitle step={3} title="Blindaje del equipo" tone="orange" />
+              <SectionTitle step={3} title="Blindaje del equipo (opcional)" tone="orange" />
               {service ? (
                 <ChecklistGrid value={checklist} onChange={setChecklist} />
               ) : (
@@ -1870,17 +1990,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Método de Pago</label>
-                  <Select value={payment} onValueChange={v => {
-                    setPayment(v);
-                    if (v.includes('Punto')) setBankFeePercent(3.5);
-                  }}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {methods.map(m => (
-                        <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  {/* F31: acceso directo a los más usados; el resto en «Otros métodos…» */}
+                  <PaymentMethodPicker
+                    methods={methods}
+                    value={payment}
+                    size="sm"
+                    onChange={v => {
+                      setPayment(v);
+                      if (v.includes('Punto')) setBankFeePercent(DEFAULT_PUNTO_FEE);
+                    }}
+                  />
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Estado</label>
@@ -1945,6 +2064,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                           <div className="flex flex-wrap gap-1 mt-1">
                             {d.serviceTypes.map(t => <Badge key={t} variant="outline" className="text-[11px]">{t}</Badge>)}
                             {d.discount > 0.005 && <Badge variant="outline" className="text-[11px] text-emerald-600">Descuento ${d.discount.toFixed(2)}</Badge>}
+                            {/* F31: el blindaje se ve acá también (es lo que se firma en el recibo) */}
+                            <Badge variant="outline" className="text-[11px] text-orange-600">
+                              Blindaje {Object.values(d.checklist).filter(v => v === 'si' || v === 'no').length}/{CHECKLIST_ITEMS.length}
+                              {Object.values(d.checklist).filter(v => v === 'si').length > 0
+                                && ` · ${Object.values(d.checklist).filter(v => v === 'si').length} con Sí`}
+                            </Badge>
                           </div>
                         </div>
                         <div className="text-right shrink-0">
@@ -2064,6 +2189,21 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         <DialogFooter className="shrink-0 border-t pt-3">
           <div className="flex w-full items-center justify-between gap-2">
             <Button variant="outline" onClick={onClose}>Cancelar</Button>
+            {/* F31: decir QUÉ FALTA en vez de dejar el botón apagado sin explicación, y recordar
+                el teclado (Enter avanza · Ctrl+Enter guarda). */}
+            <div className="flex min-w-0 flex-1 flex-col items-end gap-1 px-2">
+              {avisoGuardar && (
+                <span className="text-right text-[11px] font-medium text-danger">{avisoGuardar}</span>
+              )}
+              {faltaEnPaso.length > 0 && (
+                <span className="text-right text-[11px] text-danger">Falta: {faltaEnPaso.join(' · ')}</span>
+              )}
+              <span className="text-right text-[11px] text-muted-foreground">
+                {wizStep < steps.length - 1
+                  ? 'Enter avanza · Ctrl+Enter guarda'
+                  : (service ? 'Ctrl+Enter actualiza · Esc cierra' : 'Ctrl+Enter guarda · Esc cierra')}
+              </span>
+            </div>
             <div className="flex items-center gap-2">
               {wizStep > 0 && (
                 <Button type="button" variant="outline" onClick={() => setWizStep(w => w - 1)}>

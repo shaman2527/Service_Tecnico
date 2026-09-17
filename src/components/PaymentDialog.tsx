@@ -3,7 +3,6 @@ import { Trash2, Printer, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -16,6 +15,8 @@ import {
   saldoChipValue, quickAmounts, puntoCommission, DEFAULT_PUNTO_FEE,
 } from '@/lib/payment-math';
 import PrintReceiptDialog from './PrintReceiptDialog';
+// F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
+import { PaymentMethodPicker } from './PaymentMethodPicker';
 import type { Service, ServicePayment } from '../types';
 
 export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
@@ -233,27 +234,25 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
           </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Método de Pago</label>
-            <Select value={payMethod} onValueChange={v => {
-              const nextCur = methodCurrency(v);
-              setPayMethod(v);
-              setPayFee(v.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
-              // El toggle sigue al método y el valor se CONVIERTE sin cambiar de
-              // significado (7000 Bs → $9.35 si cambias a un método en dólares).
-              // SIN TASA no hay conversión posible: se deja el campo como está (no se borra lo
-              // tecleado ni se le cambia el rótulo) y Guardar queda bloqueado porque el monto
-              // final en la moneda del método da 0.
-              if (nextCur !== payCur && tasaBcv > 0) {
-                setPayAmount(convertTo(payAmount, nextCur));
-                setPayCur(nextCur);
-              }
-            }}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {methods.map(m => (
-                  <SelectItem key={m.id} value={m.name}>{m.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+            <PaymentMethodPicker
+              methods={methods}
+              value={payMethod}
+              onChange={v => {
+                const nextCur = methodCurrency(v);
+                setPayMethod(v);
+                setPayFee(v.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
+                // El toggle sigue al método y el valor se CONVIERTE sin cambiar de
+                // significado (7000 Bs → $9.35 si cambias a un método en dólares).
+                // SIN TASA no hay conversión posible: se deja el campo como está (no se borra lo
+                // tecleado ni se le cambia el rótulo) y Guardar queda bloqueado porque el monto
+                // final en la moneda del método da 0.
+                if (nextCur !== payCur && tasaBcv > 0) {
+                  setPayAmount(convertTo(payAmount, nextCur));
+                  setPayCur(nextCur);
+                }
+              }}
+            />
             {payIsBs && (
               <p className="text-xs text-amber-600">
                 Este método es en bolívares: el abono se registra en Bs. y se convierte a $ con la tasa BCV del día al calcular el saldo.
