@@ -276,6 +276,18 @@ Recibido → En reparación → Esperando repuesto → Reparado/Pendiente Pago �
 - Error amigable si el puerto no existe: "No se pudo abrir COM9: ... Revisa que la impresora esté conectada." (con pista de pareado si es un puerto Bluetooth).
 - Test de hardware: la PC tiene el driver HPRT MPT-II instalado (puerto USB001, impresora física NO presente — phantom) + MP58-04BLE pareada solo como BLE (`BTHLE\DEV_C2B58CC9E212`), sin COM. Verificado en vivo: list_windows_printers devuelve "HPRT MPT-II"/"POS-58", ticket RAW aceptado por el spooler (jobs no se retienen sin hardware); list_com_ports=[] + round-trip settings + error COM en vivo. En la tienda: conectar MP58-04 por USB → driver MPT-II ya instalado → Impresora → "HPRT MPT-II" → Imprimir prueba; para BLE: parear en Bluetooth y dispositivos → Detectar → "COMx — Bluetooth · MP58-04BLE".
 
+### Datos del cliente: qué toca (y qué NO) cada operación (2026-09-16)
+
+Antes de tocar una base con datos reales, esto es lo medido — no lo supuesto. Prueba reproducible:
+`node tools/verify_datos_intactos.mjs [--con-normalize]` (toma una COPIA, corre la carga de
+inventario y la limpieza canónica, y compara fila por fila las tablas de historia).
+
+| Operación | Qué escribe | ¿Toca ventas/servicios/abonos/cierres viejos? |
+|---|---|---|
+| **Carga de inventario** (`apply_inventory_load` / `load_real_inventory.mjs`) | `products` (stock, proveedor), `inventory_movements` (trazabilidad), y CREA fichas si la lista física las pide | **NO** — medido: `sales`, `services`, `service_payments`, `clients`, `daily_closings` y `expenses` quedan idénticos; solo cambia el inventario (758 → 713 unidades en la prueba) |
+| **Limpieza canónica** (`normalize_catalog`) | `products` (nombre/marca/modelo/variante/compat), `phones`, y al FUSIONAR duplicados repunta `sales.product_id`, `services.screen_product_id`, `inventory_movements.product_id`, `purchase_order_items.product_id` a la ficha que se queda + borra la ficha duplicada | **Solo el vínculo al producto**, y solo si hay duplicados que fusionar: medido (misma cantidad de ventas, misma fecha, mismo nombre y mismo total; stock total invariante). Respalda el `.db` en `backup/` antes de escribir |
+| **Actualización de la app** (instalador NSIS / updater) | El `.exe` y los recursos. La plantilla viaja como `registro.default.db` y `get_db_path()` la copia **solo si `registro.db` NO existe** (`lib.rs:163-177`) | **NO** — una instalación con datos nunca es sobrescrita; además `backup_before_update` copia la DB a `updates/registro.backup_pre_vX.db` antes de instalar, con watchdog y rollback |
+| **Arranque** (`init()`) | Campos DERIVADOS: recalcula `services.paid_amount` (suma de los abonos) y los totales de días cerrados; normaliza `service_payments.currency` de pagos en Bs guardados como USD (bug viejo, idempotente) | Escribe en filas viejas **solo** en campos derivados/normalizados: no borra ni cambia montos, fechas ni clientes |
 ### Instalador (producción / NSIS)
 - `tauri.conf.json`: `bundle.targets=["nsis"]`, `bundle.resources={"../registro.db":"registro.default.db"}` (la DB viaja como PLANTILLA `registro.default.db` — el seed copia SOLO si registro.db no existe; nunca se pisa la DB del usuario), `bundle.windows.webviewInstallMode.type="embedBootstrapper"` (WebView2 embebido, funciona offline — PC moderna).
 - Build: `npx tauri build` (~7 min con LTO; descarga NSIS + bootstrapper WebView2 la primera vez) → `src-tauri/target/release/bundle/nsis/Registro Servicio Tecnico_X.Y.Z_x64-setup.exe` (~4.7 MB). Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe (la DB que escribe es la instalada, no la del proyecto).
