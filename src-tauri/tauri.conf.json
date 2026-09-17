@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Registro Servicio Tecnico",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "identifier": "com.registro.serviciotecnico",
   "build": {
     "frontendDist": "../dist",
