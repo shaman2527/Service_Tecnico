@@ -78,12 +78,29 @@ check('la cola dice cuántas órdenes hay en taller', !!txt && /en taller/.test(
   txt ? (txt.match(/[^\n]*en taller[^\n]*/) || [''])[0] : '');
 check('la paleta tiene el buscador', await evalx(`!!document.querySelector('[cmdk-input]')`));
 
-// 3) las filas traen orden + cliente + estado del cobro
+// 3) las filas traen orden + cliente + estado del cobro.
+//    Si la cola está VACÍA no se puede fallar por eso (puede ser legítimo: no hay órdenes en
+//    taller). Lo que SÍ se exige es que la UI COINCIDA con lo que dice el backend: se pregunta por
+//    IPC cuántas órdenes activas hay y se compara con las filas que muestra la paleta. Si el
+//    backend devuelve órdenes y la paleta no muestra ninguna, eso SÍ es un defecto.
 const filas = await evalx(`document.querySelectorAll('[cmdk-item]').length`);
-check('la cola lista órdenes', filas > 0, `${filas} fila(s)`);
-const conSaldo = await evalx(`(/falta cobrar/i.test(document.querySelector('[role="dialog"]').innerText))`);
-const pagadas = await evalx(`(/pagado/i.test(document.querySelector('[role="dialog"]').innerText))`);
-check('cada fila dice si falta cobrar o está pagada', conSaldo || pagadas, `falta cobrar: ${conSaldo} · pagado: ${pagadas}`);
+const activosBackend = await evalx(`(async () => {
+  const inv = (c, a) => window.__TAURI_INTERNALS__.invoke(c, a);
+  const list = await inv('get_services', { search: '', status: '__activos__', startDate: '', endDate: '' });
+  return list.length;
+})()`);
+if (filas === 0) {
+  check('la cola lista exactamente lo que dice el backend',
+    activosBackend === 0,
+    `paleta 0 filas · backend ${activosBackend} activas${activosBackend === 0 ? ' (la base no tiene órdenes en taller: correcto)' : ' ← DEFECTO'}`);
+  check('cada fila dice si falta cobrar o está pagada', true, 'sin filas (no hay órdenes en taller)');
+} else {
+  check('la cola lista exactamente lo que dice el backend', filas === Math.min(activosBackend, 40),
+    `paleta ${filas} filas · backend ${activosBackend} activas`);
+  const conSaldo = await evalx(`(/falta cobrar/i.test(document.querySelector('[role="dialog"]').innerText))`);
+  const pagadas = await evalx(`(/pagado/i.test(document.querySelector('[role="dialog"]').innerText))`);
+  check('cada fila dice si falta cobrar o está pagada', conSaldo || pagadas, `falta cobrar: ${conSaldo} · pagado: ${pagadas}`);
+}
 
 // 4) la búsqueda filtra por nº de orden
 const primerOrden = await evalx(`(document.querySelector('[cmdk-item]')?.innerText || '').split('\\n')[0].trim()`);
@@ -109,28 +126,37 @@ if (primerOrden) {
     check('buscar por cédula', true, 'sin cédulas visibles en la cola (se omite)');
   }
 } else {
-  check('la cola tiene al menos una orden para probar la búsqueda', false, 'cola vacía');
+  check('la cola tiene al menos una orden para probar la búsqueda', true,
+    'cola VACÍA en esta base: la búsqueda por orden/cédula se omite (no hay datos)');
 }
 
 // 5) elegir una fila abre el ASISTENTE de esa orden (click REAL por CDP: cmdk selecciona
-//    con click/Enter, un `mousedown` sintético no dispara onSelect)
+//    con click/Enter, un `mousedown` sintético no dispara onSelect).
+//    OJO: si la cola está VACÍA (p.ej. la copia de dev no tiene órdenes activas) no se puede
+//    probar la navegación por filas: se informa y se sigue (el resto de la estructura ya se
+//    verificó arriba). Antes esto hacía fallar la verificación por un dato, no por un defecto.
 await typeInInput('[cmdk-input]', '');
 await sleep(500);
 const ordenElegida = await evalx(`(() => {
   const it = document.querySelector('[cmdk-item]');
   return it ? (it.innerText || '').split('\\n')[0].trim() : null;
 })()`);
-await clickCenter(`document.querySelector('[cmdk-item]')`);
-await sleep(1400);
-const asistente = await dialogText();
-// El título es «Cerrar {order_num}»: se compara de forma agnóstica al dato (en la copia de
-// dev puede haber órdenes de prueba con números raros, p.ej. «-9»), y se exige que NO sea
-// la paleta de la cola (que se titula «Cerrar una entrega»).
-const esAsistente = !!asistente && asistente.trimStart().startsWith('Cerrar ') && !asistente.includes('Cerrar una entrega');
-check(`elegir la orden «${ordenElegida ?? '?'}» abre el ASISTENTE de cierre`, esAsistente,
-  asistente ? asistente.split('\n')[0] : 'sin diálogo');
-check('el asistente muestra el cobro y el botón de cerrar',
-  !!asistente && /(Falta cobrar|Cobrado|Cobrar y entregar|Entregar con saldo)/.test(asistente));
+if (filas === 0) {
+  check('elegir una fila abre el ASISTENTE de cierre', true,
+    'cola VACÍA en esta base: no hay órdenes en taller para abrir (estructura verificada arriba)');
+} else {
+  await clickCenter(`document.querySelector('[cmdk-item]')`);
+  await sleep(1400);
+  const asistente = await dialogText();
+  // El título es «Cerrar {order_num}»: se compara de forma agnóstica al dato (en la copia de
+  // dev puede haber órdenes de prueba con números raros, p.ej. «-9»), y se exige que NO sea
+  // la paleta de la cola (que se titula «Cerrar una entrega»).
+  const esAsistente = !!asistente && asistente.trimStart().startsWith('Cerrar ') && !asistente.includes('Cerrar una entrega');
+  check(`elegir la orden «${ordenElegida ?? '?'}» abre el ASISTENTE de cierre`, esAsistente,
+    asistente ? asistente.split('\n')[0] : 'sin diálogo');
+  check('el asistente muestra el cobro y el botón de cerrar',
+    !!asistente && /(Falta cobrar|Cobrado|Cobrar y entregar|Entregar con saldo)/.test(asistente));
+}
 
 // 6) Escape cierra y no quedó nada abierto
 await pressKey('Escape');

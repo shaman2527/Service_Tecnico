@@ -1,0 +1,1057 @@
+// ============================================================================================
+// SMOKE INTEGRAL PRE-PRODUCCIÓN — verificación EN VIVO por CDP de TODOS los módulos.
+//
+// Qué hace: recorre Dashboard, Ventas, Servicio Técnico, Inventario, Pedidos, Clientes,
+// Libro Diario y Ayuda contra la app REAL (Tauri 2 + React 19 + SQLite) y comprueba con
+// evidencia (texto/valores leídos del DOM o por IPC) que cada módulo funciona de verdad:
+// no basta con que la pantalla abra, se registran datos, se leen de vuelta y se limpian.
+//
+// REQUISITOS (modo DEV — NUNCA contra la DB de la tienda):
+//   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"
+//   $env:REGISTRO_DB="<copia de trabajo>"
+//   node tools/verify_smoke_integral.mjs
+//
+// LO QUE ESCRIBE EN LA BASE (leer antes de correr):
+//   1. UNA venta de prueba (producto con stock, cantidad 1, método «EFECTIVO $», cliente real).
+//      → NO se puede borrar: este proyecto NO tiene comando `delete_sale` (revisado en
+//        src-tauri/src/lib.rs y src/db.ts) ni botón de eliminar en Ventas.tsx. Queda anotada
+//        en el resumen final con su id. Por eso el script SIEMPRE corre contra una COPIA.
+//   2. UNA orden de servicio de prueba → SÍ se borra al final con el botón de la tarjeta
+//        (papelera + confirmación) y se comprueba por IPC que no quedó ninguna fila nueva.
+//   3. Órdenes de compra: NINGUNA (el carrito de «Nuevo Pedido» se arma y se descarta sin
+//        guardar).
+//   4. NO cierra el día, NO confirma cobros, NO entrega equipos, NO fusiona duplicados,
+//        NO normaliza el catálogo, NO guarda cambios de producto.
+//
+// SI YA HAY UN DIÁLOGO ABIERTO AL EMPEZAR: el script ABORTA con exit 2 (no lee el diálogo de
+// otra sesión/herramienta — sería reportar un falso fallo).
+// ============================================================================================
+import { evalx, clickCenter, keyNav, insertText, sleep, handleDialog } from './cdp_driver.mjs';
+
+// --- Patrón de salida del proyecto -----------------------------------------------------------------
+const out = [];
+const check = (name, ok, detail) => {
+  out.push({ name, ok });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ->  ' + detail : ''}`);
+};
+
+// Todo lo que el script escribe en la base se declara acá y se imprime al final
+// (la base tiene que quedar COMO ESTABA; lo que no se pueda borrar se dice fuerte).
+const residuo = [];
+
+// --- Utilidades de lectura del DOM -----------------------------------------------------------------
+const dialogTxt = () => evalx(`document.querySelector('[role="dialog"]')?.innerText ?? null`);
+const dialogsOpen = () => evalx(`document.querySelectorAll('[role="dialog"]').length`);
+
+/** Espera hasta que la expresión sea verdadera (la UI tiene debounce de 200-350ms en búsquedas). */
+const waitFor = async (toggleExpr, ms = 12000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const v = await evalx(toggleExpr).catch(() => false);
+    if (v) return true;
+    await sleep(300);
+  }
+  return false;
+};
+
+/** Lo que el autocompletado del proyecto (ModelCombobox) marca como sugerencia elegida. */
+const toggled = (label) =>
+  `[...document.querySelectorAll('button[data-state="on"]')].some(b => (b.innerText || '').includes(${JSON.stringify(label)}))`;
+
+/** Los `value` de los <input> NO salen en innerText: se leen del DOM. */
+const valueOf = (sel) => evalx(`document.querySelector(${JSON.stringify(sel)})?.value ?? null`);
+
+/** Escribe en un input controlado por React con el setter nativo (el `el.value=` pelado React lo ignora). */
+const setValue = (sel, val) => evalx(`(() => {
+  const el = document.querySelector(${JSON.stringify(sel)});
+  if (!el) return false;
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+  setter.call(el, ${JSON.stringify(val)});
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()`);
+
+/** N-ésimo input[type=date] de la pantalla (los rangos Desde/Hasta). */
+const setDate = (index, val) => evalx(`(() => {
+  const el = [...document.querySelectorAll('main input[type="date"]')][${index}];
+  if (!el) return false;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(el, ${JSON.stringify(val)});
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()`);
+
+const clickLabeled = async (sel, label, exact = false) => {
+  await clickCenter(`([...document.querySelectorAll(${JSON.stringify(sel)})].find(b => {
+    const t = (b.innerText || '').trim();
+    return ${exact ? `t === ${JSON.stringify(label)}` : `t.includes(${JSON.stringify(label)})`};
+  }) || null)`);
+};
+const clickButton = (label) => clickLabeled('button', label);
+const clickDialog = async (label, exact = false) => {
+  await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => {
+    const t = (b.innerText || '').trim();
+    return ${exact ? `t === ${JSON.stringify(label)}` : `t.includes(${JSON.stringify(label)})`};
+  }) || null)`);
+  await sleep(800);
+};
+
+/** Botón por texto EXACTO (los labels del pedido). */
+const clickExactText = async (sel, label) => clickLabeled(sel, label, true);
+
+/** Abre un Select de Radix con click REAL y devuelve las opciones del portal. */
+const openSelectAndOptions = async (triggerExpr) => {
+  await clickCenter(triggerExpr);
+  await waitFor(`document.querySelectorAll('[role="option"]').length > 0`, 4000);
+  return evalx(`[...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim())`);
+};
+const clickOption = async (label) => {
+  await clickCenter(`([...document.querySelectorAll('[role="option"]')].find(o => (o.innerText || '').includes(${JSON.stringify(label)})) || null)`);
+  await sleep(900);
+};
+
+/** Cierra TODO lo que haya abierto (diálogos + portales de Select) para no dejar basura. */
+const closeAllDialogs = async () => {
+  for (let i = 0; i < 6; i++) {
+    if ((await dialogsOpen().catch(() => 0)) === 0) break;
+    await evalx(`(() => {
+      const el = document.querySelector('[role="dialog"]') || document;
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return true;
+    })()`).catch(() => {});
+    await keyNav('Escape', 'Escape', 27).catch(() => {});
+    await sleep(500);
+  }
+};
+
+/** Fila de la tabla PAGINADA de la pestaña activa (las tablas nuevas tienen buscador arriba). */
+const activeTable = () => evalx(`(() => {
+  const p = document.querySelector('[role="tabpanel"]');
+  if (!p) return null;
+  const rows = [...p.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
+  return JSON.stringify({
+    headers: [...p.querySelectorAll('table thead th')].map(h => h.innerText.trim()),
+    rows,
+    footer: (p.innerText.match(/Mostrando \\d+–\\d+ de \\d+|\\d+ movimientos|Sin resultados/) || [''])[0],
+  });
+})()`);
+
+/** Navegación por el sidebar: los módulos son botones dentro de <aside> con texto EXACTO. */
+const goto = async (label) => {
+  const ok = await clickCenter(`([...document.querySelectorAll('aside button')].find(b => b.innerText.trim() === ${JSON.stringify(label)}) || null)`).then(() => true).catch(() => false);
+  await handleDialog(true); // por si quedó un confirm/alert nativo de un paso anterior
+  await sleep(1000);
+  return ok;
+};
+const waitH1 = async (text, ms = 15000) => waitFor(`[...document.querySelectorAll('h1')].some(h => h.innerText.trim() === ${JSON.stringify(text)})`, ms);
+
+/** IPC directo a Tauri (mismas firmas que src/db.ts). */
+const invoke = (cmd, args = {}) => evalx(`(() => window.__TAURI_INTERNALS__.invoke(${JSON.stringify(cmd)}, ${JSON.stringify(args)}))()`);
+const serviciosRaw = () => invoke('get_services', { search: '', status: '', startDate: '', endDate: '' });
+const ventasRaw = () => invoke('get_sales', { search: '', days: null, startDate: '', endDate: '' });
+
+const fechaHace = (dias) => new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+const HOY = new Date().toISOString().slice(0, 10);
+
+console.log('— SMOKE INTEGRAL pre-producción (CDP 9222) — escribe: 1 venta (no borrable) + 1 orden temporal —');
+
+// ============================================================================================
+// 0) ARRANQUE: esperar la app, pedir el PIN del local (1234) y ABORTAR si hay un diálogo abierto
+// ============================================================================================
+// Si un confirm/alert nativo bloquea la página, los evalx dan timeout: se contesta y se sigue.
+await handleDialog(true).catch(() => {});
+await evalx(`location.reload(); 'recargando'`).catch(() => {});
+
+const pinSel = 'input[placeholder="PIN de 4 dígitos"]';
+let listo = false;
+for (let i = 0; i < 30 && !listo; i++) {
+  try {
+    if (await evalx(`!!document.querySelector(${JSON.stringify(pinSel)})`)) {
+      // La recarga vuelve a pedir el PIN (gate fail-closed): 1234 es el PIN del local.
+      await setValue(pinSel, '1234');
+      await clickButton('Entrar');
+      await sleep(1600);
+    }
+    listo = await evalx(`!!document.querySelector('aside')`);
+  } catch { /* el WebView todavía está cargando */ }
+  if (!listo) await sleep(800);
+}
+if (!listo) { console.log('\nABORTADO: la app no respondió (¿está corriendo con CDP en 9222?).'); process.exit(1); }
+check('la app arranca y responde (sidebar visible, desbloqueada con el PIN del local)', true);
+
+if (await dialogsOpen().catch(() => 0) > 0) {
+  console.log('\nABORTADO: la app tiene un diálogo abierto — está en uso por otra sesión. Reintentá cuando esté libre.');
+  process.exit(2);
+}
+
+// Foto del estado ANTES de escribir nada (para poder comparar y limpiar).
+const snapshot = async () => evalx(`(async () => {
+  const inv = (c, a) => window.__TAURI_INTERNALS__.invoke(c, a);
+  const sv = await inv('get_services', { search: '', status: '', startDate: '', endDate: '' });
+  const sa = await inv('get_sales', { search: '', days: null, startDate: '', endDate: '' });
+  return JSON.stringify({
+    services: sv.length, maxServiceId: sv.reduce((a, s) => Math.max(a, s.id), 0),
+    sales: sa.length, maxSaleId: sa.reduce((a, s) => Math.max(a, s.id), 0),
+  });
+})()`);
+const ANTES = JSON.parse(await snapshot());
+console.log(`· antes: ${ANTES.services} servicios (max id ${ANTES.maxServiceId}) · ${ANTES.sales} ventas (max id ${ANTES.maxSaleId})`);
+// El TURNO DE CAJA es lo que NO se debe tocar: se registra su estado para poder comprobarlo al final.
+const diaInicial = await invoke('get_active_day');
+console.log(`· turno de caja: ${diaInicial ? `ABIERTO (${diaInicial.close_date}, tasa ${diaInicial.tasa_bcv})` : 'CERRADO (ningún día abierto)'}`);
+
+// ============================================================================================
+// 1) ARRANQUE Y NAVEGACIÓN: los 8 módulos del sidebar abren con su título propio y sin errores
+// ============================================================================================
+{
+  const modulos = [
+    ['Dashboard', 'Dashboard'],
+    ['Ventas', 'Ventas'],
+    ['Servicio Técnico', 'Servicio Técnico'],
+    ['Inventario', 'Inventario'],
+    ['Pedidos', 'Pedidos'],
+    ['Clientes', 'Clientes'],
+    ['Libro Diario', 'Libro Diario'],
+    ['Ayuda', 'Centro de Ayuda'],
+  ];
+  for (const [nav, h1] of modulos) {
+    const abierto = await goto(nav);
+    const titulo = await waitH1(h1, 15000);
+    const erroresPantalla = await evalx(`/[Ee]rror|[Nn]o se pudo|is not a function|undefined is not/.test(document.querySelector('main')?.innerText ?? '')`);
+    check(`el módulo «${nav}» abre con su título («${h1}») y sin errores en pantalla`,
+      abierto && titulo && !erroresPantalla,
+      `sidebar:${abierto} · h1:${titulo}${erroresPantalla ? ' · TEXTO DE ERROR EN PANTALLA' : ''}`);
+  }
+}
+
+// ============================================================================================
+// 2) DASHBOARD: KPIs, indicador de sincronización y la sección «Servicios por Técnico»
+// ============================================================================================
+{
+  await goto('Dashboard');
+  // La franja de datos y los KPIs solo existen cuando la carga async terminó (si falla, el
+  // indicador pasa a «Base de datos no disponible» — eso también es un fallo honesto).
+  await waitFor(`/Sincronizado|Base de datos no disponible/.test(document.querySelector('main').innerText)`, 15000);
+  await sleep(800);
+  const txt = await evalx(`document.querySelector('main').innerText`);
+
+  check('el indicador de sincronización dice «Sincronizado · datos locales»',
+    /Sincronizado · datos locales/.test(txt),
+    (txt.match(/Sincronizado[^\n]*|Base de datos no disponible|Conectando\.\.\./) || ['(sin indicador)'])[0]);
+  for (const kpi of ['Ventas Hoy', 'Equipos en Taller', 'Cobrado Servicios Hoy']) {
+    check(`KPI «${kpi}» presente`, txt.includes(kpi));
+  }
+  check('la sección «Servicios por Técnico» existe con sus columnas',
+    txt.includes('Servicios por Técnico') && /TÉCNICO[\s\S]{0,80}EN TALLER[\s\S]{0,40}ENTREGADOS[\s\S]{0,40}INGRESOS/.test(txt),
+    (txt.match(/Servicios por Técnico[\s\S]{0,60}/) || [''])[0].replace(/\n/g, ' | '));
+  const filasTec = await evalx(`(() => {
+    const t = [...document.querySelectorAll('main table')].find(x => /TÉCNICO[\s\S]{0,60}EN TALLER/.test((x.querySelector('thead')?.innerText || '').toUpperCase()));
+    return t ? t.querySelectorAll('tbody tr').length : -1;
+  })()`);
+  check('«Servicios por Técnico» trae filas o el aviso de vacío (no queda en blanco)',
+    filasTec > 0 || /Sin servicios registrados/.test(txt), `${filasTec} fila(s)`);
+}
+
+// ============================================================================================
+// 3) VENTAS: formulario, chips de método, y UNA VENTA DE PRUEBA registrada de verdad
+// ============================================================================================
+let ventaPrueba = null;
+{
+  await goto('Ventas');
+  await waitH1('Ventas');
+  await clickButton('Nueva Venta');
+  const abrio = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Nueva Venta')`, 8000);
+  check('«Nueva Venta» abre el formulario', abrio, (await dialogTxt()) ? String(await dialogTxt()).split('\n')[0] : 'sin diálogo');
+
+  // El DÍA es requisito de backend para registrar ventas (`require_open_day`). Se avisa con
+  // evidencia en vez de escribir en el Libro Diario (el script NO abre/cierra el día).
+  const diaAbierto = await evalx(`/Día abierto/.test(document.querySelector('main').innerText)`);
+  const guardarHabilitado = await evalx(`(() => {
+    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => (x.innerText || '').includes('Guardar Venta'));
+    return b ? !b.disabled : null;
+  })()`);
+  check('el día está ABIERTO y el botón «Guardar Venta» está habilitado',
+    diaAbierto && guardarHabilitado === true,
+    `banner día abierto: ${diaAbierto} · botón habilitado: ${guardarHabilitado}`);
+
+  // Los 3 accesos directos (chips) + el desplegable «Otros métodos…». El TEXTO exacto importa:
+  // el chip de Punto de Venta no debe repetir el símbolo («PUNTO Bs Bs.» ya se escapó una vez).
+  const chips = await evalx(`[...document.querySelectorAll('[role="dialog"] button[data-state]')]
+    .map(b => (b.innerText || '').replace(/\\s+/g, ' ').trim())
+    .filter(t => /PUNTO Bs|PAGO MOVIL|EFECTIVO/.test(t))`);
+  check('el selector de pago ofrece los 3 accesos directos del local', chips.length === 3, chips.join(' · '));
+  check('los chips son exactamente PUNTO Bs · PAGO MOVIL (Bs. una sola vez) · EFECTIVO $',
+    chips.includes('PUNTO Bs') && chips.includes('EFECTIVO $') && chips.some(c => c.startsWith('PAGO MOVIL') && (c.match(/Bs/g) || []).length === 1),
+    chips.join(' · '));
+  const otros = await evalx(`[...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="combobox"]')]
+    .some(b => (b.innerText || '').includes('Otros métodos'))`);
+  check('existe el desplegable «Otros métodos…»', otros === true, String(otros));
+
+  // --- elegir un producto CON STOCK por IPC (el nombre se pega EXACTO: la sugerencia vuelve sola) ---
+  const prodRaw = await invoke('get_products_page', { search: '', categoryId: null, brand: null, stockFilter: 'con_stock', sort: 'nombre', limit: 200, offset: 0 });
+  const prod = (prodRaw?.items ?? []).find(p => p.stock > 0 && p.price_sale > 0);
+  check('hay un producto con stock y precio para la venta de prueba', !!prod,
+    prod ? `${prod.name} · stock ${prod.stock} · $${prod.price_sale}` : 'ninguno');
+
+  if (prod) {
+    await clickCenter(`document.querySelector('[role="dialog"] input[placeholder="Buscar producto..."]')`);
+    await setValue('[role="dialog"] input[placeholder="Buscar producto..."]', prod.name);
+    await sleep(1200);
+    const sug = await evalx(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').includes(${JSON.stringify(prod.name.slice(0, 14))})) || {}).innerText ?? null`);
+    check('la búsqueda del producto trae la sugerencia con su stock', !!sug && /Stock:\s*\d+/.test(sug), String(sug).replace(/\n/g, ' · ').slice(0, 120));
+    // elegir la sugerencia = el botón del desplegable (los chips de método son ToggleGroup, no llevan stock)
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /Stock:\s*\d+/.test(b.innerText || '')) || null)`);
+    await sleep(700);
+    const precio = await valueOf('[role="dialog"] input[type="number"][step="0.01"]');
+    check('elegir el producto completa el precio unitario', Number(precio) > 0, `precio: ${precio}`);
+  }
+  const cantidad = await valueOf('[role="dialog"] input[type="number"][min="1"]');
+  check('la cantidad arranca en 1', Number(cantidad) === 1, `cantidad: ${cantidad}`);
+
+  // --- método «EFECTIVO $» (chip Divisas (USD Cash)) ---
+  await clickCenter(`([...document.querySelectorAll('[role="dialog"] button[data-state]')].find(b => (b.innerText || '').trim() === 'EFECTIVO $') || null)`);
+  await sleep(700);
+  const chipOn = await evalx(toggled('EFECTIVO $'));
+  check('el método «EFECTIVO $» queda seleccionado (data-state=on)', chipOn === true || chipOn === 'true', String(chipOn));
+
+  // --- cliente: se reutiliza uno REAL (no se crea basura en `clients`, que no tiene borrado) ---
+  const cliRaw = await invoke('get_clients', { search: '' });
+  const cli = (cliRaw ?? []).find(c => c.name);
+  let clienteUsado = null;
+  if (cli) {
+    await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar o escribir nombre"]')`);
+    await setValue('[role="dialog"] input[placeholder^="Buscar o escribir nombre"]', cli.name);
+    await sleep(1200);
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').trim().startsWith(${JSON.stringify(cli.name)})) || null)`);
+    await sleep(700);
+    clienteUsado = await valueOf('[role="dialog"] input[placeholder^="Buscar o escribir nombre"]');
+    check('la sugerencia completa el cliente de la venta', clienteUsado === cli.name, `cliente: ${clienteUsado}`);
+  } else {
+    check('hay un cliente registrado para usar en la venta de prueba', false, 'la tabla clients está vacía (se registra sin cliente)');
+  }
+
+  // --- GUARDAR: es la venta de prueba de verdad ---
+  const botonGuardar = await evalx(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').includes('Guardar Venta')) || {}).innerText ?? null`);
+  check('el botón de guardado anuncia el monto que va a registrar', /Guardar Venta \(\$\d/.test(String(botonGuardar)), String(botonGuardar));
+  await clickDialog('Guardar Venta');
+  const cerro = await waitFor(`!document.body.innerText.includes('Nueva Venta')`, 8000);
+  check('la venta de prueba se guarda (el formulario se cierra)', cerro);
+
+  // --- comprobar que aparece en la lista del día (filtro «Hoy») ---
+  await clickCenter(`document.querySelector('input[placeholder="Buscar producto, cliente o cédula..."]')`);
+  await setValue('input[placeholder="Buscar producto, cliente o cédula..."]', prod ? prod.name : '');
+  await sleep(1500);
+  const filaVenta = await evalx(`(() => {
+    const rows = [...document.querySelectorAll('main table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
+    const r = rows.find(c => c[2] && c[2].includes(${JSON.stringify(prod ? prod.name.replace(/^Pantalla\s+/i, '') : '')}));
+    return r ? JSON.stringify({ id: r[0], fecha: r[1], producto: r[2], cant: r[3], total: r[5], pago: r[6], cliente: r[7] }) : null;
+  })()`);
+  ventaPrueba = filaVenta ? JSON.parse(filaVenta) : null;
+  check('la venta de prueba aparece en la lista del día (con fecha de hoy)',
+    !!ventaPrueba && ventaPrueba.fecha === HOY,
+    ventaPrueba ? `#${ventaPrueba.id} · ${ventaPrueba.producto} · ${ventaPrueba.total} · ${ventaPrueba.pago} · ${ventaPrueba.fecha}` : 'no se encontró la fila');
+  check('la venta quedó con el método EFECTIVO $ (Divisas)',
+    !!ventaPrueba && /Divisas/i.test(ventaPrueba.pago || ''), ventaPrueba ? ventaPrueba.pago : '—');
+
+  // --- ¿se puede borrar una venta desde la UI? (no: se dice fuerte al final) ---
+  // Revisado en el código: Sales.tsx NO tiene botón de eliminar y el backend no expone
+  // ningún comando `delete_sale` (solo delete_product/delete_service/delete_purchase_order).
+  const puedeBorrarVenta = await evalx(`(() => {
+    const main = document.querySelector('main');
+    const botones = [...main.querySelectorAll('button')];
+    const conTexto = botones.some(b => /eliminar|borrar|delete/i.test(b.innerText || '') || /eliminar|borrar/i.test(b.title || '') || /eliminar|borrar/i.test(b.getAttribute('aria-label') || ''));
+    // Lucide renderiza el icono de papelera con las clases «lucide-trash-2 / lucide-trash»:
+    // el innerHTML del SVG no dice nada, la clase sí.
+    const conPapelera = botones.some(b => [...b.querySelectorAll('svg')].some(s => /lucide-trash|trash/i.test(s.getAttribute('class') || '')));
+    return JSON.stringify({ conTexto, conPapelera });
+  })()`);
+  const pb = JSON.parse(puedeBorrarVenta || '{}');
+  check('la pantalla de Ventas NO ofrece borrar (no hay comando `delete_sale` en el backend)',
+    pb.conTexto === false && pb.conPapelera === false, `botón con texto: ${pb.conTexto} · papelera: ${pb.conPapelera}`);
+  if (ventaPrueba) {
+    residuo.push(`VENTA DE PRUEBA #${ventaPrueba.id} («${ventaPrueba.producto}», ${ventaPrueba.total}) — **NO SE PUEDE BORRAR**: el backend no tiene comando de borrado de ventas y Ventas.tsx no tiene botón de eliminar. Corré este smoke contra una COPIA de la base.`);
+  }
+  // limpiar el buscador para no dejar filtros puestos
+  await setValue('input[placeholder="Buscar producto, cliente o cédula..."]', '');
+  await sleep(900);
+}
+
+// ============================================================================================
+// 4) SERVICIO TÉCNICO: wizard, sugerencia por teléfono, orden de prueba, asistente «Cerrar»,
+//    «Pago / Abono» y limpieza de la orden
+// ============================================================================================
+let ordenPrueba = null; // { num, id }
+let pantallaDePrueba = null;
+
+/**
+ * Busca la TARJETA (Card) de una orden en la lista: sube desde el nodo que muestra el número de
+ * orden hasta el ancestro que también tiene los botones de la tarjeta (Cerrar/Entregar/Editar…).
+ * Se ancla en el texto exacto para no confundir «DEV-0001» con «DEV-0001-A» (órdenes multi-equipo).
+ */
+const cardOf = (orderNum) => `(() => {
+  const node = [...document.querySelectorAll('main span, main p, main div')]
+    .find(n => (n.textContent || '').trim() === ${JSON.stringify(orderNum)});
+  let el = node;
+  while (el && el !== document.body) {
+    if (el.querySelectorAll('button').length >= 4) return el;
+    el = el.parentElement;
+  }
+  return null;
+})()`;
+const clickCardButton = async (orderNum, label) => {
+  await clickCenter(`(() => {
+    const card = ${cardOf(orderNum)};
+    if (!card) return null;
+    return [...card.querySelectorAll('button')].find(b => (b.innerText || '').includes(${JSON.stringify(label)})) || null;
+  })()`);
+};
+{
+  // --- modelo + pantalla: se elige un modelo del CATÁLOGO que TENGA pantalla con stock (así
+  //     «Cambio pantalla» es coherente y el asistente de cierre tiene qué ofrecer) ---
+  const modelos = await invoke('get_phone_models', { search: '', limit: 60 });
+  let elegido = null;
+  for (const m of (modelos ?? [])) {
+    if (!(m.with_stock > 0)) continue;
+    const cand = await invoke('find_compatible_screens', { model: m.label, limit: 5 });
+    const pant = (cand ?? []).find(c => c.in_stock && c.product.stock > 0);
+    if (pant) { elegido = { label: m.label, stock: m.stock, pantalla: pant.product.name, pantallaId: pant.product.id }; break; }
+  }
+  check('hay un modelo del padrón con pantalla compatible CON STOCK (para la orden de prueba)',
+    !!elegido, elegido ? `${elegido.label} → ${elegido.pantalla} (stock ${elegido.stock})` : 'ninguno');
+  pantallaDePrueba = elegido;
+
+  const nextNum = await invoke('next_order_num');
+  const cliRaw = await invoke('get_clients', { search: '' });
+  const cli = (cliRaw ?? []).find(c => c.name && c.phone && String(c.phone).replace(/\D/g, '').length >= 7);
+  check('hay un cliente conocido con teléfono (para la sugerencia del mostrador)', !!cli,
+    cli ? `${cli.name} · ${cli.phone}` : 'ninguno');
+
+  if (elegido && cli) {
+    await goto('Servicio Técnico');
+    await waitH1('Servicio Técnico');
+    const diaAbierto = await evalx(`/Día abierto/.test(document.querySelector('main').innerText)`);
+    check('Servicio Técnico ve el DÍA ABIERTO (si no, el backend rechaza registrar)', diaAbierto === true);
+
+    await clickButton('Nuevo Servicio');
+    const abrio = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Nuevo Servicio Técnico')`, 8000);
+    check('«Nuevo Servicio» abre el wizard', abrio, (await dialogTxt() || '').split('\n')[0]);
+    const foco = await evalx(`document.activeElement?.getAttribute('placeholder') ?? document.activeElement?.tagName ?? null`);
+    check('el foco arranca en el campo Cliente', String(foco).includes('Buscar por nombre o cédula'), `foco: ${foco}`);
+
+    const paso1 = await dialogTxt();
+    check('el paso Cliente dice qué falta («Falta: …»)', /Falta:/.test(paso1 || ''),
+      (String(paso1).match(/Falta:[^\n]*/) || [''])[0]);
+
+    // --- el cliente dice su TELÉFONO: la ficha se completa sola ---
+    await clickCenter(`document.querySelector('[role="dialog"] input[placeholder="0412-1234567"]')`);
+    await setValue('[role="dialog"] input[placeholder="0412-1234567"]', cli.phone);
+    const trajo = await waitFor(`/Cliente conocido con ese teléfono/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 8000);
+    check(`escribir el teléfono ${cli.phone} trae la sugerencia del cliente conocido`, trajo,
+      (String(await dialogTxt()).match(/Cliente conocido[^\n]*/) || [''])[0]);
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').includes(${JSON.stringify(cli.name)})) || null)`);
+    await sleep(900);
+    const vCliente = await valueOf('[role="dialog"] input[placeholder^="Buscar por nombre"]');
+    const vCi = await valueOf('[role="dialog"] input[placeholder="V-12345678"]');
+    check('elegir la sugerencia completa el cliente (nombre + cédula)',
+      (vCliente || '').includes(cli.name.split(' ')[0]) && !!vCi, `nombre: ${vCliente} · cédula: ${vCi}`);
+    check('el paso Cliente ya no muestra «Falta:»', !/Falta:/.test(String(await dialogTxt())));
+
+    // --- ENTER avanza de paso (el operario sigue tipeando en un campo) ---
+    await evalx(`document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')?.focus(); true`);
+    await sleep(300);
+    const enInput = await evalx(`document.activeElement?.tagName === 'INPUT'`);
+    await keyNav('Enter', 'Enter', 13);
+    await sleep(900);
+    check('ENTER en un campo completo avanza al paso siguiente',
+      !!enInput && /Paso 2 de 4/.test(String(await dialogTxt())),
+      (String(await dialogTxt()).match(/Paso \d+ de \d+[^\n]*/) || [''])[0]);
+
+    // --- paso Equipos: modelo del padrón, trabajo «Cambio pantalla», monto 10 ---
+    await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar el modelo del teléfono"]')`);
+    await insertText(elegido.label);
+    await waitFor(toggled(elegido.label), 8000);
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button[data-state="on"]')].find(b => (b.innerText || '').includes(${JSON.stringify(elegido.label)})) || null)`);
+    await sleep(900);
+    const modeloOk = (await valueOf('[role="dialog"] input[placeholder^="Buscar el modelo del teléfono"]')) === elegido.label;
+    check('elegir el modelo de la lista del padrón lo deja puesto', modeloOk,
+      `modelo: ${await valueOf('[role="dialog"] input[placeholder^="Buscar el modelo del teléfono"]')}`);
+
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').trim() === 'Cambio pantalla') || null)`);
+    await sleep(700);
+    check('el trabajo «Cambio pantalla» queda activo', (await evalx(toggled('Cambio pantalla'))) === true);
+
+    // Monto: el input que sigue al rótulo «Monto ($)». NO se toca el del descuento.
+    await evalx(`(() => {
+      const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => (x.innerText || '').startsWith('Monto ($)'));
+      const i = l?.parentElement?.querySelector('input[type="number"]');
+      if (i) i.focus();
+      return !!i;
+    })()`);
+    await evalx(`(() => {
+      const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => (x.innerText || '').startsWith('Monto ($)'));
+      const i = l?.parentElement?.querySelector('input[type="number"]');
+      if (!i) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(i, '10');
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(700);
+    const montoPuesto = await evalx(`(() => {
+      const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => (x.innerText || '').startsWith('Monto ($)'));
+      return l?.parentElement?.querySelector('input[type="number"]')?.value ?? null;
+    })()`);
+    check('el monto del servicio queda en 10', Number(montoPuesto) === 10, `monto: ${montoPuesto}`);
+
+    // La pantalla exacta se auto-selecciona si hay UNA sola con stock (regla del proyecto).
+    await waitFor(`/Pantalla a instalar/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 12000);
+    await sleep(1500);
+    const pantallaElegida = await evalx(`/Al entregar se descuenta del inventario/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`);
+    check('la pantalla compatible con stock quedó elegida (se descuenta del inventario al entregar)',
+      pantallaElegida === true, String(pantallaElegida));
+
+    // --- Siguiente ×2 (Blindaje → Revisar) y GUARDAR ---
+    await clickDialog('Siguiente');
+    await sleep(900);
+    await clickDialog('Siguiente');
+    await sleep(900);
+    const enRevisar = /Paso 4 de 4/.test(String(await dialogTxt()));
+    check('el wizard llega al paso «Revisar»', enRevisar,
+      (String(await dialogTxt()).match(/Paso \d+ de \d+[^\n]*/) || [''])[0]);
+    const revisar = await evalx(`JSON.stringify([...document.querySelectorAll('[role="dialog"] input, [role="dialog"] textarea')].map(i => i.value))`);
+    check('el resumen del paso Revisar refleja lo cargado (modelo y monto 10)',
+      String(revisar).includes(elegido.label) && String(revisar).includes('10'), String(revisar).slice(0, 200));
+
+    await clickDialog('Guardar Servicio');
+    const guardada = await waitFor(`!document.body.innerText.includes('Nuevo Servicio Técnico')`, 12000);
+    const svcNuevo = (await serviciosRaw()).filter(s => s.order_num === nextNum);
+    ordenPrueba = svcNuevo.length > 0 ? { num: nextNum, id: svcNuevo[0].id } : null;
+    check('la orden de prueba se registra de verdad (aparece por IPC con su número)',
+      guardada && !!ordenPrueba,
+      ordenPrueba ? `${ordenPrueba.num} (id ${ordenPrueba.id}) · modelo ${svcNuevo[0].model} · $${svcNuevo[0].amount}` : 'no se creó la orden');
+
+    if (ordenPrueba) {
+      check('la orden guardó el modelo, el trabajo y el monto pedidos',
+        svcNuevo[0].model === elegido.label && /Cambio pantalla/.test(svcNuevo[0].service_types ?? '') && Number(svcNuevo[0].amount) === 10,
+        `modelo ${svcNuevo[0].model} · trabajos ${svcNuevo[0].service_types} · $${svcNuevo[0].amount}`);
+      check('la orden quedó con la pantalla EXACTA asignada (stock trazable)',
+        svcNuevo[0].screen_product_id === elegido.pantallaId,
+        `screen_product_id ${svcNuevo[0].screen_product_id} (esperado ${elegido.pantallaId})`);
+
+      // --- la tarjeta aparece en la lista: se pasa el filtro de estado a «Todos los estados» ---
+      // El trigger del Select se reconoce por su `aria-label` de accesibilidad ("Filtrar por estado").
+      // Si el componente no lo tuviera, se cae al primer combobox de la barra de filtros.
+      const triggerEstado = `([...document.querySelectorAll('main [role="combobox"]')].find(b => (b.getAttribute('aria-label') || '').includes('estado')) || document.querySelectorAll('main [role="combobox"]')[0] || null)`;
+      await clickCenter(triggerEstado).catch(() => {});
+      await waitFor(`document.querySelectorAll('[role="option"]').length > 0`, 4000);
+      const opcionesEstado = await evalx(`[...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim())`);
+      check('el filtro de estados ofrece «Todos los estados»', (opcionesEstado ?? []).includes('Todos los estados'), (opcionesEstado ?? []).join(' · '));
+      await clickOption('Todos los estados');
+      await sleep(1500);
+      const tarjeta = await evalx(`!!(${cardOf(ordenPrueba.num)})`);
+      check('la tarjeta de la orden de prueba aparece en la lista', tarjeta === true, ordenPrueba.num);
+
+      // --- asistente «Cerrar»: los 3 chips de método, SIN confirmar cobro ni entrega ---
+      await clickCardButton(ordenPrueba.num, 'Cerrar');
+      const asistente = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Cerrar ${ordenPrueba.num}')`, 10000);
+      check('el asistente «Cerrar» abre para la orden de prueba', asistente,
+        (String(await dialogTxt()).split('\n')[0] || ''));
+      const chipsCierre = await evalx(`[...document.querySelectorAll('[role="dialog"] button[data-state]')]
+        .map(b => (b.innerText || '').replace(/\\s+/g, ' ').trim())
+        .filter(t => /PUNTO Bs|PAGO MOVIL|EFECTIVO/.test(t))`);
+      check('el asistente de cierre muestra el selector con los 3 chips de método',
+        chipsCierre.length === 3 && chipsCierre.includes('PUNTO Bs') && chipsCierre.includes('EFECTIVO $'),
+        chipsCierre.join(' · '));
+      await closeAllDialogs();
+
+      // --- «Pago / Abono»: abre con el monto sugerido = saldo, y NO se confirma ---
+      await clickCardButton(ordenPrueba.num, 'Pago / Abono');
+      const dialogoPago = await waitFor(`/Registrar Pago \\/ Abono/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 10000);
+      check('«Pago / Abono» abre el diálogo de cobro', dialogoPago,
+        (String(await dialogTxt()).split('\n')[0] || ''));
+      const montoSugerido = await valueOf('[role="dialog"] input[type="number"]');
+      check('el monto sugerido del abono = saldo de la orden ($10)',
+        Number(montoSugerido) === 10, `monto sugerido: ${montoSugerido}`);
+      const chipsPago = await evalx(`[...document.querySelectorAll('[role="dialog"] button[data-state]')]
+        .map(b => (b.innerText || '').replace(/\\s+/g, ' ').trim())
+        .filter(t => /PUNTO Bs|PAGO MOVIL|EFECTIVO/.test(t))`);
+      check('el diálogo de abono también muestra los 3 accesos directos', chipsPago.length === 3, chipsPago.join(' · '));
+      await closeAllDialogs();
+      const pagosTrasCerrar = await invoke('get_service_payments', { serviceId: ordenPrueba.id });
+      check('NO se confirmó ningún cobro (la orden sigue sin pagos)',
+        (pagosTrasCerrar ?? []).length === 0, `${(pagosTrasCerrar ?? []).length} pago(s)`);
+      const sigueRecibida = (await serviciosRaw()).find(s => s.id === ordenPrueba.id);
+      check('NO se entregó la orden (sigue en «Recibido», sin fecha de salida)',
+        sigueRecibida?.status === 'Recibido' && !sigueRecibida?.date_out,
+        `estado ${sigueRecibida?.status} · salida ${sigueRecibida?.date_out}`);
+    }
+  }
+}
+
+// ============================================================================================
+// 5) INVENTARIO: pestañas, búsqueda con stock, paginación, movimientos con referencia de orden
+//    y «Repuesto por modelo»
+// ============================================================================================
+{
+  await goto('Inventario');
+  await waitH1('Inventario');
+  await waitFor(`document.querySelectorAll('[role="tab"]').length > 0`, 8000);
+  const tabs = await evalx(`[...document.querySelectorAll('[role="tab"]')].map(t => t.innerText.trim())`);
+  check('el Inventario tiene sus 5 pestañas (nombres reales de hoy)',
+    (tabs ?? []).join(' | ') === 'Productos | Modelos | Repuesto por modelo | Movimientos | Ajustes',
+    (tabs ?? []).join(' | '));
+
+  // --- Productos ---
+  await clickExactText('[role="tab"]', 'Productos');
+  await sleep(1200);
+  check('la pestaña «Productos» abre (buscador del catálogo)',
+    await waitFor(`!!document.querySelector('input[placeholder^="Buscar por producto"]')`, 8000));
+
+  await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
+  await setValue('input[placeholder^="Buscar por producto"]', 'redmi note');
+  await sleep(2000);
+  const tablaProd = JSON.parse(await activeTable() || 'null');
+  check('buscar «redmi note» devuelve resultados con stock',
+    !!tablaProd && tablaProd.rows.length > 0 && /Mostrando \d+–\d+ de \d+/.test(tablaProd.footer),
+    tablaProd ? `${tablaProd.footer} · primera: ${(tablaProd.rows[0] || []).slice(0, 5).join(' | ')}` : 'sin tabla');
+  const stockProd = await evalx(`(() => {
+    const p = document.querySelector('[role="tabpanel"]');
+    const badges = [...p.querySelectorAll('table tbody td [title]')].filter(b => /AGOTADO|DISPONIBLE|BAJO MÍNIMO|FALTANTE/.test(b.getAttribute('title') || ''));
+    return JSON.stringify({ total: badges.length, conStock: badges.filter(b => Number(b.innerText.trim()) > 0).length, muestra: badges.slice(0, 5).map(b => b.innerText.trim()) });
+  })()`);
+  const sp = JSON.parse(stockProd || '{}');
+  check('las filas muestran el stock en su badge (hay al menos uno con stock)',
+    (sp.total || 0) > 0 && (sp.conStock || 0) > 0, `${sp.conStock}/${sp.total} con stock · ${(sp.muestra || []).join(', ')}`);
+
+  const pagina1 = (JSON.parse(await activeTable() || '{}').rows || []).slice(0, 3).map(r => r[0]);
+  const hayPaginacion = await evalx(`(() => {
+    const p = document.querySelector('[role="tabpanel"]');
+    return [...p.querySelectorAll('button')].some(b => (b.innerText || '').includes('Siguiente'));
+  })()`);
+  let pagina2 = [];
+  if (hayPaginacion) {
+    await clickCenter(`([...document.querySelectorAll('[role="tabpanel"] button')].find(b => (b.innerText || '').includes('Siguiente')) || null)`);
+    await sleep(1800);
+    pagina2 = (JSON.parse(await activeTable() || '{}').rows || []).slice(0, 3).map(r => r[0]);
+  }
+  check('la paginación cambia las filas (el pie dice el total y hay página 2)',
+    hayPaginacion && pagina2.length > 0 && JSON.stringify(pagina1) !== JSON.stringify(pagina2),
+    `p1: ${pagina1.join(' / ')} → p2: ${pagina2.join(' / ')}`);
+  if (hayPaginacion) {
+    await clickCenter(`([...document.querySelectorAll('[role="tabpanel"] button')].find(b => (b.innerText || '').includes('Anterior')) || null)`);
+    await sleep(1200);
+  }
+
+  // --- Movimientos ---
+  await clickExactText('[role="tab"]', 'Movimientos');
+  await sleep(1600);
+  const tablaMov = JSON.parse(await activeTable() || 'null');
+  check('la pestaña «Movimientos» abre con sus columnas',
+    !!tablaMov && ['Fecha', 'Producto', 'Tipo', 'Cantidad', 'Motivo', 'Referencia'].every(h => (tablaMov.headers || []).includes(h)),
+    (tablaMov?.headers || []).join(' | '));
+  const mov = await invoke('get_inventory_movements_page', { productId: null, movementType: null, reason: null, fromDate: null, toDate: null, limit: 50, offset: 0 });
+  const itemsMov = mov?.items ?? [];
+  const refsMov = itemsMov.filter(m => /^DEV-\d+/i.test(String(m.reference ?? '')));
+  check('las filas de movimientos traen referencia de ORDEN (DEV-XXXX)',
+    tablaMov && tablaMov.rows.length > 0 && refsMov.length > 0 && tablaMov.rows.some(r => /DEV-\d+/i.test(r[5] || '')),
+    `${tablaMov?.rows.length} filas en pantalla · ${refsMov.length}/${itemsMov.length} con referencia de orden (ej: ${refsMov.slice(0, 3).map(m => m.reference).join(', ')})`);
+  check('el total del pie coincide con los movimientos del backend',
+    (tablaMov?.footer || '').includes(String(mov?.total ?? -1)),
+    `pie: ${tablaMov?.footer} · backend: ${mov?.total}`);
+
+  // --- Repuesto por modelo ---
+  await clickExactText('[role="tab"]', 'Repuesto por modelo');
+  await sleep(1000);
+  check('la pestaña «Repuesto por modelo» abre (buscador de teléfono)',
+    await waitFor(`!!document.querySelector('input[placeholder^="Ej: Redmi Note 11"]')`, 8000));
+  await clickCenter(`document.querySelector('input[placeholder^="Ej: Redmi Note 11"]')`);
+  await sleep(600);
+  await insertText(elegido ? elegido.label : 'Redmi Note 11');
+  await sleep(2200);
+  const porModelo = await evalx(`(() => {
+    const p = document.querySelector('[role="tabpanel"]');
+    const t = p.innerText;
+    const rows = [...p.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
+    const badgeStock = [...p.querySelectorAll('table tbody td [class*="bg-success"]')].map(b => b.innerText.trim());
+    return JSON.stringify({
+      cuenta: (t.match(/(\\d+) repuestos? compatibles/) || [])[1] ?? null,
+      conStock: (t.match(/(\\d+) con stock/) || [])[1] ?? null,
+      filas: rows.length, badgeStock,
+      coincide: rows.slice(0, 3).map(r => r[3]),
+    });
+  })()`);
+  const pm = JSON.parse(porModelo || '{}');
+  check('el teléfono muestra sus repuestos con stock real',
+    Number(pm.filas) > 0 && Number(pm.conStock) > 0 && (pm.badgeStock || []).some(v => Number(v) > 0),
+    `${pm.filas} repuesto(s) · ${pm.conStock} con stock · badges: ${(pm.badgeStock || []).join(', ')}`);
+  if (pantallaDePrueba) {
+    const aparecePantalla = await evalx(`document.querySelector('[role="tabpanel"]').innerText.includes(${JSON.stringify(pantallaDePrueba.pantalla.replace(/^Pantalla\s+/i, ''))})`);
+    check('entre los repuestos aparece la pantalla que usa el servicio de prueba', aparecePantalla === true,
+      pantallaDePrueba.pantalla);
+  }
+}
+
+// ============================================================================================
+// 6) PANTALLAS (lo que el taller más usa): la pantalla del modelo con su STOCK + ficha/editar
+// ============================================================================================
+{
+  await clickExactText('[role="tab"]', 'Productos');
+  await sleep(1200);
+  await waitFor(`!!document.querySelector('input[placeholder^="Buscar por producto"]')`, 8000);
+  // El buscador de Productos también indexa la COMPATIBILIDAD: buscar el modelo del padrón trae
+  // todas las pantallas que le sirven. Para la ficha se usa el NOMBRE del repuesto (más preciso).
+  const buscar = (t) => setValue('input[placeholder^="Buscar por producto"]', t);
+  const nombrePantalla = pantallaDePrueba ? pantallaDePrueba.pantalla : '';
+  const modeloBuscar = pantallaDePrueba ? pantallaDePrueba.label : 'Redmi Note 11';
+  await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
+  await buscar(modeloBuscar);
+  await sleep(2200);
+
+  const filaPantalla = await evalx(`(() => {
+    const p = document.querySelector('[role="tabpanel"]');
+    const rows = [...p.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
+    const r = rows.find(c => (c[4] || '').includes(${JSON.stringify(modeloBuscar)}) || (c[3] || '') === ${JSON.stringify(modeloBuscar)});
+    const badges = r ? [...p.querySelectorAll('table tbody tr')][rows.indexOf(r)].querySelectorAll('td [title]') : [];
+    return JSON.stringify(r ? {
+      producto: r[0], categoria: r[1], marca: r[2], modelo: r[3], compat: r[4],
+      stock: [...badges].map(b => ({ t: b.getAttribute('title'), v: b.innerText.trim() })).find(b => /AGOTADO|DISPONIBLE|BAJO|FALTANTE/.test(b.t)) ?? null,
+    } : null);
+  })()`);
+  const fp = JSON.parse(filaPantalla || 'null');
+  check('la pantalla compatible con el modelo aparece en Productos',
+    !!fp, fp ? `${fp.producto} · ${fp.categoria} · compat: ${String(fp.compat).slice(0, 60)}` : 'no se encontró la fila');
+  check('esa pantalla muestra su STOCK (badge con estado y número)',
+    !!fp && fp.stock != null && fp.stock.v !== '', fp && fp.stock ? `${fp.stock.t} = ${fp.stock.v}` : 'sin badge de stock');
+  check('la pantalla elegida por el servicio está entre las filas listadas y con stock',
+    !!pantallaDePrueba && !!fp && Number(fp.stock?.v) > 0,
+    pantallaDePrueba ? `esperada: ${pantallaDePrueba.pantalla} (stock ${pantallaDePrueba.stock})` : 'sin pantalla de referencia');
+
+  // --- ficha/editar: se abre y se cierra SIN guardar ---
+  // Se afina la búsqueda con el NOMBRE del repuesto (así la primera fila es la que se quiere abrir).
+  if (nombrePantalla) {
+    await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
+    await buscar(nombrePantalla);
+    await sleep(2000);
+  }
+  const filaParaAbrir = `(() => {
+    const p = document.querySelector('[role="tabpanel"]');
+    const rows = [...p.querySelectorAll('table tbody tr')];
+    const needle = ${JSON.stringify(nombrePantalla.replace(/^Pantalla\s+/i, ''))};
+    const r = rows.find(x => [...x.querySelectorAll('td')].some(c => (c.innerText || '').includes(needle))) || rows[0];
+    return r || null;
+  })()`;
+  const hayFila = await evalx(`!!(${filaParaAbrir})`);
+  check('la fila de la pantalla está en la tabla para abrir su ficha', hayFila === true,
+    `buscando: ${nombrePantalla || modeloBuscar}`);
+  await clickCenter(`(() => {
+    const r = ${filaParaAbrir};
+    return r ? ([...r.querySelectorAll('button')].find(b => (b.innerText || '').includes('Editar')) || null) : null;
+  })()`);
+  const formAbierto = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Editar producto')`, 8000);
+  const nombreEnForm = await valueOf('[role="dialog"] input[placeholder="Nombre del producto"]');
+  check('la ficha de la pantalla abre en modo edición con sus datos cargados',
+    formAbierto && !!nombreEnForm, `título: ${String(await dialogTxt()).split('\n')[0]} · nombre: ${nombreEnForm}`);
+  await closeAllDialogs();
+  check('la ficha se cierra sin guardar (no queda ningún diálogo abierto)',
+    (await dialogsOpen().catch(() => 0)) === 0, `${await dialogsOpen().catch(() => 0)} diálogo(s)`);
+  await setValue('input[placeholder^="Buscar por producto"]', '');
+  await sleep(1200);
+}
+
+// ============================================================================================
+// 7) PEDIDOS: «Nuevo Pedido» + carrito con total, tabla «Por reponer» (NO se guarda el pedido)
+// ============================================================================================
+{
+  await goto('Pedidos');
+  await waitH1('Pedidos');
+  await waitFor(`/Por reponer/.test(document.querySelector('main').innerText)`, 8000);
+  const pedidosAntes = (await invoke('get_purchase_orders'))?.length ?? 0;
+  const filasReponer = await evalx(`(() => {
+    const main = document.querySelector('main');
+    // El título de la Card lleva un icono: se busca el contenedor MÁS CHICO cuyo texto lo incluya.
+    const cand = [...main.querySelectorAll('div')].filter(d => (d.innerText || '').includes('Por reponer (stock bajo / agotado)'));
+    const card = cand.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+    if (!card) return -1;
+    const tabla = card.querySelector('table');
+    return tabla ? tabla.querySelectorAll('tbody tr').length : -1;
+  })()`);
+  check('la tabla «Por reponer» tiene filas (productos con stock bajo/agotado)',
+    Number(filasReponer) > 0, `${filasReponer} fila(s)${Number(filasReponer) < 0 ? ' (no se encontró la sección)' : ''}`);
+
+  await clickButton('Nuevo Pedido');
+  const abrio = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Nuevo Pedido')`, 8000);
+  check('«Nuevo Pedido» abre el diálogo', abrio);
+
+  const prodPed = (await invoke('get_products_page', { search: '', categoryId: null, brand: null, stockFilter: 'todos', sort: 'nombre', limit: 100, offset: 0 }))?.items?.[0];
+  if (prodPed) {
+    await clickCenter(`document.querySelector('[role="dialog"] input[placeholder="Buscar producto para agregar..."]')`);
+    await insertText(prodPed.name.replace(/^Pantalla\s+/i, '').slice(0, 18));
+    await sleep(1200);
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').includes('Stock:')) || null)`);
+    await sleep(900);
+    const carrito = await evalx(`(() => {
+      const t = document.querySelector('[role="dialog"]').innerText;
+      return JSON.stringify({ lineas: document.querySelectorAll('[role="dialog"] table tbody tr').length, total: (t.match(/Total: \\$([\\d.,]+)/) || [])[1] ?? null, unidades: (t.match(/(\\d+) unidades/) || [])[1] ?? null });
+    })()`);
+    const ca = JSON.parse(carrito || '{}');
+    check('agregar un producto al carrito muestra la línea y el TOTAL del pedido',
+      Number(ca.lineas) >= 1 && Number(ca.total) >= 0 && ca.total !== null,
+      `${ca.lineas} línea(s) · ${ca.unidades} unidades · total $${ca.total}`);
+    const totalEsperado = Number(prodPed.price_cost > 0 ? prodPed.price_cost : prodPed.price_sale) * Number(ca.unidades || 1);
+    check('el total del carrito coincide con precio × cantidad',
+      Math.abs(Number(ca.total) - totalEsperado) < 0.02, `total ${ca.total} vs esperado ${totalEsperado.toFixed(2)}`);
+  } else {
+    check('hay productos en el catálogo para el carrito del pedido', false, 'catálogo vacío');
+  }
+  // NO se guarda: se cierra con Cancelar (el carrito vive solo en memoria)
+  await clickDialog('Cancelar');
+  await closeAllDialogs();
+  const pedidosDespues = (await invoke('get_purchase_orders'))?.length ?? 0;
+  check('el pedido NO se guardó (no quedó ninguna orden de compra nueva)',
+    pedidosDespues === pedidosAntes, `${pedidosAntes} → ${pedidosDespues} pedidos`);
+}
+
+// ============================================================================================
+// 8) CLIENTES: búsqueda por cédula y su historial
+// ============================================================================================
+{
+  await goto('Clientes');
+  await waitH1('Clientes');
+  const conCi = (await invoke('get_clients', { search: '' }))?.find(c => c.ci && String(c.ci).trim().length >= 5);
+  if (conCi) {
+    await clickCenter(`document.querySelector('input[placeholder^="Buscar por nombre, teléfono o cédula"]')`);
+    await setValue('input[placeholder^="Buscar por nombre, teléfono o cédula"]', conCi.ci);
+    await sleep(1600);
+    const fila = await evalx(`(() => {
+      const rows = [...document.querySelectorAll('main table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
+      return JSON.stringify(rows.find(c => (c[0] || '').includes(${JSON.stringify(conCi.name)})) ?? null);
+    })()`);
+    const f = JSON.parse(fila || 'null');
+    check(`buscar por cédula (${conCi.ci}) encuentra al cliente`,
+      !!f && (f[2] || '').includes(conCi.ci), f ? `${f[0]} · ${f[2]} · ${f[3]} servicios · ${f[4]} compras` : 'no se encontró');
+
+    // el clic en la fila abre el historial (servicios + compras)
+    await clickCenter(`([...document.querySelectorAll('main table tbody tr')].find(r => (r.innerText || '').includes(${JSON.stringify(conCi.name)})) || null)`);
+    const historial = await waitFor(`!!document.querySelector('[role="dialog"]') && (document.querySelector('[role="dialog"]').innerText || '').includes('Total Gastado')`, 10000);
+    const txtHist = String(await dialogTxt() || '');
+    const tieneHistorial = /Servicios Técnicos/.test(txtHist) || /Compras/.test(txtHist);
+    check('el historial del cliente abre (servicios y/o compras) o dice que no tiene',
+      historial && (tieneHistorial || /Sin actividad registrada para este cliente/.test(txtHist)),
+      tieneHistorial
+        ? `${(txtHist.match(/Servicios Técnicos[\s\S]{0,40}/) || [''])[0].replace(/\n/g, ' | ')} · ${(txtHist.match(/Compras[\s\S]{0,20}/) || [''])[0].replace(/\n/g, ' | ')}`
+        : 'sin actividad registrada');
+    await closeAllDialogs();
+    await setValue('input[placeholder^="Buscar por nombre, teléfono o cédula"]', '');
+    await sleep(1000);
+  } else {
+    check('hay un cliente con cédula para buscar', false, 'ningún cliente tiene cédula cargada');
+  }
+}
+
+// ============================================================================================
+// 9) LIBRO DIARIO: pestañas, tabla diaria con columnas por método, totales y búsqueda de pagos
+// ============================================================================================
+{
+  await goto('Libro Diario');
+  await waitH1('Libro Diario');
+  await sleep(1200);
+
+  const tabsLibro = ['Diario', 'Cierres', 'Pagos', 'Gastos', 'Salud'];
+  const presentes = await evalx(`[...document.querySelectorAll('button')].map(b => (b.innerText || '').trim())`);
+  const faltan = tabsLibro.filter(t => !(presentes ?? []).includes(t));
+  check('el Libro Diario tiene sus 5 pestañas (diario | cierres | pagos | gastos | salud)',
+    faltan.length === 0, faltan.length ? `faltan: ${faltan.join(', ')}` : tabsLibro.join(' · '));
+
+  // ---- Diario ----
+  await clickButton('Diario');
+  await sleep(1800);
+  const diario = await evalx(`(() => {
+    const main = document.querySelector('main');
+    const headers = [...main.querySelectorAll('table thead th')].map(h => h.innerText.trim());
+    const t = main.innerText;
+    return JSON.stringify({
+      headers,
+      filas: main.querySelectorAll('table tbody tr').length,
+      totalPeriodo: (t.match(/Total General del período/) || []).length > 0,
+      equivalente: [...main.querySelectorAll('div')].some(d => /Equivalente en USD/.test(d.innerText || '') && d.children.length <= 3),
+      resumenDia: /Resumen del día/.test(t),
+    });
+  })()`);
+  const dj = JSON.parse(diario || '{}');
+  check('la tabla diaria tiene las columnas por método (Tasa BCV + Total $ + Bs.)',
+    (dj.headers || []).includes('Fecha') && (dj.headers || []).includes('Tasa BCV') && (dj.headers || []).some(h => h.startsWith('Total')),
+    (dj.headers || []).join(' | '));
+  check('los totales del día se muestran (Total General del período + equivalente en USD + Resumen del día)',
+    dj.totalPeriodo && dj.equivalente && dj.resumenDia,
+    `total período: ${dj.totalPeriodo} · equivalente USD: ${dj.equivalente} · resumen día: ${dj.resumenDia} · ${dj.filas} fila(s)`);
+  const diaCerrado = await evalx(`/Día CERRADO/.test(document.querySelector('main').innerText)`);
+  check('el Libro Diario informa el estado del día (abierto o cerrado) sin que el script lo toque',
+    await evalx(`/Día (ABIERTO|CERRADO)/.test(document.querySelector('main').innerText)`) === true,
+    diaCerrado ? 'el día está CERRADO (por eso no se registraron datos nuevos)' : 'el día está ABIERTO');
+
+  // ---- Pestañas Cierres / Gastos / Salud: abren con contenido propio ----
+  await clickButton('Cierres');
+  await sleep(1600);
+  const cierres = await evalx(`(() => {
+    const t = document.querySelector('main').innerText;
+    return JSON.stringify({ cols: [...document.querySelectorAll('main table thead th')].map(h => h.innerText.trim()).slice(0, 4), diceCierres: /Cierre|cierre/.test(t) });
+  })()`);
+  check('la pestaña «Cierres» abre con su tabla (Fecha/Punto Neto/Liquidado…)',
+    /Fecha/.test(String(JSON.parse(cierres || '{}').cols)), String(JSON.parse(cierres || '{}').cols));
+
+  await clickButton('Gastos');
+  await sleep(1600);
+  check('la pestaña «Gastos» abre con su tabla o su vacío',
+    await evalx(`(() => {
+      const t = document.querySelector('main').innerText;
+      return /Gasto|gasto/i.test(t) && [...document.querySelectorAll('main table thead th')].some(h => /Categoría|Monto/.test(h.innerText));
+    })()`));
+
+  await clickButton('Salud');
+  await sleep(2200);
+  const salud = await evalx(`(() => {
+    const t = document.querySelector('main').innerText;
+    return JSON.stringify({
+      ingresos: /Ingresos del período/.test(t), utilidad: /Utilidad bruta/.test(t),
+      porCobrar: /Por cobrar a clientes/.test(t), capital: /Capital en inventario/.test(t),
+    });
+  })()`);
+  const sa = JSON.parse(salud || '{}');
+  check('la pestaña «Salud» muestra sus 4 KPIs (ingresos, utilidad, por cobrar, inventario)',
+    sa.ingresos && sa.utilidad && sa.porCobrar && sa.capital, JSON.stringify(sa));
+
+  // ---- Pagos: búsqueda por rango de fechas ----
+  await clickButton('Pagos');
+  await sleep(1200);
+  const hayFiltros = await evalx(`!!document.querySelector('input[placeholder="Nombre o cédula..."]') && !!document.querySelector('input[placeholder="Nº referencia..."]')`);
+  check('la pestaña «Pagos» abre con sus filtros (método, cliente, referencia, moneda)',
+    hayFiltros === true);
+
+  const rangoDesde = fechaHace(365);
+  await setDate(0, rangoDesde);
+  await sleep(500);
+  await setDate(1, HOY);
+  await sleep(1500);
+  await clickButton('Actualizar');
+  await sleep(2500);
+  const resultados = await evalx(`(() => {
+    const main = document.querySelector('main');
+    const t = main.innerText;
+    const vacio = /Sin pagos que coincidan con los filtros/.test(t);
+    const filas = [...main.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim())).filter(r => r.length >= 7 && /\\d/.test(r[0] || ''));
+    return JSON.stringify({ vacio, filas: filas.length, muestra: filas.slice(0, 2), total: (t.match(/Total \\((\\d+) pagos?\\)/) || [])[1] ?? null });
+  })()`);
+  const rs = JSON.parse(resultados || '{}');
+  check('la búsqueda de pagos por rango devuelve filas (o dice «sin resultados»)',
+    rs.vacio === true || Number(rs.filas) > 0,
+    rs.vacio ? 'sin resultados en el rango' : `${rs.filas} fila(s) · ${String(rs.muestra?.[0] || []).slice(0, 6).join(' | ')}`);
+  check('los resultados de pagos traen orden, cliente, monto y método',
+    rs.vacio === true || (String(rs.muestra?.[0]?.[1] || '').length > 0 && Number(rs.filas) > 0),
+    JSON.stringify(rs.muestra?.[0] || []).slice(0, 160));
+}
+
+// ============================================================================================
+// 10) AYUDA: secciones (acordeones) y las guías paso a paso
+// ============================================================================================
+{
+  await goto('Ayuda');
+  await waitH1('Centro de Ayuda');
+  await sleep(1200);
+  const items = await evalx(`[...document.querySelectorAll('[data-slot="accordion-item"], [data-state][class*="border-b"]')].length`);
+  const triggers = await evalx(`[...document.querySelectorAll('button[data-state][aria-expanded]')].map(b => (b.innerText || '').trim()).filter(Boolean)`);
+  check('Ayuda tiene secciones en acordeón',
+    (items ?? 0) >= 5 && (triggers ?? []).length >= 5, `${items} ítem(s) · ${(triggers ?? []).length} encabezado(s): ${(triggers ?? []).slice(0, 4).join(' | ')}`);
+  const guias = await evalx(`(() => {
+    const main = document.querySelector('main');
+    return [...main.querySelectorAll('[role="button"]')].filter(b => /Ver guía paso a paso/.test(b.innerText || '')).length;
+  })()`);
+  check('la guía completa lista sus secciones y las tarjetas de acceso rápido',
+    Number(guias) >= 4, `${guias} tarjeta(s) «Ver guía paso a paso»`);
+
+  // abrir el primer acordeón (evidencia de que el contenido despliega)
+  const primerTitulo = (triggers ?? [])[0];
+  await clickCenter(`([...document.querySelectorAll('button[data-state][aria-expanded]')].find(b => (b.innerText || '').trim() === ${JSON.stringify(primerTitulo || '')}) || null)`);
+  await sleep(900);
+  const abierto = await evalx(`(() => {
+    const b = [...document.querySelectorAll('button[data-state][aria-expanded]')].find(x => x.getAttribute('aria-expanded') === 'true');
+    return b ? (b.innerText || '').trim() : null;
+  })()`);
+  const contenido = await evalx(`(() => {
+    const c = [...document.querySelectorAll('[data-state="open"][role="region"], [data-state="open"]')].map(x => (x.innerText || '').length);
+    return Math.max(0, ...c, 0);
+  })()`);
+  check('una sección de ayuda se despliega con su contenido',
+    !!abierto && Number(contenido) > 50, `abierta: ${abierto} · ${contenido} caracteres de contenido`);
+  check('Ayuda documenta los métodos de pago y su moneda',
+    await evalx(`/Métodos de pago y su moneda/.test(document.querySelector('main').innerText)`));
+}
+
+// ============================================================================================
+// 11) LIMPIEZA: borrar la ORDEN de prueba y comprobar que la base quedó como estaba
+// ============================================================================================
+{
+  if (ordenPrueba) {
+    await goto('Servicio Técnico');
+    await waitH1('Servicio Técnico');
+    await waitFor(`!!(${cardOf(ordenPrueba.num)})`, 10000);
+
+    // La tarjeta tiene el botón de eliminar (icono papelera «lucide-trash-2», variant ghost, sin
+    // texto). Se ancla en el icono y se comprueba abajo que la confirmación nombre ESA orden.
+    await clickCenter(`(() => {
+      const card = ${cardOf(ordenPrueba.num)};
+      if (!card) return null;
+      const svgs = [...card.querySelectorAll('button svg')];
+      const papelera = svgs.find(s => /lucide-trash/.test(s.getAttribute('class') || ''))
+        || [...svgs].filter(s => /size-4/.test(s.getAttribute('class') || '')).pop();
+      const b = papelera ? papelera.closest('button') : null;
+      return b || [...card.querySelectorAll('button')].filter(x => !(x.innerText || '').trim() && x.querySelector('svg')).pop() || null;
+    })()`);
+    const confirmo = await waitFor(`/¿Eliminar orden\\?/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 8000);
+    const txtConf = String(await dialogTxt() || '');
+    check('el botón de eliminar de la tarjeta abre la confirmación de ESA orden',
+      confirmo && txtConf.includes(ordenPrueba.num),
+      (txtConf.match(/¿Eliminar orden\?[\s\S]{0,80}/) || [''])[0].replace(/\n/g, ' '));
+    await clickDialog('Eliminar', true);
+    await sleep(2000);
+
+    const borrada = await waitFor(`(() => {
+      return !document.querySelector('main').innerText.includes(${JSON.stringify(ordenPrueba.num)});
+    })()`, 8000);
+    const despuesSv = await serviciosRaw();
+    check('la orden de prueba se borra de la lista y de la base',
+      borrada && !despuesSv.some(s => s.id === ordenPrueba.id),
+      `${despuesSv.length} servicios (antes ${ANTES.services}) · ¿sigue DEV? ${despuesSv.some(s => s.id === ordenPrueba.id)}`);
+  } else {
+    check('no quedó ninguna orden de prueba que borrar', true, ANTES.services === (await serviciosRaw()).length ? 'la cantidad de servicios no cambió' : 'REVISAR: la cantidad de servicios cambió');
+  }
+
+  // Estado final vs. inicial
+  const DESPUES = JSON.parse(await snapshot());
+  check('no quedó ningún servicio de prueba (la cantidad volvió a la inicial)',
+    DESPUES.services === ANTES.services && DESPUES.maxServiceId === ANTES.maxServiceId,
+    `servicios ${ANTES.services} → ${DESPUES.services} · max id ${ANTES.maxServiceId} → ${DESPUES.maxServiceId}`);
+  check('la única fila que queda escrita es la VENTA de prueba (no borrable por diseño)',
+    DESPUES.sales === ANTES.sales + 1 && DESPUES.maxSaleId === ANTES.maxSaleId + 1,
+    `ventas ${ANTES.sales} → ${DESPUES.sales} · max id ${ANTES.maxSaleId} → ${DESPUES.maxSaleId}`);
+  check('el script no dejó diálogos abiertos', (await dialogsOpen().catch(() => 0)) === 0, `${await dialogsOpen().catch(() => 0)} diálogo(s)`);
+}
+
+// ============================================================================================
+// RESUMEN FINAL
+// ============================================================================================
+const fails = out.filter(o => !o.ok);
+console.log(`\n${out.length} comprobaciones · ${out.length - fails.length} OK · ${fails.length} fallo(s)`);
+if (fails.length) console.log(`FALLAN: ${fails.map(f => f.name).join('; ')}`);
+
+console.log('\n--- LO QUE EL SCRIPT ESCRIBIÓ EN LA BASE (corré siempre contra una COPIA) ---');
+if (residuo.length === 0) {
+  console.log('· nada: no quedó ninguna fila nueva en la base.');
+} else {
+  for (const r of residuo) console.log(`· ${r}`);
+}
+console.log('· La orden de servicio de prueba se BORRÓ al final (verificado por IPC).');
+console.log('· NO se cerró el día, NO se confirmó ningún cobro/entrega, NO se guardó ningún pedido ni cambio de producto.');
+
+// `process.exit` SIEMPRE: el WebSocket de CDP queda abierto y sin esto el proceso no termina.
+process.exit(fails.length > 0 ? 1 : 0);

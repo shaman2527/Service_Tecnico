@@ -163,7 +163,9 @@ check('F30: la cola encuentra la orden por el nombre del cliente', opciones.some
 await clickCenter(`[...document.querySelectorAll('[role="dialog"] [role="option"]')].find(o => o.innerText.includes('Cierre'))`);
 await sleep(1800);
 const trasElegir = String(await dialogText() ?? '');
-check('F30: al elegir la orden se abre el asistente de cierre', /Cerrar -?\d+/i.test(trasElegir) && /cobro|Cobrar y entregar|Entregar con saldo/i.test(trasElegir),
+// El título del asistente es «Cerrar {order_num}» y los números reales son «DEV-0010» (no solo
+// dígitos): la regex tiene que aceptar el prefijo DEV- (antes fallaba en falso).
+check('F30: al elegir la orden se abre el asistente de cierre', /Cerrar\s+(DEV-)?-?\d+/i.test(trasElegir) && /cobro|Cobrar y entregar|Entregar con saldo/i.test(trasElegir),
   trasElegir.split(' ').slice(0, 5).join(' '));
 await keyNav('Escape', 'Escape', 27);
 await sleep(800);

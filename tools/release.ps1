@@ -45,6 +45,16 @@ cargo test | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cargo test falló" }
 Pop-Location
 
+# 3.5) GATE DE LA BASE QUE VIAJA AL INSTALADOR (2026-09-16)
+# `tauri.conf.json` empaqueta `../registro.db` como `registro.default.db` y el repo es PÚBLICO:
+# si esa base trae órdenes/pagos/clientes (o un WAL con datos sin volcar) la release publicaría
+# datos reales del local; y si sale sin precios, una PC nueva no puede cobrar nada. El gate aborta.
+Step "gate de release (plantilla de la base)"
+node tools/release_gate.mjs
+if ($LASTEXITCODE -ne 0) {
+    throw "La plantilla NO está lista para publicar (ver el detalle arriba). No fuerces la publicación sin resolver los bloqueantes."
+}
+
 # 4) Build firmado (genera setup.exe + .sig)
 Step "npx tauri build (firmado)"
 $keyPath = Join-Path $env:USERPROFILE ".tauri\registro.key"
