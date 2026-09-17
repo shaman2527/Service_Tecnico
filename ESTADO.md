@@ -47,7 +47,13 @@ por orden de fila en textos ambiguos (invertía el gate)— y 3 menores también
 ninguno** — el cambio no escribe ni migra nada y no invalida órdenes viejas (un `screen_product_id`
 ya guardado sigue siendo válido y es el que se descuenta).
 
-Abiertos: **B1** (123 SKU con stock sin precio de venta → decisión del local) · **B5** (security gate del harness = falso verde).
+Abiertos: **B1** (123 SKU con stock sin precio de venta → decisión del local).
+
+### 0.a.2 B5 cerrado: el gate de seguridad del harness ya no es un falso verde (2026-09-16)
+
+El «security gate» que veníamos corriendo no auditaba nada: juntaba solo `.ts/.tsx` bajo `paths.apiDir` (que en este proyecto es `src-tauri/src`), así que **escaneaba el backend dos veces y el frontend nunca**, y los chequeos de secretos/debug vivían únicamente en la rama «API» → **0 hallazgos siempre** (todos los PASS de seguridad anteriores no valían nada).
+
+Ahora escanea `.ts/.tsx/.js/.jsx/.mjs/.rs/.sql` de `src/` **y** `src-tauri/src` (ignorando `target/`), los chequeos universales (secretos/debug) corren en TODOS los archivos, la regla de secretos es «clave/token/contraseña asignada a un literal», y el informe publica `scanned` **fallando si escaneó 0 archivos**. Prueba por comportamiento (inyecta un secreto en el frontend y en el backend, verifica que el gate FALLA, y que al borrarlo vuelve a PASS): `node tools/node_modules/tsx/dist/cli.mjs tools/verify_security_gate.mjs` → **6/6**, 79 archivos auditados. *Pendiente menor: que el CLI del harness salga con exit 1 ante un subcomando inexistente.*
 
 ### 0.a.1 B3 y B4 cerrados: rol en el backend + PIN hasheado (2026-09-16)
 

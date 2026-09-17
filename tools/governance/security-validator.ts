@@ -40,6 +40,8 @@ export interface SecurityReport {
   passed: boolean;
   issues: ValidationIssue[];
   checks: Record<string, boolean>;
+  /** Cuántos archivos se escanearon de verdad (0 = el scan no miró nada: NO es un PASS válido). */
+  scanned?: number;
 }
 
 function scanFile(filePath: string): string {
@@ -50,22 +52,37 @@ function scanFile(filePath: string): string {
   }
 }
 
-function validateApiEndpoint(content: string, filePath: string): ValidationIssue[] {
+/**
+ * Chequeos que aplican a CUALQUIER archivo (frontend, backend Rust, SQL): secretos y modo debug.
+ * Antes vivían solo en `validateApiEndpoint`, así que en un proyecto sin rutas `api/`/`routes/`
+ * (un Tauri, por ejemplo) NINGÚN archivo pasaba por ellos y el gate daba un falso verde.
+ */
+function validateUniversal(content: string, filePath: string): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
-  if (activeChecks.has("secrets") && SECRET_PATTERNS.some(p => p.test(content))) {
+  // Regla simple y predecible: una clave/token/contraseña ASIGNADA a un literal largo.
+  // (La regla vieja marcaba cualquier mención de la palabra «password», así que se ignoraba
+  //  sola con la lista de excepciones y no encontraba nada real.)
+  const SOSPECHOSA = /(api[_-]?key|secret|token|password|private[_-]?key)\s*[:=]\s*["'`][^"'`]{8,}["'`]/i;
+  if (activeChecks.has("secrets") && SOSPECHOSA.test(content)) {
     issues.push({
       file: filePath, severity: "error", code: "SECRET-LEAK",
-      message: "Posible secreto expuesto en código generado",
+      message: "Posible secreto expuesto en el código (clave/token con valor literal)",
     });
   }
 
   if (activeChecks.has("debug-mode") && DEBUG_PATTERNS.some(p => p.test(content))) {
     issues.push({
-      file: filePath, severity: "error", code: "DEBUG-MODE",
-      message: "Modo debug activo o console.log de datos sensibles",
+      file: filePath, severity: "warning", code: "DEBUG-MODE",
+      message: "Modo debug activo o log de datos sensibles",
     });
   }
+
+  return issues;
+}
+
+function validateApiEndpoint(content: string, filePath: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = validateUniversal(content, filePath);
 
   if (activeChecks.has("sql-injection") && SQL_INJECTION_PATTERNS.some(p => p.test(content))) {
     issues.push({
@@ -108,28 +125,46 @@ function validateComponent(content: string, filePath: string): ValidationIssue[]
 }
 
 export function validateFile(content: string, filePath: string, isApi: boolean): ValidationIssue[] {
-  return isApi ? validateApiEndpoint(content, filePath) : validateComponent(content, filePath);
+  // Los chequeos universales (secretos / debug) corren SIEMPRE, sea API o componente.
+  const universales = validateUniversal(content, filePath);
+  return universales.concat(isApi ? validateApiEndpoint(content, filePath) : validateComponent(content, filePath));
 }
 
 export async function runFullSecurityScan(changedFiles?: string[]): Promise<SecurityReport> {
   const allIssues: ValidationIssue[] = [];
+  /** Archivos realmente auditados (si queda en 0, el PASS no vale nada). */
+  let scanned = 0;
 
-  const srcDir = path.join(projectRoot, S.apiDir || S.sourceDir);
-  if (fs.existsSync(srcDir)) {
+  // Se auditan TANTO el frontend como el backend: la config del proyecto pone `apiDir` en
+  // `src-tauri/src`, así que usar solo `apiDir || sourceDir` dejaba el frontend afuera (y
+  // escaneaba el backend DOS veces).
+  // Extensiones que se escanean. OJO: antes solo entraban `.ts/.tsx`, así que en un proyecto
+  // Tauri (backend en Rust) el scan juntaba CERO archivos bajo `src-tauri/src` y devolvía un
+  // PASS trivial ("falso verde"). Ahora entran también `.rs`, `.js/.jsx/.mjs` y `.sql`, y se
+  // escanean TANTO el frontend (`src/`) como el backend (`src-tauri/src/`).
+  const SCANNED_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".rs", ".sql"];
+  const roots = [...new Set([S.sourceDir, S.apiDir].filter(Boolean).map((d: string) => path.join(projectRoot, d)))]
+    .filter(d => fs.existsSync(d));
+  for (const root of roots) {
     const files: string[] = [];
     function collect(dir: string) {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let entries: fs.Dirent[] = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
       for (const e of entries) {
         const full = path.join(dir, e.name);
-        if (e.isDirectory()) collect(full);
-        else if (e.name.endsWith(".ts") || e.name.endsWith(".tsx")) files.push(full);
+        if (e.isDirectory()) {
+          // `target/` y `node_modules/` son artefactos de build: no se auditan
+          if (e.name === "target" || e.name === "node_modules" || e.name === "dist") continue;
+          collect(full);
+        } else if (SCANNED_EXT.some(ext => e.name.endsWith(ext))) files.push(full);
       }
     }
-    collect(srcDir);
+    collect(root);
     for (const file of files) {
       const relative = path.relative(projectRoot, file).replace(/\\/g, "/");
       if (changedFiles && !new Set(changedFiles.map(f => f.replace(/\\/g, "/"))).has(relative)) continue;
       const content = fs.readFileSync(file, "utf-8");
+      scanned++;
       allIssues.push(...validateFile(content, relative, relative.includes("api/") || relative.includes("routes/")));
     }
   }
@@ -149,13 +184,21 @@ export async function runFullSecurityScan(changedFiles?: string[]): Promise<Secu
     } catch {}
   }
 
+  // Un scan que no miró NINGÚN archivo NO puede pasar: antes eso era un PASS trivial.
+  if (scanned === 0) {
+    allIssues.push({
+      file: "-", severity: "error", code: "NO-FILES-SCANNED",
+      message: "El scan de seguridad no encontró archivos para auditar (revisar rutas/extensiones)",
+    });
+  }
+
   const errors = allIssues.filter(i => i.severity === "error");
   const checksRecord: Record<string, boolean> = {};
   for (const check of SEC.checks || ["secrets", "debug-mode", "sql-injection", "auth"]) {
     checksRecord[check] = !allIssues.some(i => i.code.toLowerCase().startsWith(check));
   }
 
-  return { passed: errors.length === 0, issues: allIssues, checks: checksRecord };
+  return { passed: errors.length === 0, issues: allIssues, checks: checksRecord, scanned };
 }
 
 export function printSecurityReport(report: SecurityReport): void {
