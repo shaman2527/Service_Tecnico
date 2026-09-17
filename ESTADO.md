@@ -27,6 +27,33 @@ canónicos, 38 grupos duplicados, 702 unidades, 1126 sin precio (antes de F3).
 
 ---
 
+## 0.b Asistente de Cierre de Servicio (F30, 2026-09-16) — MODO DEV
+
+El taller recibe mucho cliente; cerrar una entrega CON cobro costaba ~13 interacciones y 3 diálogos.
+Ahora hay **cola de entregas (F4)** + **asistente de cierre** que pide solo lo que falta y cobra y
+entrega en un mismo paso.
+
+| Qué | Dónde | Evidencia |
+|---|---|---|
+| Cola de entregas (F4): busca por cédula/teléfono/nombre/modelo/nº de orden | `src/components/CierreQueueDialog.tsx` + `src/lib/queue.ts` | filtrado LOCAL (1 sola consulta al abrir); `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` **32/32** |
+| Asistente: pantalla que se instaló (con stock y confirmación de agotada) + cobro ($ / Bs., chips, «todo el saldo», Punto) + entrega + motivo obligatorio si queda saldo + recibo | `src/components/CierreServiceDialog.tsx` | abierto desde la tarjeta («Cerrar») o desde la cola |
+| Reglas de dinero en UN módulo | `src/lib/payment-math.ts` (lo usan `PaymentDialog` y el asistente) | `node tools/payment_math_test.ts` **595/595** de paridad con las fórmulas viejas |
+| Reglas de pantalla + stepper + actualización de orden, sin copias | `src/lib/screen-rules.ts`, `src/components/ScreenPicker.tsx`, `src/components/FormStepper.tsx`, `src/lib/service-update.ts` | movidos literalmente desde `Services.tsx` |
+| Gates | `npx tsc -b` 0 errores · `npx oxlint` 0 errores · `npm run build` OK · `harness_security` PASS · `harness_truth` PASS | `cargo test` NO se re-corrió a propósito (cero cambios en Rust y la otra sesión tenía la app en vivo) |
+
+**Pendiente (no mezclar con F30):** F31 (cola y pagos en UNA consulta — fin del N+1 de hasta 120
+`getServicePayments`), F32 (`close_service_delivery` transaccional: cobro + entrega + stock + `printed`
+en un solo tx, con test de rollback; hoy el asistente llama `api.updateService` a mano y el botón
+«Entregar» usa `updateOrderKeepingFields`), F33 (vuelto en efectivo, contador de entregas del día).
+
+**Aviso de proceso:** durante F30 hubo **otra sesión de trabajo escribiendo los mismos archivos**
+(`CierreServiceDialog.tsx`, `Services.tsx`). Se resolvió cooperando por módulos compartidos y sin
+reescribir archivos ajenos en caliente (ver lección en `AGENTS.md`). `harness_review` está roto en este
+entorno (falta `tools/reviewer/parallel-review.ts`) → se reemplazó por revisiones adversariales con
+subagentes.
+
+---
+
 ## 1. Resumen
 
 Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servicio técnico de
@@ -254,6 +281,30 @@ fallos falsos) → ahora usan `std::env::temp_dir()` + `std::process::id()`.
 3. Pendientes de tienda que no son de código: guardar copia de la llave privada del updater, probar la impresora física y
    cambiar el PIN 1234 (ver §3).
 
+## 12. F30 — asistente para cerrar cada servicio (2026-09-16, MODO DEV)
+
+En **Servicio Técnico**, cada tarjeta de una orden activa tiene un botón **«Cerrar»** (rayo) que abre
+`src/components/CierreServiceDialog.tsx`: un asistente que dice **qué falta** para cerrar la orden y pide **solo eso**.
+
+1. **¿Qué pantalla se instaló?** (solo si el trabajo incluye «Cambio pantalla» y hay pantallas en el catálogo): lista las
+   compatibles del modelo con el **stock** de cada una y badge «agotada».
+2. **Cobro:** monto con toggle **$ / Bs.**, chips rápidos, **«Todo el saldo»**, método, comisión del Punto y referencia
+   Zelle. La aritmética sale de **`src/lib/payment-math.ts`**, el módulo compartido con «Pago / Abono» (test de paridad
+   `tools/payment_math_test.ts`: **595 comprobaciones**).
+3. **Cerrar y entregar:** un botón que registra el cobro y pasa la orden a **Entregado** (descuenta el stock de la
+   pantalla elegida y le pone la fecha de hoy), con la opción de **imprimir la orden al cerrar**.
+
+- **Entrega con saldo:** permitida, pero con **motivo obligatorio** (el botón queda deshabilitado sin él) que se guarda en
+  la orden como `Entregado con saldo ($X): motivo`.
+- **Antes vs ahora:** ~13 interacciones y 3 diálogos por cliente (cobrar → entregar → imprimir) → **un diálogo y, como
+  mucho, dos datos** (pantalla y monto, ambos precargados). Ctrl+Enter cierra, Escape sale.
+- **Verificación en vivo:** `tools/verify_servicio_cierre.mjs` **14/14** (crea dos órdenes de prueba y las borra): avisa lo
+  que falta, elige la pantalla con su stock, precarga el saldo, cierra dejando la orden **Entregado + abonada $30 + stock
+  6 → 5 + movimiento «Servicio Entregado»**, y exige el motivo cuando se entrega debiendo.
+- **Origen:** pedido del usuario («un asistente en la parte de servicio que vaya ayudándolo a cerrar cada servicio rápido,
+  sea intuitivo, que a medida vaya necesitando introducir un dato, optimizar el proceso»). El spec lo había escrito otra
+  sesión en paralelo; por decisión del usuario **esta sesión lo cierra** y **reutiliza su módulo de dinero compartido** en
+  vez de duplicar la aritmética.
 ## 11. F25 + F26 + F28 + F29 — cargar el inventario desde la app y regla «solo Pantalla» (2026-09-16, MODO DEV)
 
 ### F25 — Asistente de carga de inventario

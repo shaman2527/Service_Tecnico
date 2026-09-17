@@ -95,4 +95,20 @@ const clickXY = async (x, y) => {
   await sleep(700);
 };
 
-export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep };
+/**
+ * Contesta un diálogo NATIVO del navegador (confirm/alert) que esté bloqueando la página.
+ * La app pide confirmación en dos lugares: volver atrás con correcciones y el aviso del barrido
+ * cuando la lista parece parcial. Sin esto, la página queda bloqueada y los `evalx` dan timeout.
+ * Devuelve false si no había ningún diálogo pendiente.
+ */
+const handleDialog = async (accept = true) => {
+  try {
+    const r = await send("Page.handleJavaScriptDialog", { accept });
+    await sleep(400);
+    return !r.error;
+  } catch {
+    return false;
+  }
+};
+
+export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep, handleDialog };

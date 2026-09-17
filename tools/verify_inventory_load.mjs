@@ -1,7 +1,7 @@
 // Verificación EN VIVO de F25 (asistente de carga de inventario) y F26 (regla «solo Pantalla»).
 // Requisitos: app de dev con CDP 9222 y REGISTRO_DB apuntando a la copia de trabajo.
 // Uso: node tools/verify_inventory_load.mjs
-import { evalx, clickCenter, keyNav, typeText, insertText, sleep } from './cdp_driver.mjs';
+import { evalx, clickCenter, keyNav, typeText, insertText, sleep, handleDialog } from './cdp_driver.mjs';
 
 const out = [];
 const check = (name, ok, detail) => { out.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  ->  ${detail}` : ''}`); };
@@ -14,6 +14,14 @@ const clickDialog = async (label) => {
 };
 const dialogText = () => evalx(`document.querySelector('[role="dialog"]')?.innerText ?? null`);
 const dialogOpen = () => evalx(`!!document.querySelector('[role="dialog"]')`);
+// clic en un botón del diálogo SOLO si existe (las confirmaciones del asistente aparecen únicamente
+// cuando hay algo que confirmar: barrido con lista parcial o volver con correcciones)
+const clickDialogSi = async (label) => {
+  const hay = await evalx(`!!([...document.querySelectorAll('[role="dialog"] button')].find(${ci(label)}))`);
+  if (!hay) return false;
+  await clickDialog(label);
+  return true;
+};
 const tabActiva = () => evalx(`(() => document.querySelector('[role="tab"][data-state="active"]')?.innerText.trim() ?? null)()`);
 const pegar = async (texto) => {
   await clickCenter(`document.querySelector('[role="dialog"] textarea')`);
@@ -117,9 +125,10 @@ await clickDialog('Revisar el cruce');
 await sleep(1800);
 const avisoBarrido = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] label span')].map(s => s.innerText.trim()).find(t => /quedar[íi]an en 0|quedan en 0|Ninguna otra pantalla/i.test(t)) ?? null)()`);
 check('F25: avisa cuántas pantallas quedarían en 0 antes de aplicar',
-  /quedan en 0\s*1\s*pantalla/i.test(String(avisoBarrido).replace(/\s+/g, ' ')),
+  /quedan en 0 \d+ pantalla/i.test(String(avisoBarrido).replace(/\s+/g, ' ')),
   String(avisoBarrido).replace(/\s+/g, ' ').slice(-90));
 await clickDialog('Atrás');
+await clickDialogSi('Sí, volver'); // si hubo correcciones, confirma volver (aviso dentro del asistente)
 await clickButton('Cancelar');
 await sleep(600);
 
@@ -136,12 +145,35 @@ check('F25: avisa las unidades que NO se van a cargar (línea sin pantalla)',
   String(avisoSinPantalla).replace(/\s+/g, ' ').slice(0, 90));
 const stockAntesGate = await totalPantallas();
 await clickDialog('Cargar 1 pantalla');
+await clickDialogSi('Sí, cargar igual'); // el aviso del barrido (lista parcial) pide confirmación primero
 await sleep(2500);
 const errGate = await evalx(`(() => document.querySelector('[role="dialog"] [role="alert"], [role="dialog"] .text-destructive')?.innerText ?? null)()`);
 check('F25: el barrido NO deja en 0 mercancía que la lista menciona (pide resolver la línea)',
   /sin pantalla asignada/i.test(String(errGate)) && (await totalPantallas()) === stockAntesGate,
   `${String(errGate).replace(/\s+/g, ' ').slice(0, 80)} · stock ${stockAntesGate} → ${await totalPantallas()}`);
 await clickDialog('Atrás');
+await clickDialogSi('Sí, volver');
+await clickButton('Cancelar');
+await sleep(600);
+
+// GUARDA DEL BARRIDO (lo que pasó de verdad en la tienda): con una lista PARCIAL y el barrido
+// marcado, el asistente avisa antes de vaciar medio catálogo y el operario puede cancelar
+await clickButton('Cargar la lista del local');
+await sleep(800);
+await pegar('Tecno\nCamon 18 (10)\n');
+await clickDialog('Revisar el cruce');
+await sleep(1800);
+const stockAntesGuarda = await totalPantallas();
+await clickDialog('Cargar 1 pantalla');
+const huboAviso = await evalx(`!!([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Sí, cargar igual$/i.test(b.innerText.trim())))`);
+await clickDialog('Cancelar'); // CANCELAR el aviso
+await sleep(1200);
+const sigueEnPaso2 = await evalx(`!!document.querySelector('[role="dialog"] textarea, [role="dialog"] table')`);
+check('GUARDA: con una lista parcial el barrido avisa antes de vaciar el catálogo (y se puede cancelar)',
+  huboAviso && sigueEnPaso2 && (await totalPantallas()) === stockAntesGuarda,
+  `aviso=${huboAviso} · stock ${stockAntesGuarda} → ${await totalPantallas()}`);
+await clickDialog('Atrás');
+await clickDialogSi('Sí, volver');
 await clickButton('Cancelar');
 await sleep(600);
 
@@ -171,6 +203,7 @@ check('F28: la asignación a mano entra en el total (6 + 5 en la misma ficha)',
 const sinPantallaAhora = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] span')].map(s => s.innerText).find(t => /que NO se cargan/i.test(t)) ?? null)()`);
 check('F28: ya no queda ninguna línea sin pantalla', sinPantallaAhora === null, String(sinPantallaAhora));
 await clickDialog('Atrás');
+await clickDialogSi('Sí, volver');
 await clickButton('Cancelar');
 await sleep(600);
 const stockTrasAsignar = await totalPantallas();
@@ -178,7 +211,8 @@ check('F28: asignar a mano y salir no toca el stock', stockTrasAsignar === stock
 // --- F25 E2E por la UI: cargar una lista que refleja lo que YA hay y VER el resumen ---
 // (regresión de la revisión: al aplicar, la pestaña saltaba a Productos y el paso 3
 //  —el resumen— nunca se veía porque el diálogo se desmontaba)
-// PROVEEDOR + carga real: se carga una lista que refleja lo que YA hay, anotando el proveedor
+// PROVEEDOR + carga real SIN barrido: se carga una lista que refleja lo que YA hay (el barrido
+// queda desmarcado para que la prueba no vacíe el resto del catálogo de la copia)
 await clickButton('Cargar la lista del local');
 await sleep(800);
 await pegar('Samsung\nGalaxy A06 4G (6)\n');
@@ -193,6 +227,14 @@ await sleep(600);
 check('F29: el asistente pide el proveedor que trajo la mercancía',
   /Prov Verificacion/.test(String(await evalx(`document.querySelector('#prov-carga')?.value ?? ''`))),
   String(await evalx(`document.querySelector('#prov-carga')?.value ?? ''`)));
+// desmarcar el barrido (es una lista de una sola línea: no es todo el inventario)
+await clickCenter(`[...document.querySelectorAll('[role="dialog"] label')].find(l => /no están en la lista quedan en 0/.test(l.innerText))?.querySelector('input')`);
+await sleep(500);
+// la ficha de la línea, para comprobar que SOLO ella cambia (la lista dice 6 u.)
+const a06Antes = Number(await evalx(`(async () => {
+  const p = await window.__TAURI_INTERNALS__.invoke('get_products', { search: 'A06 4G', categoryId: 1 });
+  return (p[0] && p[0].stock) ?? -1;
+})()`));
 await clickDialog('Cargar 1 pantalla');
 await sleep(2500);
 const repDlg = await dialogText();
@@ -216,8 +258,18 @@ check('F29: el proveedor quedó guardado en la pantalla cargada', /Prov Verifica
 await clickDialog('Listo');
 await sleep(600);
 const stockFinal = await totalPantallas();
-check('F25: el stock quedó igual (la lista reflejaba lo que había)', stockFinal === stockDespues, `${stockDespues} → ${stockFinal}`);
+// sin barrido, SOLO cambia la ficha de la línea: la de A06 4G pasa de lo que tenía (a06Antes) a 6
+const esperado = stockDespues - (a06Antes - 6);
+check('F25: sin barrido solo cambia la ficha cargada (el resto del inventario queda igual)',
+  stockFinal === esperado, `${stockDespues} → ${stockFinal} (A06 4G ${a06Antes} → 6, esperado ${esperado})`);
 check('F25: al cerrar el asistente no queda ningún diálogo abierto', !(await dialogOpen()));
+
+// limpieza: el proveedor de prueba no se queda en la copia
+await evalx(`(async () => {
+  const p = await window.__TAURI_INTERNALS__.invoke('get_products', { search: 'A06 4G', categoryId: 1 });
+  for (const x of p) if (x.supplier) await window.__TAURI_INTERNALS__.invoke('set_product_supplier', { id: x.id, supplier: '' });
+  return true;
+})()`);
 
 // --- el Centro de Ayuda explica el conteo (lo que el local lee para usarlo) ---
 await clickCenter(`[...document.querySelectorAll('aside button')].find(b => b.innerText.trim().startsWith('Ayuda'))`);

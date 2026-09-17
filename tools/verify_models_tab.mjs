@@ -16,8 +16,8 @@
 import { evalx, clickCenter, keyNav, typeText, sleep } from './cdp_driver.mjs';
 
 const EXPECT = {
-  phones: Number(process.env.EXPECT_PHONES ?? 1079),
-  review: Number(process.env.EXPECT_REVIEW ?? 142),
+  phones: Number(process.env.EXPECT_PHONES ?? 1134),
+  review: Number(process.env.EXPECT_REVIEW ?? 161),
 };
 
 const results = [];

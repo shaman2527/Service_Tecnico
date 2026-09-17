@@ -68,6 +68,10 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
   const [report, setReport] = useState<LoadReport | null>(null);
   // ¿el operario tocó algo del cruce? (para no perder correcciones al volver atrás sin avisar)
   const [corregido, setCorregido] = useState(false);
+  // confirmación pendiente DENTRO del asistente ('barrido' = la lista parece parcial; 'volver' =
+  // se pierden las correcciones). No se usa confirm() del navegador: en la ventana de la app no
+  // bloquea (la verificación lo comprobó: el aviso se aceptaba solo y vaciaba el catálogo).
+  const [confirmar, setConfirmar] = useState<null | 'barrido' | 'volver'>(null);
 
   const cruzar = async () => {
     setError(null);
@@ -132,6 +136,15 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
 
   const aplicar = async () => {
     setError(null);
+    // GUARDA DEL BARRIDO: si la lista es más chica que el catálogo que va a vaciar, casi seguro es
+    // una lista PARCIAL (probando el asistente, un conteo de un sector…) y el barrido está marcado
+    // por costumbre: eso deja en 0 mercancía que sí está. Se pide confirmación DENTRO del asistente
+    // (no con confirm() del navegador: en la ventana de la app no bloquea y se acepta solo).
+    if (zeroMissing && cruzadas > 0 && zeroLive.length > fichas && confirmar !== 'barrido') {
+      setConfirmar('barrido');
+      return;
+    }
+    setConfirmar(null);
     setBusy(true);
     try {
       // Se mandan TODAS las filas (también las que quedaron sin pantalla) para que el backend
@@ -268,8 +281,14 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
   };
 
   const volverAtras = () => {
-    if (corregido && !confirm('Vas a volver al paso anterior: se pierden las correcciones del cruce (pantallas elegidas, cantidades y exclusiones). ¿Continuar?')) return;
     cerrarBuscador();
+    // también dentro del asistente: perder 20 correcciones sin aviso no puede depender de un
+    // diálogo del navegador que en esta ventana no bloquea
+    if (corregido && confirmar !== 'volver') {
+      setConfirmar('volver');
+      return;
+    }
+    setConfirmar(null);
     setStep(0);
   };
 
@@ -289,6 +308,53 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-3">
+          {confirmar === 'barrido' && (
+            <Alert variant="destructive">
+              <AlertTriangle className="size-4" />
+              <AlertTitle>Ojo: esta lista parece parcial</AlertTitle>
+              <AlertDescription className="flex flex-col gap-2 text-xs">
+                <span>
+                  Con el barrido marcado vas a dejar en <strong>0</strong> {plural(zeroLive.length, 'pantalla', 'pantallas')}
+                  {' '}({zeroUnidadesLive} unidades) que hoy tienen stock, y esta lista solo carga{' '}
+                  {plural(fichas, 'pantalla', 'pantallas')} ({unidades} u.).
+                </span>
+                <span>
+                  Si la lista <strong>no</strong> es todo el inventario del local, cancelá y desmarcá «Las pantallas que no
+                  están en la lista quedan en 0».
+                </span>
+                <span className="flex flex-wrap gap-2 pt-1">
+                  <Button type="button" variant="destructive" size="sm" className="h-7 text-[11px]"
+                    onClick={() => { setConfirmar(null); void aplicar(); }}>
+                    Sí, cargar igual
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]"
+                    onClick={() => setConfirmar(null)}>
+                    Cancelar
+                  </Button>
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {confirmar === 'volver' && (
+            <Alert>
+              <CircleAlert className="size-4" />
+              <AlertTitle>Se pierden las correcciones del cruce</AlertTitle>
+              <AlertDescription className="flex flex-col gap-2 text-xs">
+                <span>Si volvés al paso anterior se pierden las pantallas elegidas, las cantidades y las exclusiones.</span>
+                <span className="flex flex-wrap gap-2 pt-1">
+                  <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]"
+                    onClick={() => { setConfirmar(null); cerrarBuscador(); setStep(0); }}>
+                    Sí, volver
+                  </Button>
+                  <Button type="button" size="sm" className="h-7 text-[11px]" onClick={() => setConfirmar(null)}>
+                    Seguir corrigiendo
+                  </Button>
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
+
           {error && (
             <Alert variant="destructive">
               <CircleAlert className="size-4" />

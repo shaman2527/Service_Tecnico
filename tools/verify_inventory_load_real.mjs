@@ -15,6 +15,12 @@ const clickDialog = async (label) => {
   await sleep(900);
 };
 const dialogText = () => evalx(`document.querySelector('[role="dialog"]')?.innerText ?? null`);
+const clickDialogSi = async (label) => {
+  const hay = await evalx(`!!([...document.querySelectorAll('[role="dialog"] button')].find(${ci(label)}))`);
+  if (!hay) return false;
+  await clickDialog(label);
+  return true;
+};
 const totalPantallas = () => evalx(`(async () => {
   const all = await window.__TAURI_INTERNALS__.invoke('get_products', { search: '', categoryId: 1 });
   return all.reduce((a, p) => a + p.stock, 0);
@@ -117,8 +123,9 @@ const barrido = await evalx(`(() => [...document.querySelectorAll('[role="dialog
 check('REAL: el barrido avisa cuántas pantallas quedarían en 0',
   /quedan en 0/i.test(String(barrido)), String(barrido).slice(-80));
 
-// NO se aplica: se sale sin tocar nada
+// NO se aplica: se sale sin tocar nada (el asistente avisa que se pierden las correcciones)
 await clickDialog('Atrás');
+await clickDialogSi('Sí, volver');
 await clickButton('Cancelar');
 await sleep(800);
 const stockDespues = await totalPantallas();

@@ -592,6 +592,26 @@ Antes de hacer commit:
   abre con el PIN y vive **mientras vive el proceso**, no por sesión de UI (la cajera no ve los botones, pero un invoke a
   mano se acepta si el dueño ya entró en esa misma corrida).
 
+### Asistente de cierre de servicio (F30, 2026-09-16) — MODO DEV
+- **Para qué:** que el mostrador cierre una orden **rápido y sin pensar**. Botón **«Cerrar»** (rayo) en cada tarjeta
+  activa de Servicio Técnico → `src/components/CierreServiceDialog.tsx`.
+- **Qué hace:** mira la orden, dice **qué falta** y pide **solo eso**, en un diálogo: (1) la **pantalla instalada** si el
+  trabajo incluye «Cambio pantalla» (lista con **stock** y «agotada»), (2) el **cobro** (toggle **$ / Bs.**, chips,
+  **«Todo el saldo»**, método, comisión del Punto, Zelle) y (3) **«Cerrar y entregar»** en un botón: registra el cobro
+  (`addServicePayment`) y pasa la orden a `Entregado` (`updateService` → descuenta la pantalla elegida y pone la fecha),
+  con impresión opcional. Ctrl+Enter cierra, Escape sale.
+- **Entrega con saldo:** permitida con **motivo obligatorio** (el botón queda deshabilitado sin él) → se escribe en
+  `services.observations` como `Entregado con saldo ($X): motivo` (así no aparece «de la nada» en Cuentas por cobrar).
+- **Dinero en UN módulo:** toda la aritmética (moneda del campo vs del método, «todo el saldo», Punto) vive en
+  **`src/lib/payment-math.ts`**, compartida con `PaymentDialog` y fijada por `tools/payment_math_test.ts`
+  (**595 comprobaciones**). Si hay que tocar esas cuentas, se toca ahí (y se corre ese test).
+- **Ojo — `confirm()` del navegador NO bloquea en la ventana de la app** (WebView2 lo acepta solo): cualquier
+  confirmación que deba FRENAR una acción destructiva va **dentro del asistente** (Alerta con botones). Ya pasó: un
+  `confirm()` en el asistente de carga se aceptó solo y vació el catálogo de la copia.
+- **Verificación en vivo:** `tools/verify_servicio_cierre.mjs` (14/14) crea dos órdenes de prueba, las cierra con el
+  asistente y comprueba estado, abonado, stock descontado, movimiento y el motivo del saldo; borra las órdenes al final.
+  **Ojo con los scripts CDP:** dentro de un template literal los `\d` pierden la barra (`/stock \d+/` → `/stock d+/`) —
+  escribir `\\d`.
 ### Renombrar y fusionar la lista de teléfonos (F24, 2026-09-16) — MODO DEV
 - **Para qué:** el taller corrige la lista maestra desde la app (Inventario → Modelos, **solo el dueño**): «Corregir»
   (marca + línea + modelo con **vista previa** del nombre comercial, aviso si ya existe otro teléfono con ese nombre,
@@ -698,3 +718,63 @@ Antes de hacer commit:
 - Pulido: los 10 pares de fichas que difieren en variante (INCELL vs OLED) quedan a propósito sin fusionar.
 
 **Modo dev vigente:** sin release, sin push; siempre sobre copia (`backup/registro_pre_normalizacion_20260915.db`) con respaldo previo.
+
+---
+
+### F30 (continuación): cola de entregas, reglas compartidas y revisión adversarial — 2026-09-16
+
+Lo de arriba es el asistente. Esta sesión agregó lo que va **antes** de él y ordenó las reglas:
+
+- **Cola de entregas (F4)** — `src/components/CierreQueueDialog.tsx` + `src/lib/queue.ts`: botón «Cerrar entrega» en
+  la barra de Servicio Técnico y atajo **F4** → paleta (`cmdk`, el `ui/command.tsx` que ya existía) con las órdenes
+  EN TALLER. Se busca por lo que el cliente dice en voz alta: cédula, teléfono, nombre, modelo o nº de orden.
+  El filtrado es **LOCAL, sin IPC ni debounce** (UNA consulta al abrir la cola): con mucho cliente en el mostrador,
+  encontrar la orden deja de ser el cuello de botella. Cada fila muestra estado, «sin pantalla», «sin imprimir» y
+  cuánto FALTA COBRAR.
+- **Reglas en módulos compartidos (una sola vez):** `src/lib/payment-math.ts` (dinero: lo usan `PaymentDialog` y el
+  asistente), `src/lib/screen-rules.ts` (`onlyScreens`, `asPhoneEntry`, `screenOk`), `src/lib/queue.ts` (cola),
+  `src/lib/service-update.ts` (`updateOrderKeepingFields`: actualiza una orden conservando sus 23 campos),
+  `src/components/ScreenPicker.tsx` y `src/components/FormStepper.tsx` (movidos LITERALMENTE desde `Services.tsx`).
+- **Pruebas de las reglas puras (sin navegador):** `node tools/payment_math_test.ts` → **595/595** de paridad contra
+  las fórmulas viejas de `PaymentDialog`; `node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts` → **42/42**
+  (ranking con acentos, faltantes, pantalla agotada). `tsx` va por ruta: no está en `devDependencies` y `node` solo
+  no resuelve los imports TS sin extensión.
+- **`harness_review` está ROTO en este entorno** (falta `tools/reviewer/parallel-review.ts` en la copia embebida) →
+  se reemplaza por **dos revisiones adversariales en paralelo con subagentes** (calidad/correctitud y
+  consistencia/regresión contra las reglas de este archivo), pidiendo veredicto compacto y hallazgos con
+  `archivo:línea`. Gates que sí corren: `harness_security` PASS · `harness_truth` PASS (build) · `npx tsc -b` 0
+  errores · `npx oxlint` 0 errores · `npm run build` OK.
+- **Las dos revisiones dieron BLOQUEANTE y los 4 defectos están ARREGLADOS** (detalle en
+  `tools/progress/specs/F30-asistente-cierre.md` §8.1):
+  1. **Cobro duplicado**: si el cobro se guardaba y el cierre fallaba, el reintento cobraba OTRA VEZ → estado
+     `pagoHecho` + Alert ámbar + botón «Reintentar cierre» que no vuelve a cobrar (definitivo: F32 transaccional).
+  2. **Cobro fantasma**: método en $ + campo en Bs. + tasa 0 → el monto tipeado se descartaba sin aviso y la orden
+     quedaba entregada con el saldo completo → `cobroImposible` (monto escrito que no convierte) + día abierto
+     obligatorio cuando hay monto.
+  3. **Cambiar el método no convertía el monto**: Pago Móvil Bs. 7000 → «Divisas (USD Cash)» registraba **$7000** →
+     `convertAmount` antes de flipear el toggle (igual que `PaymentDialog`).
+  4. **La cola escondía órdenes con tilde**: «JOSÉ PÉREZ» no aparecía buscando «jose» → `fold()` (NFD + strip de
+     acentos) y `compact()` (nº de orden sin guiones: «DEV 0001» y «dev0001» ahora encuentran).
+- **Lección CRÍTICA de coordinación.** Había **OTRA sesión de DSH escribiendo el mismo repo a la misma hora**
+  (creó `CierreServiceDialog.tsx` y tocó `Services.tsx` mientras esta sesión hacía el refactor). Lo que salvó el
+  trabajo: (1) el guardado falla si el archivo cambió desde la última lectura — nunca pisar a ciegas; (2) mirar
+  `LastWriteTime` y si la app de dev está viva antes de reescribir (Vite hace HMR y le reinicia el diálogo abierto
+  a la otra sesión a mitad de su verificación); (3) **cooperar por módulos compartidos** (la otra sesión terminó
+  importando `lib/payment-math.ts`); (4) aportar piezas NUEVAS (la cola F4) sin reescribir lo ajeno.
+
+**Pendiente (no mezclar con F30):**
+- **F32 (lo más importante):** `close_service_delivery` transaccional (cobro + entrega + stock + `printed` en UNA
+  transacción, con test de rollback y de reintento). Hoy son 2 llamadas + el parche de `pagoHecho`.
+- Dedupe vivo: la lista de pantallas del asistente (`findCompatibleProducts(...,40)` + filtro inline de categoría 1)
+  vs `useCompatibleProducts`/`onlyScreens` (80 filas) → pueden mostrar conjuntos distintos; `esFinal` local (incluye
+  'Entregado') vs `isFinalized` de utils; falta el campo Referencia para **Pago Móvil** (solo Zelle); el botón
+  «Entregar» de la tarjeta entrega con saldo **sin motivo** (solo el asistente lo exige).
+- **F31**: `get_delivery_queue` en UNA consulta con los pagos agregados (hoy la lista dispara hasta 120
+  `getServicePayments` por búsqueda). **F33**: vuelto en efectivo, contador «entregas de hoy», auto-impresión.
+- **BUG PREEXISTENTE (lo halló la revisión, NO es de F30):** `PrintReceiptDialog.tryAutoDetect` devuelve `true` en
+  su rama de error y `doPrint` marca `printed=1` → una orden puede quedar «impresa» sin haberse impreso (el
+  asistente hereda ese camino al imprimir al cerrar).
+- **Ojo con `tools/verify_servicio_cierre.mjs`**: escribe en la DB real sin guarda de copia y, si no hay día
+  abierto, lo abre con una tasa BCV inventada (40) — correrlo contra la app de la tienda dejaría el turno abierto
+  con una tasa falsa. Exigir copia (`REGISTRO_DB`) antes de usarlo.
+

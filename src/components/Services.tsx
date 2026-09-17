@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -15,11 +15,20 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { api } from '../db';
 import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
+import CierreServiceDialog from './CierreServiceDialog';
+// F30: cola de entregas (F4) — buscar la orden por cédula/teléfono/nombre sin recorrer la lista.
+import CierreQueueDialog from './CierreQueueDialog';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { ModelCombobox } from './ModelCombobox';
-import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, normPhoneModel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate } from '../types';
+// Piezas compartidas con el asistente de cierre (Harness F30): el stepper del wizard y la
+// elección de la pantalla exacta viven en archivos propios para no tener dos copias.
+import { FormStepper } from './FormStepper';
+import { ScreenSelect, useCompatibleProducts } from './ScreenPicker';
+import { asPhoneEntry, onlyScreens, screenOk } from '@/lib/screen-rules';
+import { updateOrderKeepingFields } from '@/lib/service-update';
+import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel } from '@/lib/utils';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
@@ -228,67 +237,6 @@ function UnpaidBanner({ neverPaid, balance, amount, paid }: {
   );
 }
 
-// Indicador de progreso paso a paso del formulario de servicio: círculos numerados
-// conectados por una línea que se colorea conforme completas cada etapa + barra de avance.
-function FormStepper({ steps, current, onNavigate }: {
-  steps: { label: string; done: boolean }[];
-  current: number;
-  onNavigate?: (i: number) => void;
-}) {
-  const doneCount = steps.filter(s => s.done).length;
-  const pct = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
-  return (
-    <div className="shrink-0 space-y-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5">
-      <div className="flex items-center gap-1.5">
-        {steps.map((s, i) => {
-          const lineDone = i > 0 && steps[i - 1].done;
-          const navigable = !!onNavigate && i !== current && i < current;
-          const stepEl = (
-            <div className="flex flex-col items-center gap-1">
-              <span className={cn(
-                'flex size-7 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-bold transition-colors',
-                s.done
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : i === current
-                    ? 'border-primary text-primary'
-                    : 'border-border bg-background text-muted-foreground'
-              )}>
-                {s.done ? <Check className="size-3.5" /> : i + 1}
-              </span>
-              <span className={cn('text-[10px] font-medium leading-none', i === current ? 'text-foreground' : 'text-muted-foreground')}>
-                {s.label}
-              </span>
-            </div>
-          );
-          return (
-            <Fragment key={s.label}>
-              {i > 0 && (
-                <div className={cn('h-0.5 min-w-2 flex-1 rounded-full transition-colors', lineDone ? 'bg-primary' : 'bg-border')} />
-              )}
-              {navigable ? (
-                <button type="button" className="rounded-md px-1 py-0.5 hover:bg-accent/60 transition-colors cursor-pointer"
-                  onClick={() => onNavigate!(i)} title={`Ir a: ${s.label}`}>
-                  {stepEl}
-                </button>
-              ) : stepEl}
-            </Fragment>
-          );
-        })}
-      </div>
-      <div className="flex items-center gap-2">
-        <div className="h-1 flex-1 overflow-hidden rounded-full bg-border">
-          <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${pct}%` }} />
-        </div>
-        <span className="shrink-0 text-[10px] font-semibold text-muted-foreground">
-          {current >= steps.length
-            ? `¡Listo! ${pct}%`
-            : `Paso ${current + 1} de ${steps.length} · ${steps[current].label} · ${pct}%`}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
@@ -302,6 +250,10 @@ export default function Services() {
   const [deleting, setDeleting] = useState<Service | null>(null);
   const [payFor, setPayFor] = useState<Service | null>(null);
   const [refundFor, setRefundFor] = useState<Service | null>(null);
+  // F30: asistente de cierre (pide solo lo que falta para entregar la orden)
+  const [cierreFor, setCierreFor] = useState<Service | null>(null);
+  // F30: cola de entregas — se abre con F4 y elige la orden a cerrar
+  const [showQueue, setShowQueue] = useState(false);
   const [printFor, setPrintFor] = useState<Service | null>(null);
   const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [delivering, setDelivering] = useState<Service | null>(null);
@@ -311,8 +263,11 @@ export default function Services() {
   const [catalog, setCatalog] = useState<Product[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Atajos de teclado: N/F2 = Nuevo Servicio, / = enfocar el buscador.
+  // Atajos de teclado: N/F2 = Nuevo Servicio, F4 = cerrar una entrega (cola), / = buscar.
   // Solo cuando NO se está escribiendo en un campo (o el dialog está cerrado).
+  // F30: F4 no debe apilar la cola sobre otro diálogo ya abierto.
+  const algunDialogoAbierto = showForm || showQueue || !!payFor || !!refundFor || !!printFor
+    || !!deleting || !!cierreFor || !!confirmDeliver || showPrinterSettings;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -321,6 +276,10 @@ export default function Services() {
         e.preventDefault();
         setEditing(null);
         setShowForm(true);
+      } else if (e.key === 'F4' && !typing && !algunDialogoAbierto) {
+        // El mostrador recibe mucho cliente: F4 → cola de entregas → asistente de cierre.
+        e.preventDefault();
+        setShowQueue(true);
       } else if (e.key === '/' && !typing) {
         e.preventDefault();
         searchRef.current?.focus();
@@ -328,7 +287,7 @@ export default function Services() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [showForm]);
+  }, [showForm, algunDialogoAbierto]);
 
   // Pantalla exacta → etiqueta del repuesto para el chip de la tarjeta
   const screenProductById = useMemo(() => {
@@ -400,18 +359,13 @@ export default function Services() {
     load();
   };
 
-  // Entrega directa: status Entregado + date_out vacío (el backend pone la fecha de hoy y descuenta stock)
+  // Entrega directa desde la tarjeta: status Entregado + date_out vacío (el backend pone la
+  // fecha de hoy y descuenta stock). Pasa por el helper compartido para que no se olvide
+  // ningún campo de la orden (monto, descuento, pantalla exacta, técnico…).
   const deliver = async (s: Service) => {
     setDelivering(s);
     try {
-      await api.updateService(
-        s.id, s.client ?? '', s.phone ?? '', s.model ?? '', s.fault ?? '',
-        s.service_type ?? 'Cambio pantalla', s.service_types ?? '', s.amount, s.payment_method ?? 'Divisas (USD Cash)',
-        '', 'Entregado', s.observations ?? '', s.bank_fee_percent ?? 0,
-        s.zelle_reference ?? '', s.currency ?? 'USD', s.client_ci ?? '',
-        s.client_address ?? '', s.device_checklist ?? '', s.technician ?? '', s.technician_id ?? null, s.color ?? '', s.screen_product_id ?? null,
-        s.discount_amount ?? 0
-      );
+      await updateOrderKeepingFields(s, { status: 'Entregado' });
     } finally {
       setDelivering(null);
       setConfirmDeliver(null);
@@ -619,6 +573,13 @@ export default function Services() {
               </div>
               <div className="flex flex-wrap gap-1.5 border-t pt-3">
                 {ACTIVE_STATUSES.includes(s.status ?? '') && (
+                  <Button size="sm" className="flex-1 bg-amber-500 text-white hover:bg-amber-600"
+                    title="Asistente: te pide solo lo que falta y cierra la orden"
+                    onClick={() => setCierreFor(s)}>
+                    <Zap className="size-3.5" /> Cerrar
+                  </Button>
+                )}
+                {ACTIVE_STATUSES.includes(s.status ?? '') && (
                   <Button size="sm" variant="outline" className="flex-1 text-emerald-700 border-emerald-500/50 hover:bg-emerald-500/10"
                     disabled={delivering?.id === s.id}
                     onClick={() => {
@@ -700,6 +661,9 @@ export default function Services() {
               <CheckCircle2 className="size-4" /> Día abierto
             </span>
           )}
+          <Button variant="outline" onClick={() => setShowQueue(true)} title="Cerrar una entrega (F4) — busca la orden y cobra en un paso">
+            <Zap className="size-4" /> Cerrar entrega
+          </Button>
           <Button variant="outline" onClick={() => setShowPrinterSettings(true)} title="Configurar impresora de tickets">
             <Printer className="size-4" /> Impresora
           </Button>
@@ -858,6 +822,24 @@ export default function Services() {
         onSaved={load}
       />
 
+      {/* F30: cola de entregas (F4). Elige la orden y abre el asistente con ella. */}
+      <CierreQueueDialog
+        open={showQueue}
+        onOpenChange={setShowQueue}
+        onPick={(s) => setCierreFor(s)}
+      />
+
+      {/* F30: asistente de cierre. Pide solo lo que falta (pantalla que se instaló y cobro),
+          cobra y entrega en un mismo paso y ofrece el recibo. */}
+      <CierreServiceDialog
+        service={cierreFor}
+        open={!!cierreFor}
+        onOpenChange={(o) => { if (!o) setCierreFor(null); }}
+        dayOpen={dayOpen}
+        onSaved={load}
+        onPrint={(s) => setPrintFor(s)}
+      />
+
       <PrintReceiptDialog
         serviceId={printFor?.id ?? null}
         open={!!printFor}
@@ -967,163 +949,6 @@ function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouche
   }
   return patch;
 }
-
-// Compatibilidad del modelo: la resuelve el BACKEND (find_compatible_products),
-// la MISMA fuente que usa el módulo de inventario. Devuelve los repuestos del
-// catálogo que sirven a ese teléfono, rankeados (coincidencia exacta primero y,
-// dentro del nivel, con stock antes de agotados). Antes esto se calculaba en el
-// frontend sobre las 1126 filas del catálogo completo.
-function useCompatibleProducts(model: string, enabled = true) {
-  const [candidates, setCandidates] = useState<ScreenCandidate[]>([]);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    const q = model.trim();
-    if (!enabled || q.length < 3) { setCandidates([]); return; }
-    let alive = true;
-    setLoading(true);
-    const t = setTimeout(() => {
-      api.findCompatibleProducts(q, null, 80)
-        .then(r => { if (alive) setCandidates(r); })
-        .catch(() => { if (alive) setCandidates([]); })
-        .finally(() => { if (alive) setLoading(false); });
-    }, 250);
-    return () => { alive = false; clearTimeout(t); };
-  }, [model, enabled]);
-  return { candidates, loading };
-}
-
-// Solo pantallas (categoría 1) para el descuento exacto de inventario.
-const onlyScreens = (candidates: ScreenCandidate[]) => candidates.filter(c => c.product.category_id === 1);
-
-// Adaptador a la forma que usa applyModelPrice (precio sugerido del modelo).
-const asPhoneEntry = (label: string, candidates: ScreenCandidate[]): PhoneModelEntry => ({
-  label,
-  norm: normPhoneModel(label),
-  products: candidates.map(c => c.product),
-});
-
-// La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay
-// opciones en el catálogo. Al ENTREGAR una pantalla AGOTADA hay que confirmarlo
-// (queda en faltante) — antes se podía entregar sin ningún aviso.
-const screenOk = (serviceTypes: string[], screenProductId: number | null,
-                  options: ScreenCandidate[], confirmed = false, status = '') => {
-  if (!serviceTypes.includes('Cambio pantalla') || options.length === 0) return true;
-  if (screenProductId == null) return false;
-  const chosen = options.find(o => o.product.id === screenProductId);
-  if (!chosen) return true;
-  if (status === 'Entregado' && !chosen.in_stock) return confirmed;
-  return true;
-};
-
-// Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala
-// (al entregar se descuenta esa y solo esa) y las agotadas se marcan aparte.
-function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, onChange, onConfirm }: {
-  screenProductId: number | null;
-  screenOptions: ScreenCandidate[];
-  loading: boolean;
-  confirmed: boolean;
-  onChange: (id: number | null) => void;
-  onConfirm: (v: boolean) => void;
-}) {
-  const chosen = screenOptions.find(o => o.product.id === screenProductId) ?? null;
-  const chosenOut = chosen != null && !chosen.in_stock;
-  return (
-    <div className="flex flex-col gap-2">
-      <label className="text-sm font-medium flex items-center gap-1.5">
-        <Smartphone className="size-3.5 text-muted-foreground" /> Pantalla a instalar
-        <span className="font-normal text-muted-foreground text-xs">(descuenta del inventario al entregar)</span>
-      </label>
-
-      {loading && (
-        <div className="flex flex-col gap-1.5">
-          {[0, 1, 2].map(i => <div key={i} className="h-9 rounded-md bg-muted animate-pulse" />)}
-        </div>
-      )}
-
-      {!loading && screenOptions.length === 0 && (
-        <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
-          Modelo sin pantallas en el catálogo — el inventario no se descuenta automáticamente.
-          Revisa cómo está escrito el modelo o registra la pantalla en Inventario.
-        </p>
-      )}
-
-      {!loading && screenOptions.length > 0 && (
-        <div className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
-          {screenOptions.map(({ product: p, in_stock, match_quality }) => {
-            const active = p.id === screenProductId;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
-                className={cn(
-                  'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
-                  active ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-accent',
-                )}
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
-                  <span className="truncate">
-                    {partLabel(p)}
-                    {p.variant && <Badge variant="secondary" className="ml-2 text-[10px]">{p.variant}</Badge>}
-                  </span>
-                </span>
-                <span className="flex items-center gap-1.5 shrink-0">
-                  {match_quality !== 'exacta' && (
-                    <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
-                  )}
-                  {p.price_sale > 0 && (
-                    <span className="text-xs text-muted-foreground tabular-nums">${p.price_sale.toFixed(2)}</span>
-                  )}
-                  <Badge
-                    variant={in_stock ? 'default' : 'outline'}
-                    className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}
-                  >
-                    {in_stock ? `stock ${p.stock}` : 'agotada'}
-                  </Badge>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {!loading && screenOptions.length > 0 && screenProductId == null && (
-        <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
-      )}
-
-      {!loading && chosen && !chosenOut && (
-        <p className="text-xs text-emerald-600 flex items-center gap-1">
-          <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario (stock actual {chosen.product.stock})
-        </p>
-      )}
-
-      {!loading && chosenOut && (
-        <Alert variant="destructive" className="py-2">
-          <AlertTriangle className="size-4" />
-          <AlertTitle className="text-xs">Esa pantalla no tiene stock</AlertTitle>
-          <AlertDescription className="text-xs flex flex-col gap-2">
-            <span>
-              Si se entrega igual, el inventario de «{partLabel(chosen!.product)}» queda en{' '}
-              <strong>{chosen!.product.stock - 1}</strong> y el movimiento se marca como <strong>faltante</strong>.
-            </span>
-            <button
-              type="button"
-              onClick={() => onConfirm(!confirmed)}
-              className={cn(
-                'self-start rounded-md border px-2 py-1 text-[11px] font-medium transition-colors',
-                confirmed ? 'border-destructive bg-destructive text-white' : 'border-border bg-background hover:bg-muted',
-              )}
-            >
-              {confirmed ? '✓ Confirmado: se entregó sin stock registrado' : 'Confirmo que se entregó sin stock registrado'}
-            </button>
-          </AlertDescription>
-        </Alert>
-      )}
-    </div>
-  );
-}
-
 // Colores predefinidos del equipo — selección rápida sin escribir.
 const DEVICE_COLORS = [
   'Azul', 'Azul oscuro', 'Celeste',

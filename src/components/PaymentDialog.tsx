@@ -9,6 +9,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
 import { methodCurrency, currencySymbol, isRefund, isFinalized } from '@/lib/utils';
+// Reglas de dinero compartidas con el asistente de cierre (Harness F30): una sola
+// implementación de la moneda del método vs la del campo, "todo el saldo" y Punto.
+import {
+  convertAmount, finalAmount, suggestAmount as suggestPaymentAmount,
+  saldoChipValue, quickAmounts, puntoCommission, DEFAULT_PUNTO_FEE,
+} from '@/lib/payment-math';
 import PrintReceiptDialog from './PrintReceiptDialog';
 import type { Service, ServicePayment } from '../types';
 
@@ -43,11 +49,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
 
   // Conversión de moneda del CAMPO (toggle): Bs entero, $ 2 decimales. Sin tasa no
   // hay conversión segura → devuelve el valor sin cambios (el Alert ámbar lo avisa).
-  const convertTo = (value: number, to: 'USD' | 'VES'): number => {
-    if (tasaBcv <= 0 || to === payCur) return value;
-    if (to === 'VES') return Math.round(value * tasaBcv);
-    return Math.round((value / tasaBcv) * 100) / 100;
-  };
+  const convertTo = (value: number, to: 'USD' | 'VES'): number => convertAmount(value, payCur, to, tasaBcv);
 
   // Cambiar la moneda del campo convierte el valor SIN cambiar su significado:
   // $5 → Bs. 3.744 al pasar a Bs.; Bs. 5.000 → $6.68 al pasar a $.
@@ -58,14 +60,11 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   };
 
   // Monto FINAL a guardar: SIEMPRE en la moneda del MÉTODO (el campo puede estar en $ o Bs.).
-  const payAmountFinal = payCurrency === 'VES'
-    ? (payCur === 'VES' ? Math.round(payAmount) : tasaBcv > 0 ? Math.round(payAmount * tasaBcv) : 0)
-    : (payCur === 'USD' ? Math.round(payAmount * 100) / 100 : tasaBcv > 0 ? Math.round((payAmount / tasaBcv) * 100) / 100 : 0);
+  const payAmountFinal = finalAmount(payAmount, payCur, payCurrency, tasaBcv);
 
   // Chips de abono rápido en la moneda del CAMPO: $5/$10/$15/$20 o Bs. 5.000/10.000/15.000/20.000
   // ("5 mil", "10 mil" — lo que dice el cliente).
-  const QUICK_USD = [5, 10, 15, 20];
-  const QUICK_VES = [5000, 10000, 15000, 20000];
+  const QUICK = quickAmounts(payCur);
 
   useEffect(() => {
     api.getPaymentMethods().then(setMethods).catch(() => {});
@@ -75,10 +74,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const suggestAmount = useCallback(() => {
     if (!service) return 0;
     const saldo = service.amount - (service.paid_amount ?? 0);
-    if (saldo <= 0.005) return 0;
-    const bruto = Math.min(saldo, service.amount);
-    if (payCur === 'VES') return tasaBcv > 0 ? Math.round(bruto * tasaBcv) : 0;
-    return Math.round(bruto * 100) / 100;
+    return suggestPaymentAmount(saldo, service.amount, payCur, tasaBcv);
   }, [service, payCur, tasaBcv]);
 
   // Cargar pagos + tasa al abrir con un servicio
@@ -90,7 +86,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
     // Inicializar el form con el método del servicio (el toggle sigue la moneda del método)
     setPayMethod(service.payment_method ?? 'Divisas (USD Cash)');
     setPayCur(methodCurrency(service.payment_method));
-    setPayFee(service.payment_method?.includes('Punto') ? 3.5 : 0);
+    setPayFee(service.payment_method?.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
     setPayZelle('');
     setPayNotes('');
     setPayError(null);
@@ -138,9 +134,10 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
 
   // Valor del chip "Todo el saldo" en la moneda del CAMPO (Bs → saldo × tasa BCV)
-  const saldoChip = payCur === 'VES'
-    ? (tasaBcv > 0 ? Math.round(Math.max(0, saldoUsd) * tasaBcv) : 0)
-    : Math.round(Math.max(0, saldoUsd) * 100) / 100;
+  const saldoChip = saldoChipValue(saldoUsd, payCur, tasaBcv);
+
+  // Comisión del Punto de Venta (las mismas cuentas que usa el asistente de cierre)
+  const punto = puntoCommission(payAmountFinal, payFee);
 
   return (
     <>
@@ -181,7 +178,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               </ToggleGroup>
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {(payCur === 'VES' ? QUICK_VES : QUICK_USD).map(v => (
+              {(QUICK).map(v => (
                 <Button key={v} type="button" size="sm"
                   variant={Math.abs(payAmount - v) < 0.5 ? 'default' : 'outline'}
                   className="h-7 px-2.5 text-xs"
@@ -239,10 +236,13 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
             <Select value={payMethod} onValueChange={v => {
               const nextCur = methodCurrency(v);
               setPayMethod(v);
-              setPayFee(v.includes('Punto') ? 3.5 : 0);
+              setPayFee(v.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
               // El toggle sigue al método y el valor se CONVIERTE sin cambiar de
               // significado (7000 Bs → $9.35 si cambias a un método en dólares).
-              if (nextCur !== payCur) {
+              // SIN TASA no hay conversión posible: se deja el campo como está (no se borra lo
+              // tecleado ni se le cambia el rótulo) y Guardar queda bloqueado porque el monto
+              // final en la moneda del método da 0.
+              if (nextCur !== payCur && tasaBcv > 0) {
                 setPayAmount(convertTo(payAmount, nextCur));
                 setPayCur(nextCur);
               }
@@ -266,7 +266,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               <Input type="number" step={0.1} min={0} max={100} value={payFee}
                 onChange={e => setPayFee(Number(e.target.value))} />
               <p className="text-xs text-muted-foreground">
-                Comisión: {currencySymbol(payCurrency)}{((payAmountFinal * payFee) / 100).toFixed(2)} · Neto: {currencySymbol(payCurrency)}{(payAmountFinal - (payAmountFinal * payFee) / 100).toFixed(2)}
+                Comisión: {currencySymbol(payCurrency)}{punto.commission.toFixed(2)} · Neto: {currencySymbol(payCurrency)}{punto.net.toFixed(2)}
               </p>
             </div>
           )}
