@@ -100,12 +100,7 @@ const clickDialog = async (label, exact = false) => {
 /** Botón por texto EXACTO (los labels del pedido). */
 const clickExactText = async (sel, label) => clickLabeled(sel, label, true);
 
-/** Abre un Select de Radix con click REAL y devuelve las opciones del portal. */
-const openSelectAndOptions = async (triggerExpr) => {
-  await clickCenter(triggerExpr);
-  await waitFor(`document.querySelectorAll('[role="option"]').length > 0`, 4000);
-  return evalx(`[...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim())`);
-};
+/** Abre un Select de Radix con click REAL (no `dispatchEvent`) y devuelve las opciones del portal. */
 const clickOption = async (label) => {
   await clickCenter(`([...document.querySelectorAll('[role="option"]')].find(o => (o.innerText || '').includes(${JSON.stringify(label)})) || null)`);
   await sleep(900);
@@ -149,7 +144,6 @@ const waitH1 = async (text, ms = 15000) => waitFor(`[...document.querySelectorAl
 /** IPC directo a Tauri (mismas firmas que src/db.ts). */
 const invoke = (cmd, args = {}) => evalx(`(() => window.__TAURI_INTERNALS__.invoke(${JSON.stringify(cmd)}, ${JSON.stringify(args)}))()`);
 const serviciosRaw = () => invoke('get_services', { search: '', status: '', startDate: '', endDate: '' });
-const ventasRaw = () => invoke('get_sales', { search: '', days: null, startDate: '', endDate: '' });
 
 const fechaHace = (dias) => new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
 const HOY = new Date().toISOString().slice(0, 10);
@@ -408,11 +402,13 @@ const clickCardButton = async (orderNum, label) => {
 };
 {
   // --- modelo + pantalla: se elige un modelo del CATÁLOGO que TENGA pantalla con stock (así
-  //     «Cambio pantalla» es coherente y el asistente de cierre tiene qué ofrecer) ---
+  //     «Cambio pantalla» es coherente y el asistente de cierre tiene qué ofrecer).
+  //     Se revisan como mucho 15 teléfonos con stock (cada uno es una consulta de compatibilidad):
+  //     alcanza para encontrar una pantalla disponible sin hacer 60 round-trips al backend. ---
   const modelos = await invoke('get_phone_models', { search: '', limit: 60 });
+  const candidatosModelo = (modelos ?? []).filter(m => m.with_stock > 0 && m.screens > 0).slice(0, 15);
   let elegido = null;
-  for (const m of (modelos ?? [])) {
-    if (!(m.with_stock > 0)) continue;
+  for (const m of candidatosModelo) {
     const cand = await invoke('find_compatible_screens', { model: m.label, limit: 5 });
     const pant = (cand ?? []).find(c => c.in_stock && c.product.stock > 0);
     if (pant) { elegido = { label: m.label, stock: m.stock, pantalla: pant.product.name, pantallaId: pant.product.id }; break; }
@@ -1035,6 +1031,12 @@ const clickCardButton = async (orderNum, label) => {
     DESPUES.sales === ANTES.sales + 1 && DESPUES.maxSaleId === ANTES.maxSaleId + 1,
     `ventas ${ANTES.sales} → ${DESPUES.sales} · max id ${ANTES.maxSaleId} → ${DESPUES.maxSaleId}`);
   check('el script no dejó diálogos abiertos', (await dialogsOpen().catch(() => 0)) === 0, `${await dialogsOpen().catch(() => 0)} diálogo(s)`);
+
+  // El turno de caja (lo que NO se debe tocar): abrir/cerrar el día cambia la historia financiera.
+  const diaFinal = await invoke('get_active_day');
+  check('el turno de caja quedó IGUAL (el script no abrió ni cerró el día)',
+    ((diaInicial?.close_date ?? null) === (diaFinal?.close_date ?? null)) && ((diaInicial?.tasa_bcv ?? 0) === (diaFinal?.tasa_bcv ?? 0)),
+    `antes: ${diaInicial ? `${diaInicial.close_date} (tasa ${diaInicial.tasa_bcv})` : 'cerrado'} → después: ${diaFinal ? `${diaFinal.close_date} (tasa ${diaFinal.tasa_bcv})` : 'cerrado'}`);
 }
 
 // ============================================================================================

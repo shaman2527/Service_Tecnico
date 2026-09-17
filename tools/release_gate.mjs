@@ -65,17 +65,22 @@ const abierto = q('SELECT close_date, tasa_bcv FROM daily_closings WHERE is_clos
 if (abierto && !abierto.error) fail('la plantilla tiene un DÍA ABIERTO', `${abierto.close_date} · tasa ${abierto.tasa_bcv}`);
 else pass('sin día abierto en la plantilla');
 
-// 4) El catálogo tiene que poder VENDER: productos con precio.
-const sinPrecio = q('SELECT COUNT(*) c FROM products WHERE price_sale IS NULL OR price_sale <= 0');
-const sinCosto = q('SELECT COUNT(*) c FROM products WHERE price_cost IS NULL OR price_cost <= 0');
+// 4) El catálogo tiene que poder VENDER: los productos CON STOCK necesitan precio, porque en el
+//    mostrador una ficha con stock y sin precio no se puede cobrar (el botón queda apagado).
+//    Los que no tienen stock y no tienen precio son aviso: no hay nada que vender de ellos.
 const total = tabla('products');
+const sinPrecioConStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock > 0');
+const sinPrecioSinStock = q('SELECT COUNT(*) n FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock <= 0');
+const conStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE stock > 0');
+const sinCosto = q('SELECT COUNT(*) c FROM products WHERE price_cost IS NULL OR price_cost <= 0');
 if (total.error) fail('no pude leer «products»', total.error);
 else if (!total.c) fail('la plantilla NO tiene productos', 'una PC nueva arrancaría con el catálogo vacío');
 else {
-  if (sinPrecio.c > 0) fail(`${sinPrecio.c} de ${total.c} productos SIN precio de venta`,
-    'no se podrían cobrar. Aplicá la lista del local: REGISTRO_PRICES_DB=<db> REGISTRO_PRICES_APPLY=1 cargo test --lib -- --ignored test_manual_restore_prices');
-  else pass('todos los productos tienen precio de venta');
-  if (sinCosto.c > 0) warn(`${sinCosto.c} productos sin precio de costo`, 'la utilidad del Dashboard quedaría inflada');
+  if (sinPrecioConStock.n > 0) fail(`${sinPrecioConStock.n} productos CON STOCK (${sinPrecioConStock.u} unidades) SIN precio de venta`,
+    `de ${conStock.n} fichas con stock: esas no se pueden cobrar en el mostrador. Cargá esos precios a mano o completá la lista, y volvé a correr la restauración de precios (REGISTRO_PRICES_DB/APPLY).`);
+  else pass('todos los productos con stock tienen precio de venta');
+  if (sinPrecioSinStock.n > 0) warn(`${sinPrecioSinStock.n} productos sin stock y sin precio`, 'no hay nada que vender de ellos; se pueden dejar así o cargarles precio después');
+  if (sinCosto.c > 0) warn(`${sinCosto.c} productos sin precio de costo`, 'la utilidad del Dashboard y el capital de inventario quedarían en 0 para esos SKU');
 }
 
 // 5) Duplicados y stock negativo: dos fichas del mismo modelo parten el stock y confunden al taller.
