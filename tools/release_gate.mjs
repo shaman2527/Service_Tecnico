@@ -88,35 +88,64 @@ if (walBytes > 0) {
 }
 
 const db = new DatabaseSync(DB, { readOnly: true });
-const q = (sql) => { try { return db.prepare(sql).get(); } catch (e) { return { error: e.message }; } };
-const all = (sql) => { try { return db.prepare(sql).all(); } catch (e) { return [{ error: e.message }]; } };
-const tabla = (n) => q(`SELECT COUNT(*) c FROM ${n}`);
+// Un error de SQL NO es un OK (lección de la revisión adversarial del 2026-09-18): antes `q()`
+// devolvía `{error}` y las ramas de abajo igual imprimían «sin duplicados» / «sin día abierto» /
+// «todos con precio», así que una base sin el esquema de precios daba LISTO. Ahora toda consulta
+// que no se puede ejecutar EMPUJA UN BLOQUEANTE y devuelve null, y cada check lo mira.
+const q = (sql, etiqueta) => {
+  try { return db.prepare(sql).get(); }
+  catch (e) { fail(`no se pudo ejecutar la consulta «${etiqueta ?? sql.slice(0, 44)}»`, e.message); return null; }
+};
+const all = (sql, etiqueta) => {
+  try { return db.prepare(sql).all(); }
+  catch (e) { fail(`no se pudo ejecutar la consulta «${etiqueta ?? sql.slice(0, 44)}»`, e.message); return null; }
+};
+const tabla = (n) => q(`SELECT COUNT(*) c FROM ${n}`, `contar ${n}`);
 
-// 2) Nada de datos transaccionales ni de personas: una instalación nueva arranca limpia.
+// 1.bis) ESQUEMA: sin las tablas centrales, «0 filas» no significa «plantilla limpia» — significa que
+// NO SE PUDO COMPROBAR. Se exige que existan antes de dar cualquier veredicto.
 const prohibidas = ['services', 'sales', 'service_payments', 'daily_closings', 'expenses',
   'purchase_orders', 'purchase_order_items', 'inventory_movements', 'clients'];
+const centrales = ['products', 'categories', 'settings', 'technicians'];
+const requeridas = [...centrales, ...prohibidas];
+const tablasExistentes = new Set((all("SELECT name FROM sqlite_master WHERE type='table'", 'listar tablas') || []).map(r => r.name));
+const faltantes = requeridas.filter(t => !tablasExistentes.has(t));
+if (faltantes.length) {
+  fail(`la plantilla no tiene ${faltantes.length} tabla(s) que la app necesita`,
+    `faltan: ${faltantes.join(', ')} — sin ellas este gate no puede comprobar nada (regenerá la plantilla con tools/make_release_template.mjs)`);
+} else {
+  pass('el esquema tiene las tablas centrales', `${requeridas.length} tablas presentes`);
+}
+if (!tablasExistentes.has('phones')) {
+  warn('la plantilla no trae la tabla «phones» (el padrón de modelos)',
+    'la app la reconstruye en el primer arranque; no es bloqueante pero una PC nueva tarda más en abrir Modelos');
+}
+
+// 2) Nada de datos transaccionales ni de personas: una instalación nueva arranca limpia.
 for (const t of prohibidas) {
   const r = tabla(t);
-  if (r.error) { warn(`no pude leer ${t}`, r.error); continue; }
+  if (!r) continue;                       // ya se reportó como bloqueante
   if (r.c > 0) fail(`la plantilla trae ${r.c} fila(s) en «${t}»`,
     'una PC nueva arrancaría con datos de desarrollo/clientes reales. Vaciá esa tabla en la plantilla (ver tools/progress/specs/F32-*).');
 }
 
 // 3) Día abierto: nunca debe viajar (una PC nueva no puede quedar atrapada en un turno viejo).
-const abierto = q('SELECT close_date, tasa_bcv FROM daily_closings WHERE is_closed=0');
-if (abierto && !abierto.error) fail('la plantilla tiene un DÍA ABIERTO', `${abierto.close_date} · tasa ${abierto.tasa_bcv}`);
+const abierto = q('SELECT close_date, tasa_bcv FROM daily_closings WHERE is_closed=0', 'día abierto');
+if (!abierto) { /* la consulta ya falló */ }
+else if (Object.keys(abierto).length > 0) fail('la plantilla tiene un DÍA ABIERTO', `${abierto.close_date} · tasa ${abierto.tasa_bcv}`);
 else pass('sin día abierto en la plantilla');
 
 // 4) El catálogo tiene que poder VENDER: los productos CON STOCK necesitan precio, porque en el
 //    mostrador una ficha con stock y sin precio no se puede cobrar (el botón queda apagado).
 //    Los que no tienen stock y no tienen precio son aviso: no hay nada que vender de ellos.
 const total = tabla('products');
-const sinPrecioConStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock > 0');
-const sinPrecioSinStock = q('SELECT COUNT(*) n FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock <= 0');
-const conStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE stock > 0');
-const sinCosto = q('SELECT COUNT(*) c FROM products WHERE price_cost IS NULL OR price_cost <= 0');
-if (total.error) fail('no pude leer «products»', total.error);
-else if (!total.c) fail('la plantilla NO tiene productos', 'una PC nueva arrancaría con el catálogo vacío');
+const sinPrecioConStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock > 0', 'productos con stock sin precio');
+const sinPrecioSinStock = q('SELECT COUNT(*) n FROM products WHERE (price_sale IS NULL OR price_sale <= 0) AND stock <= 0', 'productos sin stock sin precio');
+const conStock = q('SELECT COUNT(*) n, COALESCE(SUM(stock),0) u FROM products WHERE stock > 0', 'productos con stock');
+const sinCosto = q('SELECT COUNT(*) c FROM products WHERE price_cost IS NULL OR price_cost <= 0', 'productos sin costo');
+if (!total || !sinPrecioConStock || !sinPrecioSinStock || !conStock || !sinCosto) {
+  // alguna consulta falló: ya está reportada
+} else if (!total.c) fail('la plantilla NO tiene productos', 'una PC nueva arrancaría con el catálogo vacío');
 else {
   if (sinPrecioConStock.n > 0) {
     const exc = excepciones.sin_precio_con_stock;
@@ -139,30 +168,40 @@ else {
 
 // 5) Duplicados y stock negativo: dos fichas del mismo modelo parten el stock y confunden al taller.
 const dup = q(`SELECT COUNT(*) c FROM (SELECT name, COALESCE(brand,''), COALESCE(model,''), COALESCE(variant,'')
-  FROM products GROUP BY 1,2,3,4 HAVING COUNT(*) > 1)`);
-if (dup.c > 0) fail(`${dup.c} grupo(s) de productos DUPLICADOS`, 'fusioná con merge_products (Inventario → Revisar duplicados) antes de publicar');
+  FROM products GROUP BY 1,2,3,4 HAVING COUNT(*) > 1)`, 'grupos duplicados');
+if (!dup) { /* consulta fallida: ya reportada */ }
+else if (dup.c > 0) fail(`${dup.c} grupo(s) de productos DUPLICADOS`, 'fusioná con merge_products (Inventario → Revisar duplicados) antes de publicar');
 else pass('sin productos duplicados');
-const neg = q('SELECT COUNT(*) c FROM products WHERE stock < 0');
-if (neg.c > 0) fail(`${neg.c} producto(s) con stock NEGATIVO`, 'ajustá el stock (queda como faltante de compra)');
+const neg = q('SELECT COUNT(*) c FROM products WHERE stock < 0', 'stock negativo');
+if (!neg) { /* consulta fallida */ }
+else if (neg.c > 0) fail(`${neg.c} producto(s) con stock NEGATIVO`, 'ajustá el stock (queda como faltante de compra)');
 else pass('sin stock negativo');
 
 // 6) Integridad y accesos.
-const integ = q('PRAGMA integrity_check');
+const integ = q('PRAGMA integrity_check', 'integridad');
 if (integ && (integ.integrity_check === 'ok' || Object.values(integ)[0] === 'ok')) pass('integrity_check ok');
 else fail('integrity_check falló', JSON.stringify(integ));
-const fk = all('PRAGMA foreign_key_check');
+const fk = all('PRAGMA foreign_key_check', 'claves foráneas');
 if (Array.isArray(fk) && fk.length === 0) pass('foreign_key_check sin problemas');
-else fail(`${fk.length} violación(es) de clave foránea`, JSON.stringify(fk.slice(0, 3)));
-const pin = q("SELECT value FROM settings WHERE key='pin'");
-if (pin && pin.value) pass('PIN configurado', 'la app pedirá PIN al abrir');
-else warn('sin PIN configurado', 'la app abriría sin pedir PIN (el dueño debería configurarlo)');
+else fail(`${fk?.length ?? '?'} violación(es) de clave foránea`, JSON.stringify((fk || []).slice(0, 3)));
+// El PIN de la plantilla TIENE que ser el inicial documentado: desde que el PIN se guarda hasheado
+// (B4) un `make_release_template` viejo solo lo creaba si faltaba, así que la plantilla podía viajar
+// con el PIN REAL del dueño dentro de un instalador público. Presencia no alcanza: se exige el valor.
+const PIN_INICIAL = '1234';
+const pin = q("SELECT value FROM settings WHERE key='pin'", 'PIN');
+if (!pin) { /* consulta fallida */ }
+else if (pin.value === PIN_INICIAL) pass('el PIN de la plantilla es el inicial documentado', PIN_INICIAL);
+else if (!pin.value) warn('sin PIN configurado', 'la app abriría sin pedir PIN (el dueño debería configurarlo)');
+else if (excepciones.pin_inicial) warn(`excepción ACEPTADA: el PIN de la plantilla no es el inicial (${excepciones.pin_inicial.aceptada_por})`, excepciones.pin_inicial.motivo);
+else fail('el PIN de la plantilla NO es el inicial documentado',
+  'puede ser el PIN REAL de una persona viajando en un instalador público. Regenerá la plantilla con «node tools/make_release_template.mjs --force» (resetea el PIN a 1234) o declaralo en tools/release_excepciones.json con su motivo.');
 const tech = tabla('technicians');
-if (tech.c > 0) pass(`técnicos de la plantilla: ${tech.c}`, 'Aldri/William por defecto');
+if (tech && tech.c > 0) pass(`técnicos de la plantilla: ${tech.c}`, 'Aldri/William por defecto');
 
 // 7) Avisos de configuración que dependen de la PC de la tienda.
-const pw = q("SELECT value FROM settings WHERE key='printer_windows'");
+const pw = q("SELECT value FROM settings WHERE key='printer_windows'", 'impresora');
 if (pw && pw.value) warn(`la plantilla trae impresora de Windows «${pw.value}»`, 'en una PC nueva esa impresora puede no existir: el taller la cambia en Impresora');
-const pl = q("SELECT value FROM settings WHERE key='printer_business_line'");
+const pl = q("SELECT value FROM settings WHERE key='printer_business_line'", 'nombre de negocio');
 if (pl && pl.value) warn(`la plantilla trae un nombre de negocio: «${pl.value}»`, 'revisá que sea el correcto');
 
 // 8) HIGIENE DEL REPO — un archivo gigante versionado impide publicar: GitHub rechaza un push con un

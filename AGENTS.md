@@ -377,6 +377,32 @@ inventario y la limpieza canónica, y compara fila por fila las tablas de histor
 | **Arranque** (`init()`) | Campos DERIVADOS: recalcula `services.paid_amount` (suma de los abonos) y los totales de días cerrados; normaliza `service_payments.currency` de pagos en Bs guardados como USD (bug viejo, idempotente). F32 solo AGREGA 3 columnas a `services` (`photo_in_at`, `photo_out_at`, `pay_intent`) con `ALTER TABLE` idempotente: las filas viejas quedan en NULL | Escribe en filas viejas **solo** en campos derivados/normalizados: no borra ni cambia montos, fechas ni clientes. La migración de F32 no reescribe ninguna fila existente |
 | **Recordatorios de política** (`set_service_policy`, F32) | **Una** columna de la orden indicada (`photo_in_at` / `photo_out_at` / `pay_intent`), elegida de una whitelist; la fecha/hora la estampa el backend | **NO** — es una anotación del operario: no toca montos, `paid_amount`, stock, fechas, estado ni cierres, y **no exige día abierto**. `insert_service_row` y `update_service` no la escriben, así que editar una orden jamás la borra |
 
+**Prueba de la ACTUALIZACIÓN (2026-09-18) — la condición del dueño, medible y repetible.** Cuando sale una
+versión nueva, lo primero que hace la app en la PC del taller es abrir SU base y correr `init()`; eso tiene
+que dejar intactas las ventas, los servicios, los abonos, los clientes, los cierres y el stock. La prueba
+existe y se corre **antes de publicar**:
+
+```powershell
+node tools/verify_migracion_datos.mjs                            # base real (registro.db) → 50/50
+node tools/verify_migracion_datos.mjs --db backup/registro_backup_20260804_000039.db   # base vieja con ventas → 52/52
+node tools/verify_migracion_negativa.mjs                         # ¿la prueba falla cuando la migración daña datos? 5/5
+node tools/verify_release_publicado.mjs                          # después de publicar: endpoint + plantilla empaquetada
+```
+
+- Toma una **COPIA** con `VACUUM INTO` (la base del taller no se abre para escribir) y corre la migración
+  real con el hook `db::tests::test_manual_migrate_db` (env `REGISTRO_MIGRATE_DB`, centinela en
+  `REGISTRO_MIGRATE_MARK`).
+- **Un exit code NO alcanza como evidencia** (lección 2026-09-18): si el filtro del test no matchea, `cargo
+  test` sale 0 con «0 filtered out» y la comparación sería la copia contra sí misma. Por eso se exige la
+  salida del hook en un archivo (`test result: ok. 1 passed`) **y** el centinela de la corrida. Ojo también
+  con los chequeos por subcadena: `«140 filtered out»` contiene `«0 filtered out»`.
+- **Nunca usar `--release` en el script y `--debug` en la app, ni al revés, para sacar conclusiones de
+  performance:** el hook tarda 118 ms en la base real (1087 productos) y ~9 s en una base vieja a la que hay
+  que reconstruirle el padrón de teléfonos.
+- La prueba compara **filas borradas y nuevas** (no solo columnas), `inventory_movements`, compras y TODAS
+  las columnas de `products`; el **saldo** (`amount - paid_amount`) con tolerancia de un centavo; y falla si
+  la tasa de un cierre cerrado se pierde o si un total de cierre cambia de signo.
+
 ### Instalador (producción / NSIS)
 - `tauri.conf.json`: `bundle.targets=["nsis"]`, `bundle.resources={"../backup/plantilla_candidata.db":"registro.default.db"}` (la DB viaja como PLANTILLA `registro.default.db` — el seed copia SOLO si registro.db no existe; nunca se pisa la DB del usuario), `bundle.windows.webviewInstallMode.type="embedBootstrapper"` (WebView2 embebido, funciona offline — PC moderna).
   - **2026-09-18 (release 0.4.0): la plantilla que se empaqueta ya NO es `../registro.db`.** Ese archivo es la base de TRABAJO del taller (tenía 4 órdenes, 6 abonos, 1 cliente y un día abierto) y el repo es PÚBLICO: empaquetarla publicaba datos reales de clientes dentro del instalador. Ahora apunta a `backup/plantilla_candidata.db`, regenerada con `node tools/make_release_template.mjs --force` (copia consistente con `VACUUM INTO` → vacía transaccionales/clientes → técnicos al seed → limpia settings de la máquina → negativos a 0 → `VACUUM`). `registro.db` NUNCA se toca (se comprobó: el loader y el generador escriben en archivos nuevos).

@@ -1,12 +1,13 @@
-# 📋 Registro — Estado del Proyecto (2026-09-15)
+# 📋 Registro — Estado del Proyecto (2026-09-18)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
 > y [AGENTS.md](AGENTS.md) (harness + registro de problemas).
 >
-> ⚠️ **MODO DEV (instrucción del usuario, 2026-09-15):** mientras se termina el módulo de
-> inventario **no se publica release ni se hace push a producción**; la limpieza de datos se
-> corre sobre copias (`backup/*.db`) o sobre la base de dev (`REGISTRO_DB=dev_registro.db`).
+> ✅ **EL MODO DEV SE LEVANTÓ (2026-09-18):** se publicó la **release oficial v0.4.0** con todo el
+> trabajo de septiembre (inventario completo + F30–F42). Ver §15. La regla que sigue valiendo: la
+> limpieza y las pruebas de datos se corren sobre **copias** (`backup/*.db`) o sobre
+> `REGISTRO_DB=dev_registro.db`; la base del taller (`registro.db`) no se toca nunca desde `tools/`.
 
 ---
 
@@ -132,7 +133,7 @@ Aplicación desktop **offline-first** (Tauri 2 + React 19 + SQLite) para servici
 celulares: inventario, ventas, órdenes de reparación, abonos, libro diario con tasa BCV,
 impresora térmica y **actualizaciones automáticas con rollback**.
 
-- **Versión en código:** 0.2.5 · **Última release publicada:** v0.2.5 (2026-08-24) — *las mejoras del inventario del 2026-09-15 están SOLO en el repo (modo dev), sin publicar*
+- **Versión en código:** 0.4.0 · **Última release publicada:** **v0.4.0 (2026-09-18)** — [release](https://github.com/shaman2527/Service_Tecnico/releases/tag/v0.4.0). Antes de esta, la 0.2.5 (24/8): todo el trabajo de septiembre estaba sin publicar.
 - **Repo:** https://github.com/shaman2527/Service_Tecnico — **PUBLICO** (se descartó privado: GitHub no sirve assets de releases privadas sin auth; el updater no lleva token)
 
 ---
@@ -694,3 +695,100 @@ Por los comandos de la propia app (no por SQL a mano), con respaldo `backup/regi
 `cargo test --release --lib` **133/133** · `node tools/refund_math_test.ts` **45/45** · **EN VIVO `tools/verify_devolucion_metodo.mjs` 7/7** (pedido de prueba: el backend rechaza el Punto nombrando por dónde entró, el diálogo dice «Entró por: Pago Móvil Bs. 4.243,00», propone ese método y borra sus residuos) · EN VIVO además: el Libro muestra «Devuelto Bs.1.697,00» y el cierre «Devuelto hoy: Bs.1.697,00 — ya está restado…» · `tsc -b` 0.
 
 **Spec:** `tools/progress/specs/F42-devolucion-por-donde-entro.md`. **Pendiente (feature 43 si el local lo pide):** poder **editar el método** de un pago ya anotado (hoy: borrar y reanotar).
+
+---
+
+## 15. 🚀 RELEASE OFICIAL v0.4.0 publicada — con la prueba de que NO toca los datos del local (2026-09-18)
+
+**Pedido del dueño:** «vamos a lanzar la actualización oficial de una vez **siempre y cuando no se dañen
+los datos de los usuarios**: cuando se hagan los cambios de sus db se mantenga y sus ventas registradas».
+
+**Lo que se encontró al empezar:** la última release publicada era la **v0.2.5 (24/8)** — todo el trabajo
+de septiembre estaba en el repo sin publicar; el instalador local 0.3.0 era anterior a F34–F42; y la base
+que el instalador **empaquetaba** era `../registro.db`, la base de TRABAJO del taller (4 órdenes, 6 abonos,
+1 cliente, un día abierto y un WAL de 1,3 MB) en un **repo público**.
+
+### 15.1 La condición del dueño, convertida en una prueba que se corre siempre
+
+| Herramienta | Qué hace | Resultado |
+|---|---|---|
+| `src-tauri/src/db.rs` → `test_manual_migrate_db` (hook ignorado, env `REGISTRO_MIGRATE_DB`) | Corre la **migración REAL** de la app sobre una base dada (`Database::new` → `init()`, el mismo camino del arranque), con `integrity_check`, `foreign_key_check`, el `run_health_check` del updater y un **CENTINELA** que solo se escribe si todo pasó | migración de la base real: **118 ms** |
+| `node tools/verify_migracion_datos.mjs --db <base>` | Toma una **COPIA** (VACUUM INTO, la original no se escribe), fotografía la historia, corre la migración y compara **columna por columna** | **50/50** base real · **52/52** base de la era 0.2.5 con ventas y clientes · **68/68** base de julio |
+| `node tools/verify_migracion_negativa.mjs` | **Prueba por comportamiento**: inyecta una migración que daña datos a propósito y exige que la verificación FALLE | **5/5 daños detectados** + exit 1 |
+| `node tools/verify_release_publicado.mjs` | Verifica lo publicado: release, endpoint del updater, firma, y que la plantilla empaquetada sea la LIMPIA | **21/21** |
+
+**La regla que aplica la prueba** (y que antes no estaba escrita en ningún lado): *no pueden cambiar*
+`sales`, `service_payments`, `clients`, `expenses`, `inventory_movements`, `purchase_orders` y
+`purchase_order_items` (todas las filas y columnas, **sin filas borradas ni nuevas**), `services` (salvo
+`paid_amount`), `products` (stock, precios y datos de cada ficha por id) ni el **arqueo contado
+(`actual_*`), la diferencia, las fechas, el estado y las notas** de cada cierre. *Cambian por diseño*, cada
+cosa con su propia comprobación: los nombres propios a Title Case (solo si el nuevo es EXACTAMENTE
+`titleCase(viejo)`), `paid_amount` (no puede mover el SALDO más de un centavo), la tasa de un cierre
+(solo puede LLENARSE si estaba en 0) y las columnas resumen del cierre (no pueden cambiar de signo).
+
+### 15.2 Lo que la revisión adversarial encontró y se arregló (2 BLOQUEANTES, 3 MAYORES, 6 menores)
+
+1. **(B1) La prueba podía dar un falso verde** si el filtro del test no matcheaba (`cargo test` sale 0 con
+   «0 filtered out» y la comparación era la copia contra sí misma). Ahora la salida del hook va a un
+   archivo, se exige `test result: ok. 1 passed` y el **centinela** de la corrida. *(Al escribir el chequeo
+   se coló un falso negativo propio: `«140 filtered out»` contiene `«0 filtered out»` — corregido.)*
+2. **(B2) Las filas BORRADAS pasaban como «intactas»** (el bucle recorría solo el «después») y quedaban sin
+   comparar `inventory_movements`, compras, y casi todas las columnas de `products`. Ahora se comparan
+   conteos, la **unión de ids** (borrada = FAIL, nueva = FAIL) y esas tablas/columnas.
+3. **(M1) La plata recalculada no tenía umbral**: `paid_amount` de una orden podía pasar a 999999 y el
+   veredicto seguía siendo verde. Ahora se compara el **saldo** (`amount - paid_amount`) con tolerancia de
+   un centavo, y un cambio de signo en el total de un cierre cerrado es FAIL.
+4. **(M2) El gate de release imprimía PASS sobre consultas que fallaban** (una base sin el esquema de
+   precios daba «LISTO»). Ahora todo error de consulta es BLOQUEANTE y se exige el esquema central.
+5. **(M3) El gate solo miraba que hubiera PIN**: no podía detectar la regresión que este release arregló
+   (el PIN real del dueño viajando en la plantilla). Ahora exige el inicial documentado (`1234`).
+6. Menores: la plantilla que se valida es la que `bundle.resources` empaqueta de verdad; el verificador de
+   migración avisa si la base es vieja (columnas ausentes) en vez de morir; el deduplicador de
+   aprendizajes ya no descarta niveles desconocidos ni borra los backticks del texto; el PIN viejo no se
+   imprime en el log del generador; higiene del repo en el gate.
+
+### 15.3 La plantilla que viaja dentro del instalador
+
+- Se regeneró con `node tools/make_release_template.mjs --force` desde la base real: **1087 productos, 950
+  con precio, 704 unidades, 0 filas** en transaccionales/clientes, sin día abierto, negativos a 0.
+- **`tauri.conf.json` ahora empaqueta `../backup/plantilla_candidata.db`**, no `registro.db` (la base de
+  trabajo del taller no se toca ni se publica). Verificado DESPUÉS del build: el `registro.default.db` que
+  quedó junto al exe tiene 0 filas de historia y el PIN inicial.
+- **Arreglo de seguridad:** el PIN de la plantilla se resetea SIEMPRE a `1234`. Antes solo se creaba si
+  faltaba: desde que el PIN se guarda hasheado (B4) la plantilla viajaba con el **PIN real del dueño**
+  dentro de un instalador público.
+- **Los 123 SKU con stock (333 unidades) sin precio** son una **excepción acotada y auditable**
+  (`tools/release_excepciones.json`, con motivo, fecha y TOPES: si empeora, el gate vuelve a bloquear).
+  Son modelos más nuevos que la lista del local: un cruce automático les pondría el precio de OTRO modelo.
+
+### 15.4 Lo publicado y cómo se verificó
+
+- **Release:** https://github.com/shaman2527/Service_Tecnico/releases/tag/v0.4.0 — setup firmado (6,39 MB),
+  `.sig` y `latest.json`. El endpoint del updater (`releases/latest/download/latest.json`) responde 200 y
+  anuncia la 0.4.0 con la MISMA firma del build local (o sea: las PC del local la van a aceptar).
+- `cargo test --release --lib` **133/133** (8 ignorados, incluido el hook nuevo) · 10 pruebas puras
+  **1006/1006** · `tsc -b` 0 · `oxlint` 0 errores · `npm run build` ✓ · `harness_security` PASS ·
+  `harness_truth` PASS · gate de release **0 bloqueantes** sobre la plantilla.
+- **Rollback disponible:** el updater respaldo el exe anterior y la base en `updates/` antes de instalar, y
+  el chequeo de salud post-actualización revierte si la base, la numeración de órdenes, el libro diario o la
+  tasa fallaran.
+
+### 15.5 Hallazgo aparte: `tools/progress/patterns.md` había llegado a 310 MB
+
+El consolidador de aprendizajes del harness **duplicaba el archivo en cada corrida** (crecimiento
+exponencial: 20 aprendizajes únicos, uno repetido **524.288 veces = 2^19**, con los backticks de escape
+acumulados). El `git add -A` de este release lo metió al historial (blob de 325 MB) → se deduplicó con
+`node tools/dedupe_patterns.mjs` (310 MB → **21 KB**, conservando los **26 aprendizajes únicos**, de los
+cuales **14 no estaban en la versión de git**), se quitó el blob del commit y se limpió el objeto
+(`.git`: 14,5 MB → **1,5 MB**). El gate ahora **bloquea** un archivo de más de 100 MB (GitHub rechaza ese
+push). *Pendiente real: la causa raíz está en `tools/governance/learning-injector.ts` (envuelve la
+evidencia otra vez en cada corrida: `- \`X\`` → `  - \`- \`X\``); no se pudo reproducir la duplicación
+2^19 desde ese código, así que queda anotado y con red de seguridad.*
+
+### 15.6 Qué queda pendiente
+
+- Cargar el precio de los 123 SKU (Inventario → Precios y datos) y después borrar la excepción del gate.
+- **Instalar la 0.4.0 en la PC del local** y confirmar en el mostrador: PIN, abrir el día, una venta, un
+  servicio con entrega, un cierre y un ticket. (La actualización se ofrece sola al arrancar.)
+- Features 37 (`isBsMethod` por whitelist) y 40 (libro único de movimientos de caja + auditoría).
+- Cerrar la causa raíz del desborde de `patterns.md`.

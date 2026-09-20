@@ -9191,47 +9191,56 @@ discount_amount: 0.0,
     ///
     /// SIEMPRE sobre una COPIA (el script se encarga); nunca la base del taller.
     ///   $env:REGISTRO_MIGRATE_DB="C:\ruta\copia.db"
+    ///   $env:REGISTRO_MIGRATE_MARK="C:\ruta\centinela.txt"   (opcional: evidencia de que corrió)
     ///   cd src-tauri; cargo test --lib -- --ignored test_manual_migrate_db --nocapture
+    ///
+    /// El CENTINELA existe por una lección de la revisión adversarial del 2026-09-18: la prueba que
+    /// usa este hook comparaba la copia contra sí misma si la migración no llegaba a correr (un
+    /// filtro que no matchea deja `cargo test` en exit 0 con «0 filtered out»), o sea un FALSO VERDE
+    /// sobre lo único que el dueño pidió. Con el centinela, `tools/verify_migracion_datos.mjs` exige
+    /// un archivo que SOLO se escribe al final de una migración real.
     #[test]
     #[ignore = "manual: corre la migración real (Database::new/init) sobre REGISTRO_MIGRATE_DB"]
     fn test_manual_migrate_db() {
         use std::time::Instant;
         let path = std::env::var("REGISTRO_MIGRATE_DB")
             .expect("define REGISTRO_MIGRATE_DB con la ruta de una COPIA de la base");
+        let centinela = std::env::var("REGISTRO_MIGRATE_MARK").ok();
 
         let t0 = Instant::now();
         let db = Database::new(&PathBuf::from(&path)).expect("la migración falló: la app no abriría");
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("migración (Database::new + init): {ms:.1} ms");
 
-        {
+        let resumen = {
             let c = db.conn.lock().unwrap();
             let n = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
-            println!(
-                "historia: {} ventas · {} servicios · {} abonos · {} clientes · {} cierres · {} gastos",
+            let resumen = format!(
+                "historia: {} ventas · {} servicios · {} abonos · {} clientes · {} cierres · {} gastos\n\
+                 catálogo: {} productos · {} unidades · {} teléfonos del padrón\n\
+                 integrity_check: {}\n\
+                 foreign_key_check: {} violación(es)",
                 n("SELECT COUNT(*) FROM sales"),
                 n("SELECT COUNT(*) FROM services"),
                 n("SELECT COUNT(*) FROM service_payments"),
                 n("SELECT COUNT(*) FROM clients"),
                 n("SELECT COUNT(*) FROM daily_closings"),
                 n("SELECT COUNT(*) FROM expenses"),
-            );
-            println!(
-                "catálogo: {} productos · {} unidades · {} teléfonos del padrón",
                 n("SELECT COUNT(*) FROM products"),
                 n("SELECT COALESCE(SUM(stock),0) FROM products"),
                 n("SELECT COUNT(*) FROM phones"),
+                c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                    .unwrap_or_else(|e| format!("ERROR: {e}")),
+                c.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get::<_, i64>(0))
+                    .unwrap_or(-1),
             );
             let integ: String = c
                 .query_row("PRAGMA integrity_check", [], |r| r.get(0))
                 .unwrap_or_else(|e| format!("ERROR: {e}"));
-            println!("integrity_check: {integ}");
-            let fk: i64 = c
-                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
-                .unwrap_or(-1);
-            println!("foreign_key_check: {fk} violación(es)");
             assert_eq!(integ, "ok", "la base quedó íntegra después de migrar");
-        }
+            resumen
+        };
+        println!("{resumen}");
 
         // El mismo chequeo de salud que corre la app DESPUÉS de actualizarse (updates.rs): si esto
         // falla, el updater hace rollback. Que pase acá significa que no habría rollback por datos.
@@ -9239,5 +9248,14 @@ discount_amount: 0.0,
         println!("salud post-migración: ok={} avisos={:?}", salud.ok, salud.warnings);
         assert!(salud.ok, "el chequeo de salud falló: {:?}", salud.issues);
         drop(db);
+
+        // CENTINELA: última línea del hook. Solo se escribe si todo lo de arriba pasó.
+        if let Some(marca) = centinela {
+            let texto = format!(
+                "OK\nbase: {path}\nmigración: {ms:.1} ms\n{resumen}\nsalud: ok={}\n",
+                salud.ok
+            );
+            std::fs::write(&marca, texto).expect("no pude escribir el centinela de la migración");
+        }
     }
 }

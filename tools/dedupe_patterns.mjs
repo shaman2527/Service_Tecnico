@@ -14,6 +14,7 @@
 
 import { createReadStream, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { dirname, resolve, basename } from 'node:path';
 
 const args = process.argv.slice(2);
 const argDe = (n, def) => (args.includes(n) ? args[args.indexOf(n) + 1] : def);
@@ -22,33 +23,37 @@ const OUT = argDe('--out', ARCHIVO);
 const DRY = args.includes('--dry');
 
 if (!existsSync(ARCHIVO)) { console.error(`no existe ${ARCHIVO}`); process.exit(2); }
+const MAX_EVIDENCIA = 8;   // evidencia por aprendizaje (se avisa si se recorta, no se pierde en silencio)
 
-/** Saca los backticks de escape y los guiones acumulados de una línea. */
+/** Saca SOLO el escapado acumulado del consolidador, no los backticks del texto original.
+ *  Cada corrida envolvía la línea y le anteponía «- `»: `` `- `- `- texto`` `` → `texto`.
+ *  Un `code` que ya estaba en el texto se conserva (antes se borraban TODOS los backticks). */
 function limpiar(linea) {
-  let s = linea.replace(/`+/g, '');
-  // ``- `- `- `- texto`` → el texto real empieza después del último «- » repetido
   const indent = (linea.match(/^\s*/) || [''])[0];
-  s = s.trim();
-  if (s.startsWith('-')) {
-    s = s.replace(/^(?:-\s*)+/, '');   // colapsa «- - - - » en nada
-  }
-  return indent + s;
+  let s = linea.trim();
+  s = s.replace(/^(?:-\s*`)*-\s*/, '');   // prefijos «- `» repetidos
+  s = s.replace(/`+$/, '');                // backticks de cierre acumulados
+  s = s.replace(/^`+/, '');
+  return indent + s.trim();
 }
 
 const bullets = new Map();   // clave → { nivel, texto, evidencia: [] }
 let lineas = 0;
 let ultimoNivel = null;
 let claveActual = null;      // a qué aprendizaje pertenecen las líneas de evidencia que vienen
+let evidenciasRecortadas = 0;
 
 const rl = createInterface({ input: createReadStream(ARCHIVO, { encoding: 'utf-8' }), crlfDelay: Infinity });
 for await (const linea of rl) {
   lineas += 1;
   const t = linea.trim();
-  if (!t) continue;
+  // Una línea en blanco corta la evidencia: sin esto, la prosa que viene después (o de otra sección)
+  // se pegaba como evidencia del último aprendizaje.
+  if (!t) { claveActual = null; continue; }
   if (t.startsWith('#')) continue;                       // cabecera: se reescribe abajo
   if (t.startsWith('>')) continue;
-  if (/^---+$/.test(t)) continue;
-  if (/^###\s+/.test(t)) { ultimoNivel = t.replace(/^###\s+/, ''); continue; }
+  if (/^---+$/.test(t)) { claveActual = null; continue; }
+  if (/^###\s+/.test(t)) { ultimoNivel = t.replace(/^###\s+/, ''); claveActual = null; continue; }
 
   const esBullet = /^-\s*`?\[/.test(t);
   if (esBullet) {
@@ -62,7 +67,11 @@ for await (const linea of rl) {
   } else if (claveActual) {
     // Evidencia del aprendizaje en curso: se guarda UNA vez, limpia.
     const limpia = limpiar(linea).trim();
-    if (limpia !== '' && limpia !== '-') bullets.get(claveActual).evidencia.add(limpia);
+    if (limpia !== '' && limpia !== '-') {
+      const b = bullets.get(claveActual);
+      if (b.evidencia.size < MAX_EVIDENCIA) b.evidencia.add(limpia);
+      else evidenciasRecortadas += 1;
+    }
   }
 }
 
@@ -86,17 +95,29 @@ const partes = [
   '',
 ];
 
-for (const nivel of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']) {
+// Se escriben TODOS los niveles presentes, incluidos los que no sean los 4 conocidos: antes un
+// `[WARNING]` o `[INFO]` se descartaba en silencio (y el resumen ni cerraba).
+const ORDEN_CONOCIDO = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const nivelesPresentes = [...new Set(aprendizajes.map(a => a.nivel))];
+const niveles = [
+  ...ORDEN_CONOCIDO.filter(n => nivelesPresentes.includes(n)),
+  ...nivelesPresentes.filter(n => !ORDEN_CONOCIDO.includes(n)).sort(),
+];
+for (const nivel of niveles) {
   const grupo = aprendizajes.filter(a => a.nivel === nivel);
-  if (!grupo.length) continue;
   partes.push(`### ${nivel === 'CRITICAL' ? 'Errores Recurrentes (CRITICAL)' : nivel}`);
   partes.push('');
   for (const a of grupo) {
     partes.push(`- \`[${a.nivel}]\` ${a.texto}`);
-    const ev = [...a.evidencia].slice(0, 8);
-    for (const e of ev) partes.push(`  - ${e}`);
+    for (const e of a.evidencia) partes.push(`  - ${e}`);
     partes.push('');
   }
+}
+
+const escritos = niveles.reduce((n, nivel) => n + aprendizajes.filter(a => a.nivel === nivel).length, 0);
+if (escritos !== aprendizajes.length) {
+  console.error(`ATENCIÓN: ${aprendizajes.length - escritos} aprendizaje(s) no se escribieron — NO se sobrescribe el archivo`);
+  process.exit(3);
 }
 
 const nuevo = partes.join('\n');
@@ -104,11 +125,13 @@ if (DRY) {
   console.log(`(dry run) quedaría en ${nuevo.length} bytes · ${nuevo.split('\n').length} líneas · ${aprendizajes.length} aprendizajes`);
   console.log(nuevo.slice(0, 1200));
 } else {
-  if (OUT === ARCHIVO) renameSync(ARCHIVO, `${ARCHIVO}.grande.bak`);   // respaldo por si algo salió mal
+  // El respaldo va a `backup/` (gitignored): si quedaba en tools/progress/ con 300+ MB, el propio
+  // chequeo de higiene del gate de release bloqueaba la próxima publicación.
+  const respaldo = resolve(dirname(ARCHIVO), '..', 'backup', `${basename(ARCHIVO)}.grande.bak`);
+  if (OUT === ARCHIVO) renameSync(ARCHIVO, respaldo);
   writeFileSync(OUT, nuevo);
   console.log(`leídas ${lineas.toLocaleString('es')} líneas → ${aprendizajes.length} aprendizajes únicos → ${OUT} (${(nuevo.length / 1024).toFixed(1)} KB)`);
-  const porNivel = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
-    .map(n => `${n}: ${aprendizajes.filter(a => a.nivel === n).length}`).join(' · ');
-  console.log(`   ${porNivel}`);
-  if (OUT === ARCHIVO) console.log(`   (el archivo viejo quedó en ${ARCHIVO}.grande.bak)`);
+  console.log('   ' + niveles.map(n => `${n}: ${aprendizajes.filter(a => a.nivel === n).length}`).join(' · '));
+  if (evidenciasRecortadas) console.log(`   (evidencia recortada a ${MAX_EVIDENCIA} líneas por aprendizaje: ${evidenciasRecortadas} línea(s) fuera)`);
+  if (OUT === ARCHIVO) console.log(`   (el archivo viejo quedó en ${respaldo})`);
 }

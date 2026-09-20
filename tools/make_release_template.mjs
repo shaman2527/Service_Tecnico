@@ -97,7 +97,9 @@ const PIN_INICIAL = '1234';
 const pin = db.prepare("SELECT value FROM settings WHERE key='pin'").get();
 if (pin) {
   db.prepare("UPDATE settings SET value = ? WHERE key = 'pin'").run(PIN_INICIAL);
-  reporte.pin_reseteado = `${String(pin.value).slice(0, 12)}… → ${PIN_INICIAL}`;
+  // NO se imprime el valor viejo: en una base anterior a B4 el PIN está en TEXTO PLANO, así que
+  // imprimirlo sería escribirlo en la consola/CI. Basta con saber que se reseteó.
+  reporte.pin_reseteado = `(valor anterior oculto: puede ser el PIN de una persona) → ${PIN_INICIAL}`;
 } else {
   db.prepare("INSERT INTO settings (key, value) VALUES ('pin', ?)").run(PIN_INICIAL);
   reporte.pin_creado = PIN_INICIAL;
