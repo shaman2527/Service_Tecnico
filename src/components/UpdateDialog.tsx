@@ -16,6 +16,7 @@ export default function UpdateDialog({ update, open, onOpenChange }: {
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [aviso, setAviso] = useState<string | null>(null);
 
   const alreadyDownloaded = !!update && downloadedVersion() === update.version;
 
@@ -23,11 +24,24 @@ export default function UpdateDialog({ update, open, onOpenChange }: {
     if (!update) return;
     setPhase('backing-up');
     setError(null);
+    setAviso(null);
+    // Etapa en variable LOCAL: el estado de React no se actualiza dentro del mismo closure, así que
+    // no sirve para decidir el mensaje del catch.
+    let etapa: 'respaldo' | 'instalando' = 'respaldo';
     try {
-      // 1. Respaldo previo: exe anterior + DB (checkpoint) + estado pending + watchdog
+      // 1. Respaldo previo: exe anterior + DB (checkpoint) + estado pending + watchdog.
+      //    SI ESTO FALLA, NO SE INSTALA (fail-closed): antes el error se tragaba en silencio y la
+      //    actualización seguía sin copia de la base, sin exe anterior y sin vigilante — o sea sin
+      //    red de seguridad y sin que nadie se enterara (bug encontrado el 2026-09-18).
       const { getVersion } = await import('@tauri-apps/api/app');
       const current = await getVersion();
-      await api.backupBeforeUpdate(update.version, current);
+      const respaldo = await api.backupBeforeUpdate(update.version, current);
+      if (respaldo && respaldo.watchdog === false) {
+        setAviso('El respaldo quedó hecho, pero no se pudo lanzar el vigilante de seguridad (suele ' +
+          'ser una política de PowerShell que bloquea scripts). La versión nueva igual verifica su ' +
+          'salud al abrir y puede volver atrás sola.');
+      }
+      etapa = 'instalando';
 
       // 2. Descarga e instalación (la app se cierra sola en Windows; el watchdog vela)
       setPhase('downloading');
@@ -49,7 +63,10 @@ export default function UpdateDialog({ update, open, onOpenChange }: {
       await relaunch();
     } catch (e) {
       setPhase('error');
-      setError(e instanceof Error ? e.message : String(e));
+      const fallo = e instanceof Error ? e.message : String(e);
+      setError(etapa === 'respaldo'
+        ? `No se pudo hacer el respaldo previo, así que NO se instaló nada (por seguridad): tu app y tus datos quedan igual. Detalle: ${fallo}`
+        : fallo);
     }
   };
 
@@ -112,8 +129,14 @@ export default function UpdateDialog({ update, open, onOpenChange }: {
             <span>
               Antes de instalar se hace un respaldo automático de la base de datos y de la
               versión actual. Si algo fallara, la app restaura la versión anterior sola.
+              Si el respaldo no se puede hacer, la actualización <b>no se instala</b>.
             </span>
           </div>
+          {aviso && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-700">
+              {aviso}
+            </div>
+          )}
           {phase === 'backing-up' && (
             <div className="flex items-center gap-2 text-primary">
               <ShieldCheck className="size-4" /> Haciendo respaldo de seguridad…

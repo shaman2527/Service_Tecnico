@@ -747,6 +747,17 @@ export interface HealthReport {
   warnings: string[];
 }
 
+/** Resultado del respaldo previo a una actualización (F8; fail-closed desde 2026-09-18). */
+export interface UpdateBackup {
+  /** Copia de la base hecha ANTES de instalar (junto al exe, en `updates/`). */
+  db_backup: string;
+  /** Exe anterior guardado para poder volver atrás (`updates/prev/registro.exe`). */
+  prev_exe: string;
+  /** ¿Se pudo lanzar el vigilante? (proceso aparte que restaura la versión anterior si la nueva
+   *  no arranca o no confirma su salud). Si es `false`, el respaldo existe pero nadie vela. */
+  watchdog: boolean;
+}
+
 // --- Perfil del técnico (Dashboard) ---
 export interface TechDayRow { date: string; received: number; delivered: number; usd: number }
 export interface TechTypeRow { label: string; count: number; usd: number }

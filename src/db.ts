@@ -8,7 +8,7 @@ import type {
   ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage,
   CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile,
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
-  LoadPreview, LoadRow, LoadReport, LoadCandidate
+  LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup
 } from './types';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
@@ -528,9 +528,16 @@ export const api = {
       mock<string>('')),
 
   // --- Actualizaciones (respaldo / rollback / chequeo de salud) ---
-  backupBeforeUpdate: (newVersion: string, previousVersion: string) =>
-    tauriInvoke<void>('backup_before_update', { newVersion, previousVersion }).catch(() =>
-      mock<void>(undefined)),
+  // OJO: acá NO se traga el error (bug encontrado el 2026-09-18). Antes era
+  // `.catch(() => mock(undefined))`, así que si el respaldo previo fallaba (permisos, antivirus,
+  // disco lleno, watchdog bloqueado) la actualización SEGUÍA IGUAL y en silencio: sin la copia de
+  // la base, sin el exe anterior y sin el vigilante, o sea sin red de seguridad y sin que nadie se
+  // enterara. Ahora, si el respaldo no se puede hacer, la promesa falla y `UpdateDialog.install()`
+  // corta el flujo: **sin respaldo no se instala** (fail-closed).
+  backupBeforeUpdate: (newVersion: string, previousVersion: string) => {
+    if (!isTauri) return mock<void>(undefined);
+    return tauriInvoke<UpdateBackup>('backup_before_update', { newVersion, previousVersion });
+  },
 
   runHealthCheck: () =>
     tauriInvoke<HealthReport>('run_health_check').catch(() =>

@@ -187,22 +187,26 @@ pub fn write_watchdog(install_dir: &Path) -> Result<(), String> {
 }
 
 /// Lanza el watchdog como proceso separado (sobrevive al cierre de la app).
+/// Devuelve si REALMENTE se pudo lanzar: si una política de PowerShell bloquea los scripts, el
+/// vigilante no corre y el llamador tiene que poder avisarlo (antes `let _ = spawn()` lo tapaba).
 #[cfg(windows)]
-pub fn spawn_watchdog(install_dir: &Path) {
+pub fn spawn_watchdog(install_dir: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("powershell")
+    std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(watchdog_path(install_dir))
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+        .spawn()
+        .is_ok()
 }
 
 #[cfg(not(windows))]
-pub fn spawn_watchdog(install_dir: &Path) {
-    let _ = std::process::Command::new("sh")
+pub fn spawn_watchdog(install_dir: &Path) -> bool {
+    std::process::Command::new("sh")
         .arg(watchdog_path(install_dir))
-        .spawn();
+        .spawn()
+        .is_ok()
 }
 
 // --- Rollback ---

@@ -523,8 +523,19 @@ pub fn get_windows_printer_status(printer: String) -> Result<String, String> {
 
 // --- Updates (respaldo / rollback / salud — módulo updates.rs) ---
 
+/// Qué dejó realmente el respaldo previo. Devuelve las RUTAS (para poder decirle al usuario dónde
+/// está su copia) y si el vigilante se pudo lanzar: si PowerShell está bloqueado por política, el
+/// proceso que restaura la versión anterior no corre y el usuario TIENE que enterarse (antes el
+/// `let _ = spawn()` lo tapaba, igual que el `.catch` del frontend tapaba el error del respaldo).
+#[derive(serde::Serialize)]
+pub struct UpdateBackup {
+    pub db_backup: String,
+    pub prev_exe: String,
+    pub watchdog: bool,
+}
+
 #[tauri::command]
-pub fn backup_before_update(db: State<Database>, new_version: String, previous_version: String) -> Result<(), String> {
+pub fn backup_before_update(db: State<Database>, new_version: String, previous_version: String) -> Result<UpdateBackup, String> {
     // Checkpoint WAL para que la copia de la DB quede consistente antes de copiarla
     {
         let conn = db.conn.lock().unwrap();
@@ -534,8 +545,12 @@ pub fn backup_before_update(db: State<Database>, new_version: String, previous_v
     let dir = crate::updates::install_dir();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     crate::updates::backup_before_update(&dir, &exe, &crate::get_db_path(), &previous_version, &new_version)?;
-    crate::updates::spawn_watchdog(&dir);
-    Ok(())
+    let watchdog = crate::updates::spawn_watchdog(&dir);
+    Ok(UpdateBackup {
+        db_backup: crate::updates::db_backup_path(&dir, &new_version).to_string_lossy().to_string(),
+        prev_exe: crate::updates::prev_exe_path(&dir).to_string_lossy().to_string(),
+        watchdog,
+    })
 }
 
 #[tauri::command]
