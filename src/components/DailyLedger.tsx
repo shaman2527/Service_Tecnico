@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, BookOpen, CheckCircle2, Clock, CreditCard, Download, Landmark, Lock, Package,
   Play, Plus, PiggyBank, Receipt, RefreshCw, RotateCcw, DollarSign, TrendingUp, Smartphone,
-  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye,
+  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye, Undo2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,9 +19,13 @@ import { api } from '../db';
 import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult } from '../types';
 import { EXPENSE_CATEGORIES } from '../types';
 import { localDate, addDays } from '@/lib/utils';
+// F39: el arqueo cuadra POR MONEDA (dos diferencias, dos semáforos). Regla pura con test node.
+import { closingDifference, closingLabel, sinContar, puntoDifference, TOL_USD, TOL_BS } from '@/lib/cash-closing';
 
-const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
-const fmtBs = (n: number) => `Bs.${n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// El signo va ANTES del símbolo de la moneda («-$2.00», «-Bs. 1.000,00»), que es como se escribe un
+// descuadre en un libro: «$-2.00» se lee mal y en el arqueo la diferencia puede ser negativa.
+const fmtUsd = (n: number) => `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}`;
+const fmtBs = (n: number) => `${n < 0 ? '-' : ''}Bs.${Math.abs(n).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const money = (n: number) => n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // Combina USD + Bs en un string, omitiendo la moneda sin movimientos: "$150.00 + Bs.34.310,00"
@@ -107,6 +111,10 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [showClose, setShowClose] = useState(false);
   const [expected, setExpected] = useState<DailyTotals | null>(null);
   const [cashCounted, setCashCounted] = useState(0);
+  /** F39: DIVISAS CONTADAS. Antes el cierre mandaba `actual_cash_usd = esperado` (una copia del propio
+   *  sistema, no un conteo): la «Diferencia $» daba 0 SIEMPRE y el semáforo era decorativo — si faltaban
+   *  dólares del cajón nadie se enteraba. Ahora se cuenta como los bolívares. */
+  const [usdCounted, setUsdCounted] = useState(0);
   const [pagoMovilList, setPagoMovilList] = useState<PagoMovilDetail[]>([]);
   const [closeNotes, setCloseNotes] = useState('');
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -314,37 +322,59 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
 
   const openCloseDialog = async () => {
     if (!activeDay) return;
+    await abrirCierreDe(activeDay);
+  };
+
+  /** Día que se está cerrando en el diálogo. Normalmente es el turno abierto, pero F35 permite
+   *  cerrar TAMBIÉN un día que quedó abierto de antes (por ejemplo uno que se reabrió con ↺ para
+   *  anotar un pago cobrado ese día): con dos turnos abiertos, el único «Cerrar Día» apuntaba al más
+   *  reciente y ese día quedaba sin arqueo para siempre. `close_day` ya acepta cualquier fecha. */
+  const [cierreRow, setCierreRow] = useState<DailyClosing | null>(null);
+
+  const abrirCierreDe = async (row: DailyClosing | null) => {
+    if (!row) return;
+    setCierreRow(row);
     setShowClose(true);
     setCloseNotes('');
     setCloseError(null);
     setPagoMovilList([]);
     loadTodayExpenses();
     try {
-      const dayTotals = await api.getDailyTotals(activeDay.close_date, activeDay.close_date);
+      const dayTotals = await api.getDailyTotals(row.close_date, row.close_date);
       const t = dayTotals[0] ?? null;
       setExpected(t);
       setCashCounted(t?.cash_bs ?? 0);
+      // El conteo de divisas arranca en lo que el sistema espera (para confirmar o corregir, igual que
+      // los bolívares) pero es EDITABLE: si el cajón tiene menos dólares, la diferencia se ve.
+      setUsdCounted((t?.usd_cash_total ?? 0) + (t?.cash_usd ?? 0));
       // Monto impreso del Punto: prellenado con lo que el sistema espera (regla: debe dar el mismo)
       setPosSettledUsd(t?.pos_charged_usd ?? 0);
       setPosSettledBs(t?.pos_charged_bs ?? 0);
-      const pms = await api.getPagoMovilDetail(activeDay.close_date);
+      const pms = await api.getPagoMovilDetail(row.close_date);
       setPagoMovilList(pms);
     } catch {
       setExpected(null);
       setCashCounted(0);
+      setUsdCounted(0);
       setPosSettledUsd(0);
       setPosSettledBs(0);
     }
   };
 
   const doClose = async () => {
-    if (!activeDay) return;
+    if (!cierreRow) return;
+    // No se cierra un día cuyos totales no se pudieron leer: el cierre guardaría el arqueo en 0 y
+    // quedaría como «falta todo el cajón» para siempre (revisión adversarial F39).
+    if (!expected) {
+      setCloseError('No se pudieron leer los totales del día: reintentá abrir el cierre (no se guardó nada).');
+      return;
+    }
     setCloseError(null);
     try {
       await api.closeDay(
-        activeDay.close_date, closeNotes,
-        activeDay.initial_cash_usd, activeDay.tasa_bcv, activeDay.tasa_eur,
-        expected?.usd_cash_total ?? 0, cashCounted,
+        cierreRow.close_date, closeNotes,
+        cierreRow.initial_cash_usd, cierreRow.tasa_bcv, cierreRow.tasa_eur,
+        usdCounted, cashCounted,
         expected?.pos_charged ?? 0, 0,
         expected?.zelle_total ?? 0,
         expected?.pago_movil_total ?? 0,
@@ -440,22 +470,50 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     grand_usd: a.grand_usd + t.grand_usd,
     grand_bs: a.grand_bs + t.grand_bs,
     grand_total: a.grand_total + t.grand_total,
-  }), { pos_charged: 0, pos_fees: 0, pos_net: 0, pos_net_usd: 0, pos_net_bs: 0, pos_charged_usd: 0, pos_charged_bs: 0, pago_movil: 0, cash_bs: 0, usd: 0, zelle: 0, trans_bs: 0, grand_usd: 0, grand_bs: 0, grand_total: 0 }), [totals]);
+    refund_usd: a.refund_usd + (t.refund_usd ?? 0),
+    refund_bs: a.refund_bs + (t.refund_bs ?? 0),
+  }), { pos_charged: 0, pos_fees: 0, pos_net: 0, pos_net_usd: 0, pos_net_bs: 0, pos_charged_usd: 0, pos_charged_bs: 0, pago_movil: 0, cash_bs: 0, usd: 0, zelle: 0, trans_bs: 0, grand_usd: 0, grand_bs: 0, grand_total: 0, refund_usd: 0, refund_bs: 0 }), [totals]);
 
-  const hasPos = totals.some(t => t.pos_net_usd > 0.005 || t.pos_net_bs > 0.005);
-  const hasPM = totals.some(t => t.pago_movil_total > 0.005);
-  const hasCashBs = totals.some(t => t.cash_bs > 0.005);
-  const hasUsd = totals.some(t => t.usd_cash_total + t.cash_usd > 0.005);
-  const hasZelle = totals.some(t => t.zelle_total > 0.005);
-  const hasTransf = totals.some(t => t.transfer_bs_total > 0.005);
+  // F42 — «¿hay movimiento?» es ≠ 0, NO > 0: una devolución puede dejar el método en 0 o en negativo y
+  // esconderlo era esconder la plata que salió (el caso real del 2026-09-17: una devolución anotada en
+  // «Punto de Venta (Bs)» dejaba el Punto en −Bs. 1.697 y la fila del Punto NO se dibujaba → la
+  // devolución desaparecía de la pantalla del cierre). Regla madre de F39: un descuadre nunca se esconde.
+  const hay = (v: number) => Math.abs(v) > 0.005;
+  const hasPos = totals.some(t => hay(t.pos_net_usd) || hay(t.pos_net_bs));
+  const hasPM = totals.some(t => hay(t.pago_movil_total));
+  const hasCashBs = totals.some(t => hay(t.cash_bs));
+  const hasUsd = totals.some(t => hay(t.usd_cash_total + t.cash_usd));
+  const hasZelle = totals.some(t => hay(t.zelle_total));
+  const hasTransf = totals.some(t => hay(t.transfer_bs_total));
   const condCols = [hasPos, hasPM, hasCashBs, hasUsd, hasZelle, hasTransf].filter(Boolean).length;
   const tableCols = 3 + condCols;
-  const dash = (n: number, fmt: (x: number) => string) => (n > 0.005 ? fmt(n) : '—');
-  const diasConMovimientos = totals.filter(t => t.grand_usd > 0.005 || t.grand_bs > 0.005).length;
+  const dash = (n: number, fmt: (x: number) => string) => (Math.abs(n) > 0.005 ? fmt(n) : '—');
+  const diasConMovimientos = totals.filter(t => hay(t.grand_usd) || hay(t.grand_bs)).length;
 
-  const diffBs = expected ? cashCounted - expected.cash_bs : 0;
-  const cuadrado = expected !== null && Math.abs(diffBs) < 0.5;
+  // F39 (revisión adversarial): la diferencia del diálogo sale de la MISMA regla pura que la lista de
+  // Cierres (`closingDifference`), no de una resta propia. Lo único que aporta la UI es lo CONTADO
+  // (divisas y efectivo Bs.); los cobros digitales (Zelle, Pago Móvil, Transferencia, Punto) entran con
+  // su monto esperado porque no están en el cajón: se verifican en el banco, y el diálogo lo dice.
+  const diffCierre = closingDifference({
+    cash_usd: expected?.cash_usd ?? 0,
+    zelle_total: expected?.zelle_total ?? 0,
+    usd_cash_total: expected?.usd_cash_total ?? 0,
+    cash_bs: expected?.cash_bs ?? 0,
+    pago_movil_total: expected?.pago_movil_total ?? 0,
+    transfer_bs_total: expected?.transfer_bs_total ?? 0,
+    actual_cash_usd: usdCounted,
+    actual_zelle: expected?.zelle_total ?? 0,
+    actual_cash_bs: cashCounted,
+    actual_pago_movil: expected?.pago_movil_total ?? 0,
+    actual_transfer_bs: expected?.transfer_bs_total ?? 0,
+  });
+  const diffBs = diffCierre.bs;
+  const diffUsd = diffCierre.usd;
   const pagoMovilTotal = pagoMovilList.reduce((a, p) => a + p.amount, 0);
+  // F39: la liquidación del Punto también cuadra POR MONEDA (misma regla pura que el arqueo).
+  const settleDiff = puntoDifference(settleChargedUsd, settleAmount, settleChargedBs, settleAmountBs);
+  // …y el Punto que se declara al CERRAR el día usa exactamente la misma regla (no una resta aparte).
+  const puntoDiff = puntoDifference(expected?.pos_charged_usd ?? 0, posSettledUsd, expected?.pos_charged_bs ?? 0, posSettledBs);
 
   return (
     <div className="flex flex-col gap-6">
@@ -571,6 +629,12 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               accent="bg-warning/10 text-warning" className="text-warning" />
             <Kpi icon={<DollarSign className="size-3.5" />} label="Divisas $" value={fmtUsd(sums.usd)}
               accent="bg-success/10 text-success" className="text-success" />
+            {/* F42: cuánto se DEVOLVIÓ en el período. Los KPI de arriba ya vienen netos (una devolución
+                resta del método por el que salió), así que sin este número el día "da menos" sin motivo. */}
+            {(hay(sums.refund_usd) || hay(sums.refund_bs)) && (
+              <Kpi icon={<Undo2 className="size-3.5" />} label="Devuelto" value={fmtMix(sums.refund_usd, sums.refund_bs)}
+                accent="bg-danger/10 text-danger" className="text-danger" />
+            )}
           </div>
 
           <Card>
@@ -688,30 +752,43 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   ) : (
                     totals.map(t => (
                       <TableRow key={t.date}>
-                        <TableCell className="font-medium">{t.date}</TableCell>
+                        <TableCell className="font-medium">
+                          <div className="flex items-center gap-2">
+                            <span>{t.date}</span>
+                            {/* F42: lo DEVUELTO ese día, visible (el total del día ya viene neto: sin
+                                esto el operario no puede saber cuánto devolvió ni por qué el día da menos) */}
+                            {hay(t.refund_usd ?? 0) || hay(t.refund_bs ?? 0) ? (
+                              <Badge variant="outline" className="text-[10px] gap-1 text-danger border-danger/50"
+                                data-field="refund-dia"
+                                title="Devuelto a clientes ese día (ya está restado de los totales por método)">
+                                <Undo2 className="size-3" /> Devuelto {fmtMix(t.refund_usd ?? 0, t.refund_bs ?? 0)}
+                              </Badge>
+                            ) : null}
+                          </div>
+                        </TableCell>
                         {hasPos && (
                           <TableCell className="text-right tabular-nums">
-                            {t.pos_net_usd > 0.005 || t.pos_net_bs > 0.005 ? fmtMix(t.pos_net_usd, t.pos_net_bs) : '—'}
+                            {hay(t.pos_net_usd) || hay(t.pos_net_bs) ? fmtMix(t.pos_net_usd, t.pos_net_bs) : '—'}
                           </TableCell>
                         )}
                         <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Pago Móvil"
-                          onClick={() => t.pago_movil_total > 0.005 && openDrillDown(t.date, 'Pago Móvil')}>
+                          onClick={() => hay(t.pago_movil_total) && openDrillDown(t.date, 'Pago Móvil')}>
                           {dash(t.pago_movil_total, fmtBs)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Efectivo Bs"
-                          onClick={() => t.cash_bs > 0.005 && openDrillDown(t.date, 'Efectivo Bs')}>
+                          onClick={() => hay(t.cash_bs) && openDrillDown(t.date, 'Efectivo Bs')}>
                           {dash(t.cash_bs, fmtBs)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-success cursor-pointer hover:underline" title="Ver detalle Divisas"
-                          onClick={() => (t.usd_cash_total + t.cash_usd) > 0.005 && openDrillDown(t.date, 'Divisas (USD Cash)')}>
+                          onClick={() => hay(t.usd_cash_total + t.cash_usd) && openDrillDown(t.date, 'Divisas (USD Cash)')}>
                           {dash(t.usd_cash_total + t.cash_usd, fmtUsd)}
                         </TableCell>
                         {hasZelle && <TableCell className="text-right tabular-nums text-success cursor-pointer hover:underline" title="Ver detalle Zelle"
-                          onClick={() => t.zelle_total > 0.005 && openDrillDown(t.date, 'Transferencia Zelle')}>
+                          onClick={() => hay(t.zelle_total) && openDrillDown(t.date, 'Transferencia Zelle')}>
                           {dash(t.zelle_total, fmtUsd)}
                         </TableCell>}
                         {hasTransf && <TableCell className="text-right tabular-nums text-warning cursor-pointer hover:underline" title="Ver detalle Transf Bs"
-                          onClick={() => t.transfer_bs_total > 0.005 && openDrillDown(t.date, 'Transferencia Bs')}>
+                          onClick={() => hay(t.transfer_bs_total) && openDrillDown(t.date, 'Transferencia Bs')}>
                           {dash(t.transfer_bs_total, fmtBs)}
                         </TableCell>}
                         <TableCell className="text-right tabular-nums text-muted-foreground">
@@ -755,7 +832,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                   <TableHead className="text-right">Divisas $</TableHead>
                   <TableHead className="text-right">Tasa</TableHead>
                   <TableHead className="text-right font-bold">Total ($ + Bs.)</TableHead>
-                  <TableHead className="text-right">Diferencia</TableHead>
+                  {/* F39: la caja cuadra POR MONEDA. Un solo número en $ (faltante_$ + faltante_Bs/tasa)
+                      mentía como semáforo: con la tasa moviéndose, un descuadre en Bs. parecía enorme y
+                      un faltante real de $0,40 se diluía. */}
+                  <TableHead className="text-right">Diferencia $</TableHead>
+                  <TableHead className="text-right">Diferencia Bs.</TableHead>
                   <TableHead>Estado</TableHead>
                   <TableHead className="w-28"></TableHead>
                 </TableRow>
@@ -763,7 +844,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               <TableBody>
                 {closings.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
                       Sin cierres registrados
                     </TableCell>
                   </TableRow>
@@ -787,13 +868,37 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                       <TableCell className="text-right font-bold tabular-nums">
                         {!c.is_closed ? <span className="text-muted-foreground">—</span> : totalCell(c.total_usd, c.total_bs)}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {c.is_closed ? (
-                          <span className={Math.abs(c.difference) < 0.5 ? 'text-success' : 'text-danger'}>
-                            {c.difference >= 0 ? '+' : ''}{fmtUsd(c.difference)}
-                          </span>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </TableCell>
+                      {(() => {
+                        if (!c.is_closed) return (<>
+                          <TableCell className="text-right text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-muted-foreground">—</TableCell>
+                        </>);
+                        // La diferencia se muestra SIEMPRE (esconderla tapaba un descuadre real: un
+                        // cierre con el arqueo en 0 y un esperado grande es «falta todo el cajón»).
+                        // `sinContar` solo AGREGA la marca de que nadie contó, con el remedio.
+                        const d = closingDifference(c);
+                        const sinContarEste = sinContar(c);
+                        const aviso = sinContarEste
+                          ? 'Nadie contó el cajón (arqueo en 0) o este cierre es anterior al arqueo real. Si es viejo, reabrilo con ↺, contá el cajón y volvé a cerrarlo.'
+                          : closingLabel(d);
+                        const colorUsd = sinContarEste ? 'text-warning' : Math.abs(d.usd) < TOL_USD ? 'text-success' : 'text-danger';
+                        const colorBs = sinContarEste ? 'text-warning' : Math.abs(d.bs) < TOL_BS ? 'text-success' : 'text-danger';
+                        return (<>
+                          <TableCell className="text-right tabular-nums" title={aviso}>
+                            <span className={colorUsd}
+                              data-diff="usd" data-ok={Math.abs(d.usd) < TOL_USD} data-sin-contar={sinContarEste || null}>
+                              {d.usd > 0 ? '+' : ''}{fmtUsd(d.usd)}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums" title={aviso}>
+                            <span className={colorBs}
+                              data-diff="bs" data-ok={Math.abs(d.bs) < TOL_BS} data-sin-contar={sinContarEste || null}>
+                              {d.bs > 0 ? '+' : ''}{fmtBs(d.bs)}
+                            </span>
+                            {sinContarEste && <span className="ml-1 text-[10px] text-muted-foreground">sin contar</span>}
+                          </TableCell>
+                        </>);
+                      })()}
                       <TableCell>
                         {c.is_closed ? (
                           <Badge variant="default" className="bg-success">Cerrado</Badge>
@@ -803,6 +908,17 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                       </TableCell>
                       <TableCell>
                         <div className="flex gap-1">
+                          {/* F35: un día que quedó ABIERTO (p. ej. reabierto con ↺ para anotar un pago
+                              cobrado ese día) se puede cerrar DESDE ACÁ. Antes el único «Cerrar Día»
+                              apuntaba al turno más reciente: con dos abiertos, el viejo quedaba sin
+                              arqueo. */}
+                          {!c.is_closed && (
+                            <Button variant="outline" size="sm" data-action="cerrar-dia-fila"
+                              title={`Cerrar el día ${c.close_date} (arqueo de esa caja)`}
+                              onClick={() => abrirCierreDe(c)}>
+                              <Lock className="size-3" /> Cerrar
+                            </Button>
+                          )}
                           {c.is_closed && (
                             <Button variant="ghost" size="sm"
                               onClick={() => api.reopenDay(c.close_date).then(() => { loadClosings(); refreshActiveDay(); })}>
@@ -1320,7 +1436,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       <Dialog open={showClose} onOpenChange={setShowClose}>
         <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden">
           <DialogHeader className="shrink-0 pr-6">
-            <DialogTitle>Cerrar Día: {activeDay?.close_date}</DialogTitle>
+            <DialogTitle>Cerrar Día: {cierreRow?.close_date}</DialogTitle>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <div>
@@ -1410,37 +1526,68 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               {(expected?.pos_charged_usd ?? 0) > 0 && (
                 <div className="flex items-center gap-3 text-sm">
                   <span>Diferencia ($):{' '}
-                    <span className={`font-bold ${Math.abs(posSettledUsd - (expected?.pos_charged_usd ?? 0)) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                      {posSettledUsd >= (expected?.pos_charged_usd ?? 0) ? '+' : ''}{fmtUsd(posSettledUsd - (expected?.pos_charged_usd ?? 0))}
+                    <span className={`font-bold ${Math.abs(puntoDiff.usd) < TOL_USD ? 'text-success' : 'text-danger'}`}>
+                      {puntoDiff.usd > 0 ? '+' : ''}{fmtUsd(puntoDiff.usd)}
                     </span>
                   </span>
-                  {Math.abs(posSettledUsd - (expected?.pos_charged_usd ?? 0)) < 0.5 && <span className="text-success font-medium">Cuadrado ✅</span>}
+                  {Math.abs(puntoDiff.usd) < TOL_USD && <span className="text-success font-medium">Cuadrado ✅</span>}
                 </div>
               )}
               {(expected?.pos_charged_bs ?? 0) > 0 && (
                 <div className="flex items-center gap-3 text-sm">
                   <span>Diferencia (Bs.):{' '}
-                    <span className={`font-bold ${Math.abs(posSettledBs - (expected?.pos_charged_bs ?? 0)) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                      {posSettledBs >= (expected?.pos_charged_bs ?? 0) ? '+' : ''}{fmtBs(posSettledBs - (expected?.pos_charged_bs ?? 0))}
+                    <span className={`font-bold ${Math.abs(puntoDiff.bs) < TOL_BS ? 'text-success' : 'text-danger'}`}>
+                      {puntoDiff.bs > 0 ? '+' : ''}{fmtBs(puntoDiff.bs)}
                     </span>
                   </span>
-                  {Math.abs(posSettledBs - (expected?.pos_charged_bs ?? 0)) < 0.5 && <span className="text-success font-medium">Cuadrado ✅</span>}
+                  {Math.abs(puntoDiff.bs) < TOL_BS && <span className="text-success font-medium">Cuadrado ✅</span>}
                 </div>
               )}
             </div>
-            <div className="flex flex-col gap-2">
-              <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
-              <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
-              <div className="flex items-center gap-3 text-sm">
-                <span>Diferencia:{' '}
-                  <span className={`font-bold ${Math.abs(diffBs) < 0.5 ? 'text-success' : 'text-danger'}`}>
-                    {diffBs >= 0 ? '+' : ''}{fmtBs(diffBs)}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Divisas contadas ($)</label>
+                <MoneyInput value={usdCounted} onChange={setUsdCounted} className="text-lg font-semibold" placeholder="0,00" />
+                <div className="flex items-center gap-3 text-sm">
+                  <span>Diferencia:{' '}
+                    <span className={`font-bold ${Math.abs(diffUsd) < TOL_USD ? 'text-success' : 'text-danger'}`}
+                      data-field="dif-usd" data-ok={Math.abs(diffUsd) < TOL_USD}>
+                      {diffUsd > 0 ? '+' : ''}{fmtUsd(diffUsd)}
+                    </span>
                   </span>
-                </span>
-                {cuadrado && <span className="text-success font-medium">Cuadrado ✅</span>}
+                  {Math.abs(diffUsd) < TOL_USD && <span className="text-success font-medium">Cuadrado ✅</span>}
+                </div>
+                <p className="text-xs text-muted-foreground">Cuenta los dólares del cajón. El sistema espera {fmtUsd((expected?.usd_cash_total ?? 0) + (expected?.cash_usd ?? 0))}.</p>
               </div>
-              <p className="text-xs text-muted-foreground">Debe dar 0,00 para cuadrar. Si no hay efectivo, escribe 0.</p>
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
+                <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
+                <div className="flex items-center gap-3 text-sm">
+                  <span>Diferencia:{' '}
+                    <span className={`font-bold ${Math.abs(diffBs) < TOL_BS ? 'text-success' : 'text-danger'}`}
+                      data-field="dif-bs" data-ok={Math.abs(diffBs) < TOL_BS}>
+                      {diffBs > 0 ? '+' : ''}{fmtBs(diffBs)}
+                    </span>
+                  </span>
+                  {Math.abs(diffBs) < TOL_BS && <span className="text-success font-medium">Cuadrado ✅</span>}
+                </div>
+                <p className="text-xs text-muted-foreground">Debe dar 0,00 para cuadrar. Si no hay efectivo, escribe 0.</p>
+              </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              Los cobros <span className="font-medium">digitales</span> (Zelle, Pago Móvil, Punto) no se cuentan en el cajón:
+              se verifican en la app del banco y entran por su monto esperado.
+            </p>
+            {/* F42: el cierre tiene que decir qué se DEVOLVIÓ hoy. Si no, el operario ve un esperado más
+                bajo que lo que cobró y no sabe por qué (la devolución ya está restada del método por el
+                que salió la plata). */}
+            {(hay(expected?.refund_usd ?? 0) || hay(expected?.refund_bs ?? 0)) && (
+              <div className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs" data-field="cierre-devoluciones">
+                <span className="font-medium text-danger">Devuelto hoy: {fmtMix(expected?.refund_usd ?? 0, expected?.refund_bs ?? 0)}</span>
+                {' '}— ya está restado del esperado del método por el que salió la plata (por eso el cajón o el
+                banco esperan menos de lo que se cobró).
+              </div>
+            )}
             <div className="flex flex-col gap-2">
               <p className="text-sm font-medium">Pago Móvil del día</p>
               {pagoMovilList.length === 0 ? (
@@ -1479,11 +1626,17 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               <Input value={closeNotes} onChange={e => setCloseNotes(e.target.value)}
                 placeholder="Observaciones del cierre..." />
             </div>
+            {!expected && (
+              <p className="text-sm text-danger">
+                No se pudieron leer los totales del día: cerrá este diálogo y volvé a abrirlo. Cerrar sin
+                leer el día guardaría un arqueo en 0 que después parece «falta todo el cajón».
+              </p>
+            )}
             {closeError && <p className="text-sm text-danger">{closeError}</p>}
           </div>
           <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowClose(false)}>Cancelar</Button>
-            <Button onClick={doClose}>
+            <Button onClick={doClose} disabled={!expected}>
               <Lock className="size-4" /> Cerrar Día
             </Button>
           </DialogFooter>
@@ -1510,17 +1663,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <MoneyInput value={settleAmountBs} onChange={setSettleAmountBs} />
               </div>
             )}
-            {settleChargedUsd > 0 && (
+            {(settleChargedUsd > 0 || settleAmount > 0) && (
               <div className="text-sm">
-                Diferencia ($): <span className={Math.abs(settleAmount - settleChargedUsd) < 0.5 ? 'text-success' : 'text-danger'}>
-                  {settleAmount >= settleChargedUsd ? '+' : ''}${(settleAmount - settleChargedUsd).toFixed(2)}
+                Diferencia ($): <span className={Math.abs(settleDiff.usd) < TOL_USD ? 'text-success' : 'text-danger'}
+                  data-field="settle-dif-usd" data-ok={Math.abs(settleDiff.usd) < TOL_USD}>
+                  {settleDiff.usd > 0 ? '+' : ''}{fmtUsd(settleDiff.usd)}
                 </span>
               </div>
             )}
-            {settleChargedBs > 0 && (
+            {(settleChargedBs > 0 || settleAmountBs > 0) && (
               <div className="text-sm">
-                Diferencia (Bs.): <span className={Math.abs(settleAmountBs - settleChargedBs) < 0.5 ? 'text-success' : 'text-danger'}>
-                  {settleAmountBs >= settleChargedBs ? '+' : ''}{fmtBs(settleAmountBs - settleChargedBs)}
+                Diferencia (Bs.): <span className={Math.abs(settleDiff.bs) < TOL_BS ? 'text-success' : 'text-danger'}
+                  data-field="settle-dif-bs" data-ok={Math.abs(settleDiff.bs) < TOL_BS}>
+                  {settleDiff.bs > 0 ? '+' : ''}{fmtBs(settleDiff.bs)}
                 </span>
               </div>
             )}
@@ -1615,7 +1770,10 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <TableBody>
                   {drillResults.map(p => (
                     <TableRow key={p.id}>
-                      <TableCell className="whitespace-nowrap">{p.payment_date?.slice(11, 16) ?? '—'}</TableCell>
+                      {/* Un pago RETROACTIVO se guarda solo con la fecha (la hora real del cobro de
+                          ese día es desconocida): se muestra «—» en vez de vacío o de un «00:00»
+                          inventado. Los pagos del día sí traen su hora. */}
+                      <TableCell className="whitespace-nowrap">{p.payment_date && p.payment_date.length > 10 ? p.payment_date.slice(11, 16) : '—'}</TableCell>
                       <TableCell><Badge variant="outline" className="font-mono text-xs">{p.order_num ?? '—'}</Badge></TableCell>
                       <TableCell>{p.client ?? '—'}</TableCell>
                       <TableCell className="max-w-[180px] truncate">{p.model ?? '—'}</TableCell>

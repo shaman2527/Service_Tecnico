@@ -92,6 +92,10 @@ PIN). Gate **fail-closed**: si la consulta de PIN falla en arranque, se pide el 
   día del pago (cierre del día → día abierto → fallback 1).
 - Saldo honesto: pendiente (rojo), excedente (ámbar), cancelado (verde).
 - Se permite **entregar con saldo** (deuda visible en orden y en el cliente).
+- **Devolución** (`RefundDialog`): tope **por moneda** (R-19) y el método **por el que entró la
+  plata** (R-18) — el diálogo dice «Entró por: …» y bloquea los canales que no cobraron. Al
+  devolver, la orden pasa a **Devuelto** (y el inventario descontado se devuelve). También existe
+  **«Devolver sin reembolso»** para equipos entregados sin pago.
 
 ### 4.5 Clientes
 - Auto-creación (`addOrFindClient`), búsqueda tolerante de cédula (V-24906999 =
@@ -155,7 +159,7 @@ PIN). Gate **fail-closed**: si la consulta de PIN falla en arranque, se pide el 
 | R-1 | **La moneda SIEMPRE la define el método de pago** (backend `normalize_payment_currency` + frontend `methodCurrency`). Bs: Efectivo Bs, Pago Móvil, Transferencia Bs, Punto de Venta (Bs). USD: Divisas, Zelle, Punto ($). |
 | R-2 | **Conversión Bs→USD:** siempre dividir entre tasa BCV. En el Libro Diario se usa la tasa **de cada día** (cierre del día → día abierto → último cierre con tasa>0 → 0 = sin convertir). |
 | R-3 | **El total guardado de una venta/abono está en la moneda del método** (la venta Bs guarda Bs = $ × tasa; el abono Bs guarda Bs tal cual). |
-| R-4 | **Un solo día abierto.** `open_day` rechaza si hay uno; `close_day` solo cierra el abierto. |
+| R-4 | **Un solo día abierto.** `open_day` con el día de **HOY** ya abierto **actualiza** tasa/apertura (no crea otra fila ni la cierra — botón «Actualizar día»); si el día abierto es de **OTRA fecha**, rechaza. `close_day` solo cierra el abierto. |
 | R-5 | **Día abierto obligatorio** para `add_sale`, `add_service`, `add_service_payment`, `add_purchase_order` (backend gate). |
 | R-6 | **Tasa BCV congelada al abrir el día**; nunca se consulta en vivo al cobrar. |
 | R-7 | **Auto-inventario:** entregar un servicio descuenta 1 pantalla compatible (auto-crea el producto si no existe → stock negativo visible); reabrir/borrar devuelve 1. |
@@ -163,12 +167,15 @@ PIN). Gate **fail-closed**: si la consulta de PIN falla en arranque, se pide el 
 | R-9 | **`order_num` monotónico** (MAX+1, no reutiliza al borrar); prefijo y ancho derivados del último número (`DEV-0001` → `DEV-0002`); COALESCE para tabla vacía. |
 | R-10 | **Apertura del día no es venta**: `initial_cash_usd` se guarda aparte y NO entra en totales. |
 | R-11 | **`paid_amount`** (servicio, en USD): pagos USD directos + pagos Bs / tasa del día del pago (cierre del día → día abierto → 1). |
-| R-12 | **Arqueo:** `diferencia = (actual − esperado)` separado por moneda, combinado como `diff_usd + diff_bs/tasa`. |
+| R-12 | **Arqueo (F39):** `diferencia = (actual − esperado)` **por MONEDA y por separado** — «Diferencia $» y «Diferencia Bs.» (`closingDifference`), cada una con su tolerancia (0,5, lo que se redondea al contar el cajón) y **su propio veredicto**. El número mezclado `diff_usd + diff_bs/tasa` sigue guardándose pero es **informativo**: ya no es el semáforo. |
 | R-13 | **Entrega con saldo permitida** por diseño (deuda visible). |
 | R-14 | **Cierre cuadra:** el monto que el sistema espera por método digital es *locked*; solo Efectivo Bs y el monto impreso del Punto se corrigen en el arqueo. |
 | R-15 | **PIN fail-closed:** error de IPC en arranque → pedir PIN (nunca abrir sin él). |
 | R-16 | **Instalador no sobreescribe** la DB de una instalación existente. |
 | R-17 | **Punto de Venta:** `net_amount = total − total×fee%` (comisión 3.5% default). |
+| R-18 | **La DEVOLUCIÓN vuelve POR DONDE ENTRÓ la plata (F42).** El método de una devolución sale de los **movimientos de la orden** (el método por el que se cobró), NUNCA del `payment_method` del formulario — que es sólo lo que se esperaba cobrar. Un método que no cobró nada en esa moneda **no puede** registrar la salida (gate en el backend, fail-closed); los de **cajón** (Efectivo Bs / Divisas) sí pueden pagar del cajón, con aviso. El tope sigue siendo **por moneda** (R-19). |
+| R-19 | **El tope de una devolución es POR MONEDA, sin tasas:** se devuelve, como máximo, lo que **netamente entró en esa moneda** (Bs con Bs, $ con $) → devolver todo lo cobrado deja esa moneda en 0 y la orden saldada (no hay saldo fantasma por la tasa). |
+| R-20 | **Un esperado ≠ 0 NUNCA se esconde (F42).** Las columnas del Libro y las filas del cierre se muestran cuando el neto **no es 0** — también si es **negativo** (una devolución del cajón deja el esperado en −Bs. X) — y el día muestra aparte **cuánto se devolvió** por moneda. Regla madre del arqueo: *un descuadre nunca se esconde*. |
 
 ---
 

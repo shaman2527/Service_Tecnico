@@ -20,6 +20,7 @@
 | F4 | 10 comandos nuevos (página, KPIs, teléfonos, pantallas, movimientos, duplicados, precios, limpieza) | `cargo test` **75/75** |
 | F5/F6 | Módulo único con pestañas, tabla paginada, sin columna "Efectivo ($)", sin "Pantallas" en el sidebar | `src/components/Inventory.tsx` + `src/components/inventory/`; `npm run build` ✓ y `npm run lint` 0 errores |
 | F7 | Servicio: modelo canónico → pantallas rankeadas → confirmación de agotada → descuento exacto con número de orden | `Services.tsx`, `ModelCombobox.tsx`; test `test_service_stock_faltante_and_order_reference` |
+| **F41** | **Inventario RÁPIDO**: memoria corta del catálogo (una vez por versión de la base) + el frontend deja de esperar 200 ms por consulta | `src-tauri/src/cache.rs`, `tools/bench_inventory_ui.mjs`, `tools/verify_inventario_rapido.mjs`; medido: **Modelos 896 → ~120 ms**, entrada 400 → ~100 ms, Movimientos 234 → ~30 ms (detalle en §13) |
 
 Baseline de la auditoría (para comparar cuando se aplique en la tienda): 1126 productos,
 29 marcas literales (14 fuera del mapa), 222 modelos con varios teléfonos, 896 nombres no
@@ -570,3 +571,126 @@ Inventario → Productos mostraba «pantalla infinix hot 30i go 2023 …».
   **columna de la UI ya dice «Pantalla»** (CDP); sin regresión en Modelos (23/23) ni en el contraste SQL (12/12);
   KPIs iguales a SQL (1083 SKU · 1 con stock · 6 u. · 26 marcas); security/truth PASS y CLI parallel ✅.
 - Spec: `tools/progress/specs/F27-category-name.md`.
+
+---
+
+## 13. F41 — Inventario RÁPIDO: cada pestaña muestra los datos al instante (2026-09-17, MODO DEV) · CERRADA
+
+**Pedido del dueño:** «vamos a optimizar la app, que sea rápida cuando entra inventario, cada
+pestaña/sección». **Método:** primero MEDIR (release, sobre copia de la base real de 1126 productos y
+1136 teléfonos), después tocar, y volver a medir con las mismas condiciones.
+
+### Lo que se sentía (mediana de la carrera clic → ver datos)
+
+| Pantalla | Antes | Después |
+|---|---|---|
+| Entrar a Inventario (Productos) | 400 ms | **~100 ms** |
+| Pestaña **Modelos** (la más lenta) | **896 ms** | **~120 ms** |
+| Tabla de repuestos compatibles («Repuesto por modelo») | 470 ms | **~110 ms** |
+| Pestaña Movimientos | 234 ms | **~30 ms** |
+| Volver a una pestaña | 340 ms | **~60 ms** |
+| Sugerencias del buscador de modelo | 438 ms | ~200 ms¹ |
+
+¹ ~180 ms son el rebote **a propósito** al escribir (esperar a que el operario termine de tipear): la
+consulta en sí bajó de ~230-300 ms a ~10-25 ms.
+
+### Por qué estaba lento
+Cada pestaña rehacía cálculos **derivados del catálogo** (dos tablas: `products` + `phones`): parsear el
+JSON de compatibilidad de todos los productos (118 ms), recalcular los 1135 teléfonos uno por uno
+(~140 ms), los KPIs del inventario (113 ms) y **volver a leer el catálogo entero en cada consulta** del
+buscador (240 ms). Y el frontend tiraba trabajo: **toda** consulta —incluida la primera— esperaba 200 ms de
+rebote, se tapaba con esqueleto lo que ya estaba en pantalla y el combobox de modelo consultaba el padrón al
+montarse aunque nadie hubiera escrito nada.
+
+### Qué se hizo
+- **Backend — memoria corta del catálogo** (`src-tauri/src/cache.rs`, NUEVO): índice de repuestos por
+  teléfono, filas del padrón (de las que se **derivan** los totales que usa el selector de modelo), KPIs y
+  catálogo con la compatibilidad **ya parseada**. Se calcula **a lo sumo una vez por versión de la base** y
+  la versión la da SQLite: el par `(SELECT total_changes(), PRAGMA data_version)` — el primero cuenta lo que
+  escribió ESTA conexión, el segundo lo que escribió OTRA. **No hay que acordarse de invalidar** en cada
+  punto de escritura (un contador a mano se olvida; el de SQLite no).
+- **Frontend:** el rebote de 200 ms quedó **sólo para lo que se escribe** (la primera carga y los filtros
+  salen en el acto; el cambio de página va en el mismo paso para no consultar dos veces); esqueleto sólo
+  cuando no hay nada que mostrar (con «· actualizando…» y `data-refreshing` si ya hay tabla); el combobox
+  consulta cuando se lo usa; y **precalentado en tiempo libre** al abrir el módulo (las dos llamadas que
+  construyen la memoria del padrón, ni una más: la app tiene una sola conexión).
+- **Orden de candados obligatorio: primero `conn`, después `cache`.** Los comandos no manejan la memoria:
+  llaman a métodos de `Database`, así el orden vive en un solo lugar.
+
+### Revisión adversarial (2 subagentes) — 2 BLOQUEANTES y varios menores, TODOS arreglados
+1. **(BLOQUEANTE backend) La memoria no veía las escrituras de OTRA conexión.** `total_changes()` es por
+   conexión: con **dos ventanas de la app abiertas** (no hay guard de instancia única) o con una herramienta
+   de `tools/` cargando inventario con la app abierta, habría mostrado números viejos toda la jornada (el
+   desplegable «Pantalla a instalar» ofreciendo una pantalla ya instalada). Arreglo: sumar
+   `PRAGMA data_version` a la versión. Fijado con `test_catalog_cache_sees_writes_from_another_connection`
+   (segunda conexión al mismo archivo) y comprobado EN VIVO con la app abierta: 1136 → (escritura de otro
+   proceso) 1137 → (borrado) 1136, la pantalla siempre igual a la base.
+2. **(BLOQUEANTE frontend) El buscador de modelo podía quedar en «Buscando…» para siempre** (estado de carga
+   trabado si el efecto se abortaba escribiendo y borrando dentro del rebote). Ahora el desplegable se pinta
+   según de qué texto son las opciones (`optionsForQuery`) y no hay estado de carga que pueda quedar colgado.
+   Menores: precalentado recortado a dos llamadas; escribir en Modelos estando en la página 3 ya no lanza una
+   consulta tirada con el texto viejo; los verificadores nuevos esperan **condiciones** (no relojes), abortan
+   si falta `REGISTRO_DB` y limpian sus restos en un `finally`; `verify_models_tab.mjs` recarga la SPA al
+   empezar (si la app ya estaba en esa pestaña, el clic no la remonta y los KPIs quedaban con los números de
+   la corrida anterior: un «KPI viejo» que parecía un bug del producto y era del script).
+
+### Verificación
+- `cd src-tauri && cargo test --release --lib` → **132/132** (7 ignorados; 3 tests nuevos de la memoria).
+- `tsc -b` 0 · `oxlint` 0 errores · `npm run build` ✓ · `cargo build --release` ✓ · `harness_security` PASS ·
+  `harness_truth` PASS.
+- **EN VIVO:** `tools/verify_inventario_rapido.mjs` **10/10** (compara la pantalla contra la BASE leída aparte
+  con `node:sqlite`: es lo único que distingue «número correcto» de «número viejo que coincide»),
+  `tools/verify_models_tab.mjs` **23/23**, `tools/verify_screen_brand_gate.mjs` **23/23** (el gate de marca
+  del servicio, lo que más podía romper el catálogo memorizado).
+- Todos los `*_test.ts` en verde (pos_cuadre 66/66, receipt 52/52, ficha 66/66, service_guide 35/35,
+  reminders 38/38, refund 24/24, payment_math 595/595, queue 61/61, fechas 17/17, method_picker 31/31).
+
+### Herramientas nuevas (quedan en el repo)
+- **`tools/bench_inventory_ui.mjs`** — mide EN VIVO, por pestaña y en frío (saliendo del módulo y volviendo),
+  los milisegundos desde el clic hasta **ver los datos**, con medianas. Es la medición que le importa al
+  dueño, y la que se usó para el antes/después de arriba.
+- **`tools/verify_inventario_rapido.mjs`** — verifica que la memoria **no mienta**: escribe una ficha de
+  prueba, comprueba que los números se muevan, los compara contra la base leída aparte y borra la ficha.
+- **`test_manual_inventory_bench`** (Rust, ignorado) — mide crudo vs memorizado y frío vs caliente sobre
+  `REGISTRO_BENCH_DB` (`node tools/snapshot_db.mjs --out backup/perf.db`).
+
+### Fuera de alcance por decisión (anotado, no escondido)
+**Dejar las pestañas montadas (keep-alive)** para conservar búsqueda, filtros y página. Con la memoria,
+volver a una pestaña cuesta ~60 ms: lo que se pierde es **estado**, no velocidad; y montar varias pestañas a
+la vez obliga a reescribir TODOS los verificadores en vivo (cuentan filas de `table tbody` en todo el
+documento y pasarían a contar las tablas ocultas). Se evalúa aparte si el local pide conservar los filtros.
+
+### Hallazgo aparte (NO de esta feature)
+`delete_product` **no limpia el padrón** (`rebuild_phones` sólo inserta/actualiza por clave): borrar un
+producto deja su teléfono en Modelos con 0 repuestos. La verificación de F41 lo compara contra la base
+justamente por eso y lo deja anotado en pantalla.
+
+**Spec:** `tools/progress/specs/F41-inventario-rapido.md` · **Detalle para agentes:** `AGENTS.md` §F41.
+Sigue todo en **MODO DEV**. Abiertas: **37** (`isBsMethod` por whitelist) y **40** (libro único de
+movimientos de caja + auditoría).
+
+---
+
+## 14. F42 — La devolución vuelve POR DONDE ENTRÓ la plata (2026-09-17, MODO DEV) · CERRADA
+
+**Reporte del dueño:** «devolví 2 dólares en Bs, en el Libro al cerrar obviamente se ve reflejado, pero cuando voy a cerrar caja me sale **43 dólares efectivo**. Revisá esa lógica» + «lo que quiero es que en el Libro se vea el monto que devolví, para saber cuánto llevo, datos reales; al igual cuando cierro».
+
+### Qué pasaba (con los datos reales, sobre una copia de `registro.db`)
+- **Los $43 estaban BIEN:** son los dos cobros en efectivo dólares del día ($40 + $3). La devolución fue **en bolívares**, así que no toca el cajón de dólares.
+- **El defecto:** la orden DEV-0001 ($5, formulario en «Punto de Venta (Bs)») se cobró **$3 en efectivo + Bs. 1.697 por PAGO MÓVIL** (Bs. 1.697 ÷ 848,5458 = exactamente $2). La devolución de esos Bs. 1.697 quedó anotada en el **Punto** porque el diálogo de devolución **proponía el método del FORMULARIO** (`service.payment_method`, que es sólo lo que se esperaba cobrar).
+- **Consecuencia en el cierre:** Punto de Venta (Bs) esperado **−Bs. 1.697** (imposible: la máquina no devuelve plata) y, como la fila del Punto sólo se dibuja con esperado **> 0**, **la devolución no aparecía en ninguna parte**; el cajón esperaba 0 por la plata que sí salió.
+- **Regla del local (del dueño):** «se devolvió la misma manera que el cliente me pagó».
+
+### Qué se hizo
+- **Reglas puras** en `src/lib/refund-math.ts`: `incomeByMethod`, `methodHasIncome`, `isCashMethod`, `refundMethodDefault`, `refundMethodProblem`, `incomeSummary`.
+- **Gate en el BACKEND (fail-closed):** un método que **no cobró nada** en esa moneda no puede registrar la devolución; el error dice **por dónde entró**. Los de **cajón** (Efectivo Bs / Divisas) sí pueden pagar del cajón (se avisa, no se bloquea).
+- **Diálogo de devolución:** propone método y moneda **de lo que entró**, muestra «Entró por: …», ofrece «Usar «<método real>»» a un toque y bloquea el guardado cuando el método no cobró.
+- **Libro Diario y cierre:** `|x| > 0.005` en vez de `x > 0.005` (una devolución puede dejar el método en 0 o negativo: **ya no se esconde** y la celda vuelve a ser clickeable) + campos nuevos `refund_usd`/`refund_bs` mostrados como **chip «Devuelto …»** en la fila del día, **KPI «Devuelto»** y **línea en el diálogo de cierre** («ya está restado del esperado del método por el que salió la plata»).
+
+### Datos de hoy corregidos
+Por los comandos de la propia app (no por SQL a mano), con respaldo `backup/registro_pre_fix_devolucion_20260917.db`: se borró el movimiento mal anotado y se reanotó la devolución por **Pago Móvil**. Cierre de hoy: Divisas **$43**, Pago Móvil **0**, Efectivo Bs. **0**, Punto **0**, «Devuelto **Bs. 1.697,00**» visible.
+
+### Verificación
+`cargo test --release --lib` **133/133** · `node tools/refund_math_test.ts` **45/45** · **EN VIVO `tools/verify_devolucion_metodo.mjs` 7/7** (pedido de prueba: el backend rechaza el Punto nombrando por dónde entró, el diálogo dice «Entró por: Pago Móvil Bs. 4.243,00», propone ese método y borra sus residuos) · EN VIVO además: el Libro muestra «Devuelto Bs.1.697,00» y el cierre «Devuelto hoy: Bs.1.697,00 — ya está restado…» · `tsc -b` 0.
+
+**Spec:** `tools/progress/specs/F42-devolucion-por-donde-entro.md`. **Pendiente (feature 43 si el local lo pide):** poder **editar el método** de un pago ya anotado (hoy: borrar y reanotar).

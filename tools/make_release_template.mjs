@@ -89,8 +89,19 @@ if (!KEEP_TECHS) {
 // 3) Settings de la máquina + PIN al valor documentado.
 for (const k of SETTINGS_MAQUINA) db.prepare('DELETE FROM settings WHERE key = ?').run(k);
 reporte.settings_maquina_limpiados = SETTINGS_MAQUINA;
+// El PIN de la plantilla es SIEMPRE el inicial documentado (`INSTALACION.md`: «el inicial es 1234»).
+// ANTES esto solo lo creaba si faltaba: desde que el PIN se guarda HASHEADO (B4) y la base de origen
+// es la del taller, la plantilla viajaba con el PIN REAL del dueño — en un instalador que se descarga
+// cualquiera desde un repo público. Un PIN propio es de la persona, no del catálogo: se resetea.
+const PIN_INICIAL = '1234';
 const pin = db.prepare("SELECT value FROM settings WHERE key='pin'").get();
-if (!pin) { db.prepare("INSERT INTO settings (key, value) VALUES ('pin', '1234')").run(); reporte.pin_creado = '1234'; }
+if (pin) {
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'pin'").run(PIN_INICIAL);
+  reporte.pin_reseteado = `${String(pin.value).slice(0, 12)}… → ${PIN_INICIAL}`;
+} else {
+  db.prepare("INSERT INTO settings (key, value) VALUES ('pin', ?)").run(PIN_INICIAL);
+  reporte.pin_creado = PIN_INICIAL;
+}
 // 4) Duplicados: en la plantilla las tablas transaccionales están VACÍAS, así que fusionar es
 //    quedarse con la fila de menor id y sumarle el stock de las demás (mismo criterio que
 //    `merge_products`, sin tener que repuntar ventas/servicios/pedidos porque no hay ninguno).

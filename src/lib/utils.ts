@@ -1,6 +1,9 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import type { Product, Service, ServicePayment } from '../types'
+// F38: la regla del saldo por moneda (una sola implementación: la que usan la tarjeta, el diálogo de
+// abono y ahora también el recibo — el papel no puede decir algo distinto de la pantalla).
+import { orderBalance } from './order-balance.ts'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -380,6 +383,7 @@ export function buildServiceReceiptParts(
   if (!service) return empty;
   const w = printerWidthChars(opts.width);
   const dash = '-'.repeat(w);
+  const tasa = opts.tasaBcv ?? 0;
   const lines: string[] = [];
   const tipos = parseServiceTypes(service);
   const logo = tipos.join(', ');
@@ -424,6 +428,14 @@ export function buildServiceReceiptParts(
   const abonadoBs = payments.reduce((a, p) => a + (p.amount > 0 && p.currency === 'VES' ? p.amount : 0), 0);
   const abonado = service.paid_amount ?? 0;
   const saldo = totalUsd - abonado;
+  // F38 — ¿el cliente viene pagando en BOLÍVARES y cuánto falta en Bs.? Es EXACTAMENTE la misma regla
+  // que usan la tarjeta y el diálogo de abono (`order-balance.orderBalance`, que a su vez usa el NETO
+  // por moneda de `refund-math`): así el papel no puede decir algo distinto de la pantalla. Una
+  // devolución en Bs. que dejó el neto en 0 NO imprime un «FALTA Bs.», y el monto en Bs. sale del
+  // MISMO cálculo (redondeado al bolívar) que muestra la tarjeta.
+  const balRecibo = orderBalance(totalUsd, abonado, payments, tasa);
+  const pagoEnBs = balRecibo.cobroEn === 'VES';
+  const saldoBs = balRecibo.bs;
   const pagoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (abonado > 0.005 ? fmtUsd(abonado) : '');
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) lines.push(l);
   if (finalized) {
@@ -433,7 +445,12 @@ export function buildServiceReceiptParts(
     if (saldo <= 0.005) {
       lines.push(center('PAGADO', w));
     } else {
+      // F38: si el cliente viene pagando en BOLÍVARES, el talón dice lo que le falta EN Bs. (con la
+      // tasa del turno) además del $: es el número que el operario le va a pedir en el mostrador. El
+      // $ sigue estando — es la deuda real de la orden y no se revalúa. El Bs. lo calcula la MISMA
+      // regla pura que la pantalla (`balRecibo.bs`, redondeado al bolívar).
       for (const l of kv('FALTA', fmtUsd(saldo), w)) lines.push(l);
+      if (pagoEnBs && saldoBs !== null) for (const l of kv('FALTA Bs.', fmtMoney(saldoBs, 'VES'), w)) lines.push(l);
     }
   }
   // METODO SOLO si hay pagos REALES registrados (nunca el método del form:
@@ -494,9 +511,22 @@ export function buildServiceReceiptParts(
       stub.push(center('PAGADO', w));
     } else {
       for (const l of kv('FALTA', fmtUsd(stubSaldo), w)) stub.push(l);
+      // F38: el talón repite el saldo en Bs. cuando el cliente viene pagando en bolívares
+      // (misma regla pura que el recibo principal, calculada arriba una sola vez).
+      if (pagoEnBs && saldoBs !== null && Math.abs(stubSaldo - saldo) < 0.005) {
+        for (const l of kv('FALTA Bs.', fmtMoney(saldoBs, 'VES'), w)) stub.push(l);
+      }
     }
   }
   if (methods.length > 0) for (const l of kv('METODO', methods.join(' + '), w)) stub.push(l);
+  // F32: lo que el cliente DIJO sobre el pago cuando todavía no hay pagos registrados.
+  // Es un ACUERDO, no un pago: por eso va con el rótulo «ACORDADO» (nunca «METODO», que se
+  // imprime solo con pagos REALES) y solo mientras no haya ningún pago.
+  const acuerdo = !finalized && methods.length === 0 && !(service.paid_amount > 0.005)
+    ? (service.pay_intent === 'ahora' ? 'PAGA AHORA'
+      : service.pay_intent === 'al_retirar' ? 'PAGA AL RETIRAR' : '')
+    : '';
+  if (acuerdo) stub.push(center(`ACORDADO: ${acuerdo}`, w));
   const stubNote = opts.stubNote?.trim() || service.observations?.trim() || '';
   if (stubNote) for (const l of kv('NOTA', stubNote, w)) stub.push(l);
   if (warrantyEnd(service.date_out)) stub.push(center('GARANTIA 7 DIAS', w));

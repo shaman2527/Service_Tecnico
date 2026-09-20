@@ -61,7 +61,7 @@ pub struct PhoneDetail {
 
 /// Índice teléfono -> (ids de producto, stock de cada uno, categorías).
 /// (La marca y la etiqueta salen de la fila del padrón, no del índice.)
-struct Idx {
+pub(crate) struct Idx {
     ids: BTreeSet<i64>,
     stock_by_id: BTreeMap<i64, i64>,
     cats: BTreeMap<i64, Vec<i64>>,
@@ -73,7 +73,11 @@ impl Idx {
     }
 }
 
-fn phone_index(conn: &Connection) -> SqlResult<HashMap<String, Idx>> {
+/// Índice `teléfono -> repuestos` (cálculo crudo, SIN memoria): recorre los productos de las
+/// categorías de pantalla y parsea el JSON de compatibilidad de cada uno (118 ms medidos con
+/// los datos reales). NO lo llaman los comandos: lo llama la memoria del catálogo
+/// (`cache::CatalogCache::phone_index`), que lo calcula a lo sumo una vez por versión de la base.
+pub(crate) fn build_index(conn: &Connection) -> SqlResult<HashMap<String, Idx>> {
     let mut idx: HashMap<String, Idx> = HashMap::new();
     // Regla del local: el padrón (y lo que cuenta cada teléfono) sale de las categorías de
     // pantalla — `catalog::PHONE_CATEGORIES` (Pantalla + Táctil + Táctil Tablet).
@@ -174,25 +178,53 @@ fn parse_aliases(json: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
 }
 
-/// Repuestos y stock de TODOS los teléfonos del padrón en una sola pasada (clave + alias):
-/// es el mismo cálculo que usa la pestaña Modelos, para que los números del formulario de
-/// servicio y de la tabla no puedan divergir. Devuelve `clave -> (repuestos, stock)`.
-pub fn phone_totals_map(conn: &Connection) -> SqlResult<HashMap<String, (i64, i64)>> {
-    let idx = phone_index(conn)?;
+/// TODAS las filas del padrón con sus repuestos, stock y categorías ya calculados: es
+/// exactamente lo que la pestaña Modelos muestra, sin filtrar ni ordenar.
+///
+/// Cálculo crudo (SIN memoria), con el índice ya construido: lo llama
+/// `cache::CatalogCache::phone_rows`. De acá salen TAMBIÉN los totales por teléfono que usa el
+/// selector de modelo (`clave -> (repuestos, stock)`), para que las dos pantallas no puedan
+/// divergir y el trabajo se haga una sola vez.
+pub(crate) fn build_rows(conn: &Connection, idx: &HashMap<String, Idx>) -> SqlResult<Vec<PhoneListRow>> {
     let cats = category_names(conn)?;
-    let mut out: HashMap<String, (i64, i64)> = HashMap::new();
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(key,''), COALESCE(aliases,'[]'), COALESCE(brand,'') FROM phones",
+        "SELECT id, COALESCE(brand,''), COALESCE(line,''), COALESCE(model,''), COALESCE(name,''),
+                COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]')
+         FROM phones",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, String>(7)?,
+        ))
     })?;
+
+    let mut items: Vec<PhoneListRow> = Vec::new();
     for row in rows {
-        let (key, aliases, brand) = row?;
-        let (products, stock, _, _) = merged_stats(&idx, &key, &parse_aliases(&aliases), &brand, &cats);
-        out.insert(key, (products, stock));
+        let (id, brand_row, line, model, name, key, needs_review, aliases) = row?;
+        let aliases_vec = parse_aliases(&aliases);
+        let (products, stock, cats_txt, _) = merged_stats(idx, &key, &aliases_vec, &brand_row, &cats);
+        items.push(PhoneListRow {
+            id,
+            brand: brand_row,
+            line,
+            model,
+            name,
+            key,
+            needs_review: needs_review != 0,
+            aliases: aliases_vec,
+            products,
+            stock,
+            categories: cats_txt,
+        });
     }
-    Ok(out)
+    Ok(items)
 }
 
 /// Alias (cómo está escrito en el INVENTARIO) del teléfono del padrón que corresponde a un
@@ -301,45 +333,26 @@ fn matching_rows(conn: &Connection, text: &str) -> SqlResult<Vec<(String, String
 }
 
 /// Marcas del padrón con su conteo (índice de marcas, estilo catálogo).
-pub fn get_phone_brands(conn: &Connection) -> SqlResult<Vec<PhoneBrandRow>> {
-    let idx = phone_index(conn)?;
-    let cats = category_names(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(brand,''), COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]')
-         FROM phones",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    })?;
+/// MEMORIZADO (feature 41): el índice de teléfonos y los totales por teléfono salen de la
+/// memoria del catálogo, así que esta pestaña ya no rehace el trabajo de la lista (y al revés).
+pub fn get_phone_brands(conn: &Connection, cache: &mut crate::cache::CatalogCache) -> SqlResult<Vec<PhoneBrandRow>> {
+    // Los conteos salen de las MISMAS filas memorizadas que la lista (los números de la franja
+    // y los de la tabla no pueden divergir, y el trabajo se hace una sola vez).
+    let rows = cache.phone_rows(conn)?;
     let mut map: BTreeMap<String, PhoneBrandRow> = BTreeMap::new();
-    for row in rows {
-        let (brand, key, needs_review, aliases_json) = row?;
-        let e = map.entry(brand.clone()).or_insert_with(|| PhoneBrandRow {
-            brand: brand.clone(),
+    for r in rows.iter() {
+        let e = map.entry(r.brand.clone()).or_insert_with(|| PhoneBrandRow {
+            brand: r.brand.clone(),
             ..Default::default()
         });
         e.phones += 1;
-        if needs_review != 0 {
+        if r.needs_review {
             e.needs_review += 1;
         }
-        // Mismos números que la lista: clave + alias (un teléfono renombrado conserva
-        // sus repuestos por los alias del inventario).
-        let (products, stock, _, _) = merged_stats(
-            &idx,
-            &key,
-            &parse_aliases(&aliases_json),
-            &brand,
-            &cats,
-        );
-        if products > 0 {
+        if r.products > 0 {
             e.with_products += 1;
         }
-        if stock > 0 {
+        if r.stock > 0 {
             e.with_stock += 1;
         }
     }
@@ -353,6 +366,7 @@ pub fn get_phone_brands(conn: &Connection) -> SqlResult<Vec<PhoneBrandRow>> {
 #[allow(clippy::too_many_arguments)]
 pub fn get_phones(
     conn: &Connection,
+    cache: &mut crate::cache::CatalogCache,
     brand: Option<&str>,
     search: &str,
     only_with_products: bool,
@@ -363,67 +377,36 @@ pub fn get_phones(
     limit: i64,
     offset: i64,
 ) -> SqlResult<PhonePage> {
-    let idx = phone_index(conn)?;
-    let cats = category_names(conn)?;
+    // MEMORIZADO (feature 41): las filas con sus repuestos/stock/categorías se calculan una sola
+    // vez por versión de la base y las comparten esta lista, los KPIs de marca y el selector de
+    // modelo. Antes CADA consulta recorría el padrón y recalculaba los 1135 teléfonos uno por uno
+    // (y lo mismo hacían los otros dos endpoints por su lado).
+    let all = cache.phone_rows(conn)?;
     let tokens = crate::catalog::search_tokens(search);
 
-    let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(brand,''), COALESCE(line,''), COALESCE(model,''), COALESCE(name,''),
-                COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]')
-         FROM phones",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, String>(7)?,
-        ))
-    })?;
-
     let mut items: Vec<PhoneListRow> = Vec::new();
-    for row in rows {
-        let (id, brand_row, line, model, name, key, needs_review, aliases) = row?;
+    for r in all.iter() {
         if let Some(b) = brand {
-            if !b.trim().is_empty() && !brand_row.eq_ignore_ascii_case(b.trim()) {
+            if !b.trim().is_empty() && !r.brand.eq_ignore_ascii_case(b.trim()) {
                 continue;
             }
         }
         if !tokens.is_empty() {
-            let hay = crate::catalog::norm(&format!("{brand_row} {name} {model} {}", aliases));
+            let hay = crate::catalog::norm(&format!("{} {} {} {}", r.brand, r.name, r.model, r.aliases.join(" ")));
             if !tokens.iter().all(|t| hay.contains(t)) {
                 continue;
             }
         }
-        let aliases_vec = parse_aliases(&aliases);
-        let review = needs_review != 0;
-        if only_review && !review {
+        if only_review && !r.needs_review {
             continue;
         }
-        let (products, stock, cats_txt, _) = merged_stats(&idx, &key, &aliases_vec, &brand_row, &cats);
-        if only_with_products && products == 0 {
+        if only_with_products && r.products == 0 {
             continue;
         }
-        if only_stock && stock <= 0 {
+        if only_stock && r.stock <= 0 {
             continue;
         }
-        items.push(PhoneListRow {
-            id,
-            brand: brand_row,
-            line,
-            model,
-            name,
-            key: key.clone(),
-            needs_review: review,
-            aliases: parse_aliases(&aliases),
-            products,
-            stock,
-            categories: cats_txt,
-        });
+        items.push(r.clone());
     }
 
     // El sentido elegido manda sobre la clave primaria de la columna; el nombre
@@ -457,8 +440,8 @@ pub fn get_phones(
 }
 
 /// Ficha del teléfono: sus repuestos AGRUPADOS POR CATEGORÍA (Pantalla primero).
-pub fn get_phone_detail(conn: &Connection, phone_id: i64) -> SqlResult<Option<PhoneDetail>> {
-    let idx = phone_index(conn)?;
+pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCache, phone_id: i64) -> SqlResult<Option<PhoneDetail>> {
+    let idx = cache.phone_index(conn)?;
     let cats = category_names(conn)?;
     let row = conn
         .query_row(
@@ -670,6 +653,7 @@ pub struct RenamePreview {
 
 pub fn preview_rename_phone(
     conn: &Connection,
+    cache: &mut crate::cache::CatalogCache,
     id: i64,
     brand: &str,
     line: &str,
@@ -690,7 +674,7 @@ pub fn preview_rename_phone(
             |r| r.get(0),
         )
         .ok();
-    let idx = phone_index(conn)?;
+    let idx = cache.phone_index(conn)?;
     let cats = category_names(conn)?;
     // los repuestos se cuentan con la clave NUEVA + los alias que ya tenía el teléfono
     let (products, stock, _, _) = merged_stats(&idx, &n.key, &parse_aliases(&aliases), &n.brand, &cats);
@@ -785,7 +769,7 @@ mod tests {
         let (db, path) = setup("test_phones_list.db");
         let conn = db.conn.lock().unwrap();
 
-        let brands = get_phone_brands(&conn).unwrap();
+        let brands = get_phone_brands(&conn, &mut crate::cache::CatalogCache::default()).unwrap();
         assert!(brands.iter().any(|b| b.brand == "Tecno" && b.phones >= 1), "marcas: {:?}", brands);
         assert!(brands.iter().any(|b| b.brand == "Samsung" && b.with_stock == 1));
         assert_eq!(
@@ -796,21 +780,21 @@ mod tests {
         );
         assert!(brands.iter().any(|b| b.brand == "ZTE" && b.needs_review == 1 && b.with_stock == 0));
 
-        let page = get_phones(&conn, Some("Samsung"), "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let page = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Samsung"), "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "Galaxy A06", "nombre comercial con la línea");
         assert_eq!(page.items[0].products, 1);
         assert_eq!(page.items[0].stock, 2);
         assert_eq!(page.items[0].categories, "Pantalla");
 
-        let detail = get_phone_detail(&conn, page.items[0].id).unwrap().unwrap();
+        let detail = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), page.items[0].id).unwrap().unwrap();
         assert_eq!(detail.blocks.len(), 1);
         assert_eq!(detail.blocks[0].category, "Pantalla");
         assert_eq!(detail.blocks[0].items.len(), 1);
         assert_eq!(detail.blocks[0].items[0].name, "Pantalla Samsung Galaxy A06");
 
         // orden por stock descendente (los 3 estados los maneja la UI con sort+dir)
-        let by_stock = get_phones(&conn, None, "", false, false, false, "stock", "desc", 50, 0).unwrap();
+        let by_stock = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "stock", "desc", 50, 0).unwrap();
         assert!(by_stock.items[0].stock >= by_stock.items[1].stock);
 
         drop(conn);
@@ -828,7 +812,7 @@ mod tests {
         add_phone(&conn, "Alcatel", "", "1B").unwrap();
 
         let names = |brand: Option<&str>, sort: &str, dir: &str| {
-            get_phones(&conn, brand, "", false, false, false, sort, dir, 50, 0)
+            get_phones(&conn, &mut crate::cache::CatalogCache::default(), brand, "", false, false, false, sort, dir, 50, 0)
                 .unwrap()
                 .items
                 .into_iter()
@@ -843,39 +827,39 @@ mod tests {
         assert_eq!(names(None, "marca", "asc")[0], "1B", "Alcatel primero");
         assert_eq!(names(None, "marca", "desc")[0], "A3", "ZTE primero");
         // repuestos: desc primero el que más tiene, asc el que menos
-        let by_parts_desc = get_phones(&conn, None, "", false, false, false, "repuestos", "desc", 50, 0).unwrap();
+        let by_parts_desc = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "repuestos", "desc", 50, 0).unwrap();
         assert_eq!(by_parts_desc.items[0].products, 1);
         assert_eq!(by_parts_desc.items.last().unwrap().products, 0);
-        let by_parts_asc = get_phones(&conn, None, "", false, false, false, "repuestos", "asc", 50, 0).unwrap();
+        let by_parts_asc = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "repuestos", "asc", 50, 0).unwrap();
         assert_eq!(by_parts_asc.items[0].products, 0, "el manual no tiene repuestos");
         // stock: desc por unidades y asc al revés
-        let by_stock = get_phones(&conn, None, "", false, false, false, "stock", "desc", 50, 0).unwrap();
+        let by_stock = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "stock", "desc", 50, 0).unwrap();
         assert_eq!(by_stock.items[0].name, "Spark 20", "3 unidades");
         assert_eq!(by_stock.items[0].stock, 3);
-        let by_stock_asc = get_phones(&conn, None, "", false, false, false, "stock", "asc", 50, 0).unwrap();
+        let by_stock_asc = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "stock", "asc", 50, 0).unwrap();
         assert_eq!(by_stock_asc.items[0].stock, 0);
         // revisar: desc deja los «por revisar» arriba; asc, abajo
-        let review_desc = get_phones(&conn, None, "", false, false, false, "revisar", "desc", 50, 0).unwrap();
+        let review_desc = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "revisar", "desc", 50, 0).unwrap();
         assert!(review_desc.items[0].needs_review, "ZTE A3 arriba");
         assert_eq!(review_desc.items[0].name, "A3");
-        let review_asc = get_phones(&conn, None, "", false, false, false, "revisar", "asc", 50, 0).unwrap();
+        let review_asc = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "revisar", "asc", 50, 0).unwrap();
         assert!(!review_asc.items[0].needs_review, "los revisados primero");
         assert_eq!(review_asc.items.last().unwrap().needs_review, true);
 
         // filtro «por revisar»: solo los needs_review (ZTE A3), no el manual
-        let only = get_phones(&conn, None, "", false, false, true, "nombre", "asc", 50, 0).unwrap();
+        let only = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, true, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(only.total, 1, "solo ZTE A3: {:?}", only.items.iter().map(|p| &p.name).collect::<Vec<_>>());
         assert!(only.items.iter().all(|p| p.needs_review));
         // y se combina con el filtro de marca
-        let zte = get_phones(&conn, Some("ZTE"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
+        let zte = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("ZTE"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(zte.total, 1);
-        let samsung = get_phones(&conn, Some("Samsung"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
+        let samsung = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Samsung"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(samsung.total, 0, "Samsung Galaxy A06 ya tiene familia");
-        let alcatel = get_phones(&conn, Some("Alcatel"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
+        let alcatel = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Alcatel"), "", false, false, true, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(alcatel.total, 0, "el manual no está por revisar");
 
         // paginación: el total NO cambia, el slice sí
-        let page2 = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 2, 2).unwrap();
+        let page2 = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 2, 2).unwrap();
         assert_eq!(page2.total, 4, "total del padrón completo");
         assert_eq!(page2.items.len(), 2);
 
@@ -888,23 +872,23 @@ mod tests {
     fn test_rename_add_and_merge_phones() {
         let (db, path) = setup("test_phones_rename.db");
         let conn = db.conn.lock().unwrap();
-        let page = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let page = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let id = page.items[0].id;
 
         rename_phone(&conn, id, "Tecno", "Spark", "20 Pro").unwrap();
-        let after = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(after.items[0].name, "Spark 20 Pro");
         // sigue apuntando a su repuesto por los alias
         assert_eq!(after.items[0].products, 1);
 
         // chocar con otro teléfono → error claro
-        let samsung = get_phones(&conn, Some("Samsung"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let samsung = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Samsung"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let err = rename_phone(&conn, samsung.items[0].id, "Tecno", "Spark", "20 Pro").unwrap_err();
         assert!(format!("{err}").contains("Ya existe"), "error: {err}");
 
         let manual = add_phone(&conn, "Nokia", "", "110").unwrap();
         assert!(manual > 0);
-        let all = get_phones(&conn, Some("Nokia"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let all = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Nokia"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(all.total, 1);
         assert_eq!(all.items[0].products, 0, "sin repuesto todavía (padrón completo)");
         // el "Nokia 110" escrito a mano se normaliza con las reglas del padrón
@@ -914,7 +898,7 @@ mod tests {
         // así el taller lo sigue encontrando por como estaba escrito y el catálogo no
         // vuelve a crear la fila vieja)
         merge_phones(&conn, id, manual).unwrap();
-        let merged = get_phones(&conn, None, "Nokia", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let merged = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "Nokia", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(merged.total, 1, "una sola fila: la del teléfono que se quedó");
         assert_eq!(merged.items[0].id, id);
         assert_eq!(merged.items[0].name, "Spark 20 Pro");
@@ -937,19 +921,19 @@ mod tests {
         let (db, path) = setup("test_phones_detail_rename.db");
         let conn = db.conn.lock().unwrap();
 
-        let before = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let before = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let id = before.items[0].id;
-        let detail_before = get_phone_detail(&conn, id).unwrap().unwrap();
+        let detail_before = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), id).unwrap().unwrap();
         assert_eq!(detail_before.blocks.len(), 1, "antes de renombrar hay una categoría");
         assert_eq!(detail_before.phone.products, 1);
 
         // renombrar = clave nueva + los alias del inventario se conservan
         rename_phone(&conn, id, "Tecno", "Spark", "20 Pro").unwrap();
 
-        let after = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(after.items[0].products, 1, "la LISTA ya funcionaba por los alias");
 
-        let detail = get_phone_detail(&conn, id).unwrap().unwrap();
+        let detail = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), id).unwrap().unwrap();
         assert_eq!(detail.phone.name, "Spark 20 Pro");
         assert_eq!(detail.phone.products, 1, "la ficha no puede quedar en 0 tras renombrar");
         assert_eq!(detail.phone.stock, 3, "el stock del repuesto sigue siendo 3");
@@ -965,7 +949,7 @@ mod tests {
         assert_eq!(detail.phone.categories, "Pantalla");
 
         // el índice de marcas cuenta igual que la lista
-        let brands = get_phone_brands(&conn).unwrap();
+        let brands = get_phone_brands(&conn, &mut crate::cache::CatalogCache::default()).unwrap();
         let tecno = brands.iter().find(|b| b.brand == "Tecno").expect("marca Tecno");
         assert_eq!(tecno.phones, 1);
         assert_eq!(tecno.with_products, 1, "tras renombrar sigue teniendo repuesto");
@@ -990,7 +974,7 @@ mod tests {
         ).unwrap();
         let conn = db.conn.lock().unwrap();
 
-        let page = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let page = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let names: Vec<&String> = page.items.iter().map(|p| &p.name).collect();
         let a = page.items.iter().find(|p| p.name == "Spark 20").expect("Spark 20");
         let b = page.items.iter().find(|p| p.name == "Spark 20 Pro").unwrap_or_else(|| panic!("teléfonos: {names:?}"));
@@ -1002,7 +986,7 @@ mod tests {
         // tener las dos, y el repuesto doble aparece en ambas (antes se sumaba dos veces).
         merge_phones(&conn, keep, remove).unwrap();
 
-        let detail = get_phone_detail(&conn, keep).unwrap().unwrap();
+        let detail = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), keep).unwrap().unwrap();
         assert_eq!(detail.blocks.len(), 1, "una categoría (Pantalla)");
         assert_eq!(detail.phone.products, 2, "dos repuestos distintos, no tres");
         assert_eq!(detail.phone.stock, 7, "4 + 3 — el repuesto doble cuenta UNA vez (no 11)");
@@ -1014,13 +998,13 @@ mod tests {
         drop(conn);
         crate::catalog::rebuild_phones(&db.conn.lock().unwrap(), false).unwrap();
         let conn = db.conn.lock().unwrap();
-        let after = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(after.total, 1, "sigue habiendo un solo teléfono Tecno: {:?}", after.items.iter().map(|p| &p.name).collect::<Vec<_>>());
         assert_eq!(after.items[0].id, keep, "y es el que se quedó");
         assert_eq!(after.items[0].products, 2, "con los repuestos de los dos");
 
         // y el índice de marcas cuenta lo mismo
-        let brands = get_phone_brands(&conn).unwrap();
+        let brands = get_phone_brands(&conn, &mut crate::cache::CatalogCache::default()).unwrap();
         let tecno = brands.iter().find(|b| b.brand == "Tecno").expect("Tecno");
         assert_eq!(tecno.phones, 1, "quedó un solo teléfono Tecno");
         assert_eq!(tecno.with_stock, 1);
@@ -1036,31 +1020,31 @@ mod tests {
     fn test_preview_rename_phone() {
         let (db, path) = setup("test_phones_preview.db");
         let conn = db.conn.lock().unwrap();
-        let phones = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let phones = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         let tecno = phones.items.iter().find(|p| p.name == "Spark 20").unwrap();
         let samsung_id = phones.items.iter().find(|p| p.brand == "Samsung").unwrap().id;
 
         // 1) nombre nuevo, sin choque y conservando el repuesto
-        let pv = preview_rename_phone(&conn, tecno.id, "Tecno", "Spark", "20 Pro").unwrap().unwrap();
+        let pv = preview_rename_phone(&conn, &mut crate::cache::CatalogCache::default(), tecno.id, "Tecno", "Spark", "20 Pro").unwrap().unwrap();
         assert_eq!(pv.name, "Spark 20 Pro");
         assert_eq!(pv.key, "tecno|spark 20 pro");
         assert_eq!(pv.clash, None, "no hay otro teléfono con esa clave");
         assert_eq!((pv.products, pv.stock), (1, 3), "conserva su repuesto por los alias");
 
         // 2) la vista previa NO escribió nada
-        let after = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         assert_eq!(after.items[0].name, "Spark 20");
         assert_eq!(after.items[0].key, "tecno|spark 20");
 
         // 3) choque: renombrar el Samsung al nombre del Tecno avisa cuál ya existe y
         //    muestra los repuestos que quedarían si se fusionan (los dos)
-        let pv2 = preview_rename_phone(&conn, samsung_id, "Tecno", "Spark", "20").unwrap().unwrap();
+        let pv2 = preview_rename_phone(&conn, &mut crate::cache::CatalogCache::default(), samsung_id, "Tecno", "Spark", "20").unwrap().unwrap();
         assert_eq!(pv2.clash.as_deref(), Some("Spark 20"), "avisa el que ya existe");
         assert_eq!(pv2.products, 2, "el suyo (Samsung) + el del otro (Tecno): lo que quedaría fusionados");
         assert_eq!(pv2.stock, 5, "2 + 3 unidades");
 
         // 4) la normalización de Poco se aplica también aquí
-        let pv3 = preview_rename_phone(&conn, samsung_id, "Xiaomi", "Redmi", "Poco X3").unwrap().unwrap();
+        let pv3 = preview_rename_phone(&conn, &mut crate::cache::CatalogCache::default(), samsung_id, "Xiaomi", "Redmi", "Poco X3").unwrap().unwrap();
         assert_eq!(pv3.name, "Poco X3", "«Redmi Poco X3» se muestra como «Poco X3»");
         assert_eq!(pv3.key, "xiaomi|poco x3");
 
@@ -1077,8 +1061,8 @@ mod tests {
         let (db, path) = setup("test_phones_rename_dup.db");
         // `rebuild_phones` se llama fuera del lock (toma la conexión)
         let conn = db.conn.lock().unwrap();
-        let before = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total;
-        let tecno = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let before = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total;
+        let tecno = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let id = tecno.items[0].id;
         drop(conn);
 
@@ -1090,7 +1074,7 @@ mod tests {
         crate::catalog::rebuild_phones(&db.conn.lock().unwrap(), false).unwrap();
 
         let conn = db.conn.lock().unwrap();
-        let after = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(after.total, before, "el padrón no creció: {:?}", after.items.iter().map(|p| &p.name).collect::<Vec<_>>());
         let renamed = after.items.iter().find(|p| p.id == id).expect("el teléfono renombrado sigue");
         assert_eq!(renamed.name, "Spark 20 Ultra");
@@ -1115,7 +1099,7 @@ mod tests {
     fn test_rename_con_cambio_de_marca_no_recrea_la_ficha_vieja() {
         let (db, path) = setup("test_phones_rename_marca.db");
         let conn = db.conn.lock().unwrap();
-        let before = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let before = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         let tecno = before.items.iter().find(|p| p.name == "Spark 20").expect("Spark 20");
         let (id, repuestos_antes, stock_antes) = (tecno.id, tecno.products, tecno.stock);
         assert!(repuestos_antes > 0);
@@ -1132,7 +1116,7 @@ mod tests {
         crate::catalog::rebuild_phones(&db.conn.lock().unwrap(), false).unwrap();
 
         let conn = db.conn.lock().unwrap();
-        let after = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let after = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         assert_eq!(after.total, total_before, "el padrón no creció: {:?}", after.items.iter().map(|p| &p.name).collect::<Vec<_>>());
         let renamed = after.items.iter().find(|p| p.id == id).expect("la ficha renombrada sigue");
         assert_eq!(renamed.brand, "Samsung");
@@ -1159,19 +1143,19 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let err = rename_phone(&conn, 999_999, "Tecno", "", "Nada").unwrap_err();
         assert!(format!("{err}").contains("ya no está en la lista"), "error: {err}");
-        let real = get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let real = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap();
         let keep = real.items[0].id;
         let remove = real.items[1].id;
         let total = real.total;
         // la que se quiere fusionar no existe → NO se borra nada
         assert!(merge_phones(&conn, keep, 999_999).is_err());
-        assert_eq!(get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total);
+        assert_eq!(get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total);
         // la que se queda no existe → tampoco
         assert!(merge_phones(&conn, 999_999, remove).is_err());
-        assert_eq!(get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total);
+        assert_eq!(get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total);
         // con las dos válidas sí
         merge_phones(&conn, keep, remove).unwrap();
-        assert_eq!(get_phones(&conn, None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total - 1);
+        assert_eq!(get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "nombre", "asc", 50, 0).unwrap().total, total - 1);
 
         drop(conn);
         drop(db);
@@ -1183,7 +1167,7 @@ mod tests {
     fn test_rebuild_no_pisa_las_filas_manuales() {
         let (db, path) = setup("test_phones_no_pisa.db");
         let conn = db.conn.lock().unwrap();
-        let tecno = get_phones(&conn, Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
+        let tecno = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Tecno"), "", false, false, false, "nombre", "asc", 10, 0).unwrap();
         let id = tecno.items[0].id;
         drop(conn);
         {
@@ -1192,7 +1176,7 @@ mod tests {
         }
         crate::catalog::rebuild_phones(&db.conn.lock().unwrap(), false).unwrap();
         let conn = db.conn.lock().unwrap();
-        let after = get_phone_detail(&conn, id).unwrap().unwrap();
+        let after = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), id).unwrap().unwrap();
         assert_eq!(after.phone.name, "Spark 20 Pro", "el nombre corregido se mantiene");
         assert_eq!(after.phone.key, "tecno|spark 20 pro");
         assert!(after.phone.aliases.iter().any(|a| a == "Tecno Spark 20"), "alias intactos: {:?}", after.phone.aliases);

@@ -126,6 +126,15 @@ pub fn mark_service_printed(db: State<Database>, id: i64) -> Result<(), String> 
     db.mark_service_printed(id).map_err(|e| e.to_string())
 }
 
+// F32 — señales de política del taller (foto de entrada/salida y acuerdo de pago).
+// `key` sale de una whitelist en `Database::set_service_policy` (clave desconocida = error):
+// un invoke a mano no puede escribir otra columna. `value`: "si"/"" para las fotos y
+// ""/"ahora"/"al_retirar" para el acuerdo. La hora la estampa el backend (hora local).
+#[tauri::command]
+pub fn set_service_policy(db: State<Database>, id: i64, key: String, value: String) -> Result<(), String> {
+    db.set_service_policy(id, &key, &value).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn delete_service(db: State<Database>, id: i64) -> Result<(), String> {
     // Borrar una orden también borra sus abonos (plata registrada): es del dueño.
@@ -134,9 +143,13 @@ pub fn delete_service(db: State<Database>, id: i64) -> Result<(), String> {
     db.delete_service(id).map_err(|e| e.to_string())
 }
 
+// F32: `date_field` elige el eje del rango — "out" = fecha de ENTREGA (para «entregados hoy»),
+// vacío o "in" = fecha de RECIBIDO (histórico). Opcional: los llamadores viejos siguen andando.
 #[tauri::command]
-pub fn get_services(db: State<Database>, search: String, status: String, start_date: String, end_date: String) -> Result<Vec<crate::db::Service>, String> {
-    db.get_services(&search, &status, &start_date, &end_date).map_err(|e| e.to_string())
+pub fn get_services(db: State<Database>, search: String, status: String, start_date: String, end_date: String,
+                    date_field: Option<String>) -> Result<Vec<crate::db::Service>, String> {
+    let field = date_field.unwrap_or_default();
+    db.get_services(&search, &status, &start_date, &end_date, &field).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -194,9 +207,18 @@ pub fn get_service_payments(db: State<Database>, service_id: i64) -> Result<Vec<
 #[tauri::command]
 pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, payment_method: String,
                            bank_fee_percent: f64, zelle_reference: String, currency: String,
-                           notes: String) -> Result<i64, String> {
-    db.add_service_payment(service_id, amount, &payment_method, bank_fee_percent, &zelle_reference, &currency, &notes)
+                           notes: String, payment_date: String) -> Result<i64, String> {
+    db.add_service_payment(service_id, amount, &payment_method, bank_fee_percent, &zelle_reference, &currency, &notes, &payment_date)
         .map_err(|e| e.to_string())
+}
+
+/// F35 — corregir la FECHA de un pago ya anotado (el cliente pagó el mismo día en que dejó el equipo
+/// pero avisó después). No crea ni borra plata: la mueve al día en que entró, así la caja de ese día
+/// cuadra. Sin gate de dueño (es la cajera la que está en el mostrador cuando pasa), pero con las
+/// guardas de día cerrado/futuro del backend.
+#[tauri::command]
+pub fn update_service_payment_date(db: State<Database>, id: i64, date: String) -> Result<(), String> {
+    db.update_service_payment_date(id, &date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -656,8 +678,7 @@ pub fn get_duplicate_groups(db: State<Database>) -> Result<Vec<crate::db::Duplic
 
 #[tauri::command]
 pub fn get_phone_brands(db: State<Database>) -> Result<Vec<crate::phones::PhoneBrandRow>, String> {
-    let conn = db.conn.lock().unwrap();
-    crate::phones::get_phone_brands(&conn).map_err(|e| e.to_string())
+    db.get_phone_brands().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -665,15 +686,13 @@ pub fn get_phones(db: State<Database>, brand: Option<String>, search: String,
                   only_with_products: bool, only_stock: bool, only_review: bool,
                   sort: String, dir: String,
                   limit: i64, offset: i64) -> Result<crate::phones::PhonePage, String> {
-    let conn = db.conn.lock().unwrap();
-    crate::phones::get_phones(&conn, brand.as_deref(), &search, only_with_products, only_stock,
-                              only_review, &sort, &dir, limit, offset).map_err(|e| e.to_string())
+    db.get_phones_page(brand.as_deref(), &search, only_with_products, only_stock,
+                       only_review, &sort, &dir, limit, offset).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_phone_detail(db: State<Database>, phone_id: i64) -> Result<Option<crate::phones::PhoneDetail>, String> {
-    let conn = db.conn.lock().unwrap();
-    crate::phones::get_phone_detail(&conn, phone_id).map_err(|e| e.to_string())
+    db.get_phone_detail(phone_id).map_err(|e| e.to_string())
 }
 
 /// Puede esta sesion ESCRIBIR la lista de modelos? (la UI esconde los botones si no)
@@ -686,8 +705,7 @@ pub fn can_edit_phones(db: State<Database>) -> Result<bool, String> {
 #[tauri::command]
 pub fn preview_rename_phone(db: State<Database>, id: i64, brand: String, line: String, model: String)
     -> Result<Option<crate::phones::RenamePreview>, String> {
-    let conn = db.conn.lock().unwrap();
-    crate::phones::preview_rename_phone(&conn, id, &brand, &line, &model).map_err(|e| e.to_string())
+    db.preview_rename_phone(id, &brand, &line, &model).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -839,7 +857,7 @@ mod tests {
         assert!(sid > 0);
         db.mark_service_printed(sid).unwrap();
         // abono y devolución (el camino trazable para devolver plata)
-        db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono").unwrap();
+        db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "abono", "").unwrap();
         db.add_service_refund(sid, 5.0, "Divisas (USD Cash)", "", "USD", "Devolución: prueba").unwrap();
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
         assert!((svc.paid_amount - 5.0).abs() < 0.01, "abono 10 − devolución 5 = 5, quedó {}", svc.paid_amount);

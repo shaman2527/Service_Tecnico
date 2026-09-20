@@ -38,7 +38,13 @@ export async function updateOrderKeepingFields(s: Service, patch: OrderPatch = {
     patch.serviceTypes ?? s.service_types ?? '',
     patch.amount ?? s.amount,
     patch.paymentMethod ?? s.payment_method ?? 'Divisas (USD Cash)',
-    patch.dateOut ?? '',
+    // OJO (F34): `dateOut: undefined` conserva la fecha de entrega que YA tiene la orden. Mandar
+    // '' NO es inocente: el backend lo interpreta como «entregá hoy» cuando el estado es Entregado
+    // (`update_service`), así que un update angosto (p. ej. cambiar el técnico) sobre una orden
+    // entregada el 10/09 le ponía `date_out = hoy`: movía su monto de la caja de ese día a la de hoy
+    // (descuadrando el cierre viejo, que no se recalcula), reiniciaba la garantía de 7 días y la
+    // metía en «Entregados hoy». Solo el camino «Entregar» pasa `dateOut: ''` a propósito.
+    patch.dateOut ?? (s.date_out ?? '').slice(0, 10),
     patch.status ?? s.status ?? 'Recibido',
     patch.observations ?? s.observations ?? '',
     s.bank_fee_percent ?? 0,
@@ -48,7 +54,10 @@ export async function updateOrderKeepingFields(s: Service, patch: OrderPatch = {
     s.client_address ?? '',
     s.device_checklist ?? '',
     patch.technician ?? s.technician ?? '',
-    patch.technicianId ?? s.technician_id ?? null,
+    // Mismo cuidado con el técnico: `?? ` no alcanza porque `null` es un valor VÁLIDO (desasignar).
+    // Con `patch.technicianId ?? s.technician_id` el id viejo sobrevivía a «Sin asignar» y la orden
+    // quedaba con technician NULL + technician_id apuntando al anterior (la tarjeta no cambiaba).
+    patch.technicianId !== undefined ? patch.technicianId : (s.technician_id ?? null),
     s.color ?? '',
     patch.screenProductId !== undefined ? patch.screenProductId : s.screen_product_id ?? null,
     patch.discountAmount ?? s.discount_amount ?? 0,

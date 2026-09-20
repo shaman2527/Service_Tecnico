@@ -165,38 +165,54 @@ registro/
 │   ├── App.tsx                # Layout + navegación + gate PIN (fail-closed)
 │   ├── db.ts                  # Bridge Tauri invoke + mock browser mode
 │   ├── types.ts               # Tipos compartidos
-│   ├── lib/utils.ts           # Helpers: moneda, métodos, buildServiceReceipt
+│   ├── lib/                   # reglas PURAS (sin React), con pruebas node en tools/*_test.ts
+│   │   ├── utils.ts           # moneda, métodos, fechas locales, recibo (buildServiceReceiptParts)
+│   │   ├── cash-closing.ts    # F39: diferencias del arqueo y del Punto (por moneda)
+│   │   ├── order-balance.ts   # F38: saldo en la moneda del cobro
+│   │   ├── refund-math.ts     # F36/F42: topes por moneda y MÉTODO de la devolución
+│   │   ├── payment-math.ts / payment-methods.ts / queue.ts / service-update.ts / phoneOrder.ts
+│   │   └── ficha.ts / reminders.ts / service-guide.ts / screen-rules.ts / update.ts
 │   ├── components/
 │   │   ├── Dashboard.tsx      # KPIs, diagrama de flujo, top modelos, stock bajo
 │   │   ├── Sales.tsx          # Ventas: conversión Bs, filtros, stats
-│   │   ├── Services.tsx       # Órdenes + abonos + checklist + técnicos + imprimir
+│   │   ├── Services.tsx       # Órdenes + abonos + devoluciones + checklist + técnicos + imprimir
+│   │   ├── RefundDialog.tsx   # Devolución: vuelve POR DONDE ENTRÓ la plata (F42)
 │   │   ├── PaymentDialog.tsx  # Pago/Abono reutilizable + imprimir factura
-│   │   ├── PrintReceiptDialog.tsx   # Preview de factura + imprimir (ESC/POS)
-│   │   ├── PrinterSettingsDialog.tsx # Puerto COM, baudios, 58/80mm
-│   │   ├── Inventory.tsx      # Productos, compatibilidad, movimientos
+│   │   ├── PrintReceiptDialog.tsx / PrinterSettingsDialog.tsx
+│   │   ├── Inventory.tsx      # MÓDULO ÚNICO: Productos | Modelos | Repuesto por modelo | Movimientos | Ajustes
+│   │   ├── inventory/         # ProductsTab, ModelsTab, ByModelTab, MovementsTab, PricesTab, StockBadge, CompatChips
+│   │   ├── ModelCombobox.tsx  # Selector de modelo (lista canónica del padrón)
 │   │   ├── Clients.tsx        # Clientes con historial y saldos
-│   │   ├── Catalog.tsx        # Pantallas: catálogo + compatibilidad
-│   │   ├── DailyLedger.tsx    # Libro Diario: turno, tasa BCV, arqueo, export
+│   │   ├── DailyLedger.tsx    # Libro Diario: turno, tasa BCV, arqueo por moneda, devoluciones, export
 │   │   ├── Pedidos.tsx        # Pedidos a proveedor + reposición
 │   │   ├── Help.tsx           # Centro de Ayuda
 │   │   ├── ProductForm.tsx    # Form compartido producto
-│   │   └── ui/                # 15 componentes shadcn
+│   │   └── ui/                # 23 componentes shadcn
 │   └── index.css              # Tailwind v4 + CSS variables
 ├── src-tauri/                 # Backend Rust
 │   ├── src/
 │   │   ├── main.rs            # Entrypoint (windows_subsystem)
-│   │   ├── lib.rs             # Tauri builder + 71 comandos
-│   │   ├── db.rs              # SQLite CRUD + turno + abonos + auto-inventario + settings
+│   │   ├── lib.rs             # Tauri builder + 115 comandos
+│   │   ├── db.rs              # SQLite CRUD + turno + abonos/devoluciones + auto-inventario + arqueo
+│   │   ├── cache.rs           # F41: memoria corta del catálogo (Inventario rápido)
+│   │   ├── catalog.rs         # Reglas canónicas marca/modelo/compat + normalizar + precios
 │   │   ├── updates.rs         # Updater: respaldo, rollback, health-check, watchdog
 │   │   ├── printer.rs         # ESC/POS: list_com_ports, cp850, print_receipt
 │   │   ├── bcv.rs             # Scraping tasa BCV con curl.exe (sin deps HTTP)
 │   │   └── commands.rs        # Comandos Tauri
 │   └── tauri.conf.json        # NSIS + resources registro.db + WebView2 embebido + updater
 ├── run.ps1                    # Script de ejecución
-├── tools/release.ps1          # Publicar versión: bump + build firmado + latest.json + gh release
+├── tools/                     # Scripts del proyecto + copia embebida del harness
+│   ├── verify_*.mjs           # verificaciones EN VIVO por CDP (ver «Verificación en vivo»)
+│   ├── *_test.ts              # pruebas de las reglas PURAS (moneda, arqueo, devoluciones, ficha…)
+│   ├── bench_inventory_ui.mjs # F41: mide en vivo lo que tarda cada pestaña en mostrar datos
+│   ├── audit_inventory.mjs / snapshot_db.mjs / seed_dev_db.mjs / canonical_brands.json
+│   ├── release.ps1            # Publicar versión: bump + build firmado + latest.json + gh release
+│   └── progress/              # history.md (append-only) · specs/ (una spec por feature) · patterns.md
 ├── instaladores/              # Setup + guía para copiar a pendrive
 ├── PRD.md                     # Documento de producto (reglas, flujos, QA)
-├── AGENTS.md                  # HARNESS: sistema de registro + Entropy Registry
+├── ESTADO.md                  # Estado del proyecto: hecho / pendiente / por feature
+├── AGENTS.md                  # HARNESS: arquitectura, decisiones, Entropy Registry, F41/F42
 └── README.md
 ```
 
@@ -208,12 +224,12 @@ registro/
 | Ventana nativa (dev) | `.\run.ps1 -Dev` | Tauri dev + Vite. Backend real con SQLite. |
 | Producción | `.\run.ps1 -Build` | Build release + copia a Registro.exe |
 | Ejecutar release | `.\Registro.exe` o `.\run.ps1` | App standalone sin servidor |
-| Instalador | `npx tauri build` | Setup NSIS con DB limpia + WebView2 embebido (~4.7MB) |
+| Instalador | `npx tauri build` | Setup NSIS con la plantilla sana (`backup/plantilla_candidata.db`) + WebView2 embebido (~4.7MB) |
 
 ### Instalación en la tienda
 
 1. Copiar la carpeta `instaladores\` (setup + guía) a un pendrive.
-2. Ejecutar `Registro Servicio Tecnico_0.1.2_x64-setup.exe` (SmartScreen → "Más información → Ejecutar de todos modos"). **WebView2 embebido**: no necesita drivers ni internet.
+2. Ejecutar `Registro Servicio Tecnico_0.4.0_x64-setup.exe` (SmartScreen → "Más información → Ejecutar de todos modos"). **WebView2 embebido**: no necesita drivers ni internet.
 3. Instala en `%LOCALAPPDATA%\Registro Servicio Tecnico\` con `registro.db` junto al exe
    (el catálogo inicial viaja como plantilla `registro.default.db` y solo se copia en el primer arranque — reinstalar/actualizar **nunca** toca la DB existente, verificado).
 4. PIN inicial `1234` → cambiarlo en Libro Diario → PIN.
@@ -223,12 +239,37 @@ registro/
 
 ```powershell
 gh auth login                                    # una sola vez
-.\tools\release.ps1 -Version 0.1.2 -Notes "Fix X, mejora Y"
+node tools/make_release_template.mjs --force     # plantilla sana desde la base real (NO toca registro.db)
+node tools/release_gate.mjs --db backup/plantilla_candidata.db   # 0 bloqueantes o no se publica
+node tools/verify_migracion_datos.mjs            # la migración NO toca la historia del local
+.\tools\release.ps1 -Version 0.4.0 -Notes "Fix X, mejora Y"
 ```
 
-El script corre tests, sube la versión, hace el build firmado, genera `latest.json`
-con la firma y crea la GitHub Release. La app de la tienda avisa sola al arrancar
-(con respaldo automático y rollback si fallara algo).
+El script corre tests, **vuelve a correr el gate de la plantilla**, sube la versión, hace el
+build firmado, genera `latest.json` con la firma y crea la GitHub Release. La app de la tienda
+avisa sola al arrancar (con respaldo automático y rollback si fallara algo).
+
+**Lo que viaja dentro del instalador:** `backup/plantilla_candidata.db`, **nunca** `registro.db`
+(la base de trabajo del taller tiene órdenes, abonos y clientes reales, y el repo es público).
+El generador vacía las tablas transaccionales, resetea el PIN al inicial documentado y limpia la
+configuración de la máquina; `tools/release_gate.mjs` es el que impide publicar una plantilla sucia,
+sin precios o con stock negativo. Las excepciones que el dueño acepte se declaran **con motivo,
+fecha y topes** en `tools/release_excepciones.json` (si la situación empeora, el gate vuelve a bloquear).
+
+**Antes de publicar, la prueba que exige el dueño** («que la actualización no dañe la base ni las
+ventas registradas»):
+
+```powershell
+node tools/verify_migracion_datos.mjs --db registro.db                       # 15/15, la base real
+node tools/verify_migracion_datos.mjs --db backup/registro_backup_20260804_000039.db   # base vieja con ventas
+```
+
+Toma una **copia** (VACUUM INTO, la original no se escribe), corre la migración REAL de la app
+(`Database::new` → `init()` sobre la copia) y compara la historia **columna por columna** antes y
+después: ventas, servicios, abonos, clientes, gastos, el arqueo de cada cierre y el stock/precio de
+cada ficha por id. Los nombres propios solo pueden cambiar si el valor nuevo es **exactamente** su
+Title Case (migración documentada de 2026-08-07) y las columnas resumen (saldo abonado, esperado del
+cierre) se informan una por una — nunca se dan por buenas en silencio.
 
 ## Verificación en vivo (CDP)
 
@@ -249,13 +290,35 @@ await window.__TAURI_INTERNALS__.invoke('get_products', { search: '', categoryId
 > **Importante:** en Tauri 2 el global es `__TAURI_INTERNALS__` — `window.__TAURI__`
 > NO existe (ver Entropy Registry en AGENTS.md, entrada 2026-08-01).
 
+### Verificaciones del proyecto (con la app abierta)
+
+| Script | Qué comprueba | Notas |
+|---|---|---|
+| `node tools/bench_inventory_ui.mjs` | **F41** — ms hasta VER LOS DATOS en cada pestaña del Inventario (medianas, en frío) | Mide, no afirma. Pide `REGISTRO_DB` a una **copia** |
+| `node tools/verify_inventario_rapido.mjs` | **F41** — que la memoria del catálogo no muestre números viejos: compara la pantalla contra la **base leída aparte** con `node:sqlite` | Escribe una ficha de prueba y la borra; **aborta si falta `REGISTRO_DB`** |
+| `node tools/verify_devolucion_metodo.mjs` | **F42** — la devolución vuelve por donde entró: el backend rechaza el método que no cobró y el diálogo propone el real | Crea un pedido de prueba y lo borra |
+| `node tools/verify_models_tab.mjs` | Pestaña Modelos: KPIs, filtros, orden de 3 estados, ficha por categoría | `EXPECT_PHONES`/`EXPECT_REVIEW` son la expectativa independiente |
+| `node tools/verify_screen_brand_gate.mjs` | Gate de marca de la pantalla en el servicio (OTRA marca nunca se auto-elige) | Solo lectura |
+| `node tools/verify_tecnico_y_fecha_pago.mjs` | F34/F35/F36/F38/F39: técnico rápido, fecha del pago, saldo en Bs. y las dos columnas del arqueo | Aborta si no hay turno abierto |
+| `node tools/verify_recordatorios.mjs` · `verify_servicio_cierre.mjs` · `verify_cola_entregas.mjs` · `verify_metodos_en_cobros.mjs` · `verify_wizard_metodos.mjs` | F30–F33: recordatorios, asistente de cierre, cola de entregas, métodos de pago | Escriben y limpian sus órdenes de prueba |
+
+**Receta:** abrir la app con la copia (`$env:REGISTRO_DB="…\backup\perf_app.db"` + el puerto 9222), pasar el PIN, correr el script. Los scripts **esperan condiciones** (nunca duermen a ojo) y varios **abortan** si falta el día abierto o la variable de la copia.
+
 ## Pruebas
 
 ```bash
-cd src-tauri && cargo test    # 25/25 (conversión de moneda, arqueo, garantía, técnicos, PRAGMAs, updater...)
-npm run build                 # TypeScript + Vite
-npx tsx tools/governance/run.ts --build-only   # harness governance
-npx tsx tools/governance/run.ts --security     # harness seguridad
+cd src-tauri && cargo test --release --lib     # 133/133 (+7 manuales ignorados)
+npm run build                                  # TypeScript + Vite
+npx tsc -b && npx oxlint src                   # 0 errores
+
+# reglas PURAS (node, sin app abierta):
+node tools/pos_cuadre_test.ts        # arqueo por moneda (F39)            66/66
+node tools/refund_math_test.ts       # topes y MÉTODO de la devolución    45/45
+node tools/payment_math_test.ts      # cuentas de los cobros             595/595
+node tools/receipt_acuerdo_test.ts   # recibo (montos y anchos de papel)   52/52
+node tools/ficha_test.ts             # ficha de ingreso (F33)              66/66
+node tools/reminders_test.ts         # recordatorios (F32)                 38/38
+node tools/service_guide_test.ts · queue_test.ts (npx tsx) · local_date_test.ts (npx tsx) · method_picker_test.ts (npx tsx)
 ```
 
 ## Lecciones clave (resumen)
@@ -277,5 +340,18 @@ npx tsx tools/governance/run.ts --security     # harness seguridad
    NULL en una fila): usar `COALESCE(...,0)` (fix `next_order_num`, 2026-08-04).
 9. **Gate de PIN fail-closed**: el primer invoke en arranque en frío puede fallar;
    el bridge debe reintentar y rechazar, nunca resolver como "sin PIN" (2026-08-04).
+10. **PLATA — la devolución vuelve POR DONDE ENTRÓ (F42, 2026-09-17).** El método del
+    FORMULARIO de una orden es *sólo lo que se esperaba cobrar*: proponerlo como método de
+    una devolución metió la salida en un bucket que nunca cobró (Punto en **−Bs. 1.697**) y
+    la plata que salió del cajón no aparecía en ninguna pantalla del arqueo. El método sale
+    de los **movimientos**, el gate está también en el backend (fail-closed) y los métodos
+    de cajón pueden pagar la devolución, con aviso.
+11. **Un esperado ≠ 0 NUNCA se esconde (F42).** Las columnas/filas del Libro y del cierre se
+    dibujaban con `> 0`: una devolución que deja un método en 0 o negativo **desaparecía**.
+    La condición es `|x| > tolerancia`, y el día muestra aparte cuánto se **devuelto**.
+12. **Medir antes de optimizar (F41).** En release y sobre una copia: el «problema» del
+    Inventario no era la tabla (2-5 ms) sino cuatro cálculos derivados del catálogo repetidos
+    en cada pestaña (118 + 140 + 113 + 240 ms) y un rebote de 200 ms en TODA consulta. El
+    bench queda en `tools/bench_inventory_ui.mjs`.
 
 Detalles y registro completo de problemas en [AGENTS.md](AGENTS.md).

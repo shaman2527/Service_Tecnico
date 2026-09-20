@@ -24,7 +24,8 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
   const [options, setOptions] = useState<PhoneModelRow[]>([]);
-  const [loading, setLoading] = useState(false);
+  /** para qué texto son las `options` que tenemos (null = todavía no se consultó nada) */
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const focused = useRef(false);
@@ -35,17 +36,27 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
     if (!focused.current) setQuery(value);
   }, [value]);
 
+  // CONSULTAR SÓLO CUANDO SE USA (feature 41). Antes el combobox pedía la lista del padrón al
+  // MONTARSE — 230 a 300 ms medidos — aunque nadie hubiera escrito nada; la pestaña «Repuesto
+  // por modelo» lo monta al abrirse, así que esa consulta se pagaba siempre y no servía para
+  // nada (tampoco en el asistente de servicio, donde el campo arranca vacío). Ahora consulta
+  // cuando el campo tiene el foco o cuando ya hay un modelo escrito.
+  const wanted = open || value.trim() !== '';
   useEffect(() => {
+    // El desplegable ya NO se gatea con un `loading` de estado: se pinta según `optionsForQuery`
+    // (¿las opciones son de ESTE texto?). Ese estado se podía quedar trabado en true si el efecto
+    // anterior se abortaba (escribir y borrar dentro de los 180 ms del rebote: su `finally` no
+    // bajaba `loading` porque `alive` ya era false) y el desplegable quedaba en «Buscando…» para
+    // siempre — bloqueante de la revisión adversarial. Ahora no hace falta ningún estado extra.
+    if (!wanted || loadedFor === query) return;
     let alive = true;
-    setLoading(true);
     const t = setTimeout(() => {
       api.getPhoneModels(query, 60)
-        .then(list => { if (alive) setOptions(list); })
-        .catch(() => { if (alive) setOptions([]); })
-        .finally(() => { if (alive) setLoading(false); });
+        .then(list => { if (!alive) return; setOptions(list); setLoadedFor(query); })
+        .catch(() => { if (!alive) return; setOptions([]); setLoadedFor(query); });
     }, 180);
     return () => { alive = false; clearTimeout(t); };
-  }, [query]);
+  }, [query, wanted, loadedFor]);
 
   useEffect(() => {
     if (!open) return;
@@ -56,9 +67,13 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
     return () => document.removeEventListener('mousedown', onDown);
   }, [open]);
 
+  // «exacto» sólo vale para las opciones de ESTE texto: con las de una consulta anterior
+  // (o sin haber consultado) no se puede afirmar nada — de ahí el aviso falso de «no está
+  // en la lista» que tenía la versión que consultaba siempre.
+  const optionsForQuery = loadedFor === query;
   const exact = useMemo(
-    () => options.find(o => normPhoneModel(o.label) === normPhoneModel(query)),
-    [options, query],
+    () => (optionsForQuery ? options.find(o => normPhoneModel(o.label) === normPhoneModel(query)) : undefined),
+    [options, query, optionsForQuery],
   );
 
   const pick = (label: string, phone?: PhoneModelRow) => {
@@ -109,7 +124,7 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
 
       {/* qué modelo va a quedar guardado en el equipo (sin repuestos ni stock:
           el stock se elige después, en "Pantalla a instalar") */}
-      {query.trim().length > 0 && !exact && (
+      {query.trim().length > 0 && optionsForQuery && !exact && (
         <p className="text-[11px] text-muted-foreground">
           Modelo: <span className="font-medium text-foreground">{query.trim()}</span>{' '}
           <span className="text-warning">(no está en la lista — se guarda tal cual)</span>
@@ -118,12 +133,15 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
 
       {open && (
         <div className="absolute top-full z-50 mt-1 w-full max-h-72 overflow-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
-          {loading && (
+          {/* El desplegable se pinta según `optionsForQuery` (¿las opciones son de ESTE texto?),
+              no según `loading`: si se gateaba con `loading`, un `loading` trabado dejaba el
+              cuadro en «Buscando…» sin lista (bloqueante de la revisión adversarial). */}
+          {!optionsForQuery && (
             <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" /> Buscando…
             </div>
           )}
-          {!loading && options.length === 0 && (
+          {optionsForQuery && options.length === 0 && (
             <div className="flex flex-col gap-1 px-3 py-3 text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Smartphone className="size-3.5" /> Ningún modelo del padrón coincide.
@@ -135,7 +153,7 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
               )}
             </div>
           )}
-          {!loading && options.map(o => {
+          {optionsForQuery && options.map(o => {
             const active = normPhoneModel(o.label) === normPhoneModel(query);
             return (
               <button
@@ -156,7 +174,7 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
               </button>
             );
           })}
-          {!loading && options.length > 0 && allowFreeText && query.trim() && !exact && (
+          {optionsForQuery && options.length > 0 && allowFreeText && query.trim() && !exact && (
             <button
               type="button"
               className="w-full rounded-md px-2 py-1.5 text-left text-xs text-primary hover:bg-accent"

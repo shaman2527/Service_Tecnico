@@ -367,6 +367,14 @@ export interface Service {
   printed: number;
   /** Rebaja por pago en efectivo: amount = cobrado real, precio de lista = amount + discount_amount */
   discount_amount: number;
+  // F32 — señales de POLÍTICA del taller (recordatorios del operario). Las escribe SOLO
+  // `setServicePolicy`: son anotaciones informativas, nunca bloquean nada.
+  /** Foto de ENTRADA del equipo confirmada (fecha/hora local) — null = pendiente */
+  photo_in_at: string | null;
+  /** Foto de SALIDA del equipo confirmada (fecha/hora local) — null = pendiente */
+  photo_out_at: string | null;
+  /** Acuerdo de pago con el cliente: 'ahora' | 'al_retirar' | null (no se preguntó) */
+  pay_intent: string | null;
 }
 
 export interface ServiceDeviceInput {
@@ -384,6 +392,8 @@ export interface ServiceDeviceInput {
   color: string;
   screen_product_id: number | null;
   discount_amount: number;
+  /** F32: estado con el que NACE la orden (el wizard manda 'Recibido' por defecto) */
+  status: string;
 }
 
 export interface Technician {
@@ -480,6 +490,9 @@ export interface DailyTotals {
   grand_bs: number;
   /** Tasa BCV del día (de daily_closings; fallback día abierto) */
   tasa_bcv: number;
+  /** F42 — devuelto a clientes ese día, por moneda y en positivo (los totales por método ya vienen netos) */
+  refund_usd: number;
+  refund_bs: number;
 }
 
 export interface DailyClosing {

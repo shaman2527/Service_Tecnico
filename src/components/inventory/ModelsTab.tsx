@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, CircleAlert, Eye, Flag,
   Info, Layers, Merge, Pencil, Plus, Search, Smartphone,
@@ -73,6 +73,10 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
   canEdit: boolean;
   onByModel: (name: string) => void;
 }) {
+  // `searchInput` es lo escrito y `search` lo que se consulta: el rebote es SÓLO al escribir
+  // (feature 41). Antes la pestaña —la más cara del módulo— esperaba 200 ms antes de su
+  // PRIMERA consulta, y ésos 200 ms se sumaban a los ~550 ms de cálculo del backend.
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [brand, setBrand] = useState('todas');
   const [vista, setVista] = useState<string>('todos');
@@ -82,6 +86,9 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
   const [total, setTotal] = useState(0);
   const [brands, setBrands] = useState<PhoneBrandRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // ya hay tabla en pantalla → la recarga no se tapa con esqueleto (se avisa «actualizando»)
+  const [refreshing, setRefreshing] = useState(false);
+  const loaded = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -101,13 +108,22 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
     return () => { alive = false; };
   }, [canEdit, refreshKey]);
 
-  // Los cambios de filtro/orden vuelven a la PRIMERA página en el mismo handler:
-  // si se hiciera en un efecto aparte, la consulta saldría con el offset viejo
-  // (una llamada desperdiciada al endpoint más caro del módulo).
+  // Los cambios de filtro/orden vuelven a la PRIMERA página en el mismo handler: si se hiciera en
+  // un efecto aparte, la consulta saldría con el offset viejo (una llamada desperdiciada al
+  // endpoint más caro del módulo). OJO con la BÚSQUEDA: acá sólo se guarda lo escrito; la página
+  // la resetea el rebote, en el mismo paso en que se consulta (si se resetea acá, escribir en la
+  // página 3 lanzaba una consulta tirada con el texto viejo — hallazgo de la revisión).
   const toggleOrder = (k: PhoneSortKey) => { setOrder(o => nextOrder(o, k)); setPage(0); };
-  const changeSearch = (v: string) => { setSearch(v); setPage(0); };
+  const changeSearch = (v: string) => { setSearchInput(v); };
   const changeBrand = (v: string) => { setBrand(v); setPage(0); };
   const changeVista = (v: string) => { setVista(v); setPage(0); };
+
+  // Rebote SÓLO de lo que se escribe (ver comentario de `searchInput`).
+  useEffect(() => {
+    if (searchInput === search) return;
+    const t = setTimeout(() => { setSearch(searchInput); setPage(0); }, 200);
+    return () => clearTimeout(t);
+  }, [searchInput, search]);
 
   useEffect(() => {
     let alive = true;
@@ -119,36 +135,39 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    const t = setTimeout(() => {
-      const { sort, dir } = orderParams(order);
-      api.getPhones(
-        brand === 'todas' ? null : brand,
-        search,
-        vista === 'con_repuestos',
-        vista === 'con_stock',
-        vista === 'por_revisar',
-        sort,
-        dir,
-        PAGE_SIZE,
-        page * PAGE_SIZE,
-      ).then(r => {
-        if (!alive) return;
-        setError(null);
-        setItems(r.items);
-        setTotal(r.total);
-        // Si el total bajó (p. ej. se editó un producto) y la página actual quedó
-        // fuera de rango, se vuelve a la última página real.
-        const last = Math.max(0, Math.ceil(r.total / PAGE_SIZE) - 1);
-        if (page > last) setPage(last);
-      }).catch((e: unknown) => {
-        if (!alive) return;
-        setItems([]);
-        setTotal(0);
-        setError(e instanceof Error ? e.message : String(e));
-      }).finally(() => { if (alive) setLoading(false); });
-    }, 200);
-    return () => { alive = false; clearTimeout(t); };
+    if (loaded.current) setRefreshing(true); else setLoading(true);
+    const { sort, dir } = orderParams(order);
+    api.getPhones(
+      brand === 'todas' ? null : brand,
+      search,
+      vista === 'con_repuestos',
+      vista === 'con_stock',
+      vista === 'por_revisar',
+      sort,
+      dir,
+      PAGE_SIZE,
+      page * PAGE_SIZE,
+    ).then(r => {
+      if (!alive) return;
+      loaded.current = true;
+      setError(null);
+      setItems(r.items);
+      setTotal(r.total);
+      // Si el total bajó (p. ej. se editó un producto) y la página actual quedó
+      // fuera de rango, se vuelve a la última página real.
+      const last = Math.max(0, Math.ceil(r.total / PAGE_SIZE) - 1);
+      if (page > last) setPage(last);
+    }).catch((e: unknown) => {
+      if (!alive) return;
+      setItems([]);
+      setTotal(0);
+      setError(e instanceof Error ? e.message : String(e));
+    }).finally(() => {
+      if (!alive) return;
+      setLoading(false);
+      setRefreshing(false);
+    });
+    return () => { alive = false; };
   }, [search, brand, vista, order, page, refreshKey, reloadKey]);
 
   const kpis = useMemo(() => ({
@@ -161,6 +180,10 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
   }), [brands]);
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // «actualizando» también mientras el rebote espera: el operario (y las pruebas en vivo) tienen
+  // que poder saber que la tabla va a cambiar, no quedarse mirando filas viejas creyendo que son
+  // el resultado de lo que acaba de escribir.
+  const updating = refreshing || searchInput !== search;
   const from = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const to = Math.min(total, (page + 1) * PAGE_SIZE);
   const filtering = search.trim() !== '' || brand !== 'todas' || vista !== 'todos';
@@ -181,7 +204,7 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
           <Input
             placeholder="Buscar por teléfono, marca, modelo o como esté escrito en el inventario…"
             className="pl-9"
-            value={search}
+            value={searchInput}
             onChange={e => changeSearch(e.target.value)}
           />
         </div>
@@ -378,6 +401,7 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
           {error
             ? 'No se pudo leer la lista de teléfonos'
             : total === 0 ? 'Sin resultados' : `Mostrando ${from}–${to} de ${total}`}
+          {updating && <span data-refreshing="1" className="ml-2 opacity-70">· actualizando…</span>}
         </span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={page === 0 || !!error} onClick={() => setPage(p => Math.max(0, p - 1))}>

@@ -1,0 +1,17 @@
+{
+  "_que_es": [
+    "EXCEPCIONES ACEPTADAS POR EL DUEÑO para el gate de release (tools/release_gate.mjs).",
+    "Un bloqueante se vuelve AVISO solo si está declarado acá con motivo y fecha, y el gate sigue",
+    "bloqueando si la situación EMPEORA respecto de lo aceptado (topes). Una excepción no puede",
+    "crecer sola con el tiempo: si empeora, el release se frena y hay que volver a decidir."
+  ],
+  "excepciones": {
+    "sin_precio_con_stock": {
+      "aceptada_por": "dueño del local",
+      "fecha": "2026-09-18",
+      "motivo": "Son 123 fichas de modelos MÁS NUEVOS que la lista de precios del local (cellworld_items.json, 957 fichas): Honor X6A/X6B/X6C/X7A/X7C/X7D/X8A, Xiaomi RMA3/RMA5/Redmi 15/Note 12 4G, Tecno Spark Go 2024/2025, Samsung A06 4G/A16 4G, Realme C51… NO están en la lista, así que cualquier cruce automático les pondría el precio de OTRO modelo (plata mal cobrada). La base REAL del taller está en el mismo estado, o sea que esto no lo introduce la release: el dueño decidió publicar y cargar esos precios desde la app (Inventario → Precios y datos) cuando quiera. Si alguna vez aparecen en la lista del local, correr la restauración de precios y BORRAR esta excepción.",
+      "max_fichas": 123,
+      "max_unidades": 333
+    }
+  }
+}

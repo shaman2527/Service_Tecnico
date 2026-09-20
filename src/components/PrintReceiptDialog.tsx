@@ -5,6 +5,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { api } from '../db';
 import { buildServiceReceiptParts, logoToRaster } from '@/lib/utils';
 import { toast } from 'sonner';
+// F32: recordatorios de política al abrir el comprobante (foto de SALIDA al imprimir la entrega
+// y preguntar el pago si todavía no se preguntó). Nunca bloquean la impresión.
+import { firePolicyReminders } from './policy-actions';
+import { printReminders } from '@/lib/reminders';
 import type { PrinterSettings, Service, ServicePayment, ComPort } from '../types';
 import { DEFAULT_PRINTER_SETTINGS } from '../types';
 import PrinterSettingsDialog from './PrinterSettingsDialog';
@@ -38,6 +42,10 @@ export default function PrintReceiptDialog({ serviceId, open, onOpenChange, onPr
       setSettings(st);
       setStubNote(s?.observations ?? '');
       setTasaBcv(day?.tasa_bcv ?? 0);
+      // F32: el comprobante es el momento de recordar la foto de SALIDA («al imprimir hacerle
+      // saber: recuerda tomarle la foto en la salida al tlf» — pedido del usuario) y de preguntar
+      // el pago si quedó sin preguntar. Son avisos: se cierran y la impresión sigue igual.
+      if (s) firePolicyReminders(printReminders(s), [s.id], onPrinted);
     }).catch(() => {});
     return () => { alive = false; };
   }, [open, serviceId]);

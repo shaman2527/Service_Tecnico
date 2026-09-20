@@ -51,8 +51,13 @@ export function suggestAmount(saldoUsd: number, amountUsd: number, fieldCur: Pay
   return round2(bruto);
 }
 
-/** Valor del chip "Todo el saldo" en la moneda del CAMPO (saldo nunca negativo). */
+/** Valor del chip "Todo el saldo" en la moneda del CAMPO (saldo nunca negativo).
+ *  Corte en 0,005 —el MISMO que `suggestAmount` y que `order-balance.SALDO_CERO`—: con un saldo de
+ *  centavos (`paid_amount` se guarda con 4 decimales) el chip ofrecía bolívares mientras el campo se
+ *  autocompletaba en 0 y el texto decía «Sin saldo» (revisión adversarial F39: tres respuestas para
+ *  el mismo saldo). */
 export function saldoChipValue(saldoUsd: number, fieldCur: PayCur, tasa: number): number {
+  if (saldoUsd <= 0.005) return 0;
   if (fieldCur === 'VES') return tasa > 0 ? Math.round(Math.max(0, saldoUsd) * tasa) : 0;
   return round2(Math.max(0, saldoUsd));
 }

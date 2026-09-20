@@ -54,7 +54,7 @@ const waitTable = async (timeout = 10000) => {
   const t0 = Date.now();
   while (Date.now() - t0 < timeout) {
     const busy = await evalx(`(() => {
-      const skeletons = document.querySelectorAll('table tbody [class*="animate-pulse"]').length;
+      const skeletons = document.querySelectorAll('table tbody [class*="animate-pulse"]').length + document.querySelectorAll('[data-refreshing]').length;
       const rows = document.querySelectorAll('table tbody tr').length;
       const done = /Mostrando |Sin resultados/.test(document.body.innerText);
       return skeletons > 0 || (rows === 0 && !done);
@@ -108,8 +108,18 @@ const resetFilters = async () => {
   await waitTable();
 };
 
-// --- 0. desbloqueo del PIN (si la app arrancó en frío) ---
+// --- 0. arranque DETERMINISTA + desbloqueo del PIN ---
+// Se RECARGA la SPA a propósito (lección 2026-09-17, feature 41): si la app ya estaba en
+// Inventario → Modelos, el clic al menú y a la pestaña no cambian el estado, React NO vuelve a
+// montar la pestaña y los KPIs quedan con los números de la corrida anterior (un «KPI viejo» que
+// parece un bug del producto y no lo es). Con `location.reload()` el estado es siempre el mismo.
+await evalx(`location.reload(); 'recargando'`).catch(() => {});
+await sleep(2500);
 const pinField = `document.querySelector('input[placeholder="PIN de 4 dígitos"]')`;
+for (let i = 0; i < 20; i++) {
+  try { if (await evalx(`!!document.querySelector('aside, input[placeholder="PIN de 4 dígitos"]')`)) break; } catch { /* recargando */ }
+  await sleep(700);
+}
 if (await evalx(`!!${pinField}`)) {
   console.log('· pantalla de PIN: entrando con 1234');
   await clickCenter(pinField);

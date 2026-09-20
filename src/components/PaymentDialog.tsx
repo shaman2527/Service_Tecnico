@@ -7,7 +7,8 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
-import { methodCurrency, currencySymbol, isRefund, isFinalized } from '@/lib/utils';
+import { toast } from 'sonner';
+import { methodCurrency, currencySymbol, isRefund, isFinalized, localDate } from '@/lib/utils';
 // Reglas de dinero compartidas con el asistente de cierre (Harness F30): una sola
 // implementación de la moneda del método vs la del campo, "todo el saldo" y Punto.
 import {
@@ -17,6 +18,8 @@ import {
 import PrintReceiptDialog from './PrintReceiptDialog';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
+// F38: el saldo se muestra en la moneda en que se cobró + su equivalencia del día.
+import { orderBalance, balanceLabel } from '@/lib/order-balance';
 import type { Service, ServicePayment } from '../types';
 
 export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
@@ -36,12 +39,24 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const [payFee, setPayFee] = useState(0);
   const [payZelle, setPayZelle] = useState('');
   const [payNotes, setPayNotes] = useState('');
+  // F35: FECHA DEL PAGO. El cliente que dejó el equipo y pagó el LUNES avisa el martes: si el abono
+  // se anota con la fecha de hoy, la caja del lunes cierra con FALTA y la del martes con SOBRA.
+  // Por defecto hoy (el caso normal); se puede retroceder a un día con turno ABIERTO.
+  const [payDate, setPayDate] = useState(() => localDate());
+  const [editDateId, setEditDateId] = useState<number | null>(null);
+  const [editDate, setEditDate] = useState('');
   const [payError, setPayError] = useState<string | null>(null);
   const [savingPay, setSavingPay] = useState(false);
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [tasaBcv, setTasaBcv] = useState(0);
+  // Fecha del TURNO ABIERTO: es la caja que puede recibir plata, así que es la fecha por defecto
+  // del abono (en el uso normal coincide con hoy; si el turno quedó abierto de otro día, el abono
+  // va a ESA caja, que es la única que el backend acepta).
+  const [diaTurno, setDiaTurno] = useState('');
   // Si el usuario tecleó el monto a mano, no se re-sugiere
   const payTouched = useRef(false);
+  // Si el usuario cambió el toggle $/Bs. a mano, no se le pisa la elección (F38)
+  const curTouched = useRef(false);
   const [printOpen, setPrintOpen] = useState(false);
 
   const payCurrency = methodCurrency(payMethod); // moneda del MÉTODO (lo que se guarda)
@@ -56,6 +71,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   // $5 → Bs. 3.744 al pasar a Bs.; Bs. 5.000 → $6.68 al pasar a $.
   const switchCur = (next: 'USD' | 'VES') => {
     if (next === payCur) return;
+    curTouched.current = true;
     setPayAmount(convertTo(payAmount, next));
     setPayCur(next);
   };
@@ -80,20 +96,57 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
 
   // Cargar pagos + tasa al abrir con un servicio
   useEffect(() => {
-    if (!open || !service) return;
+    if (!open) {
+      // Al CERRAR también se limpia: si queda el historial de la orden anterior, el efecto de F38 que
+      // decide la moneda del campo lo leería en el primer render de la orden siguiente.
+      setPayments([]);
+      return;
+    }
+    if (!service) return;
     let alive = true;
+    // Estado por orden: al abrir OTRA orden no puede quedar nada de la anterior (el historial
+    // viejo se veía un instante y el saldo del banner mentía con los pagos de la orden previa).
+    setPayments([]);
     api.getServicePayments(service.id).then(p => { if (alive) setPayments(p); }).catch(() => {});
-    api.getActiveDay().then(d => { if (alive) setTasaBcv(d?.tasa_bcv ?? 0); }).catch(() => {});
+    api.getActiveDay().then(d => {
+      if (!alive) return;
+      setTasaBcv(d?.tasa_bcv ?? 0);
+      // F35: la fecha del abono arranca en la del TURNO ABIERTO (su caja es la que lo va a contar).
+      setDiaTurno(d?.close_date ?? '');
+      setPayDate((d?.close_date ?? localDate()));
+    }).catch(() => {});
     // Inicializar el form con el método del servicio (el toggle sigue la moneda del método)
     setPayMethod(service.payment_method ?? 'Divisas (USD Cash)');
     setPayCur(methodCurrency(service.payment_method));
     setPayFee(service.payment_method?.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
     setPayZelle('');
     setPayNotes('');
+    setPayDate(localDate());
+    setEditDateId(null);
     setPayError(null);
     payTouched.current = false;
+    curTouched.current = false;
     return () => { alive = false; };
   }, [open, service]);
+
+  // F38: el campo del monto arranca en la MONEDA EN QUE EL CLIENTE VIENE PAGANDO (si abonó en Bs.,
+  // se le cobra en Bs. y el campo ya está en Bs.), no en la del formulario. Necesita el historial de
+  // pagos (llega async), así que se corrige cuando llega — nunca pisa una elección manual del operario.
+  //
+  // OJO (revisión adversarial): el array `payments` NO puede ser el de otra orden. Los efectos corren
+  // DESPUÉS del render, así que al abrir la orden B este efecto todavía veía el `payments` de la orden A
+  // (el reset a [] ocurre en el mismo commit) y pisaba la moneda que acababa de dejar el efecto de
+  // inicialización: la orden B, cobrada siempre por Pago Móvil, abría el campo en «$» — y el operario
+  // escribía 5000 creyendo bolívares. Por eso se exige que los movimientos sean DE ESTA orden.
+  const pagosDeEstaOrden = !!service && payments.length > 0 && payments[0].service_id === service.id;
+  const cobroEn = pagosDeEstaOrden
+    ? orderBalance(service?.amount ?? 0, service?.paid_amount ?? 0, payments, tasaBcv).cobroEn
+    : null;
+  useEffect(() => {
+    if (!open || curTouched.current) return;
+    if (!cobroEn) return; // sin cobros de ESTA orden no hay moneda de cobro: manda el método
+    setPayCur(cobroEn);
+  }, [open, cobroEn]);
 
   // Re-sugerir el monto cuando cambia el método, la moneda del campo, la tasa o se abre (solo si no se tocó a mano)
   useEffect(() => {
@@ -108,17 +161,43 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   };
 
   const doAddPayment = async () => {
-    if (!service || payAmount <= 0 || payAmountFinal <= 0) return;
+    // Anti doble-cobro: el atajo Ctrl+Enter no mira el `disabled` del botón, así que dos pulsaciones
+    // rápidas (o un reintento después de un error de refresco) registraban DOS abonos iguales en la
+    // caja. Con este corte, el segundo intento no hace nada.
+    if (savingPay || !service || payAmount <= 0 || payAmountFinal <= 0) return;
     setSavingPay(true);
     setPayError(null);
+    let ok = false;
     try {
-      await api.addServicePayment(service.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, payNotes);
-      await refresh();
-      onOpenChange(false);
+      await api.addServicePayment(service.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, payNotes, payDate);
+      ok = true;
     } catch (e) {
       setPayError(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingPay(false);
+    }
+    if (!ok) return;
+    // El pago YA se guardó: si el refresco falla, el diálogo se cierra igual (antes quedaba abierto
+    // con el monto cargado y el operario lo volvía a guardar «porque dio error»).
+    onOpenChange(false);
+    try {
+      await refresh();
+    } catch {
+      toast.warning('El abono quedó guardado, pero no se pudo refrescar la lista. Actualizá la pantalla.');
+    }
+  };
+
+  // F35: corregir la fecha de un pago ya anotado (el error del backend explica el caso del día
+  // cerrado: abrirlo con ↺ en Libro Diario → Cierres y volver a cerrarlo).
+  const doSaveDate = async (pid: number) => {
+    if (!service || !editDate) return;
+    setPayError(null);
+    try {
+      await api.updateServicePaymentDate(pid, editDate);
+      setEditDateId(null);
+      await refresh();
+    } catch (e) {
+      setPayError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -131,8 +210,10 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   // Saldo honesto usando los datos frescos del servicio (amount vs paid_amount)
   const abonadoUsd = service?.paid_amount ?? 0;
   const saldoUsd = (service?.amount ?? 0) - abonadoUsd;
-  const excedenteUsd = -Math.min(0, saldoUsd);
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+  // F38: el saldo se dice en la moneda en que se cobró y con su equivalencia del día (lo que el
+  // cliente va a entregar). El $ sigue siendo la verdad contable y NO se revalúa.
+  const saldoTexto = balanceLabel(orderBalance(service?.amount ?? 0, abonadoUsd, payments, tasaBcv));
 
   // Valor del chip "Todo el saldo" en la moneda del CAMPO (Bs → saldo × tasa BCV)
   const saldoChip = saldoChipValue(saldoUsd, payCur, tasaBcv);
@@ -154,15 +235,15 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
           <div className="text-sm flex flex-col gap-1 rounded-md bg-muted/60 px-3 py-2">
             <p>Total: <strong>${(service?.amount ?? 0).toFixed(2)}</strong></p>
             {isFinalized(service?.status) ? (
-              <p className="text-muted-foreground">Orden {service?.status === 'Devuelto' ? 'devuelta' : 'cancelada'} — no acepta más pagos.</p>
+              <p className="text-muted-foreground" data-field="saldo">Orden {service?.status === 'Devuelto' ? 'devuelta' : 'cancelada'} — no acepta más pagos.</p>
             ) : saldoUsd < -0.005 ? (
-              <p>Excedente: <strong className="text-warning">${excedenteUsd.toFixed(2)}</strong> (se cobró más que el monto del servicio)</p>
+              <p data-field="saldo">Excedente: <strong className="text-warning">{balanceLabel(orderBalance(service?.amount ?? 0, abonadoUsd, payments, tasaBcv))}</strong> (se cobró más que el monto del servicio)</p>
             ) : payments.length === 0 ? (
-              <p>Por pagar: <strong className="text-amber-600">${saldoUsd.toFixed(2)}</strong></p>
+              <p data-field="saldo">Por pagar: <strong className="text-amber-600">{saldoTexto}</strong></p>
             ) : saldoUsd > 0.005 ? (
-              <p>Saldo pendiente: <strong className="text-danger">${saldoUsd.toFixed(2)}</strong></p>
+              <p data-field="saldo">Saldo pendiente: <strong className="text-danger">{saldoTexto}</strong></p>
             ) : (
-              <p>Saldo: <strong className="text-success">Cancelado</strong></p>
+              <p data-field="saldo">Saldo: <strong className="text-success">Cancelado</strong></p>
             )}
             {abonadoUsd > 0 && (
               <p className="text-xs text-muted-foreground">
@@ -231,6 +312,23 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 Saldo pendiente ≈ <strong>Bs. {Math.round(saldoUsd * tasaBcv).toLocaleString('es-VE')}</strong> (tasa BCV {tasaBcv.toFixed(2)})
               </p>
             )}
+            {/* F38: cobrar MÁS que el saldo deja un excedente a favor del cliente. No se bloquea (puede
+                ser legítimo: el cliente redondea o adelanta plata), pero el operario tiene que verlo.
+                Cubre también la orden YA SALDADA (saldo ≤ 0): ahí cualquier monto es excedente, y antes
+                no avisaba nada — se registraba un cobro de más sin que nadie lo viera. */}
+            {!isFinalized(service?.status) && payAmount > 0
+              && convertAmount(payAmount, payCur, 'USD', tasaBcv) > saldoUsd + 0.005 && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning" data-field="aviso-excedente">
+                <AlertTriangle className="size-4" />
+                <AlertDescription className="text-xs text-amber-800">
+                  {saldoUsd > 0.005
+                    ? <>Se está cobrando más que el saldo: quedaría a favor del cliente{' '}</>
+                    : <>Esta orden ya está cancelada: todo lo que cobres queda a favor del cliente{' '}</>}
+                  <strong>${(convertAmount(payAmount, payCur, 'USD', tasaBcv) - Math.max(0, saldoUsd)).toFixed(2)}</strong>.
+                  Revisá el monto si fue un error de tipeo.
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Método de Pago</label>
@@ -276,6 +374,27 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 placeholder="Número de referencia (últimos 4 dígitos)..." />
             </div>
           )}
+          {/* F35 — FECHA DEL PAGO: en qué caja entra esta plata */}
+          <div className="flex flex-col gap-2">
+            <label className="text-sm font-medium">Fecha del pago</label>
+            <Input type="date" value={payDate} max={localDate()} data-field="pay-fecha"
+              onChange={e => setPayDate(e.target.value)} />
+            {diaTurno && payDate === diaTurno && diaTurno !== localDate() && (
+              <p className="text-[11px] text-muted-foreground">
+                El turno abierto es el <strong>{diaTurno.split('-').reverse().join('/')}</strong>: el abono entra en esa caja.
+              </p>
+            )}
+            {payDate !== (diaTurno || localDate()) && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
+                <AlertTriangle className="size-4" />
+                <AlertDescription className="text-xs text-amber-800">
+                  Este abono entra en la <strong>caja del {payDate.split('-').reverse().join('/')}</strong>, no en la de hoy
+                  (para eso se usa cuando el cliente pagó ese día y lo avisó después).
+                  Ese día tiene que estar <strong>abierto</strong> en Libro Diario.
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Notas (opcional)</label>
             <Input value={payNotes} onChange={e => setPayNotes(e.target.value)}
@@ -284,6 +403,9 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
           {payments.length > 0 && (
             <div className="flex flex-col gap-1">
               <p className="text-sm font-medium">Pagos registrados</p>
+              <p className="text-[11px] text-muted-foreground">
+                Tocá la fecha de un pago para corregirla (si el cliente pagó otro día).
+              </p>
               <div className="max-h-40 overflow-y-auto overflow-x-auto rounded-md border">
                 <Table>
                   <TableHeader>
@@ -297,7 +419,28 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                   <TableBody>
                     {payments.map(p => (
                       <TableRow key={p.id}>
-                        <TableCell className="text-xs">{p.payment_date ? p.payment_date.slice(0, 16) : '-'}</TableCell>
+                        <TableCell className="text-xs">
+                          {/* Una DEVOLUCIÓN no ofrece corregir fecha: mover una devolución cambiaría
+                              la caja de DOS días (donde salió la plata y donde se anotó). */}
+                          {editDateId === p.id ? (
+                            <div className="flex items-center gap-1">
+                              <Input type="date" className="h-7 w-32 text-xs" value={editDate} max={localDate()}
+                                data-field="pago-fecha-edit" onChange={e => setEditDate(e.target.value)} />
+                              <Button size="sm" className="h-7 px-2 text-xs" onClick={() => doSaveDate(p.id)}>OK</Button>
+                              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs"
+                                onClick={() => setEditDateId(null)}>×</Button>
+                            </div>
+                          ) : isRefund(p) ? (
+                            <span>{p.payment_date ? p.payment_date.slice(0, 10).split('-').reverse().join('/') : '-'}</span>
+                          ) : (
+                            <button type="button" className="text-left underline-offset-2 hover:underline"
+                              title="Corregir la fecha de este pago (¿lo pagó otro día?)"
+                              data-action="editar-fecha-pago"
+                              onClick={() => { setEditDateId(p.id); setEditDate((p.payment_date ?? '').slice(0, 10) || localDate()); }}>
+                              {p.payment_date ? p.payment_date.slice(0, 10).split('-').reverse().join('/') : '-'}
+                            </button>
+                          )}
+                        </TableCell>
                         <TableCell className="text-right font-medium">
                           {isRefund(p) ? (
                             <span className="text-danger">-{currencySymbol(p.currency)}{Math.abs(p.amount).toFixed(2)}</span>
@@ -330,7 +473,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               <Printer className="size-4" /> Imprimir orden
             </Button>
           )}
-          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || dayOpen === false || (payIsBs && tasaBcv <= 0)}>
+          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || dayOpen === false || (payIsBs && tasaBcv <= 0) || isFinalized(service?.status)}>
             {savingPay ? 'Guardando...' : 'Guardar Pago'}
           </Button>
         </DialogFooter>

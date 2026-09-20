@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Registro Servicio Tecnico",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.registro.serviciotecnico",
   "build": {
     "frontendDist": "../dist",
@@ -35,7 +35,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../registro.db": "registro.default.db",
+      "../backup/plantilla_candidata.db": "registro.default.db",
       "../tools/export_libro_diario.py": "export_libro_diario.py"
     },
     "windows": {

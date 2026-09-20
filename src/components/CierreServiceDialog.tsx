@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Banknote, Check, CheckCircle2, Loader2, Printer, Smartphone, Zap,
+  AlertTriangle, Banknote, Camera, Check, CheckCircle2, Loader2, Printer, Smartphone, Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -9,8 +9,10 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { api } from '@/db';
-import type { ScreenCandidate, Service } from '@/types';
+import type { ScreenCandidate, Service, ServicePayment } from '@/types';
 import { cn, currencySymbol, methodCurrency, parseServiceTypes, shortMethodLabel } from '@/lib/utils';
+// F38: el saldo se dice en la moneda del cobro (+ equivalencia del día) también al cerrar/entregar.
+import { orderBalance, balanceLabel } from '@/lib/order-balance';
 // Regla del proyecto (AGENTS.md): entregar una pantalla AGOTADA exige confirmación explícita
 // — `screenOk` es la MISMA función que usa el formulario de servicio, no una copia.
 import { screenOk, warnsCrossBrand } from '@/lib/screen-rules';
@@ -21,6 +23,10 @@ import {
 import { updateOrderKeepingFields } from '@/lib/service-update';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
+// F32: al entregar sale el recordatorio de política (foto de SALIDA). Nunca bloquea el cierre.
+import { firePolicyReminders } from './policy-actions';
+import { deliverReminders } from '@/lib/reminders';
+import { photoOutIsCurrent } from '@/lib/service-guide';
 
 // F30 — ASISTENTE DE CIERRE: entregar un equipo rápido y sin pensar.
 //
@@ -61,6 +67,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   // cobro
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [tasaBcv, setTasaBcv] = useState(0);
+  /** Fecha del turno abierto: su caja es la que recibe el cobro al entregar (F35). */
+  const [diaTurno, setDiaTurno] = useState('');
+  /** Movimientos de la orden: dicen en qué moneda se viene cobrando (F38). */
+  const [movimientos, setMovimientos] = useState<ServicePayment[]>([]);
   const [payMethod, setPayMethod] = useState('Divisas (USD Cash)');
   const [payAmount, setPayAmount] = useState(0);
   const [payCur, setPayCur] = useState<PayCur>('USD');
@@ -80,6 +90,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
     setPayFee((service?.payment_method ?? '').includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
     setPayZelle('');
     setMotivoSaldo('');
+    // Los movimientos son POR ORDEN: al cambiar de orden no puede quedar nada de la anterior (el
+    // efecto de F38 leería la moneda de cobro de la orden equivocada con datos viejos).
+    setMovimientos([]);
+    curTouched.current = false;
     setListo(false);
     setError(null);
     setPagoHecho(false);
@@ -92,7 +106,13 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
     let alive = true;
     api.getService(service.id).then(s => { if (alive && s) setSvc(s); }).catch(() => {});
     api.getPaymentMethods().then(m => { if (alive) setMethods(m); }).catch(() => {});
-    api.getActiveDay().then(d => { if (alive) setTasaBcv(d?.tasa_bcv ?? 0); }).catch(() => {});
+    api.getActiveDay().then(d => {
+      if (!alive) return;
+      setTasaBcv(d?.tasa_bcv ?? 0);
+      setDiaTurno(d?.close_date ?? '');
+    }).catch(() => {});
+    // F38: los movimientos reales dicen en qué moneda se viene cobrando (para el saldo en Bs.)
+    api.getServicePayments(service.id).then(p => { if (alive) setMovimientos(p); }).catch(() => { if (alive) setMovimientos([]); });
     return () => { alive = false; };
   }, [open, service]);
 
@@ -100,7 +120,22 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   const necesitaPantalla = trabajos.includes('Cambio pantalla');
   const yaFinal = esFinal(svc?.status);
   const saldo = Math.max(0, (svc?.amount ?? 0) - (svc?.paid_amount ?? 0));
+  // F38: el saldo se dice en la MONEDA DEL COBRO con su equivalencia (el operario lee el número en Bs.
+  // que le va a pedir al cliente, sin traducir). Los movimientos se cargan al abrir el diálogo.
+  const saldoTexto = balanceLabel(orderBalance(svc?.amount ?? 0, svc?.paid_amount ?? 0, movimientos, tasaBcv));
   const tieneSaldo = saldo > 0.005;
+
+  // F38 (revisión adversarial): el campo del monto arranca en la MONEDA EN QUE EL CLIENTE VIENE PAGANDO,
+  // igual que el diálogo de abono. Sin esto el texto de arriba decía «Falta Bs. 72.879,00 ($97.33)» y el
+  // campo de al lado, en $, no decía ninguna moneda: el operario copiaba el número en Bs. y se guardaba
+  // como DÓLARES (72.879 dólares cobrados por una reparación de $100). Nunca pisa la elección manual.
+  const curTouched = useRef(false);
+  useEffect(() => {
+    if (!open || curTouched.current) return;
+    const b = orderBalance(svc?.amount ?? 0, svc?.paid_amount ?? 0, movimientos, tasaBcv);
+    if (!b.cobroEn) return; // sin cobros manda el método del formulario
+    setPayCur(b.cobroEn);
+  }, [open, movimientos, svc?.amount, svc?.paid_amount, tasaBcv]);
 
   useEffect(() => {
     if (!open || !necesitaPantalla || !svc?.model) { setCandidatos([]); return; }
@@ -133,6 +168,9 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
 
   const cambiarMoneda = (next: PayCur) => {
     if (next === payCur) return;
+    // Elección MANUAL del operario: el efecto de F38 no la pisa más (el campo sigue a la moneda del
+    // cobro solo mientras nadie lo toque).
+    curTouched.current = true;
     setPayAmount(convertAmount(payAmount, payCur, next, tasaBcv));
     setPayCur(next);
   };
@@ -158,6 +196,9 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   const puedeCerrar = pantallaOk && !faltaMotivo && !cobroImposible && !cargandoPantallas
     && (payAmount <= 0 || dayOpen !== false)
     && (tasaBcv > 0 || !payIsBs || payAmount <= 0);
+  // F32: ¿ya está la foto de SALIDA de la entrega de ESTA orden? (se compara con su fecha de
+  // entrega; si el equipo se reabrió y se entrega de nuevo, la foto vieja no cuenta)
+  const fotoSalidaOk = photoOutIsCurrent(svc?.photo_out_at ?? null, svc?.date_out ?? null);
 
   const faltantes: string[] = [];
   if (pantallaPendiente) faltantes.push('elegir la pantalla instalada');
@@ -183,7 +224,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
       //    Tiene su PROPIO catch: si el cobro falla, no se entrega y se dice la verdad.
       if (faltaCobrar) {
         try {
-          await api.addServicePayment(svc.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, 'Cobro al entregar');
+          // F35: el cobro al entregar entra en la caja del TURNO ABIERTO (no en «hoy» a ciegas: si el
+          // turno quedó abierto de otro día, hoy no tiene fila en daily_closings y el abono se
+          // rechazaría, dejando al operario sin poder cobrar NI entregar).
+          await api.addServicePayment(svc.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, 'Cobro al entregar', diaTurno);
           cobroOk = true;
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
@@ -211,9 +255,14 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
       setPagoHecho(false);
       setListo(true);
       onSaved();
-      if (imprimir && onPrint) {
-        const actual = await api.getService(svc.id).catch(() => null);
-        if (actual) { onOpenChange(false); onPrint(actual); }
+      // F32: la orden releída sirve para el recordatorio de política y para imprimir el recibo.
+      const entregada = await api.getService(svc.id).catch(() => null);
+      // Recordatorio de POLÍTICA al entregar: «¿le tomaste la foto al teléfono al entregarlo?».
+      // Es un aviso: el equipo ya salió y la entrega NO se bloquea por esto.
+      if (entregada) firePolicyReminders(deliverReminders(entregada), [entregada.id], onSaved);
+      if (imprimir && onPrint && entregada) {
+        onOpenChange(false);
+        onPrint(entregada);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -260,6 +309,14 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
             </span>
             <span className={cn('flex items-center gap-1.5', tieneSaldo ? 'text-warning' : 'text-emerald-600')}>
               {tieneSaldo ? <AlertTriangle className="size-3.5" /> : <Check className="size-3.5" />} Cobro
+            </span>
+            {/* F32: la foto de SALIDA es política de la empresa. Acá es INFORMATIVA: no impide
+                cerrar (el equipo se entrega igual), pero el operario la ve antes y queda anotada
+                como pendiente si no la confirma. */}
+            <span className={cn('flex items-center gap-1.5', fotoSalidaOk ? 'text-emerald-600' : 'text-warning')}
+              data-state={fotoSalidaOk ? 'ok' : 'pendiente'}>
+              {fotoSalidaOk ? <Check className="size-3.5" /> : <Camera className="size-3.5" />}
+              Foto de salida{fotoSalidaOk ? '' : ' pendiente'}
             </span>
             {faltantes.length > 0 && <span className="text-muted-foreground">Falta: {faltantes.join(' y ')}</span>}
             <span className="ml-auto text-muted-foreground">Total {currencySymbol('USD')}{(svc.amount ?? 0).toFixed(2)} · abonado {currencySymbol('USD')}{(svc.paid_amount ?? 0).toFixed(2)}</span>
@@ -393,7 +450,7 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
               <span className="flex items-center gap-1.5 text-sm font-medium">
                 <Banknote className={cn('size-3.5', tieneSaldo ? 'text-warning' : 'text-muted-foreground')} />
                 {tieneSaldo
-                  ? <>Falta cobrar <strong>{currencySymbol('USD')}{saldo.toFixed(2)}</strong></>
+                  ? <>Falta cobrar <strong>{saldoTexto}</strong></>
                   : <>Cobrado ({shortMethodLabel(svc.payment_method)}) — podés registrar otro cobro si hace falta</>}
               </span>
 
@@ -405,7 +462,7 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
 
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1">
-                  <label className="text-[11px] text-muted-foreground">Monto</label>
+                  <label className="text-[11px] text-muted-foreground">Monto ({payCur === 'VES' ? 'Bs.' : '$'})</label>
                   <div className="flex items-center gap-2">
                     <ToggleGroup type="single" value={payCur} onValueChange={v => v && cambiarMoneda(v as PayCur)} className="h-8">
                       <ToggleGroupItem value="USD" className="h-7 px-2.5 text-xs">$</ToggleGroupItem>

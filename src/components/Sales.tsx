@@ -321,7 +321,11 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
   const isBs = saleCurrency === 'VES';
   const isDivisas = method === 'Divisas (USD Cash)';
   const totalUsdTmp = quantity * price;
-  const totalFinal = isBs ? totalUsdTmp * tasaBcv : totalUsdTmp;
+  // F39: una venta en bolívares se cobra AL BOLÍVAR ENTERO (no existen centavos de bolívar en la
+  // calle). Antes se guardaba `total × tasa` con centavos, así que el arqueo arrastraba descuadres
+  // de céntimos contra los 0,5 Bs. de tolerancia. Se redondea UNA vez y ese mismo número se muestra
+  // y se guarda (lo que dice la pantalla es lo que entra a la caja).
+  const totalFinal = isBs ? Math.round(totalUsdTmp * tasaBcv) : totalUsdTmp;
 
   const save = async () => {
     if (!productName) return;
@@ -340,7 +344,9 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
         cid = await api.addOrFindClient(finalName, '', clientCi);
       }
       const total = quantity * price;
-      await api.addSale(productId, productName, quantity, price, isBs ? total * tasaBcv : total, method, finalName, cid, notes, 0, reference, saleCurrency, discount);
+      // Se guarda EXACTAMENTE el número que la pantalla mostró como total (totalFinal): si la UI
+      // redondeara y el guardado no, la caja contaría un monto distinto al que se cobró.
+      await api.addSale(productId, productName, quantity, price, isBs ? totalFinal : total, method, finalName, cid, notes, 0, reference, saleCurrency, discount);
       onSaved();
     } finally {
       setSaving(false);
@@ -431,7 +437,7 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
               {methodCurrency(method) === 'VES' && (
                 <p className="text-xs text-amber-600">
                   {tasaBcv > 0
-                    ? `Se cobra en bolívares: total ≈ Bs. ${totalFinal.toFixed(2)} (tasa BCV ${tasaBcv.toFixed(2)})`
+                    ? `Se cobra en bolívares: total Bs. ${totalFinal.toLocaleString('es-VE')} (tasa BCV ${tasaBcv.toFixed(2)})`
                     : 'Sin tasa BCV en el día abierto — abre/actualiza el día en Libro Diario para cobrar en Bs.'}
                 </p>
               )}

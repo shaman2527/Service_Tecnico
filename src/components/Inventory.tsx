@@ -46,6 +46,39 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
     loadStats();
   }, []);
 
+  // PRECALENTADO EN TIEMPO LIBRE (feature 41). El backend MEMORIZA todo lo que se deriva del
+  // catálogo (ver `src-tauri/src/cache.rs`) y esa memoria se paga UNA vez por versión de la
+  // base: sin este adelanto, la PRIMERA visita a «Modelos» costaba ~550 ms de cálculo y el
+  // buscador de repuesto ~240 ms. Acá se adelanta en segundo plano justo después de abrir el
+  // módulo, así la primera visita tampoco espera.
+  //
+  // DOS LLAMADAS Y NO CUATRO (revisión adversarial): la app tiene UNA sola conexión a SQLite, y
+  // construir la memoria la retiene un instante (~100-150 ms); cada llamada de más es tiempo en
+  // el que la consulta que el operario acaba de pedir queda en cola. Con estas dos se construye
+  // TODO lo que la memoria guarda del padrón (índice + filas + totales) y el buscador de repuesto
+  // se calienta solo cuando se usa. Si algo falla no se avisa nada: cada pestaña lo vuelve a pedir.
+  useEffect(() => {
+    let cancelled = false;
+    const warm = async () => {
+      try {
+        await api.getPhoneBrands();
+        if (cancelled) return;
+        await api.getPhones(null, '', false, false, false, 'nombre', 'asc', 50, 0);
+      } catch { /* sin backend o base vacía: cada pestaña lo vuelve a pedir cuando se usa */ }
+    };
+    // `requestIdleCallback` existe en WebView2 (Chromium); el `timeout` garantiza que corra
+    // aunque la ventana esté ocupada. El fallback es para el modo navegador.
+    const hayIdle = typeof window.requestIdleCallback === 'function';
+    const id = hayIdle
+      ? window.requestIdleCallback(() => { void warm(); }, { timeout: 1500 })
+      : window.setTimeout(() => { void warm(); }, 400);
+    return () => {
+      cancelled = true;
+      if (hayIdle) window.cancelIdleCallback(id);
+      else clearTimeout(id);
+    };
+  }, []);
+
   useEffect(() => { setTab(initialTab); }, [initialTab]);
   useEffect(() => { setModelQuery(initialModel); }, [initialModel]);
 

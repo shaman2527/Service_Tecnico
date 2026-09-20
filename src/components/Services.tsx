@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle, Zap } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle, Zap, Camera } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,6 +13,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { api } from '../db';
+import { toast } from 'sonner';
 import PaymentDialog from './PaymentDialog';
 import RefundDialog from './RefundDialog';
 import CierreServiceDialog from './CierreServiceDialog';
@@ -23,12 +24,24 @@ import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { ModelCombobox } from './ModelCombobox';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
+// F32: recordatorios de política (foto / pago) y panel de los teléfonos entregados hoy. Las reglas
+// viven en módulos puros con pruebas (lib/service-guide, lib/reminders): acá solo se conectan.
+// F33: el asistente de recepción es la FICHA DE INGRESO (dentro del formulario, compacta) — se
+// quitó el aviso flotante al registrar porque tapaba lo que el operario estaba escribiendo.
+import { FichaIngreso } from './FichaIngreso';
+import { firePolicyReminders } from './policy-actions';
+import { EntregadosHoy } from './EntregadosHoy';
+import { buildFicha } from '@/lib/ficha';
+import { nextStep, DEFAULT_NEW_STATUS, isCreatableStatus, photoOutIsCurrent } from '@/lib/service-guide';
+import { deliverReminders, receiveReminders, payIntentLabel, isDelivered } from '@/lib/reminders';
 // Piezas compartidas con el asistente de cierre (Harness F30): el stepper del wizard y la
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
 import { FormStepper } from './FormStepper';
 import { ScreenSelect, useCompatibleProducts } from './ScreenPicker';
 import { asPhoneEntry, autoScreen, onlyScreens, screenOk } from '@/lib/screen-rules';
 import { updateOrderKeepingFields } from '@/lib/service-update';
+// F38: el saldo se dice en la moneda en que se cobró (+ equivalencia del día). Regla pura con test node.
+import { orderBalance, balanceLabel } from '@/lib/order-balance';
 import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
@@ -203,11 +216,14 @@ function TechniciansDialog({ open, technicians, onOpenChange, onChanged }: {
   );
 }
 
-function UnpaidBanner({ neverPaid, balance, amount, paid }: {
+function UnpaidBanner({ neverPaid, balance, amount, paid, saldoTexto }: {
   neverPaid: boolean;
   balance: number;
   amount: number;
   paid: number;
+  /** F38: el saldo en la moneda del cobro (+ equivalencia). Lo calcula la tarjeta (tiene los pagos
+   *  y la tasa del turno); acá solo se muestra, para que el cartel no diga una cifra distinta. */
+  saldoTexto?: string;
 }) {
   const pct = amount > 0.005 ? Math.min(100, Math.max(0, (paid / amount) * 100)) : 0;
   return (
@@ -221,7 +237,7 @@ function UnpaidBanner({ neverPaid, balance, amount, paid }: {
             {neverPaid ? 'Sin pagar' : 'Saldo pendiente'}
           </AlertTitle>
           <p className="text-sm leading-tight text-foreground">
-            <span className="font-bold text-destructive">Falta ${balance.toFixed(2)}</span>
+            <span className="font-bold text-destructive">Falta {saldoTexto ?? `$${balance.toFixed(2)}`}</span>
             {!neverPaid && (
               <span className="text-muted-foreground"> de ${amount.toFixed(2)}</span>
             )}
@@ -245,9 +261,17 @@ export default function Services() {
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('__activos__');
+  // true = el estado lo ajustó el conmutador «Entregados» (no el operario): al volver a
+  // «Recibidos» se restaura «Activos en taller» en lugar de dejar un filtro que el operario no pidió.
+  const estadoAuto = useRef(false);
+  // F32: eje del rango de fechas — 'in' recibidos (histórico) · 'out' ENTREGADOS (permite
+  // «entregados hoy», que con el eje de recibido era imposible de ver).
+  const [dateField, setDateField] = useState<'in' | 'out'>('in');
   const [typeFilter, setTypeFilter] = useState('');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
+  // F32: teléfonos entregados HOY (fecha de entrega), para el panel y el KPI del dueño.
+  const [entregadosHoy, setEntregadosHoy] = useState<Service[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
@@ -262,6 +286,8 @@ export default function Services() {
   const [delivering, setDelivering] = useState<Service | null>(null);
   const [confirmDeliver, setConfirmDeliver] = useState<Service | null>(null);
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
+  // Tasa del turno abierto: con ella se muestra la equivalencia en Bs. del saldo (F38).
+  const [tasaDia, setTasaDia] = useState(0);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -304,25 +330,60 @@ export default function Services() {
 
   const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
+  // ── F34: CAMBIO RÁPIDO DE TÉCNICO desde la tarjeta ────────────────────────────────────────
+  // Pedido del dueño: «le dé clic al nombre del técnico o a la letra como tal que tiene la tarjeta
+  // [y] me dé la opción cambiar técnico rápido». Se guarda por la ÚNICA vía de actualización de
+  // órdenes (`updateOrderKeepingFields`), así que ningún otro campo de la orden se toca.
+  const [quickTech, setQuickTech] = useState<Service | null>(null);
+  const [savingTech, setSavingTech] = useState(false);
+  const cambiarTecnico = async (s: Service, t: Technician | null) => {
+    if (savingTech) return;  // dos clics seguidos en técnicos distintos: gana el primero
+    setSavingTech(true);
+    try {
+      await updateOrderKeepingFields(s, { technician: t?.name ?? '', technicianId: t?.id ?? null });
+      setQuickTech(null);
+      await load();
+      toast.success(t ? `Técnico: ${t.name}` : 'Técnico sin asignar', { id: `tech-${s.id}` });
+    } catch (e) {
+      toast.error('No se pudo cambiar el técnico', { description: e instanceof Error ? e.message : String(e), id: `tech-${s.id}` });
+    } finally {
+      setSavingTech(false);
+    }
+  };
+
   const load = async () => {
-    const [s, st, techs] = await Promise.all([
-      api.getServices(search, statusFilter, dateStart, dateEnd),
+    const hoy = localDate();
+    const [s, st, techs, entregados] = await Promise.all([
+      api.getServices(search, statusFilter, dateStart, dateEnd, dateField),
       api.getServiceStatuses(),
       api.getTechnicians().catch(() => [] as Technician[]),
+      // F32: los ENTREGADOS de hoy, por fecha de entrega (una sola consulta; alimenta el KPI y
+      // el panel «Teléfonos entregados hoy»).
+      api.getServices('', 'Entregado', hoy, hoy, 'out').catch(() => [] as Service[]),
     ]);
     setServices(s);
     setStatuses(st);
     setTechnicians(techs);
+    setEntregadosHoy(entregados);
     // Métodos REALES de pago por tarjeta (chip honesto: si pagó por Pago Móvil,
     // la tarjeta no debe decir "Divisas"). Cap 120 filas para no disparar N queries.
-    if (s.length > 0 && s.length <= 120) {
-      const entries = await Promise.all(s.map(async sv =>
+    //
+    // F32: los ENTREGADOS DE HOY se piden SIEMPRE (son pocos: los del día) aunque la lista
+    // visible pase el tope — si no, al superar las 120 filas el mapa quedaba vacío y el panel
+    // mostraba «Sin pago» en órdenes que sí se cobraron (justo lo que el panel debe decir bien).
+    // F38 (revisión adversarial): por encima de las 120 filas tampoco se sabe la moneda del cobro.
+    // NO es un error de plata: `balanceLabel` sin datos dice las DOS monedas («$80.00 (Bs. 59.903,20)»),
+    // solo cambia el orden; el operario sigue viendo el número en Bs. Lo que sí se pierde es el chip
+    // del método real, y por eso la lista se filtra (el caso normal es un rango corto de fechas).
+    const conPagos = (list: Service[]) => list.length === 0 ? Promise.resolve({}) :
+      Promise.all(list.map(async sv =>
         [sv.id, await api.getServicePayments(sv.id).catch(() => [] as ServicePayment[])] as const,
-      ));
-      setPaymentsMap(Object.fromEntries(entries));
-    } else {
-      setPaymentsMap({});
-    }
+      )).then(Object.fromEntries);
+    const [mapaLista, mapaHoy] = await Promise.all([
+      s.length > 0 && s.length <= 120 ? conPagos(s) : Promise.resolve({}),
+      conPagos(entregados),
+    ]);
+    setPaymentsMap({ ...mapaLista, ...mapaHoy });
   };
 
   useEffect(() => { load(); }, []);
@@ -331,7 +392,7 @@ export default function Services() {
   useEffect(() => {
     const t = setTimeout(load, 350);
     return () => clearTimeout(t);
-  }, [search, statusFilter, dateStart, dateEnd]);
+  }, [search, statusFilter, dateStart, dateEnd, dateField]);
 
   // Períodos rápidos por fecha de RECIBIDO (días=0 → hoy; null → todos)
   const setQuickPeriod = (days: number | null) => {
@@ -353,7 +414,7 @@ export default function Services() {
   };
 
   useEffect(() => {
-    api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
+    api.getActiveDay().then(d => { setDayOpen(!!d); setTasaDia(d?.tasa_bcv ?? 0); }).catch(() => setDayOpen(true));
   }, []);
 
   const handleDelete = async (s: Service) => {
@@ -369,11 +430,26 @@ export default function Services() {
     setDelivering(s);
     try {
       await updateOrderKeepingFields(s, { status: 'Entregado' });
+      // F32: aviso de POLÍTICA (foto de SALIDA) — aparece después de entregar y NUNCA bloquea
+      // (el equipo ya salió): si el operario confirma, queda anotado en la orden; si no, la
+      // orden queda visible como «sin foto» en el panel de entregados de hoy.
+      const fresca = await api.getService(s.id).catch(() => null);
+      if (fresca) firePolicyReminders(deliverReminders(fresca), [fresca.id], load);
     } finally {
       setDelivering(null);
       setConfirmDeliver(null);
       load();
     }
+  };
+
+  // F32: ver los teléfonos ENTREGADOS hoy (por fecha de entrega) en un toque.
+  const verEntregadosHoy = () => {
+    const hoy = localDate();
+    setStatusFilter('Entregado');
+    setDateField('out');
+    setDateStart(hoy);
+    setDateEnd(hoy);
+    setTypeFilter('');
   };
 
   const totalAmount = services.reduce((a, s) => a + s.amount, 0);
@@ -425,6 +501,9 @@ export default function Services() {
   // "Equipo X/Y" con el número de la orden; los pagos/abonos son POR EQUIPO.
   const renderServiceCard = (s: Service, groupId: string | null, pos: number, count: number) => {
     const balance = s.amount - s.paid_amount;
+    // F38: el saldo de la tarjeta se dice en la moneda en que se cobró (+ su equivalencia del día):
+    // el operario lee el número en Bs. que le va a pedir al cliente, sin traducir mentalmente.
+    const saldoTexto = balanceLabel(orderBalance(s.amount, s.paid_amount ?? 0, paymentsMap[s.id], tasaDia));
     const checklist = parseChecklist(s.device_checklist);
     const hasChecklist = Object.keys(checklist).length > 0;
     const entregado = s.status === 'Entregado';
@@ -459,17 +538,30 @@ export default function Services() {
             {entregado && <CheckCircle2 className="size-4 text-emerald-500" />}
             {porEntregar && <Clock className="size-4 text-amber-500" />}
             <span className="text-[11px] text-muted-foreground">{s.date_in?.slice(0, 16) ?? '-'}</span>
-            {techById(s.technician_id) ? (
-              <span title={`${techById(s.technician_id)!.name} — técnico`}
-                className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', techById(s.technician_id)!.color)}>
-                {techById(s.technician_id)!.initials}
+            {/* F34: el técnico de la tarjeta es un BOTÓN — un clic y se cambia sin abrir el form.
+                Muestra las iniciales en su color (o el nombre del snapshot si lo borraron). */}
+            <button type="button" data-tech-quick={s.id}
+              title={`${s.technician ? s.technician : 'Sin técnico asignado'} — clic para cambiar el técnico`}
+              aria-label={`Cambiar técnico de la orden ${s.order_num}`}
+              onClick={() => setQuickTech(s)}
+              className="flex shrink-0 items-center gap-1 rounded-full px-1 -mx-1 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+              {techById(s.technician_id) ? (
+                <span className={cn('flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', techById(s.technician_id)!.color)}>
+                  {techById(s.technician_id)!.initials}
+                </span>
+              ) : s.technician ? (
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[10px] font-bold text-white">
+                  {initialsOf(s.technician)}
+                </span>
+              ) : (
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-[10px] text-muted-foreground">
+                  <Users className="size-3" />
+                </span>
+              )}
+              <span className="max-w-24 truncate text-[11px] text-muted-foreground">
+                {techById(s.technician_id)?.name ?? s.technician ?? 'Asignar'}
               </span>
-            ) : s.technician ? (
-              <span title={`${s.technician} — técnico`}
-                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-slate-500 text-[10px] font-bold text-white">
-                {initialsOf(s.technician)}
-              </span>
-            ) : null}
+            </button>
           </div>
           <Badge variant={statusBadgeVariant(s.status)} className={entregado ? 'bg-success' : undefined}>{s.status}</Badge>
         </CardHeader>
@@ -480,6 +572,7 @@ export default function Services() {
               balance={balance}
               amount={s.amount}
               paid={s.paid_amount ?? 0}
+              saldoTexto={saldoTexto}
             />
           </div>
         )}
@@ -522,9 +615,9 @@ export default function Services() {
                 ) : balance <= 0.005 ? (
                   <Badge variant="outline" className="text-success">Cancelado</Badge>
                 ) : (s.paid_amount ?? 0) <= 0.005 ? (
-                  <Badge variant="outline" className="text-amber-600 border-amber-500/40 bg-amber-500/10">Por pagar ${balance.toFixed(2)}</Badge>
+                  <Badge variant="outline" className="text-amber-600 border-amber-500/40 bg-amber-500/10">Por pagar {saldoTexto}</Badge>
                 ) : (
-                  <Badge variant="outline" className="text-danger">${balance.toFixed(2)} pendiente</Badge>
+                  <Badge variant="outline" className="text-danger">{saldoTexto}</Badge>
                 )}
               </div>
               <div className="flex items-center justify-between gap-2 mt-1 text-xs text-muted-foreground">
@@ -556,6 +649,27 @@ export default function Services() {
                 {entregado && !s.printed && (
                   <Badge variant="outline" className="text-xs text-amber-600 border-amber-500/40 bg-amber-500/10 whitespace-nowrap">
                     Sin imprimir orden
+                  </Badge>
+                )}
+                {/* F32: señales de política del taller (informativas, nunca bloquean) */}
+                {entregado && !photoOutIsCurrent(s.photo_out_at, s.date_out) && (
+                  <Badge variant="outline" className="text-xs text-amber-600 border-amber-500/40 bg-amber-500/10 whitespace-nowrap"
+                    title="Política de la empresa: se le toma foto al teléfono al entregarlo">
+                    Sin foto de salida
+                  </Badge>
+                )}
+                {/* Solo en las recepciones de HOY: marcarlo en toda orden vieja sería ruido
+                    permanente (las órdenes anteriores a F32 no tienen la anotación). */}
+                {ACTIVE_STATUSES.includes(s.status ?? '') && !s.photo_in_at && (s.date_in ?? '').slice(0, 10) === localDate() && (
+                  <Badge variant="outline" className="text-xs text-sky-700 border-sky-500/40 bg-sky-500/10 whitespace-nowrap"
+                    title="Política de la empresa: se le toma foto al teléfono al recibirlo">
+                    Sin foto de entrada
+                  </Badge>
+                )}
+                {payIntentLabel(s.pay_intent) && (
+                  <Badge variant="outline" className="text-xs text-primary border-primary/40 bg-primary/5 whitespace-nowrap"
+                    title="Lo que dijo el cliente al recibir el equipo">
+                    {payIntentLabel(s.pay_intent)}
                   </Badge>
                 )}
                 {warr === 'activa' && (
@@ -676,20 +790,49 @@ export default function Services() {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Total Equipos</CardTitle></CardHeader>
           <CardContent><div className="text-2xl font-bold">{services.length}</div></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Pendientes</CardTitle></CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Listos para entregar</CardTitle></CardHeader>
           <CardContent><div className="text-2xl font-bold text-warning">{services.filter(s => s.status === 'Por entregar').length}</div></CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Monto Total</CardTitle></CardHeader>
           <CardContent><div className="text-2xl font-bold">${totalAmount.toFixed(2)}</div></CardContent>
         </Card>
+        {/* F32: el dueño quiere ver de un vistazo los teléfonos que SALIERON hoy (fecha de entrega) */}
+        <Card
+          role="button"
+          tabIndex={0}
+          title="Ver los teléfonos entregados hoy (por fecha de entrega)"
+          onClick={verEntregadosHoy}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); verEntregadosHoy(); } }}
+          className="cursor-pointer border-emerald-500/30 bg-emerald-500/5 transition-shadow hover:shadow-md"
+          data-kpi="entregados-hoy"
+        >
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
+              <CheckCircle2 className="size-3.5 text-emerald-600" /> Entregados hoy
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-emerald-700">{entregadosHoy.length}</div>
+            <p className="text-[11px] text-muted-foreground">por fecha de entrega · clic para filtrar</p>
+          </CardContent>
+        </Card>
       </div>
+
+      <EntregadosHoy
+        services={entregadosHoy}
+        paymentsMap={paymentsMap}
+        tasaDia={tasaDia}
+        onOpen={s => { setEditing(s); setShowForm(true); }}
+        onPrint={s => setPrintFor(s)}
+        onSeeAll={verEntregadosHoy}
+      />
 
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 max-w-sm">
@@ -698,14 +841,31 @@ export default function Services() {
             ref={searchRef} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
         <div className="flex items-center gap-2">
+          {/* F32: el rango puede ir por fecha de RECIBIDO o de ENTREGADO (los rótulos lo dicen).
+              «Entregados» + el filtro por defecto «Activos en taller» daba SIEMPRE una lista vacía
+              (una orden entregada no está activa): el rótulo decía una cosa y la pantalla otra, así
+              que al pasar a «Entregados» se ajusta el estado a Entregado — y al volver se devuelve
+              «Activos en taller» solo si ese ajuste fue automático, no si lo eligió el operario. */}
+          <ToggleGroup type="single" value={dateField} className="h-9"
+            onValueChange={v => {
+              if (!v) return;
+              setDateField(v as 'in' | 'out');
+              if (v === 'out' && statusFilter === '__activos__') { setStatusFilter('Entregado'); estadoAuto.current = true; }
+              else if (v === 'in' && estadoAuto.current) { setStatusFilter('__activos__'); estadoAuto.current = false; }
+            }}>
+            <ToggleGroupItem value="in" className="h-8 px-2.5 text-xs" title="Filtrar por fecha en que se recibió el equipo">Recibidos</ToggleGroupItem>
+            <ToggleGroupItem value="out" className="h-8 px-2.5 text-xs" title="Filtrar por fecha en que se entregó el equipo">Entregados</ToggleGroupItem>
+          </ToggleGroup>
           <Input type="date" className="w-36" value={dateStart}
             onChange={e => { setDateStart(e.target.value); if (!e.target.value) setDateEnd(''); }}
-            title="Recibidos desde" />
+            title={dateField === 'out' ? 'Entregados desde' : 'Recibidos desde'}
+            aria-label={dateField === 'out' ? 'Entregados desde' : 'Recibidos desde'} />
           <span className="text-xs text-muted-foreground">a</span>
           <Input type="date" className="w-36" value={dateEnd}
             min={dateStart || undefined}
             onChange={e => setDateEnd(e.target.value)}
-            title="Recibidos hasta" />
+            title={dateField === 'out' ? 'Entregados hasta' : 'Recibidos hasta'}
+            aria-label={dateField === 'out' ? 'Entregados hasta' : 'Recibidos hasta'} />
           {(dateStart || dateEnd) && (
             <Button variant="ghost" size="sm" onClick={() => { setDateStart(''); setDateEnd(''); }}>
               Limpiar
@@ -717,8 +877,16 @@ export default function Services() {
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(7)}>7 días</Button>
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(30)}>30 días</Button>
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(null)}>Todo</Button>
+          {/* F32: el pedido del dueño en un solo botón */}
+          <Button variant="outline" size="sm" className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10"
+            onClick={verEntregadosHoy} data-action="entregados-hoy">
+            <CheckCircle2 className="size-3.5" /> Entregados hoy
+            {entregadosHoy.length > 0 && (
+              <span className="ml-1 rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold text-white">{entregadosHoy.length}</span>
+            )}
+          </Button>
         </div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
+        <Select value={statusFilter} onValueChange={v => { estadoAuto.current = false; setStatusFilter(v); }}>
           <SelectTrigger className="w-44">
             <SelectValue placeholder="Todos los estados" />
           </SelectTrigger>
@@ -761,6 +929,9 @@ export default function Services() {
               const total = activas.reduce((a, s) => a + s.amount, 0);
               const abonado = activas.reduce((a, s) => a + s.paid_amount, 0);
               const saldo = total - abonado;
+              // F38: el banner de la orden multi-equipo también dice el saldo en la moneda del cobro;
+              // los movimientos son POR EQUIPO, así que se concatenan los de toda la orden.
+              const pagosGrupo = activas.flatMap(s => paymentsMap[s.id] ?? []);
               const allFinalized = activas.length === 0;
               return (
                 <Fragment key={`g-${item.groupId}`}>
@@ -774,7 +945,7 @@ export default function Services() {
                     <span className="text-xs text-muted-foreground truncate max-w-[200px]">{svcs[0]?.client ?? '-'}</span>
                     <span className="text-xs font-semibold">Total ${total.toFixed(2)}</span>
                     <span className={cn('text-xs font-semibold', allFinalized ? 'text-muted-foreground' : saldo <= 0.005 ? 'text-success' : 'text-danger')}>
-                      {allFinalized ? 'Finalizado' : saldo <= 0.005 ? 'Cancelado' : `Abonado $${abonado.toFixed(2)} · Saldo $${saldo.toFixed(2)}`}
+                      {allFinalized ? 'Finalizado' : saldo <= 0.005 ? 'Cancelado' : `Abonado $${abonado.toFixed(2)} · Saldo ${balanceLabel(orderBalance(total, abonado, pagosGrupo, tasaDia))}`}
                     </span>
                     <span className="ml-auto text-[11px] text-muted-foreground hidden lg:block">
                       Cada equipo se paga y entrega por separado
@@ -787,6 +958,7 @@ export default function Services() {
                         balance={saldo}
                         amount={total}
                         paid={abonado}
+                        saldoTexto={balanceLabel(orderBalance(total, abonado, pagosGrupo, tasaDia))}
                       />
                     </div>
                   )}
@@ -816,6 +988,53 @@ export default function Services() {
         dayOpen={dayOpen}
         onSaved={load}
       />
+
+      {/* F34: cambio rápido de técnico (clic en el círculo/nombre del técnico de la tarjeta). */}
+      <Dialog open={!!quickTech} onOpenChange={(o) => { if (!o) setQuickTech(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-base">
+              Cambiar técnico · {quickTech?.order_num}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-1" data-quick-tech>
+            <p className="text-xs text-muted-foreground">
+              {quickTech?.client} · {quickTech?.model}
+            </p>
+            {technicians.map(t => {
+              const actual = quickTech?.technician_id === t.id;
+              return (
+                <Button key={t.id} type="button" variant={actual ? 'default' : 'ghost'}
+                  data-tech-option={t.id} disabled={savingTech}
+                  aria-current={actual ? 'true' : undefined}
+                  className="justify-start gap-2"
+                  onClick={() => quickTech && cambiarTecnico(quickTech, t)}>
+                  <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white', t.color)}>
+                    {t.initials}
+                  </span>
+                  <span className="truncate">{t.name}</span>
+                  {actual && <Check className="ml-auto size-4" />}
+                </Button>
+              );
+            })}
+            <Button type="button" variant={quickTech?.technician_id == null ? 'default' : 'ghost'}
+              data-tech-option="ninguno" disabled={savingTech}
+              aria-current={quickTech?.technician_id == null ? 'true' : undefined}
+              className="justify-start gap-2"
+              onClick={() => quickTech && cambiarTecnico(quickTech, null)}>
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-muted-foreground">
+                <Users className="size-3" />
+              </span>
+              Sin asignar
+              {quickTech?.technician_id == null && <Check className="ml-auto size-4" />}
+            </Button>
+            <p className="pt-1 text-[11px] text-muted-foreground">
+              Se guarda al instante en la orden (no se toca ningún otro dato). ¿Falta alguien? Gestioná el
+              padrón de técnicos desde el formulario de la orden.
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <RefundDialog
         service={refundFor}
@@ -1302,6 +1521,52 @@ function ChecklistGrid({ value, onChange }: {
   );
 }
 
+// F32 — POLÍTICA DEL TALLER dentro del formulario: qué dijo el cliente sobre el pago y si la
+// foto de SALIDA ya está tomada. Se anota al guardar con el comando angosto `set_service_policy`
+// y NO bloquea nada: son recordatorios registrados, no requisitos.
+function PolicyFields({ payIntent, onPayIntent, photoOut, onPhotoOut, showPhotoOut, equipos }: {
+  payIntent: 'sin' | 'ahora' | 'al_retirar';
+  onPayIntent: (v: 'sin' | 'ahora' | 'al_retirar') => void;
+  photoOut: boolean;
+  onPhotoOut: (v: boolean) => void;
+  showPhotoOut: boolean;
+  equipos: number;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3" data-policy-block="pago">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-sm font-medium">
+          <Banknote className="size-3.5 text-warning" /> ¿El cliente paga ahora o al retirar?
+        </span>
+        <ToggleGroup type="single" value={payIntent} className="h-8"
+          onValueChange={v => { if (v) onPayIntent(v as 'sin' | 'ahora' | 'al_retirar'); }}>
+          <ToggleGroupItem value="sin" className="h-7 px-2.5 text-xs">Sin preguntar</ToggleGroupItem>
+          <ToggleGroupItem value="ahora" className="h-7 px-2.5 text-xs">Paga ahora</ToggleGroupItem>
+          <ToggleGroupItem value="al_retirar" className="h-7 px-2.5 text-xs">Paga al retirar</ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Pregúntale al cliente y elegí una opción: queda visible en la orden y en la lista, así el saldo no
+        aparece «de la nada» cuando venga a retirar el equipo. Con qué método paga se elige arriba.
+      </p>
+      {showPhotoOut && (
+        <label className="flex cursor-pointer items-start gap-2 rounded-md border border-success/30 bg-success/5 px-3 py-2">
+          <input type="checkbox" className="mt-0.5 size-4" checked={photoOut} data-policy="photo_out"
+            onChange={e => onPhotoOut(e.target.checked)} />
+          <span className="min-w-0">
+            <span className="flex items-center gap-1.5 text-sm font-medium">
+              <Camera className="size-3.5 text-success" /> Ya le tomé la foto de SALIDA al equipo
+            </span>
+            <span className="block text-[11px] text-muted-foreground">
+              Política de la empresa: se le toma foto al teléfono cuando se entrega{equipos > 1 ? ` (los ${equipos} equipos de la orden)` : ''}.
+            </span>
+          </span>
+        </label>
+      )}
+    </div>
+  );
+}
+
 function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   service: Service | null;
   statuses: ServiceStatus[];
@@ -1323,6 +1588,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [payment, setPayment] = useState('Divisas (USD Cash)');
   const [dateOut, setDateOut] = useState('');
   const [status, setStatus] = useState('Recibido');
+  // F32: señales de POLÍTICA del taller que el operario anota mientras arma la orden (se guardan
+  // al guardar, con el comando angosto `set_service_policy`; nunca bloquean nada).
+  const [photoInDone, setPhotoInDone] = useState(false);
+  const [photoOutDone, setPhotoOutDone] = useState(false);
+  const [payIntentSel, setPayIntentSel] = useState<'sin' | 'ahora' | 'al_retirar'>('sin');
   const [observations, setObservations] = useState('');
   const [checklist, setChecklist] = useState<Record<string, string>>(service ? {} : checklistDefaults());
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
@@ -1414,6 +1684,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       setPayment(service.payment_method ?? 'Divisas (USD Cash)');
       setDateOut(service.date_out ?? '');
       setStatus(service.status ?? 'Por entregar');
+      setPhotoInDone(!!service.photo_in_at);
+      // La foto de SALIDA solo cuenta si es de ESTA entrega: una orden reabierta y todavía sin
+      // entregar no puede mostrar el tilde marcado con la foto de la entrega anterior (el mismo
+      // criterio que usan el chip «Sin foto de salida» y el asistente de cierre).
+      setPhotoOutDone(photoOutIsCurrent(service.photo_out_at, service.date_out));
+      setPayIntentSel(service.pay_intent === 'ahora' || service.pay_intent === 'al_retirar' ? service.pay_intent : 'sin');
       setObservations(service.observations ?? '');
       setChecklist(parseChecklist(service.device_checklist));
       setBankFeePercent(service.bank_fee_percent ?? 0);
@@ -1510,10 +1786,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     if (saving) bloqueos.push('ya se está guardando');
     if (dayOpen === false) bloqueos.push('abrir el día en Libro Diario');
     if (needCi && !clientCi.trim()) bloqueos.push('cédula del cliente nuevo');
+    // OJO: el MONTO **no** es un bloqueo del guardado. El paso del wizard pide un monto para
+    // avanzar, pero una orden de $0 es legítima (garantía, cortesía, descuento del 100%) y hay
+    // órdenes reales así en la base: bloquear acá dejaba esas órdenes sin poder guardarse.
+    // La guía lo muestra como AVISO (no bloqueante), no como requisito.
     if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
+    // Los mismos datos que apagan el botón, pero DICHOS: antes este `return` era mudo y desde el
+    // medio del wizard (o con Ctrl+Enter) el guardado no hacía nada y no explicaba por qué.
     if (service) {
-      if (!client || !model || serviceTypes.length === 0 || screenMissing) return;
-    } else if (!client || !devicesValid) return;
+      if (!client) bloqueos.push('nombre del cliente');
+      if (!model || serviceTypes.length === 0) bloqueos.push('modelo y trabajo del equipo');
+      if (screenMissing) bloqueos.push(screenMissing);
+    } else {
+      if (!client) bloqueos.push('nombre del cliente');
+      devices.forEach((d, i) => {
+        const n = devices.length > 1 ? ` del equipo ${i + 1}` : '';
+        if (!d.model.trim()) bloqueos.push(`modelo${n}`);
+        if (d.serviceTypes.length === 0) bloqueos.push(`trabajo o falla${n}`);
+        if (deviceScreenValid[i] === false) bloqueos.push(`elegir la pantalla${n}`);
+      });
+    }
+    if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
     setAvisoGuardar(null);
     setSaving(true);
     try {
@@ -1531,6 +1824,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
         const serviceTypesJson = JSON.stringify(typesArr);
         await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, Math.max(0, amount - discount), payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId, discount);
+        // F32: las señales de política que se marcaron en el formulario (si no cambió nada, no
+        // se escribe nada) — nunca tumban el guardado.
+        await anotarPoliticaSinRomper([service.id]);
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
@@ -1551,11 +1847,35 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
             currency: methodCurrency(d.payment),
             device_checklist: JSON.stringify(d.checklist),
             screen_product_id: d.screenProductId,
+            // F32: el estado lo elige el operario (por defecto «Recibido»; antes la orden nacía
+            // en «Por entregar» por un default silencioso de la base y el flujo se saltaba).
+            status,
           };
         });
         // addServiceOrder es transaccional y asigna los números: equipo 1 = base, 2+ = base-B/C...
         // (1 solo equipo → sin group_id, exactamente como antes)
-        await api.addServiceOrder(client, phone, clientCi, clientAddress, cid, techName, techId, inputs);
+        const base = await api.addServiceOrder(client, phone, clientCi, clientAddress, cid, techName, techId, inputs);
+        // F32: filas creadas (una por equipo) para anotar la política y recordar lo pendiente
+        const nuevas = await api.getServices(base, '', '', '', 'in').catch(() => [] as Service[]);
+        const filas = nuevas.filter(r => r.order_num === base || (r.order_num ?? '').startsWith(`${base}-`));
+        const ids = filas.map(r => r.id);
+        await anotarPoliticaSinRomper(ids);
+        // Recordatorios de política de la RECEPCIÓN: foto de ENTRADA + preguntar el pago.
+        // Se muestran una sola vez y solo por lo que quedó pendiente (si el operario ya lo
+        // marcó en el formulario, no aparece). Nunca bloquean.
+        firePolicyReminders(
+          receiveReminders(
+            {
+              photo_in_at: photoInDone ? 'si' : null,
+              photo_out_at: photoOutDone ? 'si' : null,
+              pay_intent: payIntentSel === 'sin' ? null : payIntentSel,
+              date_out: null,
+            },
+            { devices: devices.length, status },
+          ),
+          ids,
+          onSaved,
+        );
       }
       onSaved();
     } finally {
@@ -1591,7 +1911,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
         { label: 'Equipo', done: !!model && serviceTypes.length > 0 },
         { label: 'Blindaje', done: true },
-        { label: 'Finanzas', done: amount > 0 },
+        // El MONTO **no** es un paso bloqueante en EDICIÓN: no bloquea el guardado (una orden de $0
+        // es legítima) y este paso NO es el último, así que exigirlo acá dejaba al operario
+        // ENCERRADO en «Finanzas»: «Siguiente» apagado, sin botón Guardar (solo se dibuja en el
+        // último paso) y sin poder llegar a «Cierre» (fecha de salida, observaciones y pagos).
+        // Queda como AVISO en la ficha de ingreso y en el pie del último paso.
+        { label: 'Finanzas', done: true },
         { label: 'Cierre', done: true },
       ]
     : [
@@ -1601,7 +1926,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
         { label: 'Equipos', done: devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0) },
         { label: 'Blindaje', done: true },
-        { label: 'Revisar', done: devices.every(d => d.amount > 0) },
+        // Mismo criterio que en edición: el monto se AVISA, no bloquea (el paso «Revisar» es el
+        // último, así que el guardado siempre se alcanza; el monto vive en la ficha como pendiente).
+        { label: 'Revisar', done: true },
       ];
   const stepCurrent = steps.findIndex(s => !s.done);
   // Paso activo del wizard: 0 Cliente, 1 Equipo(s), 2 Blindaje, 3 Finanzas/Revisar, (4 Cierre)
@@ -1610,9 +1937,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     if (i < wizStep || stepCurrent === -1) setWizStep(i);
   };
 
-  // ── F31: recepción más rápida ────────────────────────────────────────────────────────────
+  // ── F33: FICHA DE INGRESO (el asistente que pide un dato por vez) ─────────────────────────
+  // Se arma más abajo, cuando ya están resueltos el monto (por equipo) y la compatibilidad de la
+  // pantalla: ver `const ficha = buildFicha(...)`.
 
-  // Aviso de por qué NO se guardó (por ejemplo al usar Ctrl+Enter con el día cerrado o sin cédula).
+  // F31: aviso de por qué NO se guardó (por ejemplo al usar Ctrl+Enter con el día cerrado o sin cédula).
   const [avisoGuardar, setAvisoGuardar] = useState<string | null>(null);
 
   // Al entrar a un paso el foco va al primer campo (menos mouse, menos tipeo en el mostrador).
@@ -1668,17 +1997,17 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       }
     } else if (wizStep === steps.length - 1) {
       // Último paso: lo mismo que bloquea el botón Guardar (así nunca queda un botón apagado mudo).
+      // El MONTO no entra acá: no bloquea el guardado (una orden de $0 es legítima) y la ficha ya lo
+      // muestra como pendiente. Antes decía «Falta: monto» con el botón encendido.
       if (!client.trim()) falta.push('nombre del cliente');
       if (needCi && !clientCi.trim()) falta.push('cédula del cliente nuevo');
       if (service) {
-        if (!(amount > 0)) falta.push('monto');
         if (!model.trim()) falta.push('modelo del equipo');
         if (serviceTypes.length === 0) falta.push('trabajo o falla');
         if (screenMissing) falta.push(screenMissing);
       } else {
         devices.forEach((d, i) => {
           const n = devices.length > 1 ? ` del equipo ${i + 1}` : '';
-          if (!(d.amount > 0)) falta.push(`monto${n}`);
           if (!d.model.trim()) falta.push(`modelo${n}`);
           if (d.serviceTypes.length === 0) falta.push(`trabajo o falla${n}`);
           // Equipo con «Cambio pantalla» y sin pantalla elegida: es lo que apaga Guardar en crear
@@ -1689,9 +2018,109 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     return falta;
   })();
 
+  // ── F32: POLÍTICA del taller (foto de entrada/salida y acuerdo de pago) ───────────────────
+  // Se anota SOLO lo que cambió, con el comando angosto `set_service_policy` (una columna, con
+  // whitelist). Nunca bloquea el guardado: si esto falla, la orden ya quedó guardada y se avisa.
+  const aplicarPolitica = async (ids: number[]) => {
+    const intent = payIntentSel === 'sin' ? '' : payIntentSel;
+    const prevIn = service?.photo_in_at ? 'si' : '';
+    const prevOut = service?.photo_out_at ? 'si' : '';
+    const prevIntent = service?.pay_intent ?? '';
+    for (const id of ids) {
+      if ((photoInDone ? 'si' : '') !== prevIn) await api.setServicePolicy(id, 'photo_in', photoInDone ? 'si' : '');
+      if ((photoOutDone ? 'si' : '') !== prevOut) await api.setServicePolicy(id, 'photo_out', photoOutDone ? 'si' : '');
+      if (intent !== prevIntent) await api.setServicePolicy(id, 'pay_intent', intent);
+    }
+  };
+  const anotarPoliticaSinRomper = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    try {
+      await aplicarPolitica(ids);
+    } catch (e) {
+      toast.error(`La orden quedó guardada, pero no se pudieron anotar los recordatorios: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // ── F33: FICHA DE INGRESO (el asistente que pide un dato por vez) ─────────────────────────
+  // Las reglas viven en `lib/ficha.ts` (puro, con pruebas): acá se le pasan los datos vivos del
+  // formulario y ella dice qué mostrar y qué dato toca pedir AHORA.
+  // El monto se evalúa POR EQUIPO en multi-equipo (igual que el pie del paso), no por la suma.
+  const montoOk = service
+    ? Math.max(0, amount - discount) > 0
+    : devices.length > 0 && devices.every(d => Math.max(0, d.amount - d.discount) > 0);
+  // En multi-equipo la ficha resume TODOS los equipos (la orden es del cliente que llega con sus
+  // teléfonos): si a UNO le falta modelo o trabajo, el dato queda en «falta» — que es exactamente lo
+  // que frena el guardado (`devicesValid`). Antes la ficha miraba solo el equipo 1 y podía decir
+  // «Lista para guardar» con el botón apagado.
+  const equiposOk = devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0);
+  const modelosEquipos = devices.map(d => d.model.trim()).filter(Boolean);
+  const tiposEquipos = [...new Set(devices.flatMap(d => d.serviceTypes))];
+  const fallasEquipos = devices.map(d => d.fault.trim()).filter(Boolean);
+  // Blindaje agregado: un dato solo se da por cargado si TODOS los equipos coinciden (si difieren,
+  // el detalle por equipo vive en el paso Blindaje; mostrar el del primero sería mentir).
+  const checklistComun = (key: string) => {
+    const primero = devices[0]?.checklist[key] ?? '';
+    return primero && devices.every(d => (d.checklist[key] ?? '') === primero) ? primero : '';
+  };
+  const checklistFicha = Object.fromEntries(
+    CHECKLIST_ITEMS.map(it => [it.key, checklistComun(it.key)]).filter(([, v]) => v),
+  );
+  // La PANTALLA sí bloquea el guardado en los dos modos (`devicesValid` en crear, `screenMissing`
+  // en editar): la ficha tiene que marcarla como obligatoria y saber si ya está resuelta.
+  const pantallasOk = devices.every((_, i) => deviceScreenValid[i] !== false);
+  const ficha = buildFicha(service ? {
+    mode: 'editar', client, clientCi, needCi, phone, clientAddress,
+    model, color, checklist, serviceTypes, fault,
+    amount: Math.max(0, amount - discount), amountOk: montoOk,
+    payIntent: payIntentSel === 'sin' ? null : payIntentSel,
+    status, technician: currentTech?.name ?? service.technician ?? '',
+    photoInAt: photoInDone ? (service.photo_in_at ?? 'si') : null,
+    needsScreen: isScreenJobEdit, hasScreenOptions: screenOptions.length > 0,
+    screenChosen: !screenMissing,
+    checklistTotal: CHECKLIST_ITEMS.length, equipos: 1,
+  } : {
+    mode: 'crear', client, clientCi, needCi, phone, clientAddress,
+    model: equiposOk ? modelosEquipos.join(' · ') : '',
+    color: devices[0]?.color ?? '',
+    checklist: checklistFicha,
+    serviceTypes: equiposOk ? tiposEquipos : [],
+    fault: fallasEquipos.join(' · '),
+    amount: devices.reduce((a, d) => a + Math.max(0, d.amount - d.discount), 0), amountOk: montoOk,
+    payIntent: payIntentSel === 'sin' ? null : payIntentSel,
+    status, technician: currentTech?.name ?? '',
+    photoInAt: photoInDone ? 'si' : null,
+    needsScreen: devices.some(d => d.serviceTypes.includes('Cambio pantalla')),
+    hasScreenOptions: devices.some((d, i) => deviceScreenValid[i] === false || d.screenProductId != null),
+    screenChosen: pantallasOk,
+    checklistTotal: CHECKLIST_ITEMS.length, equipos: devices.length,
+  });
+  // El monto NO bloquea el guardado, así que el pie lo dice como NOTA (no como «Falta:»): una orden
+  // de $0 es legítima (garantía, cortesía, descuento del 100%).
+  const sinMonto = service ? !(Math.max(0, amount - discount) > 0) : !montoOk;
+  // El paso siguiente del PROCESO según el estado (una línea informativa al pie de la ficha).
+  const pasoDelProceso = nextStep(status, {
+    technician: currentTech?.name ?? '', hasPaid: (svc?.paid_amount ?? 0) > 0.005,
+    payIntent: payIntentSel === 'sin' ? null : payIntentSel,
+    needsScreen: service ? isScreenJobEdit : devices.some(d => d.serviceTypes.includes('Cambio pantalla')),
+    screenChosen: service ? screenProductId != null : devices.every(d => !!d.screenProductId),
+  });
+
+  // F33: acá estaba el aviso flotante que salía al ABRIR una recepción. Se quitó: el usuario lo
+  // sintió invasivo («no me deja ver lo que estoy registrando»). La política del taller ahora se
+  // recuerda DENTRO del formulario, en la ficha de ingreso (foto de ENTRADA / pago acordado), y el
+  // recordatorio flotante solo aparece si el operario guarda sin haberlos marcado (eso ya no tapa
+  // el formulario: el diálogo se cerró). El foco sigue arrancando en Cliente (F31) sin que nada se
+  // lo robe.
+
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-2xl max-h-[88vh] flex flex-col overflow-hidden"
+        // F33: el foco del primer campo lo pone el PROPIO diálogo. Antes lo hacía, de rebote, el
+        // aviso flotante que salía al abrir (y al quitarlo, el foco quedaba en el botón «Nuevo
+        // Servicio»): Radix enfoca el contenedor al abrir y su efecto corre DESPUÉS del nuestro,
+        // así que el `useEffect([wizStep])` no alcanzaba. Con `onOpenAutoFocus` el foco arranca en
+        // Cliente (o en el primer campo del paso) sin que nada se lo robe.
+        onOpenAutoFocus={e => { e.preventDefault(); clientRef.current?.focus(); }}
         onKeyDown={e => {
           if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { save(); return; }
           // F31: Enter en un campo de texto AVANZA al paso siguiente cuando el paso está completo
@@ -1723,6 +2152,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
         )}
         <FormStepper steps={steps} current={wizStep} onNavigate={goTo} />
+        {/* F33: el ASISTENTE es la ficha de ingreso. Dos líneas compactas — progreso de la ficha y
+            el dato que toca pedir AHORA con su guía — y «Ver ficha» para los 4 bloques completos.
+            No hay nada flotando encima del formulario (el usuario lo sintió invasivo) y cada dato
+            de la ficha lleva a su paso para corregirlo sin perder el resto. */}
+        <FichaIngreso
+          ficha={ficha}
+          nextProcess={pasoDelProceso}
+          className="shrink-0"
+          onGoToStep={i => setWizStep(Math.max(0, Math.min(i, steps.length - 1)))}
+        />
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           {wizStep === 0 && (
           <>
@@ -1972,6 +2411,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           {wizStep === 2 && (
             <>
               <SectionTitle step={3} title="Blindaje del equipo (opcional)" tone="orange" />
+              {/* F32: política de la empresa — la foto de ENTRADA se toma al revisar el equipo.
+                  Es opcional: solo se anota para que quede el registro. */}
+              <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+                <input type="checkbox" className="mt-0.5 size-4" checked={photoInDone}
+                  onChange={e => setPhotoInDone(e.target.checked)} data-policy="photo_in" />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-sm font-medium">
+                    <Camera className="size-3.5 text-primary" /> Ya le tomé la foto de ENTRADA al equipo
+                  </span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Política de la empresa: se le toma foto al teléfono al recibirlo{devices.length > 1 ? ` (los ${devices.length} equipos)` : ''}.
+                  </span>
+                </span>
+              </label>
               {service ? (
                 <ChecklistGrid value={checklist} onChange={setChecklist} />
               ) : (
@@ -2049,10 +2502,58 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                     placeholder="Número de referencia (últimos 4 dígitos)..." />
                 </div>
               )}
+
+              {/* F32: recordatorios del taller (acuerdo de pago + foto de salida). Si el estado
+                  es de salida, la foto se puede confirmar acá mismo antes de guardar. */}
+              <PolicyFields
+                payIntent={payIntentSel}
+                onPayIntent={setPayIntentSel}
+                photoOut={photoOutDone}
+                onPhotoOut={setPhotoOutDone}
+                showPhotoOut={isDelivered(status) || status === 'Por entregar'}
+                equipos={1}
+              />
             </>
           ) : (
             <>
               <SectionTitle step={4} title="Revisar y guardar" />
+              {/* F32: el ESTADO con el que nace la orden (antes quedaba en el default silencioso
+                  «Por entregar» y el flujo del taller arrancaba a mitad de camino). La guía de
+                  arriba explica qué pide cada estado. */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Estado del equipo</label>
+                <Select value={status} onValueChange={setStatus}>
+                  <SelectTrigger data-field="nuevo-estado"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {/* Solo estados de TALLER: entregar (o anular) es un acto aparte y se hace
+                        cambiando el estado con el asistente «Cerrar» — ahí el backend descuenta
+                        el stock, escribe la fecha de entrega y arranca la garantía. El backend
+                        aplica la misma regla. */}
+                    {statuses.filter(st => isCreatableStatus(st.name)).map(s => (
+                      <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Lo normal es recibirlo en <strong>{DEFAULT_NEW_STATUS}</strong>: la guía de arriba te dice
+                  qué falta para ese estado y cuál es el siguiente. Para entregar el equipo usá «Cerrar»
+                  (o «Entregar») en la tarjeta: ahí se cobra, se descuenta el stock y queda la fecha.
+                </p>
+              </div>
+
+              <PolicyFields
+                payIntent={payIntentSel}
+                onPayIntent={setPayIntentSel}
+                photoOut={photoOutDone}
+                onPhotoOut={setPhotoOutDone}
+                // Al CREAR una recepción no se ofrece la foto de SALIDA: el equipo recién entra al
+                // taller y entregar es un acto aparte (botón «Entregar» / asistente «Cerrar», que sí
+                // lo piden). Marcarla acá estampaba una foto de la RECEPCIÓN que después, si se
+                // entregaba el mismo día, `photoOutIsCurrent` daba por válida y se callaba el aviso.
+                showPhotoOut={false}
+                equipos={devices.length}
+              />
+
               <div className="space-y-3">
                 <div className="rounded-lg border border-border/70 p-4 space-y-2">
                   <p className="text-sm font-semibold flex items-center gap-2">
@@ -2203,6 +2704,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               )}
               {faltaEnPaso.length > 0 && (
                 <span className="text-right text-[11px] text-danger">Falta: {faltaEnPaso.join(' · ')}</span>
+              )}
+              {/* El monto NO bloquea (una orden de $0 es legítima): se dice como nota, no como falta. */}
+              {sinMonto && faltaEnPaso.length === 0 && (
+                <span className="text-right text-[11px] text-muted-foreground">
+                  Sin monto: se guarda en $0 (podés cargarlo después)
+                </span>
               )}
               <span className="text-right text-[11px] text-muted-foreground">
                 {wizStep < steps.length - 1

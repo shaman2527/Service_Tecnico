@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, ChevronRight, Copy, Layers, MoveHorizontal, PackageSearch,
   Pencil, Search, TriangleAlert, Truck,
@@ -40,6 +40,11 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   /** sube cuando se guarda/fusiona algo → la tabla vuelve a consultar sola */
   refreshKey: number;
 }) {
+  // `searchInput` es lo que se escribe y `search` lo que se consulta: el rebote es SÓLO para
+  // escribir (feature 41). Antes la pestaña esperaba 200 ms antes de la PRIMERA consulta (y en
+  // cada cambio de filtro o de página), así que abrir el inventario costaba 200 ms de esqueleto
+  // gratis. Los filtros y la paginación ahora salen en el acto.
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   // Regla del local: el taller trabaja PANTALLAS → el inventario abre filtrado en esa
   // categoría (se puede cambiar el filtro para ver el resto del catálogo).
@@ -49,7 +54,11 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   const [page, setPage] = useState(0);
   const [items, setItems] = useState<Product[]>([]);
   const [total, setTotal] = useState(0);
+  // `loading` = todavía no hay NADA que mostrar (esqueleto); `refreshing` = ya hay tabla en
+  // pantalla y están llegando los datos nuevos (no se tapa lo que el operario está mirando).
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const loaded = useRef(false);
   const [catDefaultApplied, setCatDefaultApplied] = useState(false);
 
   const dupSet = useMemo(() => new Set(stats?.duplicate_ids ?? []), [stats]);
@@ -62,27 +71,36 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
     if (pantalla) setCatFilter(String(pantalla.id));
   }, [categories, catDefaultApplied]);
 
-  useEffect(() => { setPage(0); }, [search, catFilter, stockFilter, sort]);
+  // Rebote SÓLO de lo que se escribe; el cambio de página va en el mismo paso para no
+  // consultar dos veces (una con la página vieja y otra con la nueva).
+  useEffect(() => {
+    if (searchInput === search) return;
+    const t = setTimeout(() => { setSearch(searchInput); setPage(0); }, 200);
+    return () => clearTimeout(t);
+  }, [searchInput, search]);
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    const t = setTimeout(() => {
-      api.getProductsPage(
-        search,
-        catFilter === 'todas' ? null : Number(catFilter),
-        null,
-        stockFilter,
-        sort,
-        PAGE_SIZE,
-        page * PAGE_SIZE,
-      ).then(r => {
-        if (!alive) return;
-        setItems(r.items);
-        setTotal(r.total);
-      }).finally(() => { if (alive) setLoading(false); });
-    }, 200);
-    return () => { alive = false; clearTimeout(t); };
+    if (loaded.current) setRefreshing(true); else setLoading(true);
+    api.getProductsPage(
+      search,
+      catFilter === 'todas' ? null : Number(catFilter),
+      null,
+      stockFilter,
+      sort,
+      PAGE_SIZE,
+      page * PAGE_SIZE,
+    ).then(r => {
+      if (!alive) return;
+      loaded.current = true;
+      setItems(r.items);
+      setTotal(r.total);
+    }).finally(() => {
+      if (!alive) return;
+      setLoading(false);
+      setRefreshing(false);
+    });
+    return () => { alive = false; };
   }, [search, catFilter, stockFilter, sort, page, refreshKey]);
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -123,11 +141,11 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           <Input
             placeholder="Buscar por producto, marca, modelo o teléfono compatible…"
             className="pl-9"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
           />
         </div>
-        <Select value={catFilter} onValueChange={setCatFilter}>
+        <Select value={catFilter} onValueChange={v => { setCatFilter(v); setPage(0); }}>
           <SelectTrigger className="w-44" aria-label="Filtrar por categoría"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="todas">Todas las categorías</SelectItem>
@@ -136,7 +154,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
             ))}
           </SelectContent>
         </Select>
-        <Select value={stockFilter} onValueChange={setStockFilter}>
+        <Select value={stockFilter} onValueChange={v => { setStockFilter(v); setPage(0); }}>
           <SelectTrigger className="w-48" aria-label="Filtrar por stock"><SelectValue /></SelectTrigger>
           <SelectContent>
             {STOCK_FILTERS.map(f => (
@@ -144,7 +162,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
             ))}
           </SelectContent>
         </Select>
-        <Select value={sort} onValueChange={setSort}>
+        <Select value={sort} onValueChange={v => { setSort(v); setPage(0); }}>
           <SelectTrigger className="w-44" aria-label="Ordenar la tabla"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="nombre">Nombre (A-Z)</SelectItem>
@@ -263,6 +281,9 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
           {total === 0 ? 'Sin resultados' : `Mostrando ${from}–${to} de ${total}`}
+          {/* hay tabla en pantalla y están llegando datos nuevos (o el rebote todavía espera):
+              se avisa, no se tapa */}
+          {(refreshing || searchInput !== search) && <span data-refreshing="1" className="ml-2 opacity-70">· actualizando…</span>}
         </span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>

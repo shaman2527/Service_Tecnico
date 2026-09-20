@@ -10,7 +10,7 @@ const waitTable = async (timeout = 10000) => {
   const t0 = Date.now();
   while (Date.now() - t0 < timeout) {
     const busy = await evalx(`(() => {
-      const sk = document.querySelectorAll('table tbody [class*="animate-pulse"]').length;
+      const sk = document.querySelectorAll('table tbody [class*="animate-pulse"]').length + document.querySelectorAll('[data-refreshing]').length;
       const rows = document.querySelectorAll('table tbody tr').length;
       return sk > 0 || (rows === 0 && !/Mostrando |Sin resultados/.test(document.body.innerText));
     })()`);

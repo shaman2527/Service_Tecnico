@@ -76,16 +76,29 @@ await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Cerrar$/
 await sleep(1500);
 
 // --- A) el asistente pide pantalla + cobro ---
+// El asistente consulta las pantallas compatibles al abrir; esa consulta se encola detrás de las que
+// hace la lista de servicios (los movimientos de cada orden visible). Con una lista grande puede tardar
+// un par de segundos, así que se ESPERA a que la sección aparezca en vez de dormir un rato fijo
+// (medido: con `sleep(1500)` el chequeo fallaba 1 de cada 3 veces sin que nada estuviera mal).
+const waitFor = async (expr, timeout = 12000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    if (await evalx(expr).catch(() => false)) return true;
+    await sleep(400);
+  }
+  return false;
+};
+await waitFor(`/¿Qué pantalla se instaló\\?/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`);
 let dlg = String(await dialogText() ?? '');
 check('F30: el asistente dice qué falta antes de cerrar',
   /Falta:/i.test(dlg) && /pantalla/i.test(dlg) && /cobrar el saldo/i.test(dlg),
   (dlg.match(/Falta:[^\n]*/) ?? [''])[0]);
 check('F30: muestra la pantalla que se va a instalar con su stock', /¿Qué pantalla se instaló\?/i.test(dlg) && /stock \d+/i.test(dlg),
-  (dlg.match(/stock \d+/) ?? [''])[0]);
+  (dlg.match(/stock \d+/) ?? [''])[0] || ('SIN SECCIÓN → ' + dlg.replace(/\n/g, ' | ').slice(0, 200)));
 
 // elegir la primera pantalla con stock
 await clickCenter(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /stock \\d+/i.test(x.innerText) && !/agotada/i.test(x.innerText)); return b; })()`);
-await sleep(800);
+await waitFor(`!!document.querySelector('[role="dialog"] button .lucide-check')`);
 
 // cobrar el saldo completo
 await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Todo el saldo$/i.test(b.innerText.trim()))`);
@@ -129,12 +142,16 @@ const botonSaldo = await evalx(`(() => [...document.querySelectorAll('[role="dia
 check('F30: sin cobrar, el botón dice «Entregar con saldo»', botonSaldo !== null, String(botonSaldo));
 const bloqueado = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Entregar con saldo$/i.test(x.innerText.trim())); return b ? b.disabled : null; })()`);
 check('F30: sin motivo, entregar con saldo está BLOQUEADO', bloqueado === true, `disabled=${bloqueado}`);
-// primero la pantalla (la orden es «Cambio pantalla»), después el motivo
+// primero la pantalla (la orden es «Cambio pantalla»), después el motivo.
+// Igual que en A: se ESPERA la sección de pantallas (la consulta se encola detrás de las de la lista)
+// y se espera a que la elección quede marcada antes de seguir — sin esperas a ojo.
+await waitFor(`/¿Qué pantalla se instaló\\?/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`);
 await clickCenter(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /stock \\d+/i.test(x.innerText) && !/agotada/i.test(x.innerText)); return b; })()`);
-await sleep(700);
+await waitFor(`!!document.querySelector('[role="dialog"] button .lucide-check')`);
 await clickCenter(`document.querySelector('[role="dialog"] input[aria-label="Motivo del saldo pendiente"]')`);
 await insertText('cliente conocido, paga el viernes');
 await sleep(700);
+await waitFor(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Entregar con saldo$/i.test(x.innerText.trim())); return !!b && !b.disabled; })()`);
 const yaPuede = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Entregar con saldo$/i.test(x.innerText.trim())); return b ? !b.disabled : null; })()`);
 check('F30: con la pantalla y el motivo, ya se puede cerrar', yaPuede === true);
 await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Entregar con saldo$/i.test(b.innerText.trim()))`);

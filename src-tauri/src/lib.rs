@@ -1,4 +1,5 @@
 pub mod bcv;
+pub mod cache;
 pub mod catalog;
 pub mod db;
 pub mod loadlist;
@@ -46,6 +47,7 @@ commands::get_sales_stats,
             commands::add_service_order,
             commands::update_service,
             commands::mark_service_printed,
+            commands::set_service_policy,
             commands::delete_service,
             commands::get_services,
             commands::get_service,
@@ -58,6 +60,7 @@ commands::get_sales_stats,
             commands::get_dashboard_analytics,
             commands::get_service_payments,
             commands::add_service_payment,
+            commands::update_service_payment_date,
             commands::delete_service_payment,
             commands::add_service_refund,
             commands::add_purchase_order,
@@ -264,3 +267,4 @@ fn dirs_next() -> Option<PathBuf> {
 // force rebuild 2026-08-12 v2
 // force rebuild frontend embed (2026-08-14)
 // force rebuild
+// F32: fuerza el re-empaquetado del dist en el binario (cargo no rastrea dist/).

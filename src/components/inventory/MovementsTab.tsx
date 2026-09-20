@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowDownLeft, ArrowUpRight, ChevronLeft, ChevronRight, History } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,28 +23,36 @@ export function MovementsTab({ refreshKey }: { refreshKey: number }) {
   const [items, setItems] = useState<InventoryMovement[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  // ya hay tabla en pantalla → recargar no la tapa con esqueleto (feature 41)
+  const [refreshing, setRefreshing] = useState(false);
+  const loaded = useRef(false);
 
   useEffect(() => { setPage(0); }, [type, reason, from, to]);
 
+  // SIN rebote: los filtros de esta pestaña son desplegables y fechas (no texto libre), así que
+  // esperar 200 ms sólo agregaba latencia (feature 41). La consulta es de las más baratas.
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    const t = setTimeout(() => {
-      api.getInventoryMovementsPage(
-        null,
-        type === 'todos' ? null : type,
-        reason || null,
-        from || null,
-        to || null,
-        PAGE_SIZE,
-        page * PAGE_SIZE,
-      ).then(r => {
-        if (!alive) return;
-        setItems(r.items);
-        setTotal(r.total);
-      }).finally(() => { if (alive) setLoading(false); });
-    }, 200);
-    return () => { alive = false; clearTimeout(t); };
+    if (loaded.current) setRefreshing(true); else setLoading(true);
+    api.getInventoryMovementsPage(
+      null,
+      type === 'todos' ? null : type,
+      reason || null,
+      from || null,
+      to || null,
+      PAGE_SIZE,
+      page * PAGE_SIZE,
+    ).then(r => {
+      if (!alive) return;
+      loaded.current = true;
+      setItems(r.items);
+      setTotal(r.total);
+    }).finally(() => {
+      if (!alive) return;
+      setLoading(false);
+      setRefreshing(false);
+    });
+    return () => { alive = false; };
   }, [type, reason, from, to, page, refreshKey]);
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -138,7 +146,9 @@ export function MovementsTab({ refreshKey }: { refreshKey: number }) {
       </Card>
 
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-muted-foreground">{total === 0 ? 'Sin resultados' : `${total} movimientos`}</span>
+        <span className="text-xs text-muted-foreground">{total === 0 ? 'Sin resultados' : `${total} movimientos`}
+          {refreshing && <span data-refreshing="1" className="ml-2 opacity-70">· actualizando…</span>}
+        </span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>
             <ChevronLeft data-icon="inline-start" /> Anterior

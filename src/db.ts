@@ -220,16 +220,38 @@ export const api = {
     tauriInvoke<void>('mark_service_printed', { id }).catch(() =>
       mock<void>(undefined)),
 
-  getServices: (search: string = '', status: string = '', startDate: string = '', endDate: string = '') =>
-    tauriInvoke<Service[]>('get_services', { search, status, startDate, endDate }),
+  /**
+   * F32 — señales de política del taller (recordatorios). `key`: 'photo_in' | 'photo_out' |
+   * 'pay_intent' (whitelist en el backend: otra clave es rechazada). `value`: 'si'/'' para las
+   * fotos (la hora la estampa el backend, local) y ''|'ahora'|'al_retirar' para el acuerdo.
+   * Nunca bloquea nada: es una anotación informativa para el dueño.
+   */
+  setServicePolicy: (id: number, key: 'photo_in' | 'photo_out' | 'pay_intent', value: string) => {
+    // En modo navegador (sin backend) no hay dónde anotar: se resuelve sin error para no llenar
+    // la pantalla de avisos de error. Dentro de Tauri, el error SÍ sube (no se miente al operario).
+    if (!isTauri) return mock<void>(undefined);
+    return tauriInvoke<void>('set_service_policy', { id, key, value });
+  },
+
+  // `dateField`: eje del rango de fechas — 'in' = recibido (histórico) · 'out' = ENTREGADO
+  // (permite «entregados hoy», que con el eje de recibido es imposible de ver).
+  getServices: (search: string = '', status: string = '', startDate: string = '', endDate: string = '',
+    dateField: 'in' | 'out' = 'in') =>
+    tauriInvoke<Service[]>('get_services', { search, status, startDate, endDate, dateField }),
 
   getServicePayments: (serviceId: number) =>
     tauriInvoke<ServicePayment[]>('get_service_payments', { serviceId }),
 
+  // F35: `paymentDate` (AAAA-MM-DD) permite anotar el abono en la caja del día en que la plata entró
+  // de verdad (el cliente pagó el lunes y avisó el martes). Vacío = hoy.
   addServicePayment: (serviceId: number, amount: number, paymentMethod: string,
     bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD',
-    notes: string = '') =>
-    tauriInvoke<number>('add_service_payment', { serviceId, amount, paymentMethod, bankFeePercent, zelleReference, currency, notes }),
+    notes: string = '', paymentDate: string = '') =>
+    tauriInvoke<number>('add_service_payment', { serviceId, amount, paymentMethod, bankFeePercent, zelleReference, currency, notes, paymentDate }),
+
+  /** F35: corregir la fecha de un pago ya anotado (mueve la plata a la caja del día correcto). */
+  updateServicePaymentDate: (id: number, date: string) =>
+    tauriInvoke<void>('update_service_payment_date', { id, date }),
 
   deleteServicePayment: (id: number) =>
     tauriInvoke<void>('delete_service_payment', { id }),
