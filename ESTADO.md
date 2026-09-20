@@ -788,7 +788,67 @@ evidencia otra vez en cada corrida: `- \`X\`` → `  - \`- \`X\``); no se pudo r
 ### 15.6 Qué queda pendiente
 
 - Cargar el precio de los 123 SKU (Inventario → Precios y datos) y después borrar la excepción del gate.
-- **Instalar la 0.4.0 en la PC del local** y confirmar en el mostrador: PIN, abrir el día, una venta, un
-  servicio con entrega, un cierre y un ticket. (La actualización se ofrece sola al arrancar.)
+- **Instalar la 0.4.1 en la PC del local** (la 0.4.0 quedó superada por la 0.4.1) y confirmar en el mostrador:
+  PIN, abrir el día, una venta, un servicio con entrega, un cierre y un ticket. (La actualización se ofrece
+  sola al arrancar.) **Antes: copiar `registro.db` a un pendrive** (ver §15.7).
 - Features 37 (`isBsMethod` por whitelist) y 40 (libro único de movimientos de caja + auditoría).
 - Cerrar la causa raíz del desborde de `patterns.md`.
+
+---
+
+## 15.7 🔒 v0.4.1 — el respaldo previo ya no puede fallar en silencio + PRUEBA DE INSTALACIÓN REAL (2026-09-18)
+
+**Origen:** el dueño preguntó, antes de actualizar la PC del local (que está en la **0.2.5**): «¿si cargo la
+nueva actualización del cliente se me puede dañar la app?». Auditando el camino de actualización apareció
+un agujero real —y de la peor clase: silencioso—.
+
+### El bug (desde F8, presente en TODAS las versiones publicadas, incluida la 0.2.5)
+
+`api.backupBeforeUpdate` (`src/db.ts`) terminaba en `.catch(() => mock(undefined))`. Si el respaldo previo
+fallaba (permisos, antivirus, disco lleno, PowerShell bloqueado por política), la actualización **seguía
+igual y sin avisar**: sin copia de la base, sin el exe anterior y sin el vigilante → **sin red de seguridad
+y sin que nadie se enterara**. Además `spawn_watchdog` hacía `let _ = spawn()`, que tapaba el mismo tipo de
+fallo.
+
+### El arreglo (v0.4.1, publicada)
+
+| Qué | Antes | Ahora |
+|---|---|---|
+| Respaldo previo | error tragado → instalaba igual | **fail-closed**: si no se puede respaldar, `UpdateDialog` corta y dice «no se instaló nada; tu app y tus datos quedan igual» |
+| Detalle del respaldo | no se devolvía nada | el comando devuelve `UpdateBackup { db_backup, prev_exe, watchdog }` (rutas de la copia + si el vigilante arrancó) |
+| Vigilante | `let _ = spawn()` | `spawn_watchdog -> bool` y la UI **avisa** cuando no se pudo lanzar |
+| Mensaje de error | genérico | distingue la etapa con una variable LOCAL (el estado de React no cambia dentro del mismo closure: usarlo daba el mensaje equivocado) |
+
+Red anti-regresión: **`node tools/update_backup_test.ts` 17/17** (lee los archivos reales y falla si vuelve
+el `.catch` o se pierde el aviso del vigilante — mismo patrón que el test del gate de rol).
+
+### Prueba de INSTALACIÓN REAL en esta PC (la que el plan de release pedía)
+
+Sobre una instalación vieja de verdad (`%LOCALAPPDATA%\Registro Servicio Tecnico`, exe 0.1.2, esquema
+anterior a todo: sin `search_text`, sin `phones`, sin las columnas de política) se sembró **historia
+representativa** (2 órdenes, 2 abonos de $20 + Bs. 11.250, 1 venta, 2 clientes en minúscula, 1 cierre con
+arqueo) y se instaló la **0.4.1 encima**:
+
+| Qué se midió | Resultado |
+|---|---|
+| `registro.db` después de instalar (antes de abrir la app) | **sha256 IDÉNTICO** (95F9C1D5FFDEE142E64BD7F6…) → el instalador **no toca la base del usuario** |
+| exe / plantilla | exe pasó a **0.4.1**; `registro.default.db` 282.624 → **856.064 bytes** (la plantilla nueva y limpia) |
+| La app abre sobre esa base vieja | **sí** (proceso vivo, ventana «Registro - Servicio Técnico») y migra: agrega las 7 columnas nuevas de `services`, `search_text`/`price_usd`/`supplier` en `products` y arma el padrón (**999 teléfonos**) |
+| Historia (comparación columna por columna) | **ninguna fila perdida ni inventada**: ventas, abonos, clientes, cierres y las 980 fichas con su stock/precio intactos; el **arqueo contado** (`actual_cash_usd` 50, `actual_pago_movil` 11.250, `difference` 0) **sin tocar**; los únicos cambios: nombres a Title Case y columnas *resumen* recalculadas |
+| El único «FAIL» de la comparación | **era mi dato de prueba**: sembré `paid_amount = 0` con $35 en abonos. La app lo recalculó **exacto** (20 + 11.250/748,79 = **35,0242**) — verificado con la cuenta. Premisa anotada en `verify_migracion_datos.mjs`: el chequeo del saldo vale para una base REAL, donde `paid_amount` ya salió de la regla vigente (init() corre en cada arranque) |
+
+**Lecciones de la prueba (anotadas):** (1) el instalador NSIS **reutiliza la carpeta registrada** de una
+instalación previa: la primera corrida se instaló en `…\Temp\prueba_update` y la base «intacta» era una
+conclusión **vacía** — hay que forzar la carpeta con `/D=` y verificar *dónde* se instaló, no solo que algo
+se instaló; (2) después de la prueba, la instalación quedó con la base original restaurada (sin datos
+sembrados) y la app 0.4.1 funcionando.
+
+### Lo que el dueño tiene que hacer en el local
+
+1. **Cerrar la app** y copiar `registro.db` (y `registro.db-wal` si está) de
+   `%LOCALAPPDATA%\Registro Servicio Tecnico\` a un pendrive. Esa copia es la garantía total.
+2. Actualizar (desde la app, o corriendo el setup 0.4.1).
+3. Al abrir: PIN, Libro Diario (día y tasa), Servicios (órdenes y montos), Clientes, una venta de prueba.
+   Y revisar que existan `updates\registro.backup_pre_0.4.1.db` y `updates\prev\registro.exe` (red armada).
+4. Si algo fallara: reponer la copia del paso 1, o `updates\prev\registro.exe`, o Ayuda → «Restaurar
+   versión anterior».

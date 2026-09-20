@@ -282,6 +282,13 @@ for (const t of HISTORIA) {
         // Lo que importa NO es el valor crudo sino el SALDO de la orden (`amount - paid_amount`): en
         // una base de julio `paid_amount` era NULL y la migración lo deja en 0, que para la deuda es
         // exactamente lo mismo. Se compara el saldo, con tolerancia de un centavo.
+        //
+        // PREMISA (aprendida en la prueba de instalación real del 2026-09-18): esto vale para una base
+        // REAL, donde `paid_amount` ya lo calculó la app —`init()` corre en CADA arranque, así que el
+        // valor guardado siempre salió de la regla vigente—. Si el saldo se mueve más de un centavo es
+        // que el valor viejo venía de OTRA regla (o de una migración a mano): eso hay que mirarlo.
+        // Una base sembrada a mano con `paid_amount` inconsistente (0 con abonos cargados) hace fallar
+        // este chequeo «con razón»: la app lo recalcula bien (verificado: 20 + 11.250/748,79 = 35,0242).
         const saldoAntes = num0(a.amount) - num0(va);
         const saldoDespues = num0(f.amount) - num0(vd);
         const d = Math.abs(saldoDespues - saldoAntes);
