@@ -80,5 +80,5 @@ if (!existsSync(tpl)) {
   d.close();
 }
 
-console.log(fallos === 0 ? '\nTODO OK: lo publicado es la 0.4.0 con la plantilla limpia.' : `\n${fallos} FALLO(S)`);
+console.log(fallos === 0 ? `\nTODO OK: lo publicado es la ${VERSION} con la plantilla limpia.` : `\n${fallos} FALLO(S)`);
 process.exit(fallos === 0 ? 0 : 1);
