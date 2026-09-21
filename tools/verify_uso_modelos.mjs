@@ -68,6 +68,20 @@ for (let i = 0; i < 12; i++) {
 }
 const pin = `document.querySelector('input[placeholder="PIN de 4 dígitos"]')`;
 if (await evalx(`!!${pin}`)) { await clickCenter(pin); await typeText('1234'); await keyNav('Enter', 'Enter', 13); await sleep(2500); }
+
+// La preferencia «Ver todos» del selector de modelo SE RECUERDA entre sesiones (`localStorage`), y
+// es una decisión de producto: el operario que trabaja con todo el catálogo no tiene que pelearse con
+// el filtro cada vez. Para la PRUEBA, en cambio, es una trampa: si quedó encendida de una corrida
+// anterior (o de la sonda de turno), el arranque ya no es «solo lo que uso» y las comprobaciones de
+// abajo fallan culpando a la app (medido 2026-09-21). Se fuerza el default para la corrida y se
+// DEVUELVE como estaba al terminar: la verificación no le cambia la preferencia al local.
+const preferenciaOriginal = await evalx(`localStorage.getItem('modelos_ver_todos')`);
+await evalx(`localStorage.setItem('modelos_ver_todos','0'); 'ok'`);
+const restaurarPreferencia = async () => {
+  await evalx(preferenciaOriginal === null
+    ? `localStorage.removeItem('modelos_ver_todos'); 'ok'`
+    : `localStorage.setItem('modelos_ver_todos', ${JSON.stringify(String(preferenciaOriginal))}); 'ok'`).catch(() => {});
+};
 /** Cierra cualquier diálogo abierto: un modal (por ejemplo el comprobante) tapa la pantalla y
  *  los clics por coordenadas caen en el velo — la prueba fallaría por el estado, no por el código. */
 const cerrarDialogos = async () => {
@@ -240,16 +254,45 @@ const abrio = await waitFor(`/Nuevo Servicio Técnico/.test(document.querySelect
 check('F50: «Nuevo Servicio» abre el wizard (para probar el selector de modelo)', abrio);
 
 // paso 1 → paso 2 (Equipos): cliente + cédula y «Siguiente»
-await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar por nombre"]')`);
+// OJO (medido 2026-09-21): `typeText` manda las TECLAS AL ELEMENTO ENFOCADO. Si el clic al campo cae
+// mientras el diálogo de Radix todavía se está abriendo (animación), el campo NO queda enfocado, el
+// texto se pierde en el vacío y el paso 1 nunca se completa: la prueba fallaba diciendo «no se llega
+// a Equipos» con la app perfecta. Por eso se comprueba el FOCO y el VALOR, y se dice cuál falló.
+const enfocar = async (sel, intentos = 6) => {
+  for (let i = 0; i < intentos; i++) {
+    await clickCenter(sel).catch(() => {});
+    if (await evalx(`document.activeElement === (${sel})`).catch(() => false)) return true;
+    await sleep(400);
+  }
+  return false;
+};
+const campoCliente = `document.querySelector('[role="dialog"] input[placeholder^="Buscar por nombre"]')`;
+const campoCi = `document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')`;
+const focoCliente = await enfocar(campoCliente);
 await typeText('Prueba Uso Modelos');
-await clickCenter(`document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')`);
+const focoCi = await enfocar(campoCi);
 await typeText('V-99999999');
 await sleep(400);
+const escritos = await evalx(`JSON.stringify({ cliente: (${campoCliente})?.value ?? null, ci: (${campoCi})?.value ?? null })`);
+const esc = JSON.parse(String(escritos ?? '{}'));
+check('F50: el cliente y la cédula quedaron escritos en el paso 1 (si no, el paso no avanza)',
+  focoCliente && focoCi && /Prueba Uso Modelos/.test(String(esc.cliente)) && /99999999/.test(String(esc.ci)),
+  `foco=${focoCliente}/${focoCi} · campos=${escritos}`);
 // clic por DOM (no por coordenadas): el pie del wizard se MUEVE cuando desaparece la línea «Falta: …»
 // al completar el cliente, y un clic por coordenadas cae al lado (lección de las pruebas CDP).
-await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test((x.innerText || '').trim())); if (b) b.click(); return !!b; })()`);
-const enEquipos = await waitFor(`/Paso 2 de 4/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 8000);
-check('F50: se llega al paso de Equipos (donde vive el selector de modelo)', enEquipos);
+// Además se ESPERA la transición y se reintenta: un clic puede perderse mientras React procesa lo
+// que se acaba de teclear (el botón queda `disabled` un instante y `click()` no hace nada, sin error).
+const irAEquipos = async () => {
+  for (let i = 0; i < 4; i++) {
+    if (/Paso 2 de 4/.test(String(await evalx(`document.querySelector('[role="dialog"]')?.innerText ?? ''`)))) return true;
+    await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test((x.innerText || '').trim())); if (b && !b.disabled) b.click(); return !!b; })()`);
+    if (await waitFor(`/Paso 2 de 4/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 3000)) return true;
+  }
+  return false;
+};
+const enEquipos = await irAEquipos();
+check('F50: se llega al paso de Equipos (donde vive el selector de modelo)', enEquipos,
+  String(await evalx(`(document.querySelector('[role="dialog"]')?.innerText ?? '').split('\\n').find(l => /Paso \\d+ de \\d+/.test(l)) ?? null`)));
 
 /** Lee las pantallas que el formulario ofrece para el modelo elegido. */
 const pantallasOfrecidas = () => evalx(`(() => {
@@ -304,8 +347,14 @@ if (enEquipos) {
       Array.isArray(soloUso) && !soloUso.includes(apagadoConPantallas.name),
       `«${apagadoConPantallas.name}» entre ${JSON.stringify(soloUso)}`);
 
-    await clickCenter(`document.querySelector('[data-model-all]')`);
-    await waitFor(`document.querySelector('[data-model-all]')?.getAttribute('data-model-all') === '1'`, 8000);
+    // Clic por DOM, no por coordenadas: el interruptor vive dentro de un popover de Radix y un clic
+    // por coordenadas puede caer al lado (o el popover se reposiciona) → el toggle no cambiaba y las
+    // dos comprobaciones de abajo fallaban culpando a la app (medido 2026-09-21). Y se EXIGE el
+    // cambio: si el toggle no responde, se dice acá y no tres comprobaciones más tarde.
+    await evalx(`(() => { const b = document.querySelector('[data-model-all]'); if (b) b.click(); return !!b; })()`);
+    const cambioToggle = await waitFor(`document.querySelector('[data-model-all]')?.getAttribute('data-model-all') === '1'`, 8000);
+    check('F50: el interruptor «Ver todos» cambia de estado al pulsarlo', cambioToggle,
+      `data-model-all=${await evalx(`document.querySelector('[data-model-all]')?.getAttribute('data-model-all') ?? null`)}`);
     const aparecio = await waitFor(
       `[...document.querySelectorAll('[data-model-option]')].some(b => b.getAttribute('data-model-option') === ${JSON.stringify(apagadoConPantallas.name)})`, 15000);
     const infoApagado = await evalx(`(() => {
@@ -365,5 +414,6 @@ check('F50: la base quedó sana (quick_check) y con los checks como estaban',
   `en uso=${usoFinal}/${totalUso} · apagados=${apagadoFinal}/${totalApagado}`);
 
 const failed = out.filter(r => !r.ok);
+await restaurarPreferencia();
 console.log(`\n${out.length - failed.length}/${out.length} comprobaciones OK${failed.length ? ` — FALLAN: ${failed.map(f => f.name).join('; ')}` : ''}`);
 process.exit(failed.length ? 1 : 0);

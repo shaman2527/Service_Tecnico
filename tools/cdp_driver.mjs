@@ -111,4 +111,59 @@ const handleDialog = async (accept = true) => {
   }
 };
 
+/**
+ * La barra lateral se recuerda en `localStorage('sidebar_collapsed')`. Una barra COLAPSADA (w-16)
+ * deja los botones SIN TEXTO, así que toda verificación que navegue por el nombre del ítem
+ * (`aside button` + `innerText`) falla con «click target no encontrado» — y parece que la app está
+ * rota cuando en realidad es una preferencia de la UI del operario (lección 2026-09-21: el 100% de
+ * una corrida de verificación en vivo se cayó por esto, con el producto perfecto).
+ *
+ * Se corre SOLA al importar el driver: si está colapsada la expande y recarga UNA vez. Si ya está
+ * expandida no hace nada (ni cuesta tiempo). Nunca lanza: si algo falla, el script sigue igual que
+ * antes de existir esta función.
+ */
+export async function ensureSidebarExpanded() {
+  try {
+    // `localStorage` responde incluso en la pantalla del PIN (no depende del <aside> montado).
+    if (await evalx(`localStorage.getItem('sidebar_collapsed') === '1'`) !== true) return false;
+    await evalx(`localStorage.setItem('sidebar_collapsed','0'); 'ok'`);
+    await evalx(`location.reload(); 'recargando'`).catch(() => {});
+    await sleep(2500);
+    for (let i = 0; i < 12; i++) {
+      if (await evalx(`!!document.querySelector('aside, input[placeholder="PIN de 4 dígitos"]')`).catch(() => false)) break;
+      await sleep(800);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Escribe en un campo COMPROBANDO que el texto entró. `typeText` manda las teclas al elemento
+ * ENFOCADO: si el clic al campo cae mientras el diálogo todavía se anima (Radix), el campo no queda
+ * enfocado, el texto se pierde y la verificación falla tres pasos más adelante culpando a la app
+ * (medido 2026-09-21 en TRES scripts distintos: «no se llega al paso 2», «opciones=[]», «click target
+ * no encontrado»). Devuelve true si el valor quedó escrito.
+ */
+export async function escribirEn(sel, texto, intentos = 6) {
+  for (let i = 0; i < intentos; i++) {
+    await clickCenter(sel).catch(() => {});
+    if (await evalx(`document.activeElement === (${sel})`).catch(() => false)) {
+      await typeText(texto);
+      await sleep(250);
+      const v = await evalx(`(${sel})?.value ?? null`).catch(() => null);
+      if (String(v ?? '').includes(texto)) return true;
+      // el texto no entró (o entró a medias): se limpia y se reintenta
+      await evalx(`(() => { const e = ${sel}; if (e && e.select) e.select(); return !!e; })()`).catch(() => {});
+      await keyNav('Backspace', 'Backspace', 8);
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
 export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep, handleDialog };
+
+// Se ejecuta al importar: ninguna verificación en vivo depende ya de cómo quedó la barra lateral.
+await ensureSidebarExpanded();

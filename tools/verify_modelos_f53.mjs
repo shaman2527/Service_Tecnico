@@ -25,7 +25,7 @@
 //       $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"   (app abierta)
 //       node tools/verify_modelos_f53.mjs
 
-import { evalx, clickCenter, keyNav, typeText, insertText, sleep, handleDialog } from './cdp_driver.mjs';
+import { evalx, clickCenter, keyNav, typeText, insertText, sleep, handleDialog, escribirEn } from './cdp_driver.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 
@@ -205,13 +205,18 @@ if (elegido) {
   await sleep(1500);
   await evalx(`(() => { const b = [...document.querySelectorAll('button')].find(x => /Nuevo Servicio/.test(x.innerText || '')); if (b) b.click(); return !!b; })()`);
   await waitFor(`/Nuevo Servicio Técnico/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 12000);
-  await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar por nombre"]')`);
-  await typeText('Prueba Referencia');
-  await clickCenter(`document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')`);
-  await typeText('V-88888888');
-  await sleep(400);
-  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test((x.innerText || '').trim())); if (b) b.click(); return !!b; })()`);
-  await waitFor(`/Paso 2 de 4/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 10000);
+  // El cliente es obligatorio para avanzar el wizard (F33/F48) y el texto solo entra si el campo
+  // quedó ENFOCADO (ver `escribirEn`): sin esto el paso 1 no avanza, el campo del modelo no existe y
+  // la prueba se caía con «click target no encontrado» teniendo la app perfecta (medido 2026-09-21).
+  const campoCliente53 = `document.querySelector('[role="dialog"] input[placeholder^="Buscar por nombre"]')`;
+  const campoCi53 = `document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')`;
+  await escribirEn(campoCliente53, 'Prueba Referencia');
+  await escribirEn(campoCi53, 'V-88888888');
+  for (let i = 0; i < 4; i++) {
+    if (/Paso 2 de 4/.test(String(await evalx(`document.querySelector('[role="dialog"]')?.innerText ?? ''`)))) break;
+    await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test((x.innerText || '').trim())); if (b && !b.disabled) b.click(); return !!b; })()`);
+    await waitFor(`/Paso 2 de 4/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 3000);
+  }
   await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar el modelo del teléfono"]')`);
   await insertText(elegido.label);
   await waitFor(`[...document.querySelectorAll('[data-model-option]')].some(b => b.getAttribute('data-model-option') === ${JSON.stringify(elegido.label)})`, 15000);

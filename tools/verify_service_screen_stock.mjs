@@ -38,30 +38,70 @@ await sleep(1500);
 let dlg = String(await dialogText() ?? '');
 check('SERVICIO: abre el formulario de una orden nueva', /Nuevo Servicio Técnico/i.test(dlg), dlg.split('\n')[0]);
 
+// paso 1 (Cliente) → paso 2 (Equipos). El cliente es OBLIGATORIO para avanzar (F33/F48), así que
+// primero se escribe y después se pulsa «Siguiente»: sin eso el botón está `disabled`, el clic no
+// hace nada y el formulario nunca llega al modelo (por eso este script quedó viejo y fallaba).
+// `typeText` manda las teclas al elemento ENFOCADO → se comprueba el foco tras cada clic.
+const enfocar = async (sel, intentos = 6) => {
+  for (let i = 0; i < intentos; i++) {
+    await clickCenter(sel).catch(() => {});
+    if (await evalx(`document.activeElement === (${sel})`).catch(() => false)) return true;
+    await sleep(400);
+  }
+  return false;
+};
+await enfocar(`document.querySelector('[role="dialog"] input[placeholder^="Buscar por nombre"]')`);
+await typeText('Prueba Pantalla Stock');
+await enfocar(`document.querySelector('[role="dialog"] input[placeholder="V-12345678"]')`);
+await typeText('V-88888888');
+await sleep(400);
+
 // avanzar el wizard hasta el paso del equipo (el modelo)
 const modeloInput = `document.querySelector('[role="dialog"] input[placeholder*="odelo del teléfono" i]')`;
-for (let i = 0; i < 3 && !(await evalx(`!!${modeloInput}`)); i++) {
-  await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Siguiente$/i.test(b.innerText.trim()))`);
+for (let i = 0; i < 4 && !(await evalx(`!!${modeloInput}`)); i++) {
+  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/i.test((x.innerText||'').trim())); if (b && !b.disabled) b.click(); return !!b; })()`);
   await sleep(1200);
 }
-check('SERVICIO: el formulario pide el modelo del equipo', await evalx(`!!${modeloInput}`));
+check('SERVICIO: el formulario pide el modelo del equipo', await evalx(`!!${modeloInput}`),
+  String(await evalx(`(document.querySelector('[role="dialog"]')?.innerText ?? '').split('\\n').find(l => /Paso \\d+ de \\d+/.test(l)) ?? 'sin paso'`)));
 
 // modelo del equipo (A06: en el catálogo está «Pantalla Samsung A06 4G / A06» con stock)
-await clickCenter(modeloInput);
+// Otra vez el foco: si el clic no deja el cursor en el campo, «A06» no llega al desplegable y no hay
+// ninguna opción que elegir (la prueba fallaba con «click target no encontrado», culpando a la app).
+await enfocar(modeloInput);
+// ESPERAR a que el desplegable esté MONTADO antes de teclear: si se escribe con el popover todavía
+// cerrado, el texto entra al campo pero la lista no se pinta y no hay ninguna opción que elegir
+// (medido 2026-09-21: campo="A06" y opciones=[] con el backend devolviendo 3 modelos para «A06»).
+for (let i = 0; i < 12; i++) { if (await evalx(`document.querySelector('[data-model-scope]') !== null`).catch(() => false)) break; await sleep(400); }
 await typeText('A06');
-await sleep(1200);
-await clickCenter(`[...document.querySelectorAll('[role="dialog"] [role="option"]')].find(o => /A06/i.test(o.innerText)) ?? null`);
-await sleep(1500);
+const modeloEscrito = String(await evalx(`(${modeloInput})?.value ?? ''`));
+await sleep(1400);
+const opcionesA06 = await evalx(`[...document.querySelectorAll('[data-model-option]')].map(o => (o.innerText||'').replace(/\\s+/g,' ').trim())`);
+check('SERVICIO: el desplegable ofrece el modelo escrito (sale del catálogo real)',
+  /A06/i.test(modeloEscrito) && Array.isArray(opcionesA06) && opcionesA06.some(o => /A06/i.test(o)),
+  `campo="${modeloEscrito}" · opciones=${JSON.stringify((opcionesA06 ?? []).slice(0, 3))}`);
+// OJO: las opciones del selector de MODELO llevan `data-model-option` (atributo propio, con el que se
+// prueban F50/F52). NO llevan `role="option"`: este script las buscaba así (versión vieja del
+// componente) y por eso no encontraba ninguna y se caía culpando a la app (medido 2026-09-21).
+await clickCenter(`[...document.querySelectorAll('[data-model-option]')].find(o => /A06/i.test(o.innerText)) ?? null`);
+await sleep(1800);
 
-// el trabajo "Cambio pantalla" abre el selector de pantalla
-const trabajo = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button')].some(b => /^Cambio pantalla$/i.test(b.innerText.trim())))()`);
-if (trabajo) {
+// El trabajo «Cambio pantalla» es el que abre el selector de pantalla. OJO: al CREAR una orden ese
+// trabajo ya viene ELEGIDO por defecto (`emptyDevice.serviceTypes = ['Cambio pantalla']`), así que
+// este script se lo APAGABA al pulsarlo y después exigía ver el selector: fallaba con la app
+// perfecta (medido 2026-09-21). Se lee el estado del toggle y solo se enciende si estaba apagado.
+const estadoTrabajo = await evalx(`(() => {
+  const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Cambio pantalla$/i.test((x.innerText || '').trim()));
+  return b ? (b.getAttribute('data-state') ?? 'sin-estado') : null;
+})()`);
+if (estadoTrabajo === 'off') {
   await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Cambio pantalla$/i.test(b.innerText.trim()))`);
   await sleep(2000);
 }
 dlg = String(await dialogText() ?? '');
 const tieneSelector = /Pantalla a instalar/i.test(dlg);
-check('SERVICIO: el selector «Pantalla a instalar» aparece con el trabajo de cambio de pantalla', tieneSelector, dlg.match(/Pantalla a instalar[^\n]*/)?.[0] ?? 'no aparece');
+check('SERVICIO: el selector «Pantalla a instalar» aparece con el trabajo de cambio de pantalla',
+  tieneSelector, `trabajo=${estadoTrabajo} · ${dlg.match(/Pantalla a instalar[^\n]*/)?.[0] ?? 'no aparece'}`);
 const stocks = String(dlg).match(/stock\s+\d+/g) ?? [];
 const agotadas = (String(dlg).match(/agotada/g) ?? []).length;
 check('SERVICIO: el selector muestra el STOCK de cada pantalla (lo que no se veía)',
