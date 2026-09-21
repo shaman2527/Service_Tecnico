@@ -1,0 +1,11 @@
+# Rutas que el watcher de `tauri dev` debe IGNORAR.
+#
+# Por qué existe: las pruebas de Rust crean bases temporales DENTRO de `src-tauri/`
+# (`test_f62_work_types.db`, `test_f32_policy.db`, …) y las borran al terminar. Sin esto, cada
+# `cargo test` hacía que el watcher viera "archivo cambiado" y REINICIARA la app en pleno uso
+# (medido 2026-09-21: tres reinicios seguidos por un solo `cargo test --lib`).
+test_*.db
+test_*.db-shm
+test_*.db-wal
+*.db-shm
+*.db-wal
