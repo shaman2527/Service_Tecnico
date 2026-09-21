@@ -1,7 +1,7 @@
 # Codebase Patterns
 
 > Auto-consolidated learnings from loop iterations.
-> Last updated: 2026-09-20T17:53:25.291Z
+> Last updated: 2026-09-21T05:05:17.465Z
 
 ---
 
@@ -14,18 +14,28 @@
 - `[CRITICAL]` Riesgo de COBRO DUPLICADO en el asistente de cierre: si add_service_payment ya guardó el cobro y luego falla update_service (el cierre), el error se muestra pero el botón vuelve a habilitarse; el operario reintenta y el pago se registra OTRA VEZ sobre la misma orden. El estado busy solo protege del doble click inmediato, no del reintento tras un fallo parcial. (1)
 - `[CRITICAL]` Una regla de dinero debe tener UNA sola implementación, y las MIGRACIONES DE ARRANQUE son parte de ella: en este proyecto db.rs::init() tenía su propio UPDATE de paid_amount con la fórmula vieja y, como init() corre en cada arranque, revertía la regla nueva cada vez que se abría la app (el mismo saldo valía distinto según cuál fue la última acción). Al cambiar una fórmula de dinero hay que buscar TODAS las copias de la fórmula (incluidas las migraciones y los UPDATE inline en init()), y dejar un test que simule el REINICIO (cerrar y reabrir la base) — no solo el camino de la app. Además, en un invariante de dinero («X nunca puede ser negativo») hay que enumerar los caminos que lo rompen y cubrir cada uno: borrar un movimiento después de devolver, la tolerancia de redondeo aplicada repetidamente con el saldo en 0, y un monto con signo contrario que saltea el tope. (1)
 - `[CRITICAL]` Comparar dos fotos de una tabla recorriendo SOLO el lado «después» hace que las filas BORRADAS nunca se visiten: el chequeo imprime «N filas intactas» con el conteo de ANTES y miente con seguridad. Y si las tablas/columnas comparadas son un subconjunto elegido a mano, quedan afuera datos enteros (faltaban inventory_movements, compras y casi todas las columnas de products). (1)
-  - `tools/verify_migracion_datos.mjs (bucle de comparación)`
-  - `tools/verify_migracion_negativa.mjs (borra una venta y exige FAIL)`
-  - Fix: Comparar conteos por tabla y recorrer la UNIÓN de ids (borrada = FAIL, nueva = FAIL); leer la lista de columnas de la base ANTES de migrar y usarla en las dos fotos; declarar explícitamente qué columnas pueden cambiar (derivadas) en vez de saltearlas en silencio.
+  - `- `tools/verify_migracion_datos.mjs (bucle de comparación)``
+  - `- `tools/verify_migracion_negativa.mjs (borra una venta y exige FAIL)``
+
+---
+
+### Conventions
+
+- `[HIGH]` Cuando una regla se COPIA a otro lenguaje porque ese lado no puede llamarla (node no puede llamar a Rust: el split de modelos de catalog::split_model_models espejado en tools/audit_inventory.mjs), la copia tiene que venir con un FIXTURE + un TEST que falle al divergir, no con un comentario pidiendo mantenerlas iguales. El patron del proyecto ya existia (tools/canonical_brands.json + canonical_fixtures.json + test_canonical_rules_match_node_fixtures); F55 lo repitio para el split: tools/split_fixtures.json (generado con `node tools/audit_inventory.mjs --gen-split-fixtures`) + catalog::tests::test_split_model_models_match_node_fixtures. (1)
+  - `tools/audit_inventory.mjs (splitModelModels, copia a mano de la regla de Rust)`
+  - `src-tauri/src/catalog.rs:test_split_model_models_match_node_fixtures`
+  - `tools/split_fixtures.json`
+  - `tools/audit_inventory.mjs contaba 1267 telefonos (con split) vs 1135 del padron sin migracion aplicada: dos cifras sin saber cual manda`
+  - Fix: Al duplicar una regla en otro lenguaje, generar el fixture con el script y agregar el test de paridad que corre la implementacion nativa contra ese JSON (el archivo avisa en su encabezado que hay que regenerarlo si se toca la copia).
 
 ---
 
 ### Anti-Patterns
 
 - `[CRITICAL]` Una verificación que solo mira el EXIT CODE de la herramienta que muta los datos puede dar un FALSO VERDE: `cargo test -- --ignored <filtro>` sale 0 con «running 0 tests / 0 filtered out» cuando el filtro no matchea, y entonces la comparación antes/después es la copia contra sí misma y el veredicto es «los datos están intactos». Le pasó a la prueba que sostiene la condición del dueño (release 0.4.0, 2026-09-18). (1)
-  - `- `tools/verify_migracion_datos.mjs``
-  - `- `src-tauri/src/db.rs test_manual_migrate_db``
-  - `- `tools/verify_migracion_negativa.mjs``
+  - `- `- `tools/verify_migracion_datos.mjs```
+  - `- `- `src-tauri/src/db.rs test_manual_migrate_db```
+  - `- `- `tools/verify_migracion_negativa.mjs```
 
 ---
 
@@ -56,4 +66,4 @@
 
 ### Conventions
 
-*(ninguno por ahora)*
+- `[HIGH]` Cuando una regla se COPIA a otro lenguaje porque ese lado no puede llamarla (node no puede llamar a Rust: el split de modelos de catalog::split_model_models espejado en tools/audit_inventory.mjs), la copia tiene que venir con un FIXTURE + un TEST que falle al divergir, no con un comentario pidiendo mantenerlas iguales. El patron del proyecto ya existia (tools/canonical_brands.json + canonical_fixtures.json + test_canonical_rules_match_node_fixtures); F55 lo repitio para el split: tools/split_fixtures.json (generado con `node tools/audit_inventory.mjs --gen-split-fixtures`) + catalog::tests::test_split_model_models_match_node_fixtures.
