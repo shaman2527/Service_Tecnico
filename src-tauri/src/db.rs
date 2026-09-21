@@ -9517,9 +9517,6 @@ discount_amount: 0.0,
         all.iter().find(|s| s.order_num.as_deref() == Some(base.as_str())).unwrap().id
     }
 
-    /// (a) Las tres señales de política: la hora la estampa el backend, se pueden limpiar,
-    /// la clave sale de una whitelist y una orden inexistente se rechaza.
-    #[test]
     // F62 — las categorías de trabajo que agrega el local: se guardan, se validan y no se duplican.
     #[test]
     fn test_work_types_extra() {
@@ -9556,6 +9553,9 @@ discount_amount: 0.0,
         let _ = std::fs::remove_file(&test_path);
     }
 
+    /// (a) Las tres señales de política: la hora la estampa el backend, se pueden limpiar,
+    /// la clave sale de una whitelist y una orden inexistente se rechaza.
+    #[test]
     fn test_service_policy_flags() {
         let test_path = PathBuf::from("test_f32_policy.db");
         let _ = std::fs::remove_file(&test_path);
