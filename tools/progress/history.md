@@ -566,3 +566,36 @@ Cuatro pedidos del dueño en la misma jornada, todos en Servicio Técnico y **si
 
 **Lección:** cuando una regla se **copia** a otro lenguaje porque ese lado no puede llamarla (script de node vs backend Rust), la copia tiene que venir con un **fixture + un test que falle al divergir**, no con un comentario que pida mantenerlas iguales. Un reporte con su propia copia silenciosa de una regla es una fuente de verdad enemiga: dice un número distinto y nadie sabe cuál creer.
 
+## ENTREGA — verificación de producción del inventario + instalador local 0.4.2 (2026-09-21)
+
+**Pedido del dueño:** «necesito entregarla, que funcione su inventario, que haga su descuento al seleccionar una pantalla en un servicio… prueba si está funcionando primero». Decisión suya: **instalador LOCAL 0.4.2 sin publicar** (los clientes no se tocan) y **no** meterse con la caja (F40 queda fuera del alcance).
+
+**Punto de partida (lo primero que apareció):** el instalador que había en `instaladores/` era el **0.4.1 del 20/9 15:50**, o sea **ANTERIOR a F44–F55** — el `Registro.exe` y el setup NO traían ni la vista «Por modelo», ni «lo que uso», ni el orden por columnas. Se compiló con el código de hoy y se probó **contra una COPIA de la base del taller** (`backup/prod_final.db`: 1087 productos, 1135 teléfonos con nombres pegados, **sin** las columnas nuevas, 4 órdenes — exactamente el estado del local).
+
+**Lo que se midió (todo sobre la base real copiada, app 0.4.2 recién compilada):**
+
+| Qué | Resultado |
+|---|---|
+| **El descuento al entregar con la pantalla elegida** (`verify_servicio_cierre`) | **18/18** — «la pantalla elegida y el stock descontado en 1 → **7 → 6**» + movimiento «Servicio Entregado»; y al borrar la orden de prueba el stock **vuelve a 7** |
+| Migración de la actualización (`verify_migracion_datos`) | **50/50** — la historia del cliente queda **fila por fila y columna por columna** intacta (ventas, pagos, clientes, stock y precios por id, cierres), se agregan las columnas nuevas y la app nueva lee la base migrada |
+| «Lo que uso» + códigos (`verify_uso_modelos`, F50) | **37/37** |
+| Selector de pantalla con su stock (`verify_service_screen_stock`) | **6/6** — «stock 7 · 1 agotada» |
+| Gate de marca (que no se instale la pantalla de OTRA marca) | **23/23** |
+| Pantalla agotada sin bloquear (`verify_pantalla_agotada`) | **16/16** (stock intacto) |
+| Inventario rápido + «Por modelo» + orden por columnas | **10/10 · 27/27 · 12/12** |
+| «Trabajos hechos», Descuento/factura, Aviso que no tapa | **26/26 · 15/15 · 14/14** |
+| Smoke integral (servicios + ventas + libro + ayuda + borrados) | **110/110** |
+| `cargo test --lib` | **144/144** (8 manuales ignorados) |
+
+**Lo que NO era culpa del producto (4 falsos negativos, arreglados en las pruebas):** la batería en vivo se cayó al principio con fallos que parecían de inventario. Se investigó **con sondas dirigidas antes de tocar código** y el producto estaba bien en los cuatro casos: (1) la **barra lateral colapsada** deja los botones sin texto y toda navegación por nombre de ítem falla; (2) `typeText` manda las teclas al elemento **enfocado**, y si el clic cae mientras el diálogo se anima el texto se pierde → la prueba fallaba dos pasos después («no se llega al paso 2», «opciones=[]»); (3) dos scripts eran **viejos**: buscaban las opciones del selector con `role="option"` (hoy usan `data-model-option`) y pulsaban «Cambio pantalla» para abrir el selector cuando al CREAR ese trabajo **ya viene elegido** (o sea lo apagaban); (4) `verify_uso_modelos` no fijaba la preferencia «Ver todos», que **se recuerda a propósito**, así que una corrida anterior la dejaba encendida y el arranque ya no era «solo lo que uso». Se agregó al driver `ensureSidebarExpanded()` (se corre al importar) y `escribirEn()` (enfoca, escribe y **comprueba el valor**), y la prueba de F50 devuelve la preferencia como estaba (no le cambia la configuración al local).
+
+**Lo que quedó pendiente, dicho sin adornos:**
+- **El padrón de la base REAL todavía tiene 124 nombres pegados** («Galaxy A70 A705», «A13 4G A135 M13»…). El split ya está en la app: se aplica solo cuando el padrón se rearma (al agregar/editar un producto) o con el botón de **Inventario → Ajustes** (con vista previa y respaldo). En la copia de prueba quedó en **0 pegados y 1201 teléfonos numerados**, verificado. No es un bloqueante: el taller puede trabajar igual y separarlos cuando quiera.
+- **123 fichas con stock (333 unidades) sin precio** — son modelos más nuevos que la lista de precios del local; el dueño ya aceptó esa excepción el 18/9 (se cargan desde Inventario → Precios y datos). **Esas no se pueden cobrar hasta que tengan precio.**
+- Las features 37 (métodos en Bs por whitelist) y 40 (libro único de movimientos de caja + auditoría) siguen abiertas por decisión del dueño.
+
+**Instalador:** `instaladores\Registro Servicio Tecnico_0.4.2_x64-setup.exe` (6,5 MB, firmado, **NO publicado**: ni release en GitHub ni manifiesto del updater → las PCs del local siguen en su versión hasta que se corra ese setup a mano). Gate de release: **0 bloqueantes**, 8 comprobaciones OK y 5 avisos (los 5 ya conocidos, incluida la excepción aceptada de precios).
+
+**Lección (pruebas en vivo):** un fallo de la batería **no es** un fallo del producto hasta que se demuestra. Los cuatro de esta sesión se resolvieron mirando el DOM real con una sonda dirigida — y en los cuatro el producto estaba bien. La batería ahora **dice qué falló y con qué valor** (foco, valor escrito, `data-model-all`, nombres pegados en la base) en lugar de morir con «click target no encontrado».
+
+

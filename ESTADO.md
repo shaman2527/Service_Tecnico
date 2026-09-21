@@ -1,8 +1,18 @@
-# 📋 Registro — Estado del Proyecto (2026-09-18)
+# 📋 Registro — Estado del Proyecto (2026-09-21)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
 > y [AGENTS.md](AGENTS.md) (harness + registro de problemas).
+>
+> 🚚 **VERIFICACIÓN DE ENTREGA (2026-09-21):** se compiló y probó el **instalador local 0.4.2**
+> (F44–F55) **contra una copia de la base real del taller**. El inventario descuenta bien al
+> entregar con la pantalla elegida (**stock 7 → 6** + movimiento), la actualización **no toca los
+> datos del cliente** (50/50), «lo que uso»/«por modelo»/orden por columnas/gate de marca y el
+> **smoke integral 110/110** están verdes. Instalador:
+> `instaladores\Registro Servicio Tecnico_0.4.2_x64-setup.exe` (**NO publicado**: se instala a mano).
+> Pendientes reales: el padrón de la base real tiene **124 nombres pegados** (se separan desde
+> Inventario → Ajustes, o solos al editar un producto) y **123 fichas con stock sin precio** (no se
+> pueden cobrar hasta cargarles precio). Detalle en `tools/progress/history.md`.
 >
 > ✅ **EL MODO DEV SE LEVANTÓ (2026-09-18):** se publicó la **release oficial v0.4.0** con todo el
 > trabajo de septiembre (inventario completo + F30–F42). Ver §15. La regla que sigue valiendo: la
