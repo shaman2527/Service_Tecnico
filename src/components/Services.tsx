@@ -47,9 +47,34 @@ import { orderBalance, balanceLabel } from '@/lib/order-balance';
 import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
 // F44: TRABAJOS HECHOS — los contadores de la lista cuentan LO QUE SE ESTÁ VIENDO (entregados
 // incluidos) con la misma regla que el filtro, y la línea de alcance dice sobre qué se cuenta.
+// F56: el RESUMEN DEL DÍA (recibidos hoy / entregados hoy / qué trabajos se hicieron) sale del
+// MISMO módulo, con su propio alcance, para que no existan dos conteos distintos.
 // Reglas puras con prueba node (`tools/service_report_test.ts`).
-import { ACTIVE_SENTINEL, NO_WORK_FILTER, matchesWorkFilter, scopeLabel, scopeProblem, serviceReport } from '@/lib/service-report';
-import type { ScopeInput } from '@/lib/service-report';
+import { ACTIVE_SENTINEL, matchesWorkFilter, scopeLabel, scopeProblem, serviceReport, rangeFor, scopeSummary, summaryScopeLabel, topWorks } from '@/lib/service-report';
+import type { ScopeInput, ScopeKind } from '@/lib/service-report';
+// F57: el filtro de trabajos es UN solo selector con buscador (adiós al muro de 49 chips).
+import { WorkPicker } from './WorkPicker';
+// F58: la tabla de equivalencias de etiquetas («bateria» → «Cambio batería») es una sola, revisable,
+// y se aplica al contar, al filtrar y al GUARDAR (así no nacen sinónimos nuevos).
+import { canonicalWorkLabel, foldWork } from '@/lib/work-aliases';
+
+/** F58: etiqueta canónica si lo escrito en «Otro» es un sinónimo aprobado; `null` si no lo es. */
+const aliasDeTrabajo = (texto: string): string | null => {
+  const { label, cambiado } = canonicalWorkLabel(texto ?? '');
+  return cambiado ? label : null;
+};
+
+/**
+ * F58: agrega a la orden el trabajo escrito en «Otro», ya normalizado y SIN repetir. Si el operario
+ * ya tiene elegido el chip del mismo trabajo, no se agrega otra vez: se imprimiría dos veces en el
+ * recibo y React dibujaría dos badges con la misma clave (observación de la re-revisión).
+ */
+const agregarTrabajoDeOtro = (arr: string[], texto: string): void => {
+  const etiqueta = canonicalWorkLabel(texto).label;
+  if (!etiqueta) return;
+  const clave = foldWork(etiqueta);
+  if (!arr.some(t => foldWork(t) === clave)) arr.push(etiqueta);
+};
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
@@ -263,6 +288,53 @@ function UnpaidBanner({ neverPaid, balance, amount, paid, saldoTexto }: {
   );
 }
 
+/**
+ * F56 — Tile del «Resumen del día». Es un BOTÓN: al tocarlo el alcance del resumen se aplica a la
+ * lista (el dueño quiere «cuántas pantallas hoy» y, de un toque, las tarjetas de esas pantallas).
+ * Los tonos siguen el diccionario de la pantalla: azul = entró, verde = salió, ámbar = en taller.
+ */
+function ResumenTile({ id, titulo, valor, sub, tono, onClick, kpi, cargando = false }: {
+  id: string;
+  titulo: string;
+  valor: number;
+  sub: string;
+  tono: 'azul' | 'verde' | 'ambar' | 'neutro';
+  onClick: () => void;
+  kpi?: string;
+  /** true = los totales todavía no se pudieron leer: se muestra «—», NUNCA un cero que mienta. */
+  cargando?: boolean;
+}) {
+  const clases = {
+    azul: { borde: 'border-blue-500/30 bg-blue-500/5', num: 'text-blue-700', icono: 'text-blue-600' },
+    verde: { borde: 'border-emerald-500/30 bg-emerald-500/5', num: 'text-emerald-700', icono: 'text-emerald-600' },
+    ambar: { borde: 'border-amber-500/30 bg-amber-500/5', num: 'text-amber-700', icono: 'text-amber-600' },
+    neutro: { borde: '', num: '', icono: 'text-muted-foreground' },
+  }[tono];
+  return (
+    <Card
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+      title={`Ver en la lista: ${titulo.toLowerCase()}`}
+      className={cn('cursor-pointer transition-shadow hover:shadow-md', clases.borde)}
+      data-resumen={id}
+      data-resumen-count={cargando ? undefined : valor}
+      data-kpi={kpi}
+    >
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <span className={clases.icono}><Smartphone className="size-3.5" /></span> {titulo}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className={cn('text-2xl font-bold', clases.num)}>{cargando ? '—' : valor}</div>
+        <p className="text-[11px] text-muted-foreground">{cargando ? 'leyendo los totales…' : sub}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
@@ -280,8 +352,36 @@ export default function Services() {
   const [typeFilter, setTypeFilter] = useState('');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
+  /**
+   * ¿La lista está SIN filtros de servidor? (el resumen reusa sus filas en ese caso: son toda la
+   * base y no hace falta otra lectura). Se calcula acá arriba porque el efecto del resumen lo usa.
+   */
+  const listaSinFiltros = !search && !statusFilter && !dateStart && !dateEnd;
   // F32: teléfonos entregados HOY (fecha de entrega), para el panel y el KPI del dueño.
   const [entregadosHoy, setEntregadosHoy] = useState<Service[]>([]);
+  // F56: RESUMEN DEL DÍA. Se calcula sobre TODA la base (su propio alcance), no sobre la lista
+  // filtrada: si el operario dejó la lista en «Entregado + agosto», el número de HOY tiene que
+  // seguir siendo el de hoy. `resumenVersion` se sube solo cuando CAMBIAN LOS DATOS (guardar,
+  // borrar, entregar): el buscador y los filtros no vuelven a pedir la base entera.
+  const [resumenRows, setResumenRows] = useState<Service[]>([]);
+  const [resumenVersion, setResumenVersion] = useState(0);
+  const [resumenKind, setResumenKind] = useState<ScopeKind | 'filtros'>('hoy');
+  // Revisión adversarial (mayor): un fallo de lectura NO puede parecer «un día sin movimiento». Con
+  // esto la pantalla distingue cargando / ok / error y no pinta ceros diciendo «todavía no se recibió
+  // ningún equipo hoy» mientras la lista de abajo sí muestra las órdenes del día.
+  const [resumenEstado, setResumenEstado] = useState<'cargando' | 'ok' | 'error'>('cargando');
+  // Secuencia de la consulta del resumen: si llega tarde una respuesta vieja, se descarta (no pisa
+  // los datos nuevos).
+  const resumenSeq = useRef(0);
+  /** ¿Ya se leyeron los totales alguna vez? (para no parpadear a «Leyendo…» en cada refresco) */
+  const hayResumen = useRef(false);
+  /**
+   * Con qué filtros se trajeron las filas de `services` (observación de la re-revisión): entre que
+   * el operario limpia un filtro y llega la lista nueva, `services` sigue siendo la lista FILTRADA —
+   * y el resumen no puede calcular sobre el conjunto equivocado. Se reusa `services` SOLO si la
+   * firma coincide.
+   */
+  const firmaFiltros = useRef('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
   const [deleting, setDeleting] = useState<Service | null>(null);
@@ -302,6 +402,9 @@ export default function Services() {
   const [tasaDia, setTasaDia] = useState(0);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
+  // F62: las categorías de trabajo que AGREGA EL LOCAL (settings work_types_extra). Se cargan una
+  // vez y se usan en los chips del formulario, en el selector de trabajos y en el resumen.
+  const [tiposExtra, setTiposExtra] = useState<string[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // Atajos de teclado: N/F2 = Nuevo Servicio, F4 = cerrar una entrega (cola), / = buscar.
@@ -367,6 +470,9 @@ export default function Services() {
 
   const load = async () => {
     const hoy = localDate();
+    // F56: se anota CON QUÉ filtros se trajeron estas filas: el resumen solo las reusa si la firma
+    // sigue coincidiendo (entre limpiar un filtro y la respuesta nueva, `services` es la lista vieja).
+    firmaFiltros.current = JSON.stringify([search, statusFilter, dateStart, dateEnd]);
     const [s, st, techs, entregados] = await Promise.all([
       api.getServices(search, statusFilter, dateStart, dateEnd, dateField),
       api.getServiceStatuses(),
@@ -404,8 +510,75 @@ export default function Services() {
     setPagosSinCargar(s.length > 120);
   };
 
+  // F62: agrega una categoría de trabajo del LOCAL y devuelve el nombre GUARDADO (null si falló).
+  // La validación vive en el backend (no vacía, tope de 40, sin duplicados por mayúsculas/acentos) y
+  // acá solo se refresca la lista que ya está en pantalla.
+  const agregarCategoria = useCallback(async (nombre: string): Promise<string | null> => {
+    try {
+      const json = await api.addWorkTypeExtra(nombre);
+      const lista = JSON.parse(json) as string[];
+      setTiposExtra(Array.isArray(lista) ? lista : []);
+      // Si el nombre es sinónimo de un trabajo que ya existe, el backend lo guarda con el nombre
+      // CANÓNICO (tabla de F58): se devuelve ESE para que quede elegido en la orden.
+      const canonico = aliasDeTrabajo(nombre) ?? nombre.trim();
+      toast.success(`Categoría agregada: ${canonico}`);
+      return canonico;
+    } catch (e) {
+      toast.error('No se pudo agregar la categoría', { description: e instanceof Error ? e.message : String(e) });
+      return null;
+    }
+  }, []);
+
+  // F62: quita una categoría del local (deshacer un error de tipeo). Las órdenes ya registradas NO
+  // se tocan: la etiqueta vive dentro de cada orden.
+  const quitarCategoria = useCallback(async (nombre: string): Promise<boolean> => {
+    try {
+      const json = await api.removeWorkTypeExtra(nombre);
+      const lista = JSON.parse(json) as string[];
+      setTiposExtra(Array.isArray(lista) ? lista : []);
+      toast.success('Categoría quitada: ' + nombre);
+      return true;
+    } catch (e) {
+      toast.error('No se pudo quitar la categoría', { description: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  }, []);
+
+  // F56: refrescar la LISTA y los datos del RESUMEN (guardar, borrar, entregar, cobrar). Los
+  // filtros y el buscador NO entran acá a propósito: el resumen tiene su propio alcance, así que no
+  // depende de ellos y no hace falta volver a leer la base entera en cada tecla.
+  const refrescar = () => { load(); setResumenVersion(v => v + 1); };
+
   useEffect(() => { load(); }, []);
+  // F56: los datos del resumen. SOLO se piden cuando la lista tiene filtros: sin filtros, las filas
+  // de la lista YA son toda la base y se reusan (una sola lectura). Las deps son el BOOLEANO, no los
+  // cuatro filtros: con los strings, cada tecla del buscador disparaba una lectura completa y hacía
+  // parpadear los tiles a «—» (observación de la re-revisión).
+  useEffect(() => {
+    if (listaSinFiltros) return;
+    const mio = ++resumenSeq.current;
+    // «Leyendo…» solo si no hay nada que mostrar: con datos previos se refresca en silencio.
+    if (!hayResumen.current) setResumenEstado('cargando');
+    api.getServices('', '', '', '', 'in')
+      .then(rs => {
+        if (resumenSeq.current !== mio) return;  // respuesta vieja: se descarta
+        setResumenRows(rs);
+        hayResumen.current = true;
+        setResumenEstado('ok');
+      })
+      .catch(() => {
+        if (resumenSeq.current !== mio) return;
+        // NO se pisan las filas anteriores: un fallo de lectura no es un día vacío.
+        setResumenEstado('error');
+      });
+  }, [resumenVersion, listaSinFiltros]);
   useEffect(() => { api.getProducts('', null).then(setCatalog).catch(() => {}); }, []);
+  // F62: las categorías del local, una sola vez (si falla, la pantalla sigue con las canónicas).
+  useEffect(() => {
+    api.getWorkTypesExtra()
+      .then(json => { const l = JSON.parse(json) as string[]; if (Array.isArray(l)) setTiposExtra(l); })
+      .catch(() => {});
+  }, []);
   // Debounce: la búsqueda solo consulta tras 350ms de inactividad.
   // F44: la PRIMERA corrida se saltea — el montaje ya cargó la lista, y con el filtro por defecto en
   // «Todos los estados» esa consulta es todo el historial: pagarla dos veces es pagar dos veces la
@@ -443,7 +616,7 @@ export default function Services() {
   const handleDelete = async (s: Service) => {
     await api.deleteService(s.id);
     setDeleting(null);
-    load();
+    refrescar();
   };
 
   // Entrega directa desde la tarjeta: status Entregado + date_out vacío (el backend pone la
@@ -461,7 +634,7 @@ export default function Services() {
     } finally {
       setDelivering(null);
       setConfirmDeliver(null);
-      load();
+      refrescar();
     }
   };
 
@@ -473,6 +646,9 @@ export default function Services() {
     setDateStart(hoy);
     setDateEnd(hoy);
     setTypeFilter('');
+    // F56: el resumen se pone en HOY para que el número del KPI «Entregados hoy» del resumen siga
+    // siendo el del día que se acaba de pedir (si no, la pantalla diría dos cosas distintas).
+    setResumenKind('hoy');
   };
 
   // F44 — TRABAJOS HECHOS: los contadores cuentan LA LISTA QUE SE ESTÁ VIENDO (búsqueda + estado +
@@ -481,7 +657,47 @@ export default function Services() {
   // salió— desaparecían todos los chips, y los trabajos escritos a mano («Otro») no tenían contador.
   // El reporte y el filtro salen del MISMO módulo puro (`lib/service-report`), así el número del chip
   // no puede mentir: dice exactamente las tarjetas que aparecen al hacerle clic.
-  const report = useMemo(() => serviceReport(services), [services]);
+  const report = useMemo(() => serviceReport(services, tiposExtra), [services, tiposExtra]);
+
+  // ── F56 — EL RESUMEN DEL DÍA ────────────────────────────────────────────────────────────────
+  // El alcance es PROPIO (por defecto HOY) y se resuelve con la regla pura `rangeFor`: «hoy»,
+  // «7 días» (hoy + los 6 anteriores), «este mes» (del día 1 a hoy) o el rango de los filtros.
+  // OJO: `rangeFor` usa fechas LOCALES (localDate/addDays/monthStart) — nunca toISOString, que en
+  // Venezuela adelanta el día después de las 20:00.
+  const hoyLocal = localDate();
+  const resumenRange = resumenKind === 'filtros'
+    ? { start: dateStart, end: dateEnd }
+    : rangeFor(resumenKind, hoyLocal);
+  // Revisión adversarial (mayor): con la lista SIN filtros, sus filas YA son toda la base — el resumen
+  // las reusa y no se paga una segunda lectura completa. Con filtros puestos sí hace falta la suya
+  // (el resumen tiene alcance propio y no puede cambiar porque el operario filtró la lista).
+  // OJO (re-revisión, O1): se reusa SOLO si `services` se trajo con los filtros de AHORA — si no,
+  // durante la ventana de recarga el resumen calcularía sobre la lista vieja (filtrada).
+  // (`listaSinFiltros` se calcula arriba, junto a los estados: lo usa el efecto del resumen.)
+  const listaConfiable = firmaFiltros.current === JSON.stringify([search, statusFilter, dateStart, dateEnd]);
+  const reusaLista = listaSinFiltros && listaConfiable && services.length > 0;
+  const filasResumen = reusaLista ? services : resumenRows;
+  const resumen = useMemo(() => scopeSummary(filasResumen, resumenRange, tiposExtra), [filasResumen, resumenRange.start, resumenRange.end, tiposExtra]);
+  // ¿Los números del resumen son confiables? (o se están leyendo, o falló la lectura: en esos dos
+  // casos NO se pintan ceros, porque un cero diría «hoy no pasó nada» cuando en realidad no se sabe).
+  const resumenListo = reusaLista || resumenEstado === 'ok';
+  // Aplicar el alcance del resumen a la LISTA (un toque: «ver estos equipos» en vez de armar los
+  // filtros a mano). El estado de trabajo se limpia porque el resumen no filtra por estado (F44)
+  // y el eje de fecha lo decide cada tile según lo que esté contando (recibo vs entrega).
+  const verResumenEnLista = (eje: 'in' | 'out', trabajo = '') => {
+    setSearch('');
+    setStatusFilter('');
+    setDateField(eje);
+    setDateStart(resumenRange.start);
+    setDateEnd(resumenRange.end);
+    setTypeFilter(trabajo);
+  };
+  // Estos dos números NO dependen del alcance del resumen, así que su clic también tiene que sacar el
+  // rango de la lista: si no, pulsar «En taller» con el eje de ENTREGA puesto deja la lista vacía por
+  // definición (una orden en taller todavía no tiene fecha de entrega) mostrando 42 en el tile
+  // (revisión adversarial, mayor).
+  const verTaller = () => { setSearch(''); setStatusFilter(ACTIVE_SENTINEL); setTypeFilter(''); setDateField('in'); setDateStart(''); setDateEnd(''); };
+  const verListos = () => { setSearch(''); setStatusFilter('Por entregar'); setTypeFilter(''); setDateField('in'); setDateStart(''); setDateEnd(''); };
   const filtrosActivos = !!(search || statusFilter || dateStart || dateEnd || typeFilter);
   const alcance: ScopeInput = { status: statusFilter, dateField, start: dateStart, end: dateEnd };
   const problemaAlcance = scopeProblem({ status: statusFilter, dateField });
@@ -853,17 +1069,135 @@ export default function Services() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ── F56 — RESUMEN DEL DÍA ────────────────────────────────────────────────────────────────
+          Lo que el cliente pregunta de verdad («¿cuántas pantallas hiciste hoy?», «¿cuántos equipos
+          recibiste hoy?») sin armar filtros a mano y sin el muro de categorías: los números del
+          alcance, el desglose por trabajo y —siempre— la línea que dice SOBRE QUÉ se está contando.
+          Se calcula con su PROPIO alcance (por defecto HOY) sobre toda la base, así que no lo mueve
+          el filtro de la lista; y cada número, al tocarlo, trae esos equipos a la lista. */}
+      <Card data-panel="resumen-dia">
+        <CardHeader className="pb-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle className="text-base">Resumen del día</CardTitle>
+              <p className="text-xs text-muted-foreground" data-resumen-scope>
+                {summaryScopeLabel(resumen.range, hoyLocal)}
+              </p>
+            </div>
+            <ToggleGroup type="single" value={resumenKind} aria-label="Alcance del resumen"
+              onValueChange={v => { if (v) setResumenKind(v as ScopeKind | 'filtros'); }}>
+              <ToggleGroupItem value="hoy" className="h-8 px-2.5 text-xs" data-resumen-kind="hoy"
+                title="Lo de hoy: por fecha de recibo y por fecha de entrega">Hoy</ToggleGroupItem>
+              <ToggleGroupItem value="7d" className="h-8 px-2.5 text-xs" data-resumen-kind="7d"
+                title="Hoy y los 6 días anteriores">7 días</ToggleGroupItem>
+              <ToggleGroupItem value="mes" className="h-8 px-2.5 text-xs" data-resumen-kind="mes"
+                title="Del día 1 del mes hasta hoy">Este mes</ToggleGroupItem>
+              <ToggleGroupItem value="filtros" className="h-8 px-2.5 text-xs" data-resumen-kind="filtros"
+                title="El mismo rango de fechas que tienen los filtros de la lista">Los filtros</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <ResumenTile id="recibidos" titulo="Recibidos" valor={resumen.recibidos} tono="azul"
+              cargando={!resumenListo}
+              sub={`por fecha de recibo · $${resumen.montoRecibido.toFixed(2)}`}
+              onClick={() => verResumenEnLista('in')} />
+            {/* F32: este tile es el KPI «Entregados hoy» del dueño — pero SOLO cuando el alcance es
+                HOY: con «7 días» o «Este mes» el mismo número diría otra cosa y el enganche mentiría
+                (revisión adversarial, mayor). */}
+            <ResumenTile id="entregados" titulo="Entregados" valor={resumen.entregados} tono="verde"
+              cargando={!resumenListo}
+              kpi={resumenKind === 'hoy' ? 'entregados-hoy' : undefined}
+              sub={`por fecha de entrega · $${resumen.montoEntregado.toFixed(2)}`}
+              onClick={() => verResumenEnLista('out')} />
+            <ResumenTile id="taller" titulo="En taller" valor={resumen.taller} tono="ambar"
+              cargando={!resumenListo}
+              sub="ahora · no depende del alcance" onClick={verTaller} />
+            <ResumenTile id="listos" titulo="Listos para entregar" valor={resumen.listos} tono="neutro"
+              cargando={!resumenListo}
+              sub="ahora · estado «Por entregar»" onClick={verListos} />
+          </div>
+
+          {resumenEstado === 'error' && !resumenListo && (
+            <p className="text-xs text-warning" data-resumen-error>
+              No se pudieron leer los totales del resumen — volvé a intentar en un momento (los números de la lista de abajo sí se leyeron).
+            </p>
+          )}
+
+          {/* El desglose por trabajo: es la respuesta a «cuántas pantallas hice hoy», sin chips y
+              sin ruido — a lo sumo 5 trabajos por eje, con los números alineados. Tocar uno trae
+              esos equipos a la lista. Si un equipo tiene 2 trabajos cuenta en cada uno (es el mismo
+              criterio de los contadores de arriba, y la línea de alcance lo dice). */}
+          <div className="grid gap-4 md:grid-cols-2">
+            {([
+              ['in', 'Qué se recibió', resumen.porTrabajoRecibidos, resumen.recibidos, resumen.recibidosSinTrabajo, resumen.recibidosNoTrabajo],
+              ['out', 'Qué se entregó', resumen.porTrabajoEntregados, resumen.entregados, resumen.entregadosSinTrabajo, resumen.entregadosNoTrabajo],
+            ] as const).map(([eje, titulo, lista, total, sinTrabajo, noTrabajo]) => (
+              <div key={eje} data-resumen-desglose={eje}>
+                <p className="text-xs font-semibold text-muted-foreground">
+                  {titulo} <span className="font-normal">({total} {total === 1 ? 'equipo' : 'equipos'})</span>
+                </p>
+                {!resumenListo ? (
+                  <p className="mt-1 text-xs italic text-muted-foreground" data-resumen-vacio={eje}>
+                    Leyendo los totales…
+                  </p>
+                ) : total === 0 ? (
+                  <p className="mt-1 text-xs italic text-muted-foreground" data-resumen-vacio={eje}>
+                    {resumenKind === 'hoy'
+                      ? (eje === 'in' ? 'Todavía no se recibió ningún equipo hoy.' : 'Todavía no salió ningún equipo hoy.')
+                      : 'Sin equipos en este alcance.'}
+                  </p>
+                ) : (
+                  <ul className="mt-1 space-y-0.5">
+                    {topWorks(lista, 5).map(w => (
+                      <li key={w.key}>
+                        <button type="button" onClick={() => verResumenEnLista(eje, w.key)}
+                          data-resumen-work={w.key} data-resumen-work-count={w.total}
+                          title={`Ver en la lista: ${w.label} (${w.total})`}
+                          className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-xs hover:bg-accent">
+                          <span className="truncate">{w.label}</span>
+                          <span className="font-semibold tabular-nums">{w.total}</span>
+                        </button>
+                      </li>
+                    ))}
+                    {lista.length > 5 && (
+                      <li className="px-1.5 pt-0.5 text-[11px] text-muted-foreground">
+                        y {lista.length - 5} trabajo{lista.length - 5 === 1 ? '' : 's'} más en este alcance
+                      </li>
+                    )}
+                    {sinTrabajo > 0 && (
+                      <li className="px-1.5 pt-0.5 text-[11px] text-muted-foreground">{sinTrabajo} sin trabajo anotado</li>
+                    )}
+                    {/* F59: si hay garantía/venta anotadas como trabajo, se dice — así el operario
+                        entiende por qué el desglose no suma exactamente el total del día. */}
+                    {noTrabajo > 0 && (
+                      <li className="px-1.5 pt-0.5 text-[11px] text-muted-foreground" data-resumen-no-trabajo={eje}>
+                        {noTrabajo} con garantía/venta anotada (no es un trabajo)
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* La LISTA que se está viendo: estos números SÍ siguen a los filtros y al trabajo elegido
+          (F44 — el KPI y las tarjetas de abajo tienen que decir lo mismo). El resumen de arriba, en
+          cambio, tiene su propio alcance: por eso van separados y cada uno dice a qué se refiere. */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
         <Card>
-          {/* F44: el KPI cuenta LA LISTA (con el chip de trabajo y los filtros puestos), no todo lo
-              que trajo el backend: antes este número no coincidía con las tarjetas de abajo. */}
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Equipos en la lista</CardTitle>
           </CardHeader>
           <CardContent><div className="text-2xl font-bold" data-kpi="equipos">{visibleServices.length}</div></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Listos para entregar</CardTitle></CardHeader>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Listos para entregar en la lista</CardTitle>
+          </CardHeader>
           <CardContent><div className="text-2xl font-bold text-warning">{listos}</div></CardContent>
         </Card>
         <Card>
@@ -872,26 +1206,6 @@ export default function Services() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold" title="Suma de los equipos que estás viendo (incluye devueltos y cancelados)">${totalAmount.toFixed(2)}</div>
-          </CardContent>
-        </Card>
-        {/* F32: el dueño quiere ver de un vistazo los teléfonos que SALIERON hoy (fecha de entrega) */}
-        <Card
-          role="button"
-          tabIndex={0}
-          title="Ver los teléfonos entregados hoy (por fecha de entrega)"
-          onClick={verEntregadosHoy}
-          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); verEntregadosHoy(); } }}
-          className="cursor-pointer border-emerald-500/30 bg-emerald-500/5 transition-shadow hover:shadow-md"
-          data-kpi="entregados-hoy"
-        >
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-              <CheckCircle2 className="size-3.5 text-emerald-600" /> Entregados hoy
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-emerald-700">{entregadosHoy.length}</div>
-            <p className="text-[11px] text-muted-foreground">por fecha de entrega · clic para filtrar</p>
           </CardContent>
         </Card>
       </div>
@@ -976,52 +1290,31 @@ export default function Services() {
         </Button>
       </div>
 
-      {/* ── TRABAJOS HECHOS (F44) ────────────────────────────────────────────────────────────────
-          La respuesta a «¿cuántas pantallas hice hoy?» sin adivinar: cuántos equipos y QUÉ trabajos
-          hay en lo que se está viendo, con los entregados incluidos, y —debajo— sobre qué se está
-          contando (estado, eje de fecha y rango) para poder decirlo con seguridad. */}
-      <div className="flex flex-col gap-0.5" data-report="trabajos">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-          <span className="font-semibold">Trabajos hechos:</span>
-          <span data-report-total><span className="font-bold">{report.equipos}</span> equipos</span>
-          <span className="text-emerald-700">{report.entregados} entregados</span>
-          <span className="text-warning">{report.taller} en taller</span>
-          {report.anulados > 0 && <span className="text-danger">{report.anulados} devueltos/cancelados</span>}
-          {report.sinTrabajo > 0 && (
-            <span className="text-muted-foreground">{report.sinTrabajo} sin trabajo anotado</span>
-          )}
+      {/* ── TRABAJOS (F44 + F57) ─────────────────────────────────────────────────────────────────
+          F44 dejó los números confiables (el conteo de la lista visible, entregados incluidos) y su
+          línea de alcance. F57 sacó el MURO DE CHIPS: la pantalla ya no dibuja un botón por etiqueta
+          distinta (en la base real del cliente son 49, 24 de ellas con un solo equipo) sino UN solo
+          selector con buscador — «que esté oculta y uno elija una específica», pedido del dueño
+          (2026-09-21). Los números de la lista se siguen diciendo acá; el desglose de QUÉ se hizo
+          (por trabajo) vive en el Resumen del día, que tiene su propio alcance. */}
+      <div className="flex flex-col gap-1.5" data-report="trabajos">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <WorkPicker counts={report.porTrabajo} total={services.length} sinTrabajo={report.sinTrabajo}
+            sinTrabajoEntregados={report.sinTrabajoEntregados} sinTrabajoTaller={report.sinTrabajoTaller}
+            sinTrabajoAnulados={report.sinTrabajoAnulados}
+            value={typeFilter} onChange={setTypeFilter} />
+          <span className="text-sm text-muted-foreground" data-report-total>
+            <span className="font-bold text-foreground">{report.equipos}</span> equipos en la lista
+          </span>
+          <span className="text-xs text-emerald-700">{report.entregados} entregados</span>
+          <span className="text-xs text-warning">{report.taller} en taller</span>
+          {report.anulados > 0 && <span className="text-xs text-danger">{report.anulados} devueltos/cancelados</span>}
         </div>
         <p className="text-xs text-muted-foreground" data-report-scope>{scopeLabel(alcance)}</p>
         {pagosSinCargar && (
           <p className="text-xs text-warning" data-note="pagos-no-cargados">
             Lista muy larga: el método de pago real se muestra hasta 120 equipos — acotá el rango de fechas para verlo.
           </p>
-        )}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <Button variant={typeFilter === '' ? 'default' : 'outline'} size="sm"
-          data-work-chip="todos" data-work-count={services.length}
-          onClick={() => setTypeFilter('')}>
-          Todos <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{services.length}</span>
-        </Button>
-        {report.porTrabajo.map(tc => (
-          <Button key={tc.key} variant={typeFilter === tc.key ? 'default' : 'outline'} size="sm"
-            data-work-chip={tc.key} data-work-count={tc.total}
-            title={`${tc.total} equipos · ${tc.entregados} entregados · ${tc.taller} en taller${tc.anulados ? ` · ${tc.anulados} devueltos/cancelados` : ''}`}
-            onClick={() => setTypeFilter(typeFilter === tc.key ? '' : tc.key)}>
-            {tc.label} <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{tc.total}</span>
-          </Button>
-        ))}
-        {/* F44: los equipos sin ningún trabajo anotado tienen su propio chip para que los números
-            cierren (nunca «desaparece» un equipo sin explicación). */}
-        {report.sinTrabajo > 0 && (
-          <Button variant={typeFilter === NO_WORK_FILTER ? 'default' : 'outline'} size="sm"
-            data-work-chip={NO_WORK_FILTER} data-work-count={report.sinTrabajo}
-            title="Equipos sin ningún trabajo/falla anotado (órdenes viejas o recepciones sin tipo)"
-            onClick={() => setTypeFilter(typeFilter === NO_WORK_FILTER ? '' : NO_WORK_FILTER)}>
-            Sin trabajo anotado <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{report.sinTrabajo}</span>
-          </Button>
         )}
       </div>
 
@@ -1040,12 +1333,21 @@ export default function Services() {
                 <span>
                   {problemaAlcance === 'activos-sin-entrega'
                     ? 'Ningún equipo con fecha de ENTREGA puede seguir «Activo en taller»: una orden en el taller todavía no tiene fecha de entrega.'
-                    : 'Sin equipos con estos filtros.'}
+                    : typeFilter
+                      // El trabajo elegido no tiene equipos en lo que se está viendo: se dice CON SU
+                      // NOMBRE (si no, el operario ve tres números que se contradicen y no sabe por qué).
+                      ? 'El trabajo elegido no tiene equipos con estos filtros.'
+                      : 'Sin equipos con estos filtros.'}
                 </span>
                 <span className="text-xs">{scopeLabel(alcance)}</span>
                 <div className="flex flex-wrap items-center justify-center gap-2">
                   {problemaAlcance === 'activos-sin-entrega' && (
                     <Button variant="outline" size="sm" onClick={() => setDateField('in')}>Cambiar a Recibidos</Button>
+                  )}
+                  {!!typeFilter && (
+                    <Button variant="outline" size="sm" onClick={() => setTypeFilter('')} data-empty-quitar-trabajo>
+                      Quitar el trabajo
+                    </Button>
                   )}
                   {!!statusFilter && (
                     <Button variant="outline" size="sm" onClick={() => setStatusFilter('')}>Ver todos los estados</Button>
@@ -1113,8 +1415,11 @@ export default function Services() {
           service={editing}
           statuses={statuses}
           dayOpen={dayOpen}
+          tiposExtra={tiposExtra}
+          onNuevaCategoria={agregarCategoria}
+          onQuitarCategoria={quitarCategoria}
           onClose={() => { setShowForm(false); setEditing(null); }}
-          onSaved={() => { setShowForm(false); setEditing(null); load(); }}
+          onSaved={() => { setShowForm(false); setEditing(null); refrescar(); }}
         />
       )}
 
@@ -1129,7 +1434,7 @@ export default function Services() {
         service={discountFor}
         open={!!discountFor}
         onOpenChange={o => { if (!o) setDiscountFor(null); }}
-        onSaved={load}
+        onSaved={refrescar}
       />
 
       <PaymentDialog
@@ -1137,7 +1442,7 @@ export default function Services() {
         open={!!payFor}
         onOpenChange={(o) => { if (!o) setPayFor(null); }}
         dayOpen={dayOpen}
-        onSaved={load}
+        onSaved={refrescar}
       />
 
       {/* F34: cambio rápido de técnico (clic en el círculo/nombre del técnico de la tarjeta). */}
@@ -1192,7 +1497,7 @@ export default function Services() {
         open={!!refundFor}
         onOpenChange={(o) => { if (!o) setRefundFor(null); }}
         dayOpen={dayOpen}
-        onSaved={load}
+        onSaved={refrescar}
       />
 
       {/* F30: cola de entregas (F4). Elige la orden y abre el asistente con ella. */}
@@ -1209,7 +1514,7 @@ export default function Services() {
         open={!!cierreFor}
         onOpenChange={(o) => { if (!o) setCierreFor(null); }}
         dayOpen={dayOpen}
-        onSaved={load}
+        onSaved={refrescar}
         onPrint={(s) => setPrintFor(s)}
       />
 
@@ -1383,7 +1688,89 @@ function colorDot(color: string): string {
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
 // modelo (con sugerencias), monto, trabajos/fallas, blindaje colapsable y finanzas propias.
-function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false }: {
+/**
+ * F62 — «+ NUEVA CATEGORÍA» (pedido del dueño, 2026-09-21): «en las categorías o los types, donde
+ * sale Otro, cuando vas a hacer un registro poder registrar ahí mismo una nueva categoría con un +».
+ *
+ * Se escribe el nombre, se guarda en la base (settings `work_types_extra`) y queda ELEGIDA en la
+ * orden que se está registrando. Si lo escrito es un sinónimo de una categoría que YA existe (tabla
+ * de F58), se AVISA y se guarda con el nombre canónico: es exactamente el problema que F58 arregla,
+ * así que no lo volvemos a crear con otro nombre.
+ */
+function NuevaCategoriaChip({ onAgregar, onCancelar, existentes, locales = [], onQuitar }: {
+  onAgregar: (nombre: string) => Promise<string | null>;
+  onCancelar: () => void;
+  existentes: string[];
+  /** F62: las categorías que agregó ESTE local (se pueden quitar desde acá) */
+  locales?: string[];
+  onQuitar?: (nombre: string) => Promise<boolean>;
+}) {
+  const [abierto, setAbierto] = useState(false);
+  const [nombre, setNombre] = useState('');
+  const [guardando, setGuardando] = useState(false);
+  if (!abierto) {
+    return (
+      <button type="button" data-nueva-categoria
+        title="Agregar una categoría nueva de este local (queda guardada para las próximas órdenes)"
+        className="rounded-full border border-dashed border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+        onClick={() => setAbierto(true)}>
+        <Plus className="size-3 inline mr-1" /> Nueva categoría
+      </button>
+    );
+  }
+  const limpio = nombre.trim();
+  const sinonimo = aliasDeTrabajo(limpio);
+  const yaExiste = existentes.some(t => foldWork(t) === foldWork(limpio));
+  const puede = limpio.length > 0 && !yaExiste && !guardando;
+  const guardar = async () => {
+    if (!puede) return;
+    setGuardando(true);
+    const guardado = await onAgregar(limpio);
+    setGuardando(false);
+    if (guardado) { setNombre(''); setAbierto(false); }
+  };
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border p-2">
+      <Input autoFocus value={nombre} data-nueva-categoria-input
+        onChange={e => setNombre(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { e.preventDefault(); void guardar(); }
+          if (e.key === 'Escape') onCancelar();
+        }}
+        placeholder="Nombre de la categoría (ej: Cambio de tapa)" className="h-8 w-56 text-sm" />
+      <Button type="button" size="sm" className="h-8" disabled={!puede} onClick={() => void guardar()}>
+        {guardando ? 'Guardando…' : 'Agregar'}
+      </Button>
+      <Button type="button" size="sm" variant="ghost" className="h-8" onClick={onCancelar}>Cancelar</Button>
+      {yaExiste && <p className="w-full text-[11px] text-danger">Esa categoría ya está en la lista.</p>}
+      {!yaExiste && sinonimo && (
+        <p className="w-full text-[11px] text-amber-700" data-nueva-categoria-aviso>
+          «{limpio}» ya es un trabajo de la lista: se guardará como «{sinonimo}».
+        </p>
+      )}
+      {/* F62: las categorías que ya agregó ESTE local, con su ✕ para deshacer un error de tipeo.
+          Quitar una categoría NO toca las órdenes ya registradas (la etiqueta vive en cada orden). */}
+      {locales.length > 0 && (
+        <div className="w-full border-t border-border/60 pt-1.5">
+          <p className="text-[11px] text-muted-foreground">Categorías de este local (quitá las que no uses):</p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {locales.map(l => (
+              <span key={l} data-categoria-local={l}
+                className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px]">
+                {l}
+                {onQuitar && (
+                  <button type="button" data-quitar-categoria={l} title="Quitar esta categoría del local"
+                    className="text-muted-foreground hover:text-danger" onClick={() => void onQuitar(l)}>✕</button>
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false, tiposExtra = [], onNuevaCategoria, onQuitarCategoria }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
   methods: { id: number; name: string }[];
@@ -1395,6 +1782,12 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   onScreenValid?: (index: number, valid: boolean) => void;
   /** F31: al entrar al paso «Equipos» el foco cae en el modelo del primer equipo */
   autoFocus?: boolean;
+  /** F62: categorías de trabajo que agregó el local (van después de las canónicas) */
+  tiposExtra?: string[];
+  /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
+  onNuevaCategoria?: (nombre: string) => Promise<string | null>;
+  /** F62: quita una categoría del local */
+  onQuitarCategoria?: (nombre: string) => Promise<boolean>;
 }) {
   const [showChecklist, setShowChecklist] = useState(false);
 
@@ -1409,6 +1802,9 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   const { candidates, loading: compatLoading } = useCompatibleProducts(device.model);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   const isScreenJob = device.serviceTypes.includes('Cambio pantalla');
+  // F63: con un trabajo que NO es de pantalla, el bloque de compatibilidad se consulta igual (la
+  // consulta ya se hacía) pero se muestra plegado, para no llenar el formulario de un trabajo simple.
+  const [verCompat, setVerCompat] = useState(false);
 
   /**
    * F53 — la pantalla de REFERENCIA del modelo elegido en el padrón (`phones.default_product_id`).
@@ -1539,11 +1935,25 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
       </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">
-          Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
-        </label>
+        {/* F62: el rótulo y el botón «+ Nueva categoría» van juntos: el operario agrega la categoría
+            del local sin salir del formulario, y queda elegida en ESTE equipo. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium">
+            Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
+          </span>
+          {onNuevaCategoria && (
+            <NuevaCategoriaChip existentes={[...SERVICE_TYPES, ...tiposExtra]} locales={tiposExtra} onQuitar={onQuitarCategoria} onCancelar={() => {}}
+              onAgregar={async (nombre) => {
+                const guardado = await onNuevaCategoria(nombre);
+                if (guardado && !device.serviceTypes.includes(guardado)) {
+                  onChange({ serviceTypes: [...device.serviceTypes, guardado] });
+                }
+                return guardado;
+              }} />
+          )}
+        </div>
         <div className="flex flex-wrap gap-2">
-          {SERVICE_TYPES.map(t => {
+          {[...SERVICE_TYPES, ...tiposExtra].map(t => {
             const active = device.serviceTypes.includes(t);
             return (
               <button key={t} type="button"
@@ -1566,17 +1976,47 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           <p className="text-xs text-danger">Elige al menos un trabajo o falla</p>
         )}
         {device.serviceTypes.includes('Otro') && (
-          <Input value={device.otherFault} onChange={e => onChange({ otherFault: e.target.value })}
-            placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+          <>
+            <Input value={device.otherFault} onChange={e => onChange({ otherFault: e.target.value })}
+              placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+            {/* F58: si lo escrito es un sinónimo de un trabajo de la lista, se GUARDA el canónico.
+                Avisa (nunca bloquea): el operario ve con qué nombre va a quedar en los contadores. */}
+            {aliasDeTrabajo(device.otherFault) && (
+              <p className="text-[11px] text-muted-foreground" data-alias-aviso>
+                Se guardará como <span className="font-medium text-foreground">«{aliasDeTrabajo(device.otherFault)}»</span>: ya es un trabajo de la lista.
+              </p>
+            )}
+          </>
         )}
       </div>
 
-      {isScreenJob && (
+      {/* ── F63 — LA COMPATIBILIDAD DE PANTALLA DEL MODELO SIEMPRE SE PUEDE VER/ELEGIR ──────────
+          Pedido del dueño (2026-09-21): «dependiendo del modelo del equipo, si tiene compatibilidad
+          en pantalla para ese modelo tiene que dejarme seleccionar la compatibilidad si tiene».
+          Antes el bloque solo existía si el trabajo incluía «Cambio pantalla», así que con cualquier
+          otro trabajo la compatibilidad del modelo quedaba invisible aunque estuviera cargada.
+          Ahora: si el trabajo ES «Cambio pantalla» el bloque va ABIERTO y la pantalla es obligatoria
+          (gate de inventario intacto, `screenOk`); con cualquier otro trabajo aparece una línea con
+          la cantidad de repuestos compatibles y se abre a un toque — es informativo y NO descuenta
+          stock (el descuento sigue viviendo en el trabajo «Cambio pantalla»). */}
+      {!isScreenJob && !compatLoading && screenOptions.length > 0 && (
+        <button type="button" data-ver-compat
+          onClick={() => setVerCompat(v => !v)}
+          title="Ver los repuestos de pantalla compatibles con este modelo"
+          className="self-start rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
+          <Smartphone className="size-3 inline mr-1" />
+          Compatibilidad de pantalla: {screenOptions.length} repuesto{screenOptions.length === 1 ? '' : 's'}
+          {verCompat ? ' — ocultar' : ' — ver'}
+        </button>
+      )}
+
+      {(isScreenJob || verCompat) && (
         <ScreenSelect
           screenProductId={device.screenProductId}
           screenOptions={screenOptions}
           loading={compatLoading}
           confirmed={device.screenConfirm}
+          descuenta={isScreenJob}
           onChange={id => onChange({ screenProductId: id })}
           onConfirm={v => onChange({ screenConfirm: v })}
         />
@@ -1759,12 +2199,18 @@ function PolicyFields({ payIntent, onPayIntent, photoOut, onPhotoOut, showPhotoO
   );
 }
 
-function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
+function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra = [], onNuevaCategoria, onQuitarCategoria }: {
   service: Service | null;
   statuses: ServiceStatus[];
   dayOpen: boolean | null;
   onClose: () => void;
   onSaved: () => void;
+  /** F62: categorías de trabajo que agregó el local (van después de las canónicas) */
+  tiposExtra?: string[];
+  /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
+  onNuevaCategoria?: (nombre: string) => Promise<string | null>;
+  /** F62: quita una categoría del local */
+  onQuitarCategoria?: (nombre: string) => Promise<boolean>;
 }) {
   const [orderNum, setOrderNum] = useState('');
   const [client, setClient] = useState('');
@@ -2043,7 +2489,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         const checklistJson = JSON.stringify(checklist);
         // El texto de "Otro" se guarda como trabajo propio (badge propio en la orden)
         const typesArr = [...serviceTypes];
-        if (serviceTypes.includes('Otro') && otherFault.trim()) typesArr.push(otherFault.trim());
+        // F58: se guarda la etiqueta CANÓNICA si lo escrito es un sinónimo aprobado («bateria» →
+        // «Cambio batería»): el contador del taller no se parte en dos y el operario no tiene que
+        // acordarse de la ortografía exacta. No bloquea nada: normaliza y avisa.
+        if (serviceTypes.includes('Otro') && otherFault.trim()) agregarTrabajoDeOtro(typesArr, otherFault.trim());
         const serviceTypesJson = JSON.stringify(typesArr);
         await api.updateService(service.id, client, phone, model, fault, serviceType, serviceTypesJson, Math.max(0, amount - discount), payment, dateOut, status, observations, bankFeePercent, zelleReference, currency, clientCi, clientAddress, checklistJson, techName, techId, color, screenProductId, discount);
         // F32: las señales de política que se marcaron en el formulario (si no cambió nada, no
@@ -2052,7 +2501,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
-          if (d.serviceTypes.includes('Otro') && d.otherFault.trim()) typesArr.push(d.otherFault.trim());
+          // F58: misma normalización que en la edición (una sola regla).
+          if (d.serviceTypes.includes('Otro') && d.otherFault.trim()) agregarTrabajoDeOtro(typesArr, d.otherFault.trim());
           return {
             model: d.model,
             color: d.color,
@@ -2583,11 +3033,22 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">
-              Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
-            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium">
+                Trabajos / Fallas * <span className="font-normal text-muted-foreground">(elige todas las que apliquen)</span>
+              </span>
+              {/* F62: en EDICIÓN el «+» agrega la categoría al local y la deja elegida en la orden. */}
+              {onNuevaCategoria && (
+                <NuevaCategoriaChip existentes={[...SERVICE_TYPES, ...tiposExtra]} locales={tiposExtra} onQuitar={onQuitarCategoria} onCancelar={() => {}}
+                  onAgregar={async (nombre) => {
+                    const guardado = await onNuevaCategoria(nombre);
+                    if (guardado) setServiceTypes(prev => (prev.includes(guardado) ? prev : [...prev, guardado]));
+                    return guardado;
+                  }} />
+              )}
+            </div>
             <div className="flex flex-wrap gap-2">
-              {SERVICE_TYPES.map(t => {
+              {[...SERVICE_TYPES, ...tiposExtra].map(t => {
                 const active = serviceTypes.includes(t);
                 return (
                   <button key={t} type="button"
@@ -2608,8 +3069,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <p className="text-xs text-danger">Elige al menos un trabajo o falla</p>
             )}
             {serviceTypes.includes('Otro') && (
-              <Input value={otherFault} onChange={e => setOtherFault(e.target.value)}
-                placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+              <>
+                <Input value={otherFault} onChange={e => setOtherFault(e.target.value)}
+                  placeholder="Describe el trabajo (ej: Cambio de pin de carga, placa de carga, trampilla...)" />
+                {aliasDeTrabajo(otherFault) && (
+                  <p className="text-[11px] text-muted-foreground" data-alias-aviso>
+                    Se guardará como <span className="font-medium text-foreground">«{aliasDeTrabajo(otherFault)}»</span>: ya es un trabajo de la lista.
+                  </p>
+                )}
+              </>
             )}
           </div>
 
@@ -2637,7 +3105,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
               <div className="space-y-3">
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
-                    methods={methods} index={i} onScreenValid={onScreenValid} autoFocus={false} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */
+                    methods={methods} index={i} onScreenValid={onScreenValid} autoFocus={false}
+                    tiposExtra={tiposExtra} onNuevaCategoria={onNuevaCategoria} onQuitarCategoria={onQuitarCategoria} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */
                     onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
                 ))}
               </div>

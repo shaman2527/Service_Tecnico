@@ -1,4 +1,4 @@
-import { isFinalized, parseServiceTypes } from './utils';
+import { isFinalized, parseServiceTypes } from './utils.ts';
 import type { Service } from '../types';
 
 // Cola de entregas (F30): funciones PURAS para encontrar la orden y saber qué le falta.

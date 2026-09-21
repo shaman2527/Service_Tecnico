@@ -6,8 +6,8 @@
 //
 // Uso: node tools/node_modules/tsx/dist/cli.mjs tools/method_picker_test.ts
 
-import { METODOS_FAVORITOS, splitMethods, simboloSiAporta } from '../src/lib/payment-methods';
-import { methodCurrency, shortMethodLabel } from '../src/lib/utils';
+import { METODOS_FAVORITOS, splitMethods, simboloSiAporta } from '../src/lib/payment-methods.ts';
+import { methodCurrency, shortMethodLabel } from '../src/lib/utils.ts';
 
 let checks = 0;
 let failures = 0;

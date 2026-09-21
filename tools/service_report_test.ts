@@ -15,9 +15,13 @@
 import {
   ACTIVE_SENTINEL, NO_WORK_FILTER, WORK_COUNT_NOTE,
   foldWork, workKeys, matchesWorkFilter, workBucket, workCounts, serviceReport, scopeLabel, scopeProblem,
+  dayOf, inRange, rangeFor, sortByCount, topWorks, scopeSummary, summaryScopeLabel,
   type WorkRow,
 } from '../src/lib/service-report.ts';
 import { SERVICE_TYPES } from '../src/lib/utils.ts';
+// F58/F59: la tabla de equivalencias vive en su propio módulo (`foldWork` se importa de
+// service-report, que lo re-exporta: una sola regla de plegado).
+import { WORK_ALIASES } from '../src/lib/work-aliases.ts';
 
 let checks = 0;
 let failures = 0;
@@ -230,6 +234,191 @@ eq('un estado entregado + entrega es válido', scopeProblem({ status: 'Entregado
     serviceReport([{ status: 'Entregado', service_type: 'Cambio pantalla' }]).porTrabajo[0]?.total === 1);
   ok('un service_types roto (JSON inválido) cae al service_type y no rompe nada',
     serviceReport([{ status: 'Entregado', service_type: 'Cambio batería', service_types: '{roto' }]).porTrabajo[0]?.label === 'Cambio batería');
+}
+
+// ── 15) F56 — el RESUMEN DEL DÍA: recibidos hoy, entregados hoy y qué trabajos se hicieron ────
+// El pedido del dueño (2026-09-21): «quiero ver en mis servicios cuántas pantallas hice hoy, cuántos
+// equipos recibí hoy, cuántos entregué hoy… se clasifique bien». Estas pruebas fijan (a) que los DOS
+// EJES son independientes —recibido por `date_in`, entregado por `date_out`—, (b) que una fecha con
+// HORA cuenta en su día (el defecto que hacía desaparecer «lo de hoy» cuando se comparaba el texto
+// completo) y (c) que el desglose por trabajo sale de la MISMA función que el resto (`workCounts`).
+{
+  const HOY = '2026-09-21';
+  eq('rango «hoy»', rangeFor('hoy', HOY), { start: HOY, end: HOY });
+  eq('rango «7 días» incluye hoy y los 6 anteriores', rangeFor('7d', HOY), { start: '2026-09-15', end: HOY });
+  eq('rango «este mes» va del día 1 a hoy', rangeFor('mes', HOY), { start: '2026-09-01', end: HOY });
+  eq('sin fecha de hoy el rango es abierto (no inventa un día)', rangeFor('hoy', ''), { start: '', end: '' });
+
+  // El DÍA de un sello con hora: el defecto que rompía «hoy».
+  eq('saca el día de un sello con hora', dayOf('2026-09-21 09:30:00'), HOY);
+  ok('una fecha con hora SÍ es «de hoy» (con `date_in === hoy` esto era SIEMPRE falso)',
+    dayOf('2026-09-21 09:30:00') === HOY && '2026-09-21 09:30:00' !== HOY);
+  eq('sin fecha no hay día', dayOf(null), '');
+  ok('sin día no entra en ningún rango', inRange('', { start: HOY, end: HOY }) === false);
+  ok('un día anterior al rango queda afuera', inRange('2026-09-20', { start: HOY, end: HOY }) === false);
+  ok('un día posterior al rango queda afuera', inRange('2026-09-22', { start: HOY, end: HOY }) === false);
+  ok('el rango abierto acepta cualquier día con fecha', inRange('2020-01-01', { start: '', end: '' }) === true);
+
+  // Caso real del local: uno recibido HOY y todavía en taller, uno recibido AYER y entregado HOY
+  // (el caso que el dueño destaca: «recibido la semana pasada, entregado hoy»), uno viejo entregado,
+  // uno anulado sin trabajo y uno listo para entregar.
+  const base: WorkRow[] = [
+    row('Recibido', ['Cambio pantalla'], { date_in: `${HOY} 08:10:00`, amount: 20 }),
+    row('Entregado', ['Cambio pantalla', 'Cambio batería'], { date_in: '2026-09-20 15:00:00', date_out: `${HOY} 10:05:00`, amount: 30 }),
+    row('Entregado', ['Pin de Carga'], { date_in: '2026-08-22 11:00:00', date_out: '2026-09-01 11:00:00', amount: 10 }),
+    row('Devuelto', [], { date_in: `${HOY} 12:00:00`, amount: 5 }),
+    row('Por entregar', ['Revisión'], { date_in: '2026-09-16 09:00:00', amount: 15 }),
+  ];
+  const hoy = scopeSummary(base, rangeFor('hoy', HOY));
+  eq('recibidos HOY por fecha de RECIBO', hoy.recibidos, 2);
+  eq('entregados HOY por fecha de ENTREGA (el recibido ayer entra acá)', hoy.entregados, 1);
+  eq('importe de lo recibido hoy', hoy.montoRecibido, 25);
+  eq('importe de lo entregado hoy', hoy.montoEntregado, 30);
+  eq('en taller ahora (no depende del rango)', hoy.taller, 2);
+  eq('listos para entregar', hoy.listos, 1);
+  eq('anulados', hoy.anulados, 1);
+  eq('equipos del alcance', hoy.equipos, 5);
+  eq('el desglose de lo recibido cuenta por trabajo', hoy.porTrabajoRecibidos.map(c => [c.label, c.total]), [['Cambio pantalla', 1]]);
+  eq('y avisa el equipo sin trabajo anotado (para que los números cierren)', hoy.recibidosSinTrabajo, 1);
+  eq('el desglose de lo entregado va por CANTIDAD y por nombre si empatan',
+    hoy.porTrabajoEntregados.map(c => [c.label, c.total]), [['Cambio batería', 1], ['Cambio pantalla', 1]]);
+  ok('un equipo con 2 trabajos cuenta en cada trabajo del desglose (lo dice la nota de pantalla)',
+    hoy.porTrabajoEntregados.reduce((a, c) => a + c.total, 0) === 2 && hoy.entregados === 1);
+
+  // El rango NO cambia el estado del taller, y «todo el historial» cuenta las dos fechas que existan.
+  const todo = scopeSummary(base, { start: '', end: '' });
+  eq('todo el historial: recibidos = los que tienen fecha de recibo', todo.recibidos, 5);
+  eq('todo el historial: entregados = los que tienen fecha de entrega', todo.entregados, 2);
+  eq('todo el historial: el taller sigue siendo el mismo número', todo.taller, 2);
+
+  // Recibido y entregado el MISMO día: cuenta en los dos ejes (no es un error, es un servicio
+  // de mostrador) — y es la única forma de que «recibí 18 y entregué 11» pueda compartir un equipo.
+  const mismoDia = scopeSummary(
+    [row('Entregado', ['Cambio pantalla'], { date_in: `${HOY} 09:00:00`, date_out: `${HOY} 17:00:00`, amount: 12 })],
+    rangeFor('hoy', HOY),
+  );
+  eq('mismo día: cuenta como recibido', mismoDia.recibidos, 1);
+  eq('mismo día: y como entregado', mismoDia.entregados, 1);
+
+  // Destacados: los N trabajos más hechos (los que el cliente pregunta siempre).
+  const muchos = workCounts([
+    row('Entregado', ['Cambio pantalla']), row('Entregado', ['Cambio pantalla']),
+    row('Entregado', ['Cambio pantalla']), row('Entregado', ['Pin de Carga']),
+    row('Entregado', ['Pin de Carga']), row('Entregado', ['Revisión']),
+  ]);
+  eq('destacados: los 2 más hechos', topWorks(muchos, 2).map(c => [c.label, c.total]), [['Cambio pantalla', 3], ['Pin de Carga', 2]]);
+  eq('destacados: pedir más de los que hay no inventa nada', topWorks(muchos, 99).length, muchos.length);
+  eq('orden por cantidad, desempate por nombre',
+    sortByCount([{ key: 'b', label: 'Batería', total: 1, entregados: 1, taller: 0, anulados: 0, custom: true },
+      { key: 'a', label: 'Alarma', total: 1, entregados: 1, taller: 0, anulados: 0, custom: true }]).map(c => c.label),
+    ['Alarma', 'Batería']);
+
+  // La línea de alcance: sin esto el número no se puede defender frente al cliente.
+  const l1 = summaryScopeLabel(rangeFor('hoy', HOY), HOY);
+  ok('el alcance de hoy dice HOY y la fecha', /Hoy \(2026-09-21\)/.test(l1), l1);
+  ok('y dice los DOS ejes', /recibidos por fecha de recibo/.test(l1) && /entregados por fecha de entrega/.test(l1), l1);
+  const l2 = summaryScopeLabel({ start: '2026-09-01', end: '2026-09-20' }, HOY);
+  ok('un rango se dice entero', /Del 2026-09-01 al 2026-09-20/.test(l2), l2);
+  const l3 = summaryScopeLabel({ start: '', end: '' }, HOY);
+  ok('sin rango se dice que es todo el historial', /Todo el historial/.test(l3), l3);
+}
+
+// ── 16) F58 — las EQUIVALENCIAS aprobadas: las etiquetas escritas a mano se unen a su trabajo ──
+// El pedido del dueño (2026-09-21) es poder decir «cambié 30 baterías» sin sumar a mano: en su base
+// real «Cambio batería» (27) + «bateria» (2) + «REPARACIÓN DE BATTERIA» (1) son EL MISMO trabajo.
+// Y la regla que NO se negocia (decisión de F44): nada de parecidos automáticos — solo lo que está
+// en la tabla explícita se une.
+{
+  const lista = [
+    row('Entregado', ['Cambio batería']),
+    row('Entregado', ['bateria']),
+    row('Entregado', ['REPARACIÓN DE BATTERIA']),
+  ];
+  const c = workCounts(lista);
+  eq('las tres formas de «batería» son UN solo trabajo', c.length, 1);
+  eq('y el número es la suma, sin sumar a mano', c[0].total, 3);
+  eq('con la etiqueta canónica del formulario', c[0].label, 'Cambio batería');
+  eq('y ya no cuenta como etiqueta libre', c[0].custom, false);
+  // El invariante de F44 sobrevive: el número del trabajo == las filas que devuelve el filtro.
+  eq('el filtro devuelve EXACTAMENTE lo que el contador cuenta',
+    lista.filter(r => matchesWorkFilter(r, c[0].key)).length, c[0].total);
+  eq('la etiqueta vieja Y la nueva en el mismo equipo cuentan UNA vez',
+    workKeys(row('Entregado', ['bateria', 'Cambio batería'])).length, 1);
+
+  // NADA de parecidos: lo que no está aprobado sigue separado.
+  eq('una etiqueta PARECIDA no aprobada no se fusiona', workCounts([
+    row('Entregado', ['Cambio batería']), row('Entregado', ['bateria de iphone']),
+  ]).length, 2);
+  eq('el texto libre que no está en la tabla se conserva tal cual',
+    workCounts([row('Entregado', ['Cambio de pin de carga'])])[0].label, 'Cambio de pin de carga');
+  eq('«placa» + «sustitución de targeta logica» van a Reparación (placa)', workCounts([
+    row('Entregado', ['placa']), row('Entregado', ['sustitución de targeta logica']),
+  ]).map(x => [x.label, x.total]), [['Reparación (placa)', 2]]);
+
+  // La tabla tiene que seguir siendo VÁLIDA y revisable: cada alias apunta a un trabajo real.
+  const huerfanos = Object.entries(WORK_ALIASES).filter(([, destino]) => !SERVICE_TYPES.some(t => foldWork(t) === destino));
+  ok('todos los alias apuntan a un trabajo de la lista canónica', huerfanos.length === 0, JSON.stringify(huerfanos));
+  ok('la tabla de alias no está vacía (si se vacía, esto avisa)', Object.keys(WORK_ALIASES).length > 0);
+  ok('las equivalencias viven en su propio módulo revisable', Object.keys(WORK_ALIASES).every(k => foldWork(k) === k),
+    'las claves de la tabla van plegadas');
+}
+
+// ── 17) F59 — «garantía» y «VENTA» NO son trabajos hechos ─────────────────────────────────────
+{
+  const H = '2026-09-21';
+  const lista = [
+    row('Recibido', ['garantía'], { date_in: `${H} 09:00:00`, amount: 0 }),
+    row('Recibido', ['VENTA'], { date_in: `${H} 10:00:00`, amount: 20 }),
+    row('Recibido', ['Cambio pantalla'], { date_in: `${H} 11:00:00`, amount: 30 }),
+  ];
+  const r = scopeSummary(lista, rangeFor('hoy', H));
+  eq('los tres equipos se cuentan como recibidos', r.recibidos, 3);
+  eq('pero el desglose por trabajo no los cuenta como trabajos',
+    r.porTrabajoRecibidos.map(c => c.label), ['Cambio pantalla']);
+  eq('y se informan aparte (el operario ve por qué el desglose no suma el total)', r.recibidosNoTrabajo, 2);
+  eq('lo entregado se informa igual', scopeSummary([
+    row('Entregado', ['venta de pantalla'], { date_out: `${H} 12:00:00` }),
+  ], rangeFor('hoy', H)).entregadosNoTrabajo, 1);
+  // Un equipo que ADEMÁS tiene un trabajo real sigue contando como trabajo (no se pierde).
+  eq('un equipo con trabajo real + venta cuenta como trabajo y como no-trabajo',
+    scopeSummary([row('Recibido', ['Cambio pantalla', 'VENTA'], { date_in: `${H} 13:00:00` })], rangeFor('hoy', H))
+      .porTrabajoRecibidos.map(c => c.label), ['Cambio pantalla']);
+}
+
+// ── 18) F62 — las categorías que AGREGA EL LOCAL cuentan como del taller ──────────────────────
+// Pedido del dueño (2026-09-21): «en las categorías o los types, donde sale Otro, cuando vas a hacer
+// un registro poder registrar ahí mismo una nueva categoría con un +». Una categoría propia NO puede
+// caer en «Anotados a mano» (ese grupo es para el texto libre viejo): tiene que mostrarse y contarse
+// como las del taller, y su número tiene que seguir siendo el de las tarjetas al filtrar.
+{
+  const H = '2026-09-21';
+  const lista = [
+    row('Entregado', ['Cambio de tapa'], { date_in: `${H} 09:00:00` }),
+    row('Entregado', ['Cambio de tapa'], { date_in: `${H} 10:00:00` }),
+    row('Entregado', ['Cambio de lente'], { date_in: `${H} 11:00:00` }),
+    row('Entregado', ['etiqueta vieja del local'], { date_in: `${H} 12:00:00` }),
+  ];
+  const sin = workCounts(lista);
+  eq('sin las categorías del local, la nueva se trata como etiqueta libre', sin.find(c => c.label === 'Cambio de tapa')?.custom, true);
+
+  const con = workCounts(lista, ['Cambio de tapa', 'Cambio de lente']);
+  eq('con la categoría del local, cuenta como trabajo del taller', con.find(c => c.label === 'Cambio de tapa')?.custom, false);
+  eq('y su número es el real', con.find(c => c.label === 'Cambio de tapa')?.total, 2);
+  const orden = con.map(c => c.label);
+  ok('las categorías del local van ANTES de las libres', orden.indexOf('Cambio de tapa') < orden.indexOf('etiqueta vieja del local'), JSON.stringify(orden));
+  eq('el filtro devuelve exactamente lo que cuenta (invariante de F44)',
+    lista.filter(r => matchesWorkFilter(r, 'cambio de tapa')).length, 2);
+  // El resumen del día también las conoce (misma puerta que el selector). OJO: el desglose del
+  // resumen lista TODO lo que se hizo —incluido el texto libre viejo— porque es un dato real; lo que
+  // cambia con las categorías del local es que se cuentan y se ordenan como trabajos del taller.
+  const resumen = scopeSummary(lista, rangeFor('hoy', H), ['Cambio de tapa', 'Cambio de lente']);
+  eq('el resumen del día las lista con su número, ordenadas por cantidad',
+    resumen.porTrabajoRecibidos.map(c => [c.label, c.total]),
+    [['Cambio de tapa', 2], ['Cambio de lente', 1], ['etiqueta vieja del local', 1]]);
+  eq('y el reporte de la lista las marca del taller',
+    serviceReport(lista, ['Cambio de tapa']).porTrabajo.find(c => c.label === 'Cambio de tapa')?.custom, false);
+  // Sin categorías extra, todo sigue igual que antes (compatibilidad).
+  eq('sin extras el resultado es el de siempre', serviceReport(lista).porTrabajo.filter(c => !c.custom).length, 0);
 }
 
 console.log(`\nservice_report_test: ${checks - failures}/${checks} OK${failures ? ` — ${failures} FALLAN` : ''}`);

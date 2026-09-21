@@ -564,6 +564,36 @@ pub fn get_windows_printer_status(printer: String) -> Result<String, String> {
     crate::printer::get_windows_printer_status(&printer)
 }
 
+// --- F62: CATEGORÍAS DE TRABAJO QUE AGREGA EL LOCAL ---------------------------------------------
+// Pedido del dueño (2026-09-21): «en las categorías o los types, donde sale Otro, cuando vas a hacer
+// un registro poder registrar ahí mismo una nueva categoría con un +».
+//
+// Viven en `settings` (clave `work_types_extra`, un JSON array de nombres): son del LOCAL, no del
+// producto, y NO se tocan las órdenes viejas (la etiqueta viaja dentro de cada orden).
+// Dos comandos ANGOSTOS en vez de un `set_setting` genérico: el nombre se VALIDA en el backend (no
+// vacío, tope de largo, sin duplicados que solo cambien mayúsculas/acentos) y el JSON lo arma el
+// backend, nunca el texto crudo del frontend.
+
+/// Las categorías extra del local (JSON array; `[]` si nunca se agregó ninguna).
+#[tauri::command]
+pub fn get_work_types_extra(db: State<Database>) -> Result<String, String> {
+    db.get_work_types_extra().map_err(|e| e.to_string())
+}
+
+/// Agrega una categoría y devuelve la lista COMPLETA resultante (JSON array).
+/// No exige día abierto: es una preferencia del local, no plata.
+#[tauri::command]
+pub fn add_work_type_extra(db: State<Database>, name: String) -> Result<String, String> {
+    db.add_work_type_extra(&name).map_err(|e| e.to_string())
+}
+
+/// Quita una categoría del local (para deshacer un error de tipeo). NO toca las órdenes ya
+/// registradas: la etiqueta vive dentro de cada orden.
+#[tauri::command]
+pub fn remove_work_type_extra(db: State<Database>, name: String) -> Result<String, String> {
+    db.remove_work_type_extra(&name).map_err(|e| e.to_string())
+}
+
 // --- Updates (respaldo / rollback / salud — módulo updates.rs) ---
 
 /// Qué dejó realmente el respaldo previo. Devuelve las RUTAS (para poder decirle al usuario dónde

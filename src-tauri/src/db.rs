@@ -5100,6 +5100,85 @@ impl Database {
         Ok(())
     }
 
+    // --- F62: CATEGORÍAS DE TRABAJO QUE AGREGA EL LOCAL ---
+    // Pedido del dueño (2026-09-21): «en las categorías o los types, donde sale Otro, cuando vas a
+    // hacer un registro poder registrar ahí mismo una nueva categoría con un +».
+    //
+    // Viven en `settings` bajo la clave `work_types_extra`, como JSON array de nombres. Son del LOCAL
+    // (no del producto) y NO tocan las órdenes viejas: la etiqueta viaja dentro de cada orden, así que
+    // borrar o renombrar una categoría más adelante no rompe nada de lo ya registrado.
+
+    /// Plegado del nombre para comparar duplicados: minúsculas, sin acentos y solo alfanuméricos —
+    /// el MISMO criterio que el plegado del frontend, para que «Cambio de Tapa» y «cambio de tapa»
+    /// sean la misma categoría y no se creen dos.
+    fn plegar_trabajo(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .map(|c| match c {
+                'á' | 'à' | 'ä' | 'â' => 'a',
+                'é' | 'è' | 'ë' | 'ê' => 'e',
+                'í' | 'ì' | 'ï' | 'î' => 'i',
+                'ó' | 'ò' | 'ö' | 'ô' => 'o',
+                'ú' | 'ù' | 'ü' | 'û' => 'u',
+                'ñ' => 'n',
+                otro => otro,
+            })
+            .collect()
+    }
+
+    /// Las categorías extra del local (JSON array; `[]` si nunca se agregó ninguna o el valor guardado
+    /// no es un array válido — fail-closed: nunca se devuelve basura al frontend).
+    pub fn get_work_types_extra(&self) -> SqlResult<String> {
+        let crudo = self.get_setting("work_types_extra")?.unwrap_or_default();
+        let t = crudo.trim();
+        if t.is_empty() {
+            return Ok("[]".to_string());
+        }
+        match serde_json::from_str::<Vec<String>>(t) {
+            Ok(lista) => Ok(serde_json::to_string(&lista).unwrap_or_else(|_| "[]".to_string())),
+            Err(_) => Ok("[]".to_string()),
+        }
+    }
+
+    /// Agrega una categoría y devuelve la lista COMPLETA resultante (JSON array).
+    /// Validación acá (no en el frontend): no vacía, tope de 40 caracteres y sin duplicados que solo
+    /// cambien mayúsculas/acentos. No exige día abierto: es una preferencia del local, no plata.
+    pub fn add_work_type_extra(&self, name: &str) -> SqlResult<String> {
+        let nombre = name.trim();
+        if nombre.is_empty() {
+            return Err(day_shift_error("La categoría no puede estar vacía."));
+        }
+        if nombre.chars().count() > 40 {
+            return Err(day_shift_error("El nombre de la categoría es muy largo (máximo 40 caracteres)."));
+        }
+        let actual = self.get_work_types_extra()?;
+        let mut lista: Vec<String> = serde_json::from_str(&actual).unwrap_or_default();
+        let clave = Self::plegar_trabajo(nombre);
+        if lista.iter().any(|x| Self::plegar_trabajo(x) == clave) {
+            return Err(day_shift_error("Esa categoría ya existe."));
+        }
+        lista.push(nombre.to_string());
+        let json = serde_json::to_string(&lista)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_setting("work_types_extra", &json)?;
+        Ok(json)
+    }
+
+    /// Quita una categoría del local (comparando plegado) y devuelve la lista restante.
+    /// NO toca las órdenes: la etiqueta vive dentro de cada orden, así que lo ya registrado se lee
+    /// igual (y el trabajo sigue apareciendo en los contadores como etiqueta propia).
+    pub fn remove_work_type_extra(&self, name: &str) -> SqlResult<String> {
+        let clave = Self::plegar_trabajo(name);
+        let actual = self.get_work_types_extra()?;
+        let lista: Vec<String> = serde_json::from_str(&actual).unwrap_or_default();
+        let quedan: Vec<String> = lista.into_iter().filter(|x| Self::plegar_trabajo(x) != clave).collect();
+        let json = serde_json::to_string(&quedan)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_setting("work_types_extra", &json)?;
+        Ok(json)
+    }
+
     // --- Impresora térmica (puerto COM + impresora de Windows persisten en settings) ---
     pub fn get_printer_settings(&self) -> SqlResult<PrinterSettings> {
         let default = PrinterSettings {
@@ -9441,6 +9520,42 @@ discount_amount: 0.0,
     /// (a) Las tres señales de política: la hora la estampa el backend, se pueden limpiar,
     /// la clave sale de una whitelist y una orden inexistente se rechaza.
     #[test]
+    // F62 — las categorías de trabajo que agrega el local: se guardan, se validan y no se duplican.
+    #[test]
+    fn test_work_types_extra() {
+        let test_path = PathBuf::from("test_f62_work_types.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Arranca vacío y devuelve un JSON array válido (nunca basura).
+        assert_eq!(db.get_work_types_extra().unwrap(), "[]");
+
+        // Agregar: devuelve la lista completa y queda guardada.
+        let tras = db.add_work_type_extra("Cambio de tapa").unwrap();
+        assert_eq!(tras, "[\"Cambio de tapa\"]");
+        assert_eq!(db.get_work_types_extra().unwrap(), "[\"Cambio de tapa\"]");
+
+        // Se recorta el espacio de los bordes (el operario escribe apurado).
+        db.add_work_type_extra("  Cambio de lente  ").unwrap();
+        assert_eq!(db.get_work_types_extra().unwrap(), "[\"Cambio de tapa\",\"Cambio de lente\"]");
+
+        // Duplicado que solo cambia mayúsculas/acentos → rechazado con un mensaje claro.
+        let dup = db.add_work_type_extra("CAMBIO DE TAPA").unwrap_err().to_string();
+        assert!(dup.contains("ya existe"), "mensaje: {dup}");
+        // …y tampoco se creó una segunda.
+        assert_eq!(serde_json::from_str::<Vec<String>>(&db.get_work_types_extra().unwrap()).unwrap().len(), 2);
+
+        // Vacío y demasiado largo → rechazados.
+        assert!(db.add_work_type_extra("   ").unwrap_err().to_string().contains("vacía"));
+        assert!(db.add_work_type_extra(&"x".repeat(41)).unwrap_err().to_string().contains("muy largo"));
+
+        // Un valor corrupto en `settings` no rompe la pantalla: se devuelve [].
+        db.set_setting("work_types_extra", "{no es un array").unwrap();
+        assert_eq!(db.get_work_types_extra().unwrap(), "[]");
+
+        let _ = std::fs::remove_file(&test_path);
+    }
+
     fn test_service_policy_flags() {
         let test_path = PathBuf::from("test_f32_policy.db");
         let _ = std::fs::remove_file(&test_path);

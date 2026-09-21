@@ -558,6 +558,25 @@ export const api = {
     return tauriInvoke<void>('set_printer_settings', { port, baud, width, windowsPrinter, businessName, businessLine, logo });
   },
 
+  // F62: las categorías de trabajo que agrega el local (JSON array guardado en `settings`).
+  // Son del LOCAL, no del producto: viajan con la base y el cliente decide cuáles usa.
+  getWorkTypesExtra: () => {
+    if (!isTauri) return mock<string>('[]');
+    return tauriInvoke<string>('get_work_types_extra');
+  },
+
+  /** Agrega una categoría y devuelve la lista COMPLETA. El backend valida (vacío, largo, duplicados). */
+  addWorkTypeExtra: (name: string) => {
+    if (!isTauri) return mock<string>(JSON.stringify([name.trim()]));
+    return tauriInvoke<string>('add_work_type_extra', { name });
+  },
+
+  /** F62: quita una categoría del local (deshace un error de tipeo; NO toca las órdenes ya registradas). */
+  removeWorkTypeExtra: (name: string) => {
+    if (!isTauri) return mock<string>('[]');
+    return tauriInvoke<string>('remove_work_type_extra', { name });
+  },
+
   getWindowsPrinterStatus: (printer: string) =>
     tauriInvoke<string>('get_windows_printer_status', { printer }).catch(() =>
       mock<string>('')),

@@ -36,11 +36,17 @@ export function useCompatibleProducts(model: string, enabled = true) {
 
 // Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala (al entregar
 // se descuenta esa y solo esa) y las agotadas se marcan aparte con confirmación obligatoria.
-export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, onChange, onConfirm }: {
+export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, onChange, onConfirm }: {
   screenProductId: number | null;
   screenOptions: ScreenCandidate[];
   loading: boolean;
   confirmed: boolean;
+  /**
+   * F63: ¿este trabajo DESCUENTA inventario? `true` = el trabajo incluye «Cambio pantalla» (la
+   * elección es obligatoria y al entregar baja el stock). `false` = se está mirando la
+   * compatibilidad del modelo desde otro trabajo: es informativo y NO descuenta nada.
+   */
+  descuenta?: boolean;
   onChange: (id: number | null) => void;
   onConfirm: (v: boolean) => void;
 }) {
@@ -50,7 +56,11 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
     <div className="flex flex-col gap-2">
       <label className="text-sm font-medium flex items-center gap-1.5">
         <Smartphone className="size-3.5 text-muted-foreground" /> Pantalla a instalar
-        <span className="font-normal text-muted-foreground text-xs">(descuenta del inventario al entregar)</span>
+        <span className="font-normal text-muted-foreground text-xs">
+          {descuenta
+            ? '(descuenta del inventario al entregar)'
+            : '(solo de referencia: el stock baja al entregar un «Cambio pantalla»)'}
+        </span>
       </label>
 
       {loading && (
@@ -67,7 +77,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
       )}
 
       {!loading && screenOptions.length > 0 && (
-        <div className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
+        <div data-screen-options className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
           {screenOptions.map(o => {
             const { product: p, in_stock, match_quality } = o;
             const active = p.id === screenProductId;
@@ -76,6 +86,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
               <button
                 key={p.id}
                 type="button"
+                data-screen-option={p.id}
                 onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
                 className={cn(
                   'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
@@ -112,11 +123,27 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
         </div>
       )}
 
-      {!loading && screenOptions.length > 0 && screenProductId == null && (
-        <p className="text-xs text-amber-600">Elige la pantalla exacta que se va a instalar</p>
+      {/* F47: elegir SÍ es obligatorio (si no, el descuento caería en OTRO repuesto), pero una
+          pantalla AGOTADA no bloquea: se avisa en rojo más abajo y se puede entregar igual. Cuando
+          TODAS las opciones del modelo están agotadas, el aviso lo dice con todas las letras para que
+          nadie crea que tiene que buscar stock antes de poder guardar. */}
+      {descuenta && !loading && screenOptions.length > 0 && screenProductId == null && (
+        <p className="text-xs text-amber-600" data-elegir-pantalla>
+          {screenOptions.every(o => !o.in_stock)
+            ? 'Elegí la pantalla que se instaló: todas figuran AGOTADAS y eso NO bloquea — se entrega igual y el inventario queda como faltante.'
+            : 'Elige la pantalla exacta que se va a instalar'}
+        </p>
       )}
 
-      {!loading && chosen && !chosenOut && !isCrossBrand(chosen) && (
+      {/* F63: mirando la compatibilidad desde otro trabajo — se dice que es informativo, sin
+          prometer un descuento de stock que no va a pasar. */}
+      {!descuenta && !loading && screenOptions.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-compat-informativa>
+          Estos son los repuestos de pantalla compatibles con el modelo. El inventario solo baja si el trabajo incluye «Cambio pantalla».
+        </p>
+      )}
+
+      {descuenta && !loading && chosen && !chosenOut && !isCrossBrand(chosen) && (
         <p className="text-xs text-emerald-600 flex items-center gap-1">
           <CheckCircle2 className="size-3" /> Al entregar se descuenta del inventario (stock actual {chosen.product.stock})
         </p>
@@ -141,7 +168,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
         </Alert>
       )}
 
-      {!loading && chosenOut && (
+      {descuenta && !loading && chosenOut && (
         <Alert variant="destructive" className="py-2">
           <AlertTriangle className="size-4" />
           <AlertTitle className="text-xs">Esa pantalla no tiene stock</AlertTitle>

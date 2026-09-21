@@ -6,8 +6,8 @@
 // Uso:  node tools/node_modules/tsx/dist/cli.mjs tools/queue_test.ts
 //       (tsx resuelve los imports TS sin extensión del proyecto; `node` solo no puede)
 
-import { rankQueue, scoreQueueMatch, queueFlags, ACTIVE_QUEUE } from '../src/lib/queue';
-import { onlyScreens, screenOk, outOfStockChoice, autoScreen, isCrossBrand, warnsCrossBrand } from '../src/lib/screen-rules';
+import { rankQueue, scoreQueueMatch, queueFlags, ACTIVE_QUEUE } from '../src/lib/queue.ts';
+import { onlyScreens, screenOk, outOfStockChoice, autoScreen, isCrossBrand, warnsCrossBrand } from '../src/lib/screen-rules.ts';
 import type { Service, ScreenCandidate, Product } from '../src/types';
 
 let checks = 0;

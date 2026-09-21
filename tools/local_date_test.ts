@@ -8,7 +8,7 @@
 // Uso:  node tools/node_modules/tsx/dist/cli.mjs tools/local_date_test.ts
 //       (para ejercitar el desfase de UTC en cualquier PC:  $env:TZ="America/Caracas"  antes)
 
-import { localDate, addDays, monthStart } from '../src/lib/utils';
+import { localDate, addDays, monthStart } from '../src/lib/utils.ts';
 
 let checks = 0;
 let failures = 0;

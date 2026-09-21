@@ -66,12 +66,54 @@ const irA = async (nombre) => {
   await clickCenter(`[...document.querySelectorAll('aside button')].find(b => (b.getAttribute('title') || '').startsWith(${JSON.stringify(nombre)}))`);
   await sleep(1800);
 };
-const chipCount = (key) => evalx(`(() => { const b = document.querySelector('[data-work-chip="${key}"]'); return b ? Number(b.getAttribute('data-work-count')) : null; })()`);
-const chipText = (key) => evalx(`document.querySelector('[data-work-chip="${key}"]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
 const equiposKpi = async () => Number(await evalx(`document.querySelector('[data-kpi="equipos"]')?.innerText.trim() ?? 'NaN'`));
 const tarjetas = async () => Number(await evalx(`document.querySelectorAll('[data-tech-quick]').length`));
 const alcance = () => evalx(`document.querySelector('[data-report-scope]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
 const estadoFiltro = () => evalx(`document.querySelector('main [role="combobox"][aria-label="Filtrar por estado"]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
+
+// ── F57: el filtro de trabajos es UN SELECTOR con buscador (ya no hay chips sueltos) ───────────
+// Estos ayudantes hacen exactamente lo que hace el operario: abrir, buscar, leer y elegir. La clave
+// (`data-work-chip`) y su cantidad (`data-work-count`) siguen siendo los mismos enganches de F44.
+const abrirTrabajos = async () => {
+  await clickCenter(`document.querySelector('[data-work-picker]')`);
+  return waitFor(`!!document.querySelector('[data-work-menu]')`, 8000);
+};
+const cerrarTrabajos = async () => {
+  if (await evalx(`!!document.querySelector('[data-work-menu]')`)) { await keyNav('Escape', 'Escape', 27); await sleep(400); }
+};
+const buscarTrabajo = (texto) => evalx(`(() => {
+  const i = document.querySelector('[data-work-search]');
+  if (!i) return false;
+  const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  s.call(i, ${JSON.stringify(texto)});
+  i.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()`);
+/** Lee la cantidad de un trabajo (abre el selector, busca si hace falta y lo cierra). */
+const contarTrabajo = async (key, texto = '') => {
+  if (!(await abrirTrabajos())) return null;
+  if (texto) { await buscarTrabajo(texto); await sleep(500); }
+  const v = await evalx(`(() => { const b = document.querySelector('[data-work-chip="${key}"]'); return b ? Number(b.getAttribute('data-work-count')) : null; })()`);
+  await cerrarTrabajos();
+  return v;
+};
+const textoOpcion = async (key, texto = '') => {
+  if (!(await abrirTrabajos())) return null;
+  if (texto) { await buscarTrabajo(texto); await sleep(500); }
+  const t = await evalx(`document.querySelector('[data-work-chip="${key}"]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
+  await cerrarTrabajos();
+  return t;
+};
+/** Elige un trabajo (vacío = «todos») como lo hace el operario: abre, busca y toca. */
+const elegirTrabajo = async (key, texto = '') => {
+  if (!(await abrirTrabajos())) return false;
+  if (texto) { await buscarTrabajo(texto); await sleep(600); }
+  await clickCenter(`document.querySelector('[data-work-chip="${key}"]')`);
+  await sleep(1600);
+  return true;
+};
+const totalTrabajos = () => evalx(`Number(document.querySelector('[data-work-picker]')?.getAttribute('data-work-total') ?? -1)`);
+const filtroActivo = () => evalx(`document.querySelector('[data-work-picker]')?.getAttribute('data-work-filter') ?? null`);
 
 /**
  * Elige una opción del Select de estado SIN depender de las coordenadas del portal de Radix (el
@@ -219,20 +261,51 @@ try {
   await evalx(`(() => { const i = document.querySelector('input[placeholder*="Buscar" i]'); i.select(); return true; })()`);
   await keyNav('Backspace', 'Backspace', 8);
   await insertText(marca);
-  await waitFor(`Number(document.querySelector('[data-work-chip="todos"]')?.getAttribute('data-work-count') ?? -1) === 3`, 12000);
+  await waitFor(`Number(document.querySelector('[data-work-picker]')?.getAttribute('data-work-total') ?? -1) === 3`, 12000);
   await sleep(600);
 
   const kpi = await equiposKpi();
   const tarj = await tarjetas();
   check('F44: los 3 equipos están en la lista (KPI y tarjetas)', kpi === 3 && tarj === 3, `kpi=${kpi} tarjetas=${tarj}`);
 
-  const chipTodos = await chipCount('todos');
-  const chipPantalla = await chipCount('cambio pantalla');
-  const chipPin = await chipCount('cambio de pin de carga');
-  check('F44: el chip «Todos» cuenta los equipos de la lista', chipTodos === 3, `chip=${chipTodos}`);
-  check('F44: el chip «Cambio pantalla» cuenta la ENTREGADA y la que está en taller', chipPantalla === 2, `chip=${chipPantalla}`);
-  check('F44: el trabajo ESCRITO A MANO tiene su propio chip', chipPin === 1, `chip=${chipPin}`);
-  const textoPin = await chipText('cambio de pin de carga');
+  // ── 3.b) F57: NO HAY MURO DE CHIPS — la pantalla no dibuja un botón por etiqueta ─────────────
+  // El defecto que reportó el dueño: «no quiere tener todas las categorías, así se ve poco
+  // profesional». Con el selector cerrado no puede quedar NI UN chip suelto en la pantalla.
+  const chipsSueltos = await evalx(`document.querySelectorAll('[data-work-chip]').length`);
+  check('F57: con el selector cerrado NO hay chips de trabajos en la pantalla (el muro se fue)',
+    chipsSueltos === 0, `chips visibles=${chipsSueltos}`);
+  check('F57: el filtro de trabajos es UN solo control', (await evalx(`document.querySelectorAll('[data-work-picker]').length`)) === 1);
+
+  const totalTodos = await totalTrabajos();
+  check('F57: el selector dice el total de la lista sin abrirse', totalTodos === 3, `data-work-total=${totalTodos}`);
+  const abrio = await abrirTrabajos();
+  check('F57: el selector se abre a un toque y trae buscador', abrio && await evalx(`!!document.querySelector('[data-work-search]')`));
+  // OJO (revisión adversarial): `data-work-group` vive en el TÍTULO del grupo, no en las opciones, así
+  // que contar opciones «sin ese atributo» no comprobaba nada. Lo que sí prueba el agrupamiento es la
+  // POSICIÓN en el DOM: la etiqueta escrita a mano tiene que venir DESPUÉS del título de su grupo.
+  const ordenGrupo = await evalx(`(() => {
+    const g = document.querySelector('[data-work-group="libres"]');
+    const op = document.querySelector('[data-work-chip="cambio de pin de carga"]');
+    if (!g || !op) return null;
+    return (g.compareDocumentPosition(op) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  })()`);
+  const tituloLibres = await evalx(`document.querySelector('[data-work-group="libres"]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
+  check('F57: las etiquetas a mano van BAJO su propio grupo («Anotados a mano»), no entre los trabajos del taller',
+    ordenGrupo === true, `grupo=«${tituloLibres}» · la opción va después: ${ordenGrupo}`);
+  await buscarTrabajo('pin');
+  await sleep(600);
+  const opcionesPin = await evalx(`[...document.querySelectorAll('[data-work-chip]')].map(b => b.getAttribute('data-work-chip'))`);
+  check('F57: el buscador encuentra por texto («pin» → el trabajo escrito a mano)',
+    Array.isArray(opcionesPin) && opcionesPin.includes('cambio de pin de carga'), JSON.stringify(opcionesPin));
+  await cerrarTrabajos();
+
+  const chipTodos = await totalTrabajos();
+  const chipPantalla = await contarTrabajo('cambio pantalla', 'pantalla');
+  const chipPin = await contarTrabajo('cambio de pin de carga', 'pin');
+  check('F44: el «Todos» del selector cuenta los equipos de la lista', chipTodos === 3, `total=${chipTodos}`);
+  check('F44: «Cambio pantalla» cuenta la ENTREGADA y la que está en taller', chipPantalla === 2, `cantidad=${chipPantalla}`);
+  check('F44: el trabajo ESCRITO A MANO tiene su propia entrada en el selector', chipPin === 1, `cantidad=${chipPin}`);
+  const textoPin = await textoOpcion('cambio de pin de carga', 'pin');
   check('F44: ...y se muestra tal como se anotó', /pin de carga/i.test(String(textoPin)), String(textoPin));
 
   const lineaAlcance = await alcance();
@@ -242,26 +315,27 @@ try {
   check('F44: ...y avisa que un equipo con varios trabajos cuenta en cada uno',
     /varios trabajos/.test(String(lineaAlcance)), String(lineaAlcance));
 
-  // ── 4) EL INVARIANTE: el chip dice exactamente lo que aparece al hacerle clic ────────────────
-  await clickCenter(`document.querySelector('[data-work-chip="cambio pantalla"]')`);
-  await sleep(1500);
+  // ── 4) EL INVARIANTE: el trabajo elegido dice exactamente lo que aparece al filtrar ───────────
+  await elegirTrabajo('cambio pantalla', 'pantalla');
   const tarjPantalla = await tarjetas();
   const kpiPantalla = await equiposKpi();
-  check('F44: al filtrar por «Cambio pantalla» aparecen EXACTAMENTE las 2 tarjetas del chip',
-    tarjPantalla === 2 && kpiPantalla === 2, `tarjetas=${tarjPantalla} kpi=${kpiPantalla} chip=2`);
-  await clickCenter(`document.querySelector('[data-work-chip="cambio pantalla"]')`);  // desfiltrar
-  await sleep(1200);
+  check('F44: al filtrar por «Cambio pantalla» aparecen EXACTAMENTE las 2 tarjetas del selector',
+    tarjPantalla === 2 && kpiPantalla === 2, `tarjetas=${tarjPantalla} kpi=${kpiPantalla} selector=2`);
+  check('F57: el selector muestra cuál quedó elegido (sin abrirlo)',
+    (await filtroActivo()) === 'cambio pantalla' && /Cambio pantalla/i.test(String(await evalx(`document.querySelector('[data-work-picker]')?.innerText ?? ''`))),
+    `data-work-filter=${await filtroActivo()}`);
+  await elegirTrabajo('todos');  // desfiltrar
 
   // ── 5) «ENTREGADOS HOY»: la respuesta a «¿cuántas pantallas hice hoy?» ───────────────────────
-  // Acá está el defecto que reportó el dueño: con el eje de ENTREGA, los chips de trabajos contaban
-  // solo las órdenes activas → el de pantalla desaparecía aunque la pantalla ya estuviera entregada.
+  // Acá está el defecto que reportó el dueño: con el eje de ENTREGA, los contadores de trabajos
+  // contaban solo las órdenes activas → el de pantalla desaparecía aunque ya estuviera entregada.
   await clickCenter(`document.querySelector('[data-action="entregados-hoy"]')`);
   await sleep(2200);
-  const chipPantallaHoy = await chipCount('cambio pantalla');
-  const chipPinHoy = await chipCount('cambio de pin de carga');
-  check('F44: con «Entregados hoy» el chip de pantalla sigue contando (1 entregada hoy)',
-    chipPantallaHoy === 1, `chip=${chipPantallaHoy}`);
-  check('F44: y el trabajo escrito a mano también (1 entregado hoy)', chipPinHoy === 1, `chip=${chipPinHoy}`);
+  const chipPantallaHoy = await contarTrabajo('cambio pantalla', 'pantalla');
+  const chipPinHoy = await contarTrabajo('cambio de pin de carga', 'pin');
+  check('F44: con «Entregados hoy» la pantalla sigue contando (1 entregada hoy)',
+    chipPantallaHoy === 1, `cantidad=${chipPantallaHoy}`);
+  check('F44: y el trabajo escrito a mano también (1 entregado hoy)', chipPinHoy === 1, `cantidad=${chipPinHoy}`);
   const alcanceEntrega = await alcance();
   check('F44: el alcance ahora dice fecha de ENTREGA y el día',
     /fecha de ENTREGA/.test(String(alcanceEntrega)) && String(alcanceEntrega).includes(hoy), String(alcanceEntrega));
@@ -292,8 +366,11 @@ try {
   check('F44: ...borra las fechas y la búsqueda, y el botón desaparece',
     (trasLimpiar?.fechas ?? ['x']).every(v => v === '') && trasLimpiar?.busqueda === '' && trasLimpiar?.limpiarVisible === false,
     JSON.stringify(trasLimpiar));
-  const volvioTodo = await waitFor(`Number(document.querySelector('[data-work-chip="todos"]')?.getAttribute('data-work-count') ?? -1) > 3`, 12000);
-  check('F44: ...y vuelve a contar todo el historial', volvioTodo, `chip Todos=${await chipCount('todos')}`);
+  const volvioTodo = await waitFor(`Number(document.querySelector('[data-work-picker]')?.getAttribute('data-work-total') ?? -1) > 3`, 12000);
+  check('F44: ...y vuelve a contar todo el historial', volvioTodo, `total del selector=${await totalTrabajos()}`);
+  check('F57: «Limpiar filtros» también saca el trabajo elegido',
+    (await filtroActivo()) === '' && /Todos los trabajos/.test(String(await evalx(`document.querySelector('[data-work-picker]')?.innerText ?? ''`))),
+    `data-work-filter=${await filtroActivo()} · dice=«${await evalx(`document.querySelector('[data-work-picker]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`)}»`);
 } catch (e) {
   check('la verificación corrió hasta el final sin excepciones', false, String(e?.message ?? e));
   if (await evalx(`!!document.querySelector('[role="dialog"]')`).catch(() => false)) { await keyNav('Escape', 'Escape', 27).catch(() => {}); }

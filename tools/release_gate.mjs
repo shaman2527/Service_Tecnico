@@ -244,6 +244,25 @@ if (exagerados.length) {
   pass('sin archivos desbocados en el repo', `ningún archivo de más de ${LIMITE_AVISO / MB} MB`);
 }
 
+// ── F64: el cliente decide QUÉ NO usar (todo viaja EN USO) ─────────────────────────────────────
+// Pedido del dueño (2026-09-21): «que cuando se cargue al release esté todo en SÍ, y el cliente con
+// el check decida qué dejar o no». Una plantilla que viaja con modelos o repuestos APAGADOS hace
+// que el buscador del servicio los esconda sin que nadie lo haya decidido: es un bloqueante.
+try {
+  const prod = db.prepare('SELECT COUNT(*) t, SUM(CASE WHEN COALESCE(in_use,1) = 0 THEN 1 ELSE 0 END) apagados FROM products').get();
+  const tel = db.prepare('SELECT COUNT(*) t, SUM(CASE WHEN COALESCE(in_use,1) = 0 THEN 1 ELSE 0 END) apagados FROM phones').get();
+  const apagados = (prod.apagados ?? 0) + (tel.apagados ?? 0);
+  if (apagados > 0) {
+    fail('la plantilla trae productos o modelos APAGADOS («en uso» = No)',
+      `${prod.apagados ?? 0} de ${prod.t} productos y ${tel.apagados ?? 0} de ${tel.t} modelos — el release viaja TODO en uso y el cliente destilda lo que no usa (regenerá con: node tools/make_release_template.mjs)`);
+  } else {
+    pass('todo viaja EN USO (productos y modelos): el cliente destilda lo que no usa',
+      `${prod.t} productos · ${tel.t} modelos`);
+  }
+} catch (e) {
+  warn('no se pudo comprobar el «en uso» de productos/modelos', String(e?.message ?? e));
+}
+
 db.close();
 
 // ─────────────────────────────────── salida ───────────────────────────────────

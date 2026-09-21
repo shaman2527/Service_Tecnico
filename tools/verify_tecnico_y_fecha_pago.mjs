@@ -483,18 +483,26 @@ try {
       await sleep(1800);
       const filasCierre = await invoke('get_services', { search: `Saldo Bs ${marca}`, status: '', startDate: '', endDate: '', dateField: 'in' });
       const idCierre = filasCierre?.find(r => (r.order_num ?? '') === refSaldo)?.id;
-      // La tarjeta de ESA orden (el botón del técnico la identifica) y su botón «Cerrar»
-      await clickCenter(`(() => {
-        const t = document.querySelector('[data-tech-quick="${idCierre}"]');
-        let card = t;
-        for (let i = 0; i < 6 && card && !card.querySelector('button'); i++) card = card.parentElement;
-        for (let i = 0; i < 8 && card; i++) {
-          const b = [...card.querySelectorAll('button')].find(x => /^Cerrar$/.test(x.innerText.trim()));
-          if (b) return b;
-          card = card.parentElement;
-        }
-        return null;
+      // F49 cambió el camino: el botón «Cerrar» YA NO está en la tarjeta (en su lugar va «Descuento»
+      // — lo dice el propio código). El asistente de cierre se abre desde la barra de arriba
+      // («Cerrar entrega», o F4) y la orden se elige en la cola, que es lo que hace el operario.
+      // Este bloque seguía buscando «Cerrar» DENTRO de la tarjeta y moría con «click target no
+      // encontrado»: era un test desactualizado desde F49, no un defecto del producto (medido 2026-09-21).
+      if (!idCierre) throw new Error(`No se encontró en la lista la orden de saldo (orden ${refSaldo}) para abrir el asistente de cierre.`);
+      await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Cerrar entrega$/.test(b.innerText.trim())) ?? null`);
+      await sleep(1600);
+      const cajaCola = `document.querySelector('[role="dialog"] input[placeholder^="Cédula"]')`;
+      await clickCenter(`${cajaCola} ?? null`);
+      await evalx(`(() => {
+        const i = ${cajaCola};
+        if (!i) return false;
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        s.call(i, ${JSON.stringify(String(refSaldo))});
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
       })()`);
+      await sleep(1800);
+      await clickCenter(`document.querySelector('[role="dialog"] [cmdk-item][data-value="${idCierre}"]') || document.querySelector('[role="dialog"] [data-value="${idCierre}"]')`);
       await sleep(1800);
       const etiquetaMonto = await evalx(`(() => {
         const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => /^Monto/.test(x.innerText.trim()));

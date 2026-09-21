@@ -139,7 +139,10 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
       )}
 
       {open && (
-        <div className="absolute top-full z-50 mt-1 w-full max-h-72 overflow-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
+        // F60: el desplegable puede ser MÁS ANCHO que el campo (en el formulario el campo ocupa media
+        // pantalla): sin ese mínimo, los nombres largos («Redmi Note 11 Pro+ 5G») no entraban en un
+        // renglón y había que adivinar cuál se estaba eligiendo.
+        <div className="absolute top-full z-50 mt-1 w-full min-w-[22rem] max-w-[92vw] max-h-72 overflow-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
           {/* F50 — el interruptor que trae TODO el catálogo. Va arriba, es un botón (no un check de
               Radix) y deja claro qué está mostrando. */}
           <div className="flex items-center justify-between gap-2 border-b border-border/60 px-2 pb-1.5 pt-1">
@@ -183,37 +186,44 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
           )}
           {optionsForQuery && options.map(o => {
             const active = normPhoneModel(o.label) === normPhoneModel(query);
+            const marca = o.brand && !normPhoneModel(o.label).startsWith(normPhoneModel(o.brand)) ? o.brand : '';
+            const repuestos = o.screens > 0
+              ? `${o.screens} pantalla${o.screens === 1 ? '' : 's'}${o.stock > 0 ? ` · ${o.stock} u.` : ''}`
+              : '';
+            const sinUsar = (o.in_use ?? 0) !== 1;
             return (
               <button
                 key={o.key}
                 type="button"
                 data-model-option={o.label}
                 data-model-in-use={o.in_use ?? 0}
+                title={sinUsar
+                  ? 'Este modelo está apagado en el padrón (marcalo como «lo uso» en Inventario → Modelos)'
+                  : o.label}
                 onClick={() => pick(o.label, o)}
                 className={cn(
-                  'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent',
+                  'flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-accent',
                   active && 'bg-accent',
                 )}
               >
-                <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
-                <span className="truncate">{o.label}</span>
-                {/* la marca aparte: el nombre comercial del padrón no la repite («110» = Nokia 110) */}
-                {o.brand && !normPhoneModel(o.label).startsWith(normPhoneModel(o.brand)) && (
-                  <span className="shrink-0 text-[11px] text-muted-foreground">{o.brand}</span>
-                )}
-                {/* F50: el CÓDIGO del modelo (el local lo dicta) y si está en uso */}
-                {o.code && <span className="shrink-0 text-[10px] font-mono text-muted-foreground">{o.code}</span>}
-                {(o.in_use ?? 0) !== 1 && (
-                  <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] text-muted-foreground" title="Este modelo está apagado en el padrón (marcalo como «lo uso» en Inventario → Modelos)">
-                    sin usar
+                <Check className={cn('mt-0.5 size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
+                {/* F60 — EL NOMBRE DEL EQUIPO VA PRIMERO Y SE LEE (pedido del dueño, 2026-09-21:
+                    «cuando vas a colocar un modelo en servicio no se diferencia bien qué modelo vas a
+                    elegir, no se puede leer; debería salir el nombre del equipo»). Antes el nombre
+                    compartía UN renglón con la marca, el código, «sin usar» y el stock, y encima con
+                    `truncate`: en el campo del formulario (media pantalla de ancho) el nombre quedaba
+                    cortado. Ahora el nombre tiene su propio renglón, en negrita y SIN truncar (si hace
+                    falta, envuelve), y todo lo demás baja a una segunda línea en letra chica. */}
+                <span className="min-w-0 flex-1">
+                  <span data-model-label className="block text-sm font-semibold leading-snug text-foreground">
+                    {o.label}
                   </span>
-                )}
-                {o.screens > 0 && (
-                  <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                    {o.screens} pantalla{o.screens === 1 ? '' : 's'}
-                    {o.stock > 0 && ` · ${o.stock} u.`}
-                  </span>
-                )}
+                  {[marca, o.code, repuestos, sinUsar ? 'sin usar' : ''].filter(Boolean).length > 0 && (
+                    <span data-model-detail className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                      {[marca, o.code, repuestos, sinUsar ? 'sin usar' : ''].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                </span>
               </button>
             );
           })}

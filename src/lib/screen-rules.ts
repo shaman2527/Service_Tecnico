@@ -1,5 +1,5 @@
-import { normPhoneModel } from './utils';
-import type { PhoneModelEntry } from './utils';
+import { normPhoneModel } from './utils.ts';
+import type { PhoneModelEntry } from './utils.ts';
 import type { ScreenCandidate } from '../types';
 
 // Reglas PURAS de la pantalla que se instala (sin React): las comparten el formulario de

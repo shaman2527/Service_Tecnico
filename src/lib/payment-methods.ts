@@ -1,7 +1,7 @@
 // Métodos de pago: qué se muestra SIEMPRE y qué queda detrás del desplegable (F31).
 // Puro (sin React) para poder probarlo sin navegador en `tools/method_picker_test.ts`.
 
-import { currencySymbol, methodCurrency } from './utils';
+import { currencySymbol, methodCurrency } from './utils.ts';
 
 export interface PaymentMethod {
   id: number;

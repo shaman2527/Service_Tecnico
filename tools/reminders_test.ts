@@ -68,27 +68,30 @@ const svc = (patch: Record<string, unknown> = {}) => ({
     deliverReminders(reabierta).map(r => r.key).join(','), 'photo_out');
 }
 
-// ── 2. Al GUARDAR la recepción (1 equipo): foto de entrada + pregunta del pago ──────────────
+// ── 2. Al GUARDAR la recepción (1 equipo): el PAGO primero, la foto al final ─────────────────
+// Pedido del dueño (2026-09-21): «primero es el mensaje de cómo va a pagar, de último es la foto».
+// El orden importa de verdad: los avisos se muestran de a UNO (cola de `PolicyModal`), así que la
+// lista es literalmente el orden en que el operario los ve.
 {
   const list = receiveReminders(svc(), { devices: 1, status: STATUS_RECIBIDO });
   eq('guardar · dos avisos', list.length, 2);
-  eq('guardar · entrada primero (prioridad)', tones(list), 'entrada,pago');
-  eq('guardar · acciones de la foto', list[0].actions.map(a => a.id), ['foto_tomada', 'ok']);
-  eq('guardar · acciones del pago', list[1].actions.map(a => a.id), ['pago_ahora', 'pago_al_retirar']);
-  ok('guardar · el aviso de la foto dice que es política de la empresa', /política de la empresa/i.test(list[0].message));
+  eq('guardar · el PAGO se ve primero y la foto al final', tones(list), 'pago,entrada');
+  eq('guardar · acciones del pago', list[0].actions.map(a => a.id), ['pago_ahora', 'pago_al_retirar']);
+  eq('guardar · acciones de la foto', list[1].actions.map(a => a.id), ['foto_tomada', 'ok']);
+  ok('guardar · el aviso de la foto dice que es política de la empresa', /política de la empresa/i.test(list[1].message));
   ok('guardar · ningún aviso exige nada (solo acciones)', list.every(r => r.actions.length > 0));
   // «PAGAR», no «cancelar»: en esta app «Cancelado» significa PAGADO, así que «¿va a cancelar?»
   // se leía como «¿va a anular la orden?».
-  ok('guardar · la pregunta del pago dice PAGAR (no «cancelar»)', /pagar ahora o al retirar/i.test(list[1].message));
-  ok('guardar · la pregunta del pago NO dice «cancelar»', !/cancelar/i.test(list[1].message));
+  ok('guardar · la pregunta del pago dice PAGAR (no «cancelar»)', /pagar ahora o al retirar/i.test(list[0].message));
+  ok('guardar · la pregunta del pago NO dice «cancelar»', !/cancelar/i.test(list[0].message));
 }
 
 // ── 3. Multi-equipo: el texto lo dice ───────────────────────────────────────────────────────
 {
   const list = receiveReminders(svc(), { devices: 3, status: STATUS_RECIBIDO });
-  ok('3 equipos · el aviso habla de los 3 teléfonos', /los 3 teléfonos/.test(list[0].message));
+  ok('3 equipos · el aviso habla de los 3 teléfonos', /los 3 teléfonos/.test(list[1].message));
   const uno = receiveReminders(svc(), { devices: 1, status: STATUS_RECIBIDO });
-  ok('1 equipo · el aviso habla en singular', /al teléfono/.test(uno[0].message));
+  ok('1 equipo · el aviso habla en singular', /al teléfono/.test(uno[1].message));
 }
 
 // ── 4. Ya resuelto → NO insiste ─────────────────────────────────────────────────────────────
@@ -108,10 +111,10 @@ const svc = (patch: Record<string, unknown> = {}) => ({
 // ── 5. Al IMPRIMIR: el eje es la foto de SALIDA cuando el equipo ya salió ───────────────────
 {
   const enTaller = printReminders(svc({ status: STATUS_RECIBIDO }));
-  eq('imprimir en taller · entrada + pago (sin salida)', tones(enTaller), 'entrada,pago');
+  eq('imprimir en taller · pago primero, foto de entrada al final', tones(enTaller), 'pago,entrada');
 
   const entregado = printReminders(svc({ status: STATUS_ENTREGADO, date_out: '2026-09-17', photo_in_at: '2026-09-10 09:00' }));
-  eq('imprimir entregado · salida + pago', tones(entregado), 'salida,pago');
+  eq('imprimir entregado · pago + salida', tones(entregado), 'pago,salida');
   ok('imprimir entregado · el aviso de salida nombra la política de la empresa',
     /política de la empresa/i.test(entregado.find(r => r.tone === 'salida')!.message));
 
@@ -130,10 +133,11 @@ const svc = (patch: Record<string, unknown> = {}) => ({
 // ── 6. Al ENTREGAR: la foto de salida es la política ────────────────────────────────────────
 {
   const list = deliverReminders(svc({ date_out: '2026-09-17' }));
-  eq('entregar · salida + pago (hay saldo y no se preguntó)', tones(list), 'salida,pago');
-  eq('entregar · acciones de la foto de salida', list[0].actions.map(a => a.id), ['foto_tomada', 'ok']);
+  eq('entregar · pago primero, foto de salida al final', tones(list), 'pago,salida');
+  eq('entregar · acciones del pago', list[0].actions.map(a => a.id), ['pago_ahora', 'pago_al_retirar']);
+  eq('entregar · acciones de la foto de salida', list[1].actions.map(a => a.id), ['foto_tomada', 'ok']);
   ok('entregar · el texto es el que pidió el usuario',
-    list[0].message === '¿Le tomaste la foto al teléfono al entregarlo? Es política de la empresa.');
+    list.find(r => r.tone === 'salida')!.message === '¿Le tomaste la foto al teléfono al entregarlo? Es política de la empresa.');
 
   const pagada = deliverReminders(svc({ date_out: '2026-09-17', amount: 30, paid_amount: 30 }));
   eq('entregar ya pagada · solo la foto de salida', tones(pagada), 'salida');
@@ -147,13 +151,13 @@ const svc = (patch: Record<string, unknown> = {}) => ({
   eq('tope declarado', MAX_REMINDERS, 2);
   const conEscenarioCargado = printReminders(svc({ status: STATUS_ENTREGADO, date_out: '2026-09-17' }));
   ok('nunca más de 2 avisos', conEscenarioCargado.length <= MAX_REMINDERS);
-  eq('se descarta el de menor prioridad (queda salida + pago)', tones(conEscenarioCargado), 'salida,pago');
+  eq('se descarta el de menor prioridad (queda salida + pago)', tones(conEscenarioCargado), 'pago,salida');
 }
 
 // ── 8. Crear la orden directamente ENTREGADO: no se pide foto de entrada ────────────────────
 {
   const list = receiveReminders(svc(), { devices: 1, status: STATUS_ENTREGADO });
-  eq('nace entregado · salida + pago (no entrada)', tones(list), 'salida,pago');
+  eq('nace entregado · pago + salida (no entrada)', tones(list), 'pago,salida');
 }
 
 // ── 9. Etiqueta del acuerdo (tarjetas, panel y talón) ──────────────────────────────────────

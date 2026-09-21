@@ -14,8 +14,10 @@
 //   2. **No insisten por lo ya resuelto**: si la foto ya se confirmó o el pago ya se preguntó, la
 //      función devuelve menos avisos (o ninguno). Nunca dos veces por lo mismo.
 //
-// Máximo 2 avisos por acción (prioridad: entrada > salida > pago > política) para no inundar la
-// pantalla del mostrador.
+// Máximo 2 avisos por acción (el tope lo decide `PRIORIDAD`: entrada > salida > pago > política) y
+// **el aviso del PAGO se ve PRIMERO**, con la foto al final (lo decide `ORDEN_EN_PANTALLA`: pedido
+// del dueño, 2026-09-21) — para no inundar la pantalla del mostrador y para preguntar el pago
+// mientras el cliente todavía está enfrente.
 
 import type { Service } from '../types';
 // Extensión explícita: este módulo lo cargan TAMBIÉN las pruebas puras con Node
@@ -43,13 +45,26 @@ export interface Reminder {
 /** Tope de avisos simultáneos por acción (el resto se descarta, no se acumula). */
 export const MAX_REMINDERS = 2;
 
-// Prioridad de los avisos cuando hay más de los que se pueden mostrar: primero la foto que el
-// operario puede tomar EN ESE MOMENTO (entrada al recibir, salida al entregar/imprimir la
-// entrega), después la pregunta del pago y por último el aviso informativo.
+// DOS COSAS DISTINTAS, y conviene no mezclarlas:
+//
+// 1) `PRIORIDAD` decide **cuáles sobreviven** cuando hay más avisos que el tope: primero la foto que
+//    el operario puede tomar EN ESE MOMENTO (entrada al recibir, salida al entregar/imprimir), después
+//    la pregunta del pago y por último el aviso informativo.
 const PRIORIDAD: Record<ReminderTone, number> = { entrada: 0, salida: 1, pago: 2, politica: 3 };
 
+// 2) `ORDEN_EN_PANTALLA` decide **en qué orden se ven** los que sobrevivieron. Pedido del dueño
+//    (2026-09-21): «primero es el mensaje de cómo va a pagar, de último es la foto». El mostrador
+//    pregunta el pago con el cliente enfrente —si se va sin que se lo pregunten, la caja no cuadra—
+//    y la foto se puede tomar un segundo después, cuando ya está anotado el acuerdo.
+//    Los avisos se muestran de a UNO (cola de `PolicyModal`), así que este orden es literalmente el
+//    orden en que el operario los ve.
+const ORDEN_EN_PANTALLA: Record<ReminderTone, number> = { pago: 0, entrada: 1, salida: 2, politica: 3 };
+
 function limitar(list: Reminder[]): Reminder[] {
-  return [...list].sort((a, b) => PRIORIDAD[a.tone] - PRIORIDAD[b.tone]).slice(0, MAX_REMINDERS);
+  return [...list]
+    .sort((a, b) => PRIORIDAD[a.tone] - PRIORIDAD[b.tone])      // quiénes quedan (tope)
+    .slice(0, MAX_REMINDERS)
+    .sort((a, b) => ORDEN_EN_PANTALLA[a.tone] - ORDEN_EN_PANTALLA[b.tone]); // en qué orden se ven
 }
 
 export interface ReceiveContext {

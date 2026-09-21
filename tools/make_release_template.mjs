@@ -133,6 +133,18 @@ if (negativos.length) {
   db.prepare('UPDATE products SET stock = 0 WHERE stock < 0').run();
   reporte.negativos_a_cero = negativos.map(n => `${n.name} (${n.stock})`);
 }
+// 5.b) F64 — TODO EN USO (pedido del dueño, 2026-09-21): «todos los modelos y todos los productos
+//      visibles con sus compatibilidades… que cuando se cargue al release esté todo en SÍ, y el
+//      cliente con el check decida qué dejar o no lo que va a usar». Antes la plantilla heredaba lo
+//      APAGADO del local (los productos sin stock quedaban con «en uso» = No, y los modelos traían
+//      el seed de «lo uso» del taller), así que una instalación nueva arrancaba con modelos y
+//      repuestos que NO aparecían en el buscador del servicio. El cliente destilda lo que no usa
+//      (Inventario → Modelos y la ficha del producto), no al revés.
+const prodApagados = db.prepare('SELECT COUNT(*) c FROM products WHERE COALESCE(in_use,1) = 0').get().c;
+const telApagados = db.prepare('SELECT COUNT(*) c FROM phones WHERE COALESCE(in_use,1) = 0').get().c;
+db.prepare('UPDATE products SET in_use = 1').run();
+db.prepare('UPDATE phones SET in_use = 1').run();
+reporte.todo_en_uso = { productos_encendidos: prodApagados, modelos_encendidos: telApagados };
 db.exec('COMMIT');
 
 // 6) Autocontenida: sin WAL pendiente y sin huecos.
