@@ -18,7 +18,7 @@ import type { Ficha, FichaField } from '@/lib/ficha';
 // Compacto por defecto (dos líneas) y sin nada flotando encima del formulario: el operario ve
 // siempre lo que está escribiendo.
 
-function DatoFila({ field, onGo }: { field: FichaField; onGo?: (step: number) => void }) {
+function DatoFila({ field, onGo }: { field: FichaField; onGo?: (step: number, key?: string) => void }) {
   const puedeIr = !!onGo && field.step >= 0;
   const contenido = (
     <div className="flex items-start gap-2 py-1" data-ficha-field={field.key} data-state={field.state}>
@@ -45,7 +45,7 @@ function DatoFila({ field, onGo }: { field: FichaField; onGo?: (step: number) =>
   if (!puedeIr) return contenido;
   return (
     <button type="button" className="-mx-1 w-full rounded px-1 text-left transition-colors hover:bg-accent/60"
-      title={`Ir a corregir «${field.label}»`} onClick={() => onGo!(field.step)}>
+      title={`Ir a corregir «${field.label}»`} onClick={() => onGo!(field.step, field.key)}>
       {contenido}
     </button>
   );
@@ -55,7 +55,11 @@ export function FichaIngreso({ ficha, nextProcess, onGoToStep, className }: {
   ficha: Ficha;
   /** el paso siguiente del PROCESO (por estado): «En reparación — asigná el técnico…» */
   nextProcess?: { status: string; why: string } | null;
-  onGoToStep?: (step: number) => void;
+  /**
+   * F48: lleva al PASO del dato y le dice CUÁL es, para que el formulario además le dé el foco
+   * (el «te va llevando de la mano» del dueño: un toque y el cursor queda en el campo que falta).
+   */
+  onGoToStep?: (step: number, key?: string) => void;
   className?: string;
 }) {
   const [abierta, setAbierta] = useState(false);
@@ -107,7 +111,7 @@ export function FichaIngreso({ ficha, nextProcess, onGoToStep, className }: {
           {onGoToStep && next.step >= 0 && (
             <Button type="button" size="sm" variant="outline" className="h-6 shrink-0 px-2 text-[11px]"
               aria-label={`Ir al campo ${next.label}`}
-              onClick={() => onGoToStep(next.step)}>
+              onClick={() => onGoToStep(next.step, next.key)}>
               Ir al campo <ArrowRight className="size-3" />
             </Button>
           )}
@@ -116,6 +120,24 @@ export function FichaIngreso({ ficha, nextProcess, onGoToStep, className }: {
         <p className="text-[11px] text-success" data-ficha-next="completa">
           Todos los datos de la ficha están cargados — podés guardar (Ctrl+Enter).
         </p>
+      )}
+
+      {/* F48 — OBSERVACIONES que NO bloquean (el dueño: «hacerle una observación pero no
+          bloqueante: falta número de tlf del cliente»). Van en ámbar, se pueden tocar para ir al
+          campo, y NO impiden guardar: la orden se registra igual. */}
+      {ficha.notas.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-ficha-notas>
+          <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700">
+            <AlertTriangle className="size-3" /> Para completar (no bloquea):
+          </span>
+          {ficha.notas.map(n => (
+            <button key={n.key} type="button" data-ficha-nota={n.key} title={n.guia}
+              onClick={() => onGoToStep?.(n.step, n.key)}
+              className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-500/20">
+              {n.texto}
+            </button>
+          ))}
+        </div>
       )}
 
       {/* Ficha completa (a un clic): los 4 bloques del mostrador, dato por dato */}

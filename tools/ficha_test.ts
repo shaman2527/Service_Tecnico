@@ -80,7 +80,8 @@ const claves = (f: ReturnType<typeof buildFicha>) => f.groups.flatMap(g => g.fie
   eq('sin nombre → Pendiente (y como falta)', [byKey('client').value, byKey('client').state], [null, 'falta']);
   eq('sin cédula → falta (cliente nuevo)', byKey('client_ci').state, 'falta');
   eq('sin teléfono → pendiente (no bloquea)', byKey('phone').state, 'pendiente');
-  eq('sin color → pendiente', byKey('color').state, 'pendiente');
+  // F48 (pedido del dueño): el COLOR pasó a ser obligatorio (antes era opcional y «pendiente»).
+  eq('sin color → falta (es obligatorio desde F48)', byKey('color').state, 'falta');
   eq('sin foto de entrada → pendiente (la política nunca bloquea)', byKey('photo_in').state, 'pendiente');
   eq('sin pago acordado → pendiente', byKey('pay_intent').state, 'pendiente');
   eq('con valor → ok', byKey('model').value, 'Samsung Galaxy A15');
@@ -102,14 +103,38 @@ const claves = (f: ReturnType<typeof buildFicha>) => f.groups.flatMap(g => g.fie
   eq('sin trabajos pide el tipo de servicio', sinTrabajos.next?.key, 'service_types');
 }
 
-// ── 4. Si no falta nada que bloquee, pide lo recomendado (sin bloquear) ─────────────────────
+// ── 4. Si no falta nada que bloquee, pide lo recomendado; el COLOR ya es obligatorio (F48) ───
 {
   const f = buildFicha(base({ color: '', technician: '', photoInAt: null }));
-  // Se pide por ORDEN: primero lo del equipo (el color), después el técnico y por último la política.
-  eq('pide el primer dato recomendado (color del equipo)', f.next?.key, 'color');
-  eq('y la ficha ya se puede guardar', f.completa, true);
-  const sinColor = buildFicha(base({ color: '', technician: '', photoInAt: null }));
-  eq('el técnico no se adelanta al color', sinColor.groups.flatMap(g => g.fields).find(x => x.key === 'color')?.state, 'pendiente');
+  // F48: el color BLOQUEA, así que es el dato que el asistente pide ahora (y con eso el operario
+  // llega al selector en un toque: «si no selecciono un color lo salte de una vez a que elija uno»).
+  eq('pide el color del equipo (dato obligatorio desde F48)', f.next?.key, 'color');
+  eq('y la ficha NO está lista para guardar sin color', f.completa, false);
+  eq('el técnico sigue sin bloquear (F45)', f.groups.flatMap(g => g.fields).find(x => x.key === 'technician')?.state, 'pendiente');
+  // Con el color puesto, el asistente pasa a lo no bloqueante (el técnico, la foto…).
+  const conColor = buildFicha(base({ technician: '', photoInAt: null }));
+  eq('con el color elegido la ficha ya se puede guardar', conColor.completa, true);
+  ok('y entonces pide lo recomendado (técnico o política)',
+    ['technician', 'photo_in', 'pay_intent'].includes(String(conColor.next?.key)), String(conColor.next?.key));
+}
+
+// ── 4b. F48 — OBSERVACIONES que NO bloquean (el teléfono del cliente, el técnico) ────────────
+{
+  const sinTelefono = buildFicha(base({ phone: '' }));
+  eq('el teléfono que falta queda como OBSERVACIÓN con el texto del dueño',
+    sinTelefono.notas.find(n => n.key === 'phone')?.texto, 'Falta el número de teléfono del cliente');
+  ok('...y la observación explica para qué sirve', /avis/i.test(sinTelefono.notas.find(n => n.key === 'phone')?.guia ?? ''));
+  ok('...y NO entra en los datos que bloquean (la orden se guarda igual)',
+    sinTelefono.completa === true && sinTelefono.groups.flatMap(g => g.fields).find(x => x.key === 'phone')?.state === 'pendiente');
+  eq('...y lleva al paso del teléfono (paso 0)', sinTelefono.notas.find(n => n.key === 'phone')?.step, 0);
+
+  const sinTecnico = buildFicha(base({ technician: '' }));
+  eq('el técnico sin asignar también es una observación (no bloquea)',
+    sinTecnico.notas.find(n => n.key === 'technician')?.texto, 'El equipo todavía no tiene técnico asignado');
+  ok('...y avisa que se puede asignar después', /despu[eé]s/i.test(sinTecnico.notas.find(n => n.key === 'technician')?.guia ?? ''));
+
+  const completa = buildFicha(base());
+  eq('con el teléfono y el técnico cargados no hay observaciones', completa.notas, []);
 }
 
 // ── 5. Cédula de cliente YA registrado: no bloquea ──────────────────────────────────────────

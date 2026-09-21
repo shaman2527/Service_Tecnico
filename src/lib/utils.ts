@@ -4,6 +4,7 @@ import type { Product, Service, ServicePayment } from '../types'
 // F38: la regla del saldo por moneda (una sola implementación: la que usan la tarjeta, el diálogo de
 // abono y ahora también el recibo — el papel no puede decir algo distinto de la pantalla).
 import { orderBalance } from './order-balance.ts'
+import { grossOf } from './discount.ts'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -416,14 +417,18 @@ export function buildServiceReceiptParts(
   if (logo) for (const l of kv('SERVICIO', logo, w)) lines.push(l);
   lines.push(dash);
 
-  // Finanzas — minimalista y entendible: TOTAL / PAGADO / FALTA.
+  // Finanzas — minimalista y entendible: (PRECIO / DESCUENTO) TOTAL / PAGADO / FALTA.
   // "PAGADO" = el cliente saldó la orden; "CANCELADO"/"DEVUELTO" SOLO cuando la
   // orden se anuló (estado final) — nunca "CANCELADO" por estar pagada.
-  // El descuento es INTERNO (se decide en el mostrador, no se imprime
-  // PRECIO/DESCUENTO): TOTAL = lo que el cliente debe pagar.
+  // F49 (pedido del dueño: «que se refleje en la factura que se le aplicó un descuento de X monto»):
+  // cuando la orden tiene descuento se imprime el PRECIO de lista y el DESCUENTO, y el TOTAL sigue
+  // siendo lo que el cliente debe pagar (`amount`, ya descontado). Sin descuento la factura NO cambia:
+  // sigue saliendo un solo TOTAL (nada de líneas en $0.00 que confundan al cliente).
   // PAGADO y METODO salen de los PAGOS REALES registrados (no del form).
   const finalized = isFinalized(service.status);
   const totalUsd = service.amount ?? 0;
+  const descuentoUsd = service.discount_amount ?? 0;
+  const precioLista = grossOf(totalUsd, descuentoUsd);
   const abonadoUsd = payments.reduce((a, p) => a + (p.amount > 0 && p.currency !== 'VES' ? p.amount : 0), 0);
   const abonadoBs = payments.reduce((a, p) => a + (p.amount > 0 && p.currency === 'VES' ? p.amount : 0), 0);
   const abonado = service.paid_amount ?? 0;
@@ -437,6 +442,10 @@ export function buildServiceReceiptParts(
   const pagoEnBs = balRecibo.cobroEn === 'VES';
   const saldoBs = balRecibo.bs;
   const pagoLabel = payments.length > 0 ? fmtMix(abonadoUsd, abonadoBs) : (abonado > 0.005 ? fmtUsd(abonado) : '');
+  if (descuentoUsd > 0.005) {
+    for (const l of kv('PRECIO', fmtUsd(precioLista), w)) lines.push(l);
+    for (const l of kv('DESCUENTO', `-${fmtUsd(descuentoUsd)}`, w)) lines.push(l);
+  }
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) lines.push(l);
   if (finalized) {
     lines.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
@@ -500,7 +509,13 @@ export function buildServiceReceiptParts(
     stub.push('BLINDAJE (AL RECIBIR):');
     for (const row of checklistRows(marked, w)) stub.push(row);
   }
-  // Pago para la salida del equipo: TOTAL / PAGADO / FALTA — mismo bloque minimalista.
+  // Pago para la salida del equipo: (PRECIO / DESCUENTO) TOTAL / PAGADO / FALTA — mismo bloque
+  // minimalista. El talón también muestra el descuento (F49): es la copia del taller y ahí queda
+  // escrito qué se le descontó al cliente.
+  if (descuentoUsd > 0.005) {
+    for (const l of kv('PRECIO', fmtUsd(precioLista), w)) stub.push(l);
+    for (const l of kv('DESCUENTO', `-${fmtUsd(descuentoUsd)}`, w)) stub.push(l);
+  }
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) stub.push(l);
   if (finalized) {
     stub.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));

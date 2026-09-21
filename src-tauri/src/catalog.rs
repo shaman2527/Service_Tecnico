@@ -402,10 +402,93 @@ pub fn is_junk_entry(cleaned: &str) -> bool {
         || cleaned.chars().filter(|c| c.is_alphanumeric()).all(|c| c.is_ascii_digit())
 }
 
+/// F53 — ¿El token identifica un MODELO por sí solo? (`A70`, `A705`, `MS350`, `13C`, `A035F`).
+/// Se exige que tenga letras **y** dígitos: los números puros (`11`, `2019`) son medidas o años y
+/// las palabras sueltas (`Note`, `Pro`, `Plus`) describen la familia — ninguno es un teléfono por sí
+/// solo. Los sufijos de RED (`4G`, `5G`, `LTE`) quedan afuera a propósito: «A06 4G» es UN teléfono.
+fn is_model_code(token: &str) -> bool {
+    let t = norm(token);
+    if t.is_empty() || matches!(t.as_str(), "2g" | "3g" | "4g" | "5g" | "lte") {
+        return false;
+    }
+    t.chars().any(|c| c.is_ascii_alphabetic()) && t.chars().any(|c| c.is_ascii_digit())
+}
+
+/// F53 — PARTIR EL TEXTO DE UN MODELO EN TELÉFONOS REALES (pedido del dueño): «cuando yo busco un
+/// Samsung A70 me sale también A705 — ya este viene siendo otro modelo de tlf; debería salir una sola
+/// por modelo». `A70 A705` son DOS teléfonos (y la pantalla queda compatible con los DOS, porque el
+/// repuesto conserva las dos entradas en su compatibilidad).
+///
+/// Regla (medida contra las 181 entradas reales del catálogo): se parte cuando el modelo tiene **2 o
+/// más CÓDIGOS** (`is_model_code`). Cada parte es
+/// **[palabras de familia que van adelante] + [código] + [palabras que lo siguen hasta el próximo
+/// código]**: así `Galaxy A70 A705` → `Galaxy A70` + `Galaxy A705`, `K20 Plus MP260` → `K20 Plus` +
+/// `MP260` y `A13 4G A135 M13` → `A13 4G` + `A135` + `M13`. Con un solo código (o ninguno) el texto
+/// se devuelve tal cual: `Redmi Note 11`, `Galaxy S21 Ultra 5G` y `Alcatel 5001 1V 2019` NO se
+/// parten (un solo código cada uno).
+pub fn split_model_models(model: &str) -> Vec<String> {
+    let texto = model.trim();
+    if texto.is_empty() {
+        return vec![String::new()];
+    }
+    let tokens: Vec<&str> = texto.split_whitespace().collect();
+    let codes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| is_model_code(t))
+        .map(|(i, _)| i)
+        .collect();
+    if codes.len() < 2 {
+        return vec![texto.to_string()];
+    }
+    let prefijo = &tokens[..codes[0]];
+    let mut parts: Vec<String> = Vec::new();
+    for (n, &ci) in codes.iter().enumerate() {
+        let end = codes.get(n + 1).copied().unwrap_or(tokens.len());
+        let mut palabras: Vec<&str> = prefijo.to_vec();
+        palabras.extend(&tokens[ci..end]);
+        let parte = palabras.join(" ");
+        // nada de partes vacías ni repetidas (el mismo código dos veces en la misma entrada)
+        if parte.trim().is_empty() || parts.iter().any(|p| norm(p) == norm(&parte)) {
+            continue;
+        }
+        parts.push(parte);
+    }
+    if parts.len() < 2 {
+        return vec![texto.to_string()];
+    }
+    parts
+}
+
+/// F53 — la VARIANTE que nombra un TEXTO de compatibilidad («Samsung A25 5G OLED C» → `OLED`).
+/// Se busca como **palabra completa** (con `contains('am')` «Camon» daría AM, que es un error real
+/// que apareció al medir el catálogo) y se le agrega el marco cuando el texto lo dice
+/// («OLED Con Marco»), para que el valor guardado sea del mismo vocabulario que ya usa el catálogo.
+pub fn variant_in_text(text: &str) -> Option<String> {
+    let t = norm(text);
+    let palabras: Vec<&str> = t.split(' ').collect();
+    let material = ["incell", "incel", "oled", "am", "original", "tactil"]
+        .into_iter()
+        .find(|m| palabras.contains(m))?;
+    let mut v = match material {
+        "incell" | "incel" => "INCELL",
+        "oled" => "OLED",
+        "am" => "AM",
+        "original" => "ORIGINAL",
+        _ => "TÁCTIL",
+    }
+    .to_string();
+    if t.contains("con marco") {
+        v.push_str(" Con Marco");
+    } else if t.contains("sin marco") {
+        v.push_str(" Sin Marco");
+    }
+    Some(v)
+}
+
 /// Cuenta de palabras de la MARCA real al inicio del texto (no de la línea:
 /// "Redmi Note 11" NO se toca, "Infinix Spark 10C" sí).
-fn leading_brand_words(text: &str) -> Option<usize> {
-    let r = rules();
+fn leading_brand_words(text: &str) -> Option<usize> {    let r = rules();
     let n = norm(text);
     r.brand_aliases
         .iter()
@@ -462,7 +545,28 @@ pub fn compat_phones_raw(compatibility: &str, product_brand: &str) -> Vec<(Strin
         if is_junk_entry(&phone.model) {
             continue;
         }
-        out.push((cleaned, phone));
+        // F53 — el texto puede nombrar VARIOS teléfonos («Samsung A70 A705»): cada uno entra al padrón
+        // con su nombre limpio y su alias, así el mostrador busca «A70» y le sale A70 (y A705 por su
+        // lado), no una ficha confusa con los dos. El repuesto queda compatible con los DOS.
+        let partes = split_model_models(&phone.model);
+        if partes.len() <= 1 {
+            out.push((cleaned, phone));
+            continue;
+        }
+        for parte in partes {
+            let p = Phone {
+                brand: phone.brand.clone(),
+                model: parte.clone(),
+                label: format!("{} {}", phone.brand, parte).trim().to_string(),
+            };
+            if is_junk_entry(&p.model) {
+                continue;
+            }
+            // el alias es el nombre de ESTE teléfono (con su marca): la entrada combinada ya no se
+            // guarda como alias de ninguno de los dos (era justamente lo que confundía la búsqueda).
+            let alias = format!("{} {}", p.brand, p.model).trim().to_string();
+            out.push((alias, p));
+        }
     }
     out
 }
@@ -938,7 +1042,9 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
     for (_id, brand, compat) in &products {
         let raw_count = parse_compat(compat).len() as i64;
         let phones = compat_phones_raw(compat, brand);
-        dropped_entries += raw_count - phones.len() as i64;
+        // con el split de F53 una entrada puede dar MÁS de un teléfono: lo «descartado» nunca es
+        // negativo (una entrada que se parte no perdió nada, se repartió).
+        dropped_entries += (raw_count - phones.len() as i64).max(0);
         for (raw, phone) in phones {
             let (line, display) = real_name(&phone.brand, &phone.model);
             // En Apple el "iPhone" ES parte del nombre del teléfono (no una línea
@@ -1113,6 +1219,56 @@ pub struct DedupeReport {
 pub fn variant_key(variant: &str) -> String {
     let v = norm(variant);
     if v == "incell" { String::new() } else { v }
+}
+
+// ── F52 — FAMILIA y ORDEN de las variantes (lo que el local pide en el mostrador) ──────────────
+// Las variantes REALES del catálogo son: INCELL · OLED · «OLED Con Marco» · ORIGINAL ·
+// «INCELL Con Marco» · «ORIGINAL Con Marco» · «ORIGINAL Sin Marco» (y 613 fichas SIN variante).
+// Para el mostrador la FAMILIA es el MATERIAL (la primera palabra): quien pide «una OLED» acepta
+// OLED y OLED Con Marco. El marco es un detalle que se dice aparte y NO cambia la familia.
+// Es la única regla que usan el filtro del inventario y los chips de la vista «Por modelo»
+// (en SQL se escribe la MISMA regla — primera palabra del texto recortado — y hay un test que
+// compara las dos implementaciones contra los valores reales del catálogo).
+
+/// Familia de una variante: `OLED Con Marco` → `oled` · `AM (OLED)` → `am` · `""` → `""`.
+pub fn variant_family(variant: &str) -> String {
+    norm(variant).split(' ').next().unwrap_or("").to_string()
+}
+
+/// ¿La variante pertenece a la familia pedida? (`family` vacía = las que NO tienen familia).
+pub fn variant_is_family(variant: &str, family: &str) -> bool {
+    variant_family(variant) == norm(family)
+}
+
+/// Orden canónico para MOSTRAR: sin variante primero (es la ficha genérica), después el material
+/// en el orden en que lo pide el taller (INCELL → OLED → AM → ORIGINAL), y dentro de cada familia el
+/// repuesto PELADO antes que sus variantes de marco («OLED» → «OLED Con Marco» → «OLED Sin Marco»).
+pub fn variant_rank(variant: &str) -> (u8, u8, String) {
+    let v = norm(variant);
+    let pos = match variant_family(&v).as_str() {
+        "" => 0,
+        "incell" => 1,
+        "oled" => 2,
+        "am" => 3,
+        "original" => 4,
+        "service" => 5,
+        _ => 6,
+    };
+    let marco = if v.contains("con marco") {
+        1
+    } else if v.contains("sin marco") {
+        2
+    } else {
+        0
+    };
+    (pos, marco, v)
+}
+
+/// Ordena (y deduplica dejando vacíos afuera) una lista de variantes para mostrarla.
+pub fn sort_variants(list: &mut Vec<String>) {
+    list.retain(|v| !v.trim().is_empty());
+    list.sort_by_key(|v| variant_rank(v));
+    list.dedup();
 }
 
 /// Deja UN solo producto por modelo duplicado (misma marca+modelo+variante) y
@@ -2133,6 +2289,70 @@ mod tests {
             r.phone_labels_raw, r.stock_units
         );
         assert!(r.products > 0);
+    }
+
+    #[test]
+    fn test_split_model_models_real_cases() {
+        // Casos REALES medidos en el catálogo del local (181 entradas con 2+ códigos).
+        for (texto, esperado) in [
+            // el caso del dueño: son DOS teléfonos, y la pantalla sirve para los dos
+            ("A70 A705", vec!["A70", "A705"]),
+            ("Galaxy A70 A705", vec!["Galaxy A70", "Galaxy A705"]),
+            ("A16 4G A165", vec!["A16 4G", "A165"]),
+            ("A13 4G A135 M13", vec!["A13 4G", "A135", "M13"]),
+            ("K20 Plus MP260", vec!["K20 Plus", "MP260"]),
+            ("A01 Core A013", vec!["A01 Core", "A013"]),
+            ("Y6 2019 8A", vec!["Y6 2019", "8A"]),
+            // NO se parten: un solo código (o ninguno)
+            ("Redmi Note 11", vec!["Redmi Note 11"]),
+            ("A06 4G", vec!["A06 4G"]),
+            ("Galaxy S21 Ultra 5G", vec!["Galaxy S21 Ultra 5G"]),
+            ("Redmi 9A", vec!["Redmi 9A"]),
+            ("iPhone 11 Pro Max", vec!["iPhone 11 Pro Max"]),
+            ("5001 1V 2019", vec!["5001 1V 2019"]),
+            ("", vec![""]),
+        ] {
+            assert_eq!(split_model_models(texto), esperado.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "el split de «{texto}» no es el esperado");
+        }
+    }
+
+    #[test]
+    fn test_split_model_models_match_node_fixtures() {
+        // F55 — PARIDAD node <-> Rust del split de modelos: `tools/audit_inventory.mjs` tiene su
+        // PROPIA copia de la regla (no puede llamar a Rust) y su reporte se compara con el padrón de
+        // la app; si las dos copias se separan, el reporte cuenta teléfonos que la app no tiene y la
+        // comparación deja de significar algo. Se regenera con:
+        //   node tools/audit_inventory.mjs --gen-split-fixtures
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/split_fixtures.json");
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("falta {} ({e}). Genera con: node tools/audit_inventory.mjs --gen-split-fixtures", path.display())
+        });
+        let cases: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+        assert!(!cases.is_empty(), "el archivo de fixtures está vacío");
+        for case in &cases {
+            let model = case["model"].as_str().unwrap_or("");
+            let esperado: Vec<String> = case["expect"].as_array().unwrap().iter()
+                .map(|v| v.as_str().unwrap().to_string()).collect();
+            assert_eq!(split_model_models(model), esperado, "el split de «{model}» no coincide con node");
+        }
+    }
+
+    #[test]
+    fn test_compat_phones_parte_la_entrada_compuesta() {
+        // «Samsung A70 A705» = DOS teléfonos, cada uno con su clave y su alias propio
+        let phones = compat_phones_raw(r#"["Samsung A70 A705"]"#, "Samsung");
+        let nombres: Vec<String> = phones.iter().map(|(_, p)| p.label.clone()).collect();
+        assert_eq!(nombres, vec!["Samsung A70".to_string(), "Samsung A705".to_string()], "{nombres:?}");
+        let aliases: Vec<String> = phones.iter().map(|(raw, _)| raw.clone()).collect();
+        assert_eq!(aliases, vec!["Samsung A70".to_string(), "Samsung A705".to_string()],
+            "el alias es el nombre de CADA teléfono (la entrada combinada ya no se guarda como alias)");
+        let claves: Vec<String> = phones.iter().map(|(_, p)| phone_registry_key(p)).collect();
+        assert_eq!(claves, vec!["samsung|a70".to_string(), "samsung|a705".to_string()]);
+        // y una entrada normal sigue dando UN teléfono con su texto original como alias
+        let simple = compat_phones_raw(r#"["Samsung Galaxy A06 4G"]"#, "Samsung");
+        assert_eq!(simple.len(), 1);
+        assert_eq!(simple[0].0, "Samsung Galaxy A06 4G", "el alias conserva cómo estaba escrito");
     }
 
     #[test]

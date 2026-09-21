@@ -10,11 +10,18 @@
 //   node tools/audit_inventory.mjs --snapshot tools/progress/artifacts/antes.json
 //   node tools/audit_inventory.mjs --json > reporte.json
 //   node tools/audit_inventory.mjs --gen-fixtures     (paridad con Rust)
+//   node tools/audit_inventory.mjs --gen-split-fixtures (paridad del split, F55)
 //
 // Las reglas canónicas vienen de tools/canonical_brands.json (misma fuente que
 // usa el backend Rust en catalog.rs). Este script REPORTA; quien ESCRIBE es
 // Rust. Si los conteos de este reporte y el dry-run de Rust no coinciden, hay
 // divergencia de reglas y se corrige antes de aplicar nada.
+//
+// OJO (F55): la regla del SPLIT de entradas compuestas está copiada a mano aquí
+// (el script no puede llamar a Rust), así que su paridad se fija con el fixture
+// tools/split_fixtures.json + el test `catalog::tests::test_split_model_models_match_node_fixtures`.
+// Si se toca `splitModelModels` de este archivo, hay que regenerar el fixture o
+// el test de Rust falla a propósito.
 // ============================================================================
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
@@ -180,6 +187,41 @@ function canonicalPhone(entry, inheritedBrand) {
   return { brand, model, label: `${brand} ${model}`.trim() };
 }
 
+// F53 — PARTIR EL TEXTO DE UN MODELO EN TELÉFONOS REALES (espejo de `catalog::split_model_models`):
+// un «código» es un token con LETRAS Y DÍGITOS (`A70`, `A705`, `MS350`), sin los sufijos de red
+// (4G/5G/LTE) ni los números puros (11, 2019). Con 2+ códigos se parte: cada parte es
+// [palabras de familia] + [código] + [palabras hasta el próximo código].
+function isModelCode(token) {
+  const t = norm(token);
+  if (!t || ['2g', '3g', '4g', '5g', 'lte'].includes(t)) return false;
+  return /[a-z]/.test(t) && /\d/.test(t);
+}
+function splitModelModels(model) {
+  const texto = String(model ?? '').trim();
+  if (!texto) return [''];
+  const toks = texto.split(/\s+/);
+  const codes = toks.map((t, i) => (isModelCode(t) ? i : -1)).filter((i) => i >= 0);
+  if (codes.length < 2) return [texto];
+  const prefijo = toks.slice(0, codes[0]);
+  const partes = [];
+  codes.forEach((ci, n) => {
+    const end = n + 1 < codes.length ? codes[n + 1] : toks.length;
+    const parte = [...prefijo, ...toks.slice(ci, end)].join(' ').trim();
+    if (!parte || partes.some((p) => norm(p) === norm(parte))) return;
+    partes.push(parte);
+  });
+  return partes.length >= 2 ? partes : [texto];
+}
+
+// El padrón REAL de la app (tabla `phones`), cuando la copia auditada ya la tiene: es el número que
+// ve el local. El conteo del script (`teléfonos distintos… (script)`) es una aproximación propia.
+function hasPhonesTable() {
+  try { return all("SELECT name FROM sqlite_master WHERE type='table' AND name='phones'").length > 0; } catch { return false; }
+}
+function countPhones() {
+  try { return all('SELECT COUNT(*) AS n FROM phones')[0]?.n ?? 0; } catch { return 0; }
+}
+
 // Clave de agrupación del teléfono: marca + modelo SIN las submarcas
 // "strippables" (Xiaomi red/redmi). Así "Xiaomi Redmi Note 11S 4G" y
 // "Xiaomi Note 11S 4G" son el MISMO teléfono, pero "Xiaomi Mi A2" y
@@ -214,10 +256,16 @@ function normalizeFields(category, brandRaw, modelRaw, variantRaw, compatibility
   for (const entry of entries) {
     const explicit = explicitBrandOf(entry);
     if (explicit) currentBrand = explicit;
-    const phone = canonicalPhone(entry, currentBrand);
-    const key = phoneKey(phone);
-    const prev = byKey.get(key);
-    if (!prev || phone.label.length > prev.length) byKey.set(key, phone.label);
+    // F53 — MISMA regla que `catalog::split_model_models` de la app: una entrada puede nombrar
+    // VARIOS teléfonos («Samsung A70 A705» → A70 + A705). Sin esto, el reporte cuenta menos
+    // teléfonos que el padrón de la app y los dos números no se pueden comparar.
+    const base = canonicalPhone(entry, currentBrand);
+    for (const parte of splitModelModels(base.model)) {
+      const phone = canonicalPhone(`${base.brand} ${parte}`, currentBrand);
+      const key = phoneKey(phone);
+      const prev = byKey.get(key);
+      if (!prev || phone.label.length > prev.length) byKey.set(key, phone.label);
+    }
   }
 
   const primaryKey = phoneKey(canonicalPhone(cModelFull.split(' / ')[0] ?? cModelFull, brand));
@@ -267,6 +315,42 @@ const FIXTURE_CASES = [
   { category: 'Pantalla', brand: 'Samsung', model: 'A06 4G', variant: '', compatibility: '["Samsung A06 4G","Samsung A06"]' },
   { category: 'Pantalla', brand: 'Xiaomi', model: 'Redmi Poco x6 pro', variant: '', compatibility: '["Redmi Poco x6 pro"]' },
 ];
+
+// F55 — casos de PARIDAD del split de modelos (F53): los mismos textos que verifica
+// `catalog::tests::test_split_model_models_real_cases`. El script tiene su PROPIA copia de la regla
+// (no puede llamar a Rust), así que este fixture es lo que impide que las dos se separen: se
+// regenera con `node tools/audit_inventory.mjs --gen-split-fixtures` y el test de Rust falla si el
+// script devuelve algo distinto.
+const SPLIT_CASES = [
+  // SÍ se parten (2+ códigos) — casos reales del catálogo del local
+  'A70 A705',
+  'Galaxy A70 A705',
+  'A16 4G A165',
+  'A13 4G A135 M13',
+  'K20 Plus MP260',
+  'A01 Core A013',
+  'Y6 2019 8A',
+  'K42 K52',
+  // el mismo código dos veces: no hay 2 partes distintas → se devuelve tal cual
+  'A70 A70',
+  // NO se parten (un solo código, o ninguno)
+  'Redmi Note 11',
+  'A06 4G',
+  'Galaxy S21 Ultra 5G',
+  'Redmi 9A',
+  'iPhone 11 Pro Max',
+  '5001 1V 2019',
+  'Note 20',
+  '',
+];
+
+if (argv.includes('--gen-split-fixtures')) {
+  const out = SPLIT_CASES.map((model) => ({ model, expect: splitModelModels(model) }));
+  const target = path.join(HERE, 'split_fixtures.json');
+  fs.writeFileSync(target, `${JSON.stringify(out, null, 2)}\n`);
+  console.log(`fixtures -> ${path.relative(ROOT, target)} (${out.length} casos)`);
+  process.exit(0);
+}
 
 if (argv.includes('--gen-fixtures')) {
   const out = FIXTURE_CASES.map((c) => {
@@ -407,7 +491,11 @@ const summary = {
   'sin compatibilidad': report.compat.empty.length,
   'compatibilidad sin marca (se agrega)': report.compat.without_brand.length,
   'teléfonos con 2+ etiquetas (duplicado)': report.compat.label_collisions.length,
-  'teléfonos distintos en el catálogo': phoneGroups.size,
+  'teléfonos distintos en el catálogo (script)': phoneGroups.size,
+  // El número que MANDA es el del padrón de la app (`phones`): el script cuenta desde la
+  // compatibilidad con su propia copia de las reglas, y con el split de F53 las dos cifras quedan
+  // cerca pero NO son idénticas (el script no aplica el filtro de familia/marca ni los «junk»).
+  ...(hasPhonesTable() ? { 'teléfonos en el padrón (app)': countPhones() } : {}),
   'productos sin precio': report.prices.zero,
   'grupos duplicados (marca+modelo+variante)': report.duplicates.length,
   'SKU en 0': report.stock.zero,

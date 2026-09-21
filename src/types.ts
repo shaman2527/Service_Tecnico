@@ -57,6 +57,10 @@ export interface Product {
   category_name: string | null;
   /** Proveedor que trajo esta mercancía (lo anota la carga de inventario) */
   supplier?: string;
+  /** F50: el local lo marcó como «lo uso» (lo que aparece al registrar un servicio). */
+  in_use?: number;
+  /** F50: código corto con el que el local lo dicta/busca (`P-0142`). */
+  code?: string | null;
 }
 
 // --- Inventario unificado (2026-09-15) ---
@@ -99,6 +103,12 @@ export interface PhoneModelRow {
   screens: number;
   stock: number;
   with_stock: number;
+  /** F50: 1 = el local lo usa (es lo que ofrece el formulario de servicio por defecto). */
+  in_use?: number;
+  /** F50: código corto del modelo (`M-007`). */
+  code?: string | null;
+  /** F53 — pantalla de REFERENCIA del modelo: se auto-selecciona al registrar el servicio. */
+  default_product_id?: number | null;
 }
 
 /** Candidata del desplegable "Pantalla a instalar" del servicio. */
@@ -147,6 +157,60 @@ export interface PhoneListRow {
   products: number;
   stock: number;
   categories: string;
+  /** F50: 1 = el local lo usa (check del padrón) · código corto (`M-007`) · pantalla de referencia */
+  in_use?: number;
+  code?: string | null;
+  default_product_id?: number | null;
+  /** F53: nombre y código de la pantalla de referencia (para mostrarla sin otra consulta) */
+  default_product_name?: string;
+  default_product_code?: string;
+  /** F52: variantes del modelo (chips de la vista «Por modelo»), en el orden canónico del taller */
+  variants?: string[];
+  /** F52: rango de precios de venta de sus repuestos (0/0 = ninguna ficha tiene precio) */
+  price_min?: number;
+  price_max?: number;
+}
+
+/** F53 — un TELÉFONO dentro de un grupo de repetidos (lo que muestra el asistente). */
+export interface PhoneDuplicateRow {
+  id: number;
+  brand: string;
+  name: string;
+  code: string;
+  in_use: number;
+  /** cuántos repuestos le sirven (todos los del grupo comparten el MISMO conjunto) */
+  repuestos: number;
+  aliases: string[];
+}
+
+/** F53 — grupo de MODELOS que se sirven con los MISMOS repuestos: el asistente propone juntarlos. */
+export interface PhoneDuplicateGroup {
+  phones: PhoneDuplicateRow[];
+}
+
+/** F53 — Informe de «separar los modelos» (mismo formato para la vista previa y la aplicación). */export interface PhoneSplitPreview {
+  phones_before: number;
+  phones_after: number;
+  /** teléfonos que APARECEN (los modelos que estaban pegados en una entrada compuesta) */
+  created: string[];
+  /** teléfonos que DEJAN de existir (el nombre combinado, «Samsung A70 A705») */
+  removed: string[];
+  updated: number;
+  needs_review: number;
+  /** variantes que estaban escritas en el TEXTO y pasaron al campo `variant` */
+  variants_extracted: number;
+  variant_samples: string[];
+  backup?: string | null;
+  /** true = es la revisión (no se escribió nada) */
+  dry_run?: boolean;
+}
+
+/** F52 — Familia de variante con cuántas fichas (y stock) tiene en el catálogo. */
+export interface VariantFamily {
+  /** `incell` | `oled` | `original` | `am` | `''` (sin variante) */
+  family: string;
+  products: number;
+  stock: number;
 }
 
 /** Lo que pasaría al renombrar un teléfono (vista previa: no escribe nada). */

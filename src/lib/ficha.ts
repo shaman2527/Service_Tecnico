@@ -45,8 +45,25 @@ export interface Ficha {
   next: FichaField | null;
   /** datos cargados con formato dudoso: «revisá: Cédula · Teléfono» */
   warns: FichaField[];
+  /**
+   * F48 — OBSERVACIONES que NO bloquean: datos que conviene completar y que la ficha dice con todas
+   * las letras («Falta el número de teléfono del cliente»). Pedido del dueño: «cuando está agregando
+   * un servicio hacerle una observación pero no bloqueante: falta número de tlf del cliente… que sea
+   * intuitivo, lo vaya llevando de la mano». No entran en `falta` ni en `completa`: el guardado sigue.
+   */
+  notas: FichaNota[];
   /** true = no falta ninguno de los que bloquean */
   completa: boolean;
+}
+
+export interface FichaNota {
+  /** clave del dato al que lleva el aviso (para «Ir al campo») */
+  key: string;
+  /** la observación, tal como se lee en pantalla */
+  texto: string;
+  /** qué gana el taller completándola (una línea) */
+  guia: string;
+  step: number;
 }
 
 export interface FichaInput {
@@ -179,8 +196,11 @@ export function buildFicha(i: FichaInput): Ficha {
   const tecnica: FichaField[] = [
     field('model', 'Marca y modelo exacto', 'Como lo dice el equipo (ej. Samsung Galaxy A15).',
       i.model.trim() || null, true, 1),
-    field('color', 'Color / acabado', 'Color del equipo (ej. Negro, Azul).',
-      i.color.trim() || null, false, 1),
+    // F48 (pedido del dueño, 2026-09-20): «en los colores que sea un campo requerido; si no selecciono
+    // un color lo salte de una vez a que elija un color». El color dejó de ser opcional: la ficha lo
+    // marca como FALTA y —como es el dato que toca— el asistente lleva al selector con un toque.
+    field('color', 'Color / acabado', 'Tocá «Color del equipo» y elegí uno (ej. Negro, Azul, Lila).',
+      i.color.trim() || null, true, 1),
     field('contrasena', 'Clave / patrón de desbloqueo', `¿El cliente entregó la clave? Se marca en Blindaje.${eq1}`,
       checklistValue(i.checklist, 'contrasena'), false, 2),
     field('accesorios', 'Inventario de accesorios recibidos', `Qué entra con el equipo: chip, forro, bandeja SIM.${eq1}`,
@@ -231,12 +251,34 @@ export function buildFicha(i: FichaInput): Ficha {
   const pendientes = all.filter(f => f.state === 'pendiente');
   const warns = all.filter(f => !!f.warn);
 
+  // F48 — lo que se observa SIN bloquear (el dueño pidió que el teléfono se pida como observación):
+  // son datos que el taller necesita después (avisar que el equipo está listo) y que no impiden
+  // guardar la orden. Se listan solo los que faltan.
+  const notas: FichaNota[] = [];
+  if (!i.phone.trim()) {
+    notas.push({
+      key: 'phone',
+      texto: 'Falta el número de teléfono del cliente',
+      guia: 'Es por donde se le avisa que el equipo está listo (se puede guardar igual).',
+      step: 0,
+    });
+  }
+  if (!i.technician.trim()) {
+    notas.push({
+      key: 'technician',
+      texto: 'El equipo todavía no tiene técnico asignado',
+      guia: 'Se puede asignar después con un clic en la tarjeta de la orden.',
+      step: 0,
+    });
+  }
+
   return {
     groups,
     done,
     total: all.length,
     next: faltan[0] ?? pendientes[0] ?? null,
     warns,
+    notas,
     completa: faltan.length === 0,
   };
 }

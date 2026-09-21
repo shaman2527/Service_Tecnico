@@ -7,7 +7,7 @@
 //       (tsx resuelve los imports TS sin extensión del proyecto; `node` solo no puede)
 
 import { rankQueue, scoreQueueMatch, queueFlags, ACTIVE_QUEUE } from '../src/lib/queue';
-import { onlyScreens, screenOk, autoScreen, isCrossBrand, warnsCrossBrand } from '../src/lib/screen-rules';
+import { onlyScreens, screenOk, outOfStockChoice, autoScreen, isCrossBrand, warnsCrossBrand } from '../src/lib/screen-rules';
 import type { Service, ScreenCandidate, Product } from '../src/types';
 
 let checks = 0;
@@ -119,9 +119,18 @@ ok('sin trabajo de pantalla → no exige nada', screenOk(['Software / Formateo']
 ok('modelo sin pantallas en catálogo → no bloquea', screenOk(['Cambio pantalla'], null, []));
 ok('trabajo de pantalla con opciones y SIN elegir → bloquea', !screenOk(['Cambio pantalla'], null, [cand(1, 5)]));
 ok('pantalla elegida con stock → ok', screenOk(['Cambio pantalla'], 1, [cand(1, 5)]));
-ok('pantalla AGOTADA al entregar → exige confirmación', !screenOk(['Cambio pantalla'], 2, [cand(1, 5), cand(2, 0)], false, 'Entregado'));
-ok('pantalla AGOTADA confirmada → ok', screenOk(['Cambio pantalla'], 2, [cand(1, 5), cand(2, 0)], true, 'Entregado'));
-ok('al RECIBIR (no entregado) la agotada no exige confirmar', screenOk(['Cambio pantalla'], 2, [cand(2, 0)], false, 'Recibido'));
+// F47 (pedido del dueño, 2026-09-20): «dejarlo predeterminado, que no te bloquee pero sí deje el
+// mensaje en rojo». Antes una pantalla AGOTADA exigía confirmar «se entregó sin stock» para poder
+// guardar; ahora avisa y NO bloquea (el inventario baja y el movimiento queda como faltante).
+ok('pantalla AGOTADA → ya NO bloquea el guardado', screenOk(['Cambio pantalla'], 2, [cand(1, 5), cand(2, 0)]));
+ok('pantalla AGOTADA al ENTREGAR tampoco bloquea', screenOk(['Cambio pantalla'], 2, [cand(1, 5), cand(2, 0)]));
+ok('al RECIBIR la agotada tampoco bloquea', screenOk(['Cambio pantalla'], 2, [cand(2, 0)]));
+eq('y la regla del AVISO rojo sí la detecta', outOfStockChoice([cand(1, 5), cand(2, 0)], 2)?.product.id, 2);
+eq('pantalla con stock → sin aviso rojo', outOfStockChoice([cand(1, 5)], 1), null);
+eq('sin elegir → sin aviso', outOfStockChoice([cand(1, 5)], null), null);
+eq('elegir una que no está en las opciones → sin aviso', outOfStockChoice([cand(1, 5)], 99), null);
+ok('elegir pantalla SIGUE siendo obligatorio con la agotada (no se relajó el gate)',
+  !screenOk(['Cambio pantalla'], null, [cand(2, 0)]));
 eq('onlyScreens deja solo categoría 1', onlyScreens([cand(1, 5), cand(2, 5, 2)]).length, 1);
 
 // ── GATE DE MARCA de la pantalla que se elige sola (B2 pre-producción) ────────────────
@@ -136,6 +145,22 @@ eq('dos de la marca con stock → decide el operario', autoScreen([cand(1, 3), c
 eq('la de la marca con stock aunque haya otra de la marca agotada', autoScreen([cand(1, 3), cand(2, 0)])?.product.id, 1);
 eq('coincidencia PARCIAL de la misma marca → no se elige sola',
   autoScreen([cand(1, 3, 1, true, 'parcial')]), null);
+
+// ── F53: la PANTALLA DE REFERENCIA del modelo manda sobre la regla conservadora ────────────────
+// Pedido del dueño: «esos mismos modelos tienen que tener referencia: qué pantalla va a seleccionar
+// para ese modelo». Si el padrón dice CUÁL es la de ese teléfono, se elige ESA aunque haya otras
+// candidatas (o aunque sea de otra marca, o esté agotada: los avisos siguen saliendo).
+eq('con referencia, se elige ESA (aunque haya dos de la marca con stock)',
+  autoScreen([cand(1, 3), cand(2, 4)], 2)?.product.id, 2);
+eq('con referencia, se elige aunque sea de OTRA marca (la referencia es una decisión del local)',
+  autoScreen([cand(1, 3), cand(2, 4, 1, false)], 2)?.product.id, 2);
+eq('con referencia AGOTADA, se elige igual (sale el aviso rojo y el stock baja como faltante)',
+  autoScreen([cand(1, 3), cand(2, 0)], 2)?.product.id, 2);
+eq('referencia que ya no está entre las compatibles → vuelve a la regla de siempre',
+  autoScreen([cand(1, 3)], 99)?.product.id, 1);
+eq('referencia apuntando a una pantalla que no es de este modelo → no se inventa nada',
+  autoScreen([cand(1, 3), cand(2, 4)], 77), null);
+eq('sin referencia (null) → regla de siempre', autoScreen([cand(1, 3)], null)?.product.id, 1);
 ok('cand con marca → no es de otra marca', !isCrossBrand(cand(1, 3)));
 ok('cand de otra marca → isCrossBrand', isCrossBrand(cand(1, 3, 1, false)));
 ok('sin candidata elegida → isCrossBrand false', !isCrossBrand(null));
@@ -147,8 +172,8 @@ ok('marca desconocida → no se avisa «otra marca»', !warnsCrossBrand(sinMarca
 ok('marca desconocida → isCrossBrand false', !isCrossBrand(sinMarca));
 eq('marca desconocida → no se auto-elige', autoScreen([sinMarca]), null);
 ok('marca conocida y distinta → sí avisa', warnsCrossBrand(cand(1, 5, 1, false, 'exacta', true)));
-ok('sin marca conocida la agotada confirmada sigue igual',
-  screenOk(['Cambio pantalla'], 2, [cand(2, 0)], true, 'Entregado'));
+ok('sin marca conocida la agotada sigue avisando (y sin bloquear)',
+  outOfStockChoice([cand(2, 0)], 2)?.product.id === 2 && screenOk(['Cambio pantalla'], 2, [cand(2, 0)]));
 
 console.log(`\nqueue + screen-rules: ${checks} comprobaciones · ${checks - failures} OK · ${failures} fallos`);
 if (failures > 0) process.exit(1);

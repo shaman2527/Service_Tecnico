@@ -17,23 +17,40 @@ export const asPhoneEntry = (label: string, candidates: ScreenCandidate[]): Phon
 });
 
 /**
- * La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay opciones en
- * el catálogo. Al ENTREGAR una pantalla AGOTADA hay que confirmarlo (queda como faltante):
- * sin esto se podía entregar sin ningún aviso y el inventario bajaba en silencio.
+ * La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay opciones en el
+ * catálogo: sin elegirla el descuento de inventario caería en OTRO repuesto (o no caería).
+ *
+ * F47 (pedido del dueño, 2026-09-20): una pantalla **agotada NO bloquea**. Antes había que confirmar
+ * «se entregó sin stock» para poder guardar; ahora el aviso queda **en rojo y bien visible** pero el
+ * operario sigue trabajando (el inventario baja y el movimiento queda como faltante, que es lo que el
+ * local quiere ver en el inventario). Ojo: no se relaja el gate de ELEGIR la pantalla — ese sí sigue.
  */
 export const screenOk = (serviceTypes: string[], screenProductId: number | null,
-                         options: ScreenCandidate[], confirmed = false, status = '') => {
+                         options: ScreenCandidate[]) => {
   if (!serviceTypes.includes('Cambio pantalla') || options.length === 0) return true;
   if (screenProductId == null) return false;
-  const chosen = options.find(o => o.product.id === screenProductId);
-  if (!chosen) return true;
-  if (status === 'Entregado' && !chosen.in_stock) return confirmed;
   return true;
 };
 
 /**
- * Auto-selección de la pantalla a instalar. SOLO se elige sola cuando hay UNA única
- * candidata con stock, DE LA MISMA MARCA del teléfono (`brand_match`) y con coincidencia
+ * La pantalla elegida está AGOTADA: se avisa (y se puede entregar igual, dejando el stock en
+ * negativo). Regla pura para que el aviso no dependa de la pantalla: `null` = no hay nada que avisar.
+ */
+export const outOfStockChoice = (options: ScreenCandidate[], screenProductId: number | null): ScreenCandidate | null =>
+  options.find(o => o.product.id === screenProductId && !o.in_stock) ?? null;
+
+/**
+ * Auto-selección de la pantalla a instalar.
+ *
+ * **F53 — la pantalla de REFERENCIA del modelo manda** (pedido del dueño: «esos mismos modelos tienen
+ * que tener referencia: qué pantalla va a seleccionar para ese modelo»). Si el modelo del padrón tiene
+ * una pantalla de referencia y esa pantalla está entre las compatibles, se elige ESA — es la que el
+ * taller instala siempre en ese modelo, y el operario la cambia a mano si ese día pone otra. Los
+ * avisos siguen valiendo igual: si la referencia está agotada, sale el aviso rojo (F47) y el
+ * inventario baja como faltante.
+ *
+ * Sin referencia, se mantiene la regla conservadora de siempre: SOLO se elige sola cuando hay UNA
+ * única candidata con stock, DE LA MISMA MARCA del teléfono (`brand_match`) y con coincidencia
  * exacta o por prefijo.
  *
  * Antes se elegía la única con stock aunque fuera de otra marca. Medido con el informe
@@ -42,9 +59,12 @@ export const screenOk = (serviceTypes: string[], screenProductId: number | null,
  * elegían solos la pantalla de OTRA marca («7 Pro» → Tecno, «A11 Pro» → Samsung A11, «G50» →
  * Motorola, «Galaxy Note 10 AM» → Infinix) y el descuento caía en el repuesto equivocado. Con
  * la regla nueva son 279 auto-selecciones seguras (misma marca, exacta/prefijo) y 0 cruzadas.
- * Si no hay certeza, la elige el operario a mano.
  */
-export const autoScreen = (options: ScreenCandidate[]): ScreenCandidate | null => {
+export const autoScreen = (options: ScreenCandidate[], referenciaId?: number | null): ScreenCandidate | null => {
+  if (referenciaId != null) {
+    const referencia = options.find(o => o.product.id === referenciaId);
+    if (referencia) return referencia;
+  }
   const own = options.filter(o => o.in_stock && o.brand_match && o.match_quality !== 'parcial');
   return own.length === 1 ? own[0] : null;
 };

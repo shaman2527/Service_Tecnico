@@ -46,10 +46,22 @@ pub struct ClientSummary {
 /// agrega la columna al FINAL del orden físico (`search_text` quedó en 14) y el mapeo
 /// posicional pasaba a leer la columna equivocada: `category_name: r.get(14)` devolvía
 /// `search_text` y la columna «Categoría» de Inventario mostraba el texto de búsqueda.
-/// Con esta lista el orden es fijo: 0..13 = producto, **14 = `c.name`**.
+/// Con esta lista el orden es fijo: 0..13 = producto, **14 = `c.name`**, 15 = supplier y
+/// **16/17 = `in_use` / `code` (F50, apendadas al final)**.
 pub(crate) const PRODUCT_COLS: &str = "p.id, p.name, p.category_id, p.brand, p.model, \
      p.variant, p.compatibility, p.price_cost, p.price_sale, p.stock, p.min_stock, \
-     p.created_at, p.updated_at, p.price_usd, c.name as category_name, COALESCE(p.supplier,'') as supplier";
+     p.created_at, p.updated_at, p.price_usd, c.name as category_name, COALESCE(p.supplier,'') as supplier, \
+     COALESCE(p.in_use,1) as in_use, COALESCE(p.code,'') as code";
+
+/// F52 — FAMILIA de la variante escrita en SQL: la PRIMERA PALABRA del texto recortado, en
+/// minúsculas (sin acentos: las variantes reales del catálogo son INCELL / OLED / ORIGINAL / AM /
+/// «OLED Con Marco»…). Es la MISMA regla que `catalog::variant_family` — que es la que usan los
+/// chips y los textos de la app — y el test `test_variant_family_sql_matches_rust` compara las dos
+/// implementaciones contra los valores REALES del catálogo, así que no pueden divergir en silencio.
+pub(crate) const VARIANT_FAMILY_SQL: &str = "lower(CASE \
+     WHEN instr(trim(COALESCE(p.variant,'')), ' ') > 0 \
+       THEN substr(trim(COALESCE(p.variant,'')), 1, instr(trim(COALESCE(p.variant,'')), ' ') - 1) \
+       ELSE trim(COALESCE(p.variant,'')) END)";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Product {
@@ -71,7 +83,16 @@ pub struct Product {
     /// Proveedor que trajo esta mercancía (lo llena la carga de inventario; editable en la ficha)
     #[serde(default)]
     pub supplier: String,
+    /// F50: 1 = el local lo marcó como «lo uso» (es lo que ofrece el formulario de servicio).
+    #[serde(default = "uno")]
+    pub in_use: i64,
+    /// F50: código corto con el que el local lo dicta/busca (`P-0142`).
+    #[serde(default)]
+    pub code: String,
 }
+
+/// `serde` necesita una función para el default de `in_use` (siempre «en uso» si falta el campo).
+fn uno() -> i64 { 1 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sale {
@@ -328,6 +349,105 @@ pub struct PhoneModelRow {
     /// unidades totales de esos repuestos
     pub stock: i64,
     pub with_stock: i64,
+    /// F50: el local MARCA este modelo como «lo uso» (0/1) y su código corto (`M-007`).
+    pub in_use: i64,
+    pub code: String,
+    /// F53 — pantalla de REFERENCIA del modelo: la que el local instala siempre. Al elegir el modelo
+    /// en el registro de servicio, esta se **auto-selecciona** (`autoScreen`), y el operario puede
+    /// cambiarla a mano si ese día pone otra.
+    pub default_product_id: Option<i64>,
+}
+
+/// F53 — un TELÉFONO dentro de un grupo de repetidos (lo que muestra el asistente).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PhoneDuplicateRow {
+    pub id: i64,
+    pub brand: String,
+    pub name: String,
+    pub code: String,
+    pub in_use: i64,
+    /// cuántos repuestos le sirven (todos los del grupo comparten el MISMO conjunto)
+    pub repuestos: i64,
+    pub aliases: Vec<String>,
+}
+
+/// F53 — grupo de MODELOS que se sirven con los MISMOS repuestos: el asistente propone juntarlos
+/// (el dueño decide, con vista previa de qué nombre queda y qué alias se conservan).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PhoneDuplicateGroup {
+    pub phones: Vec<PhoneDuplicateRow>,
+}
+
+/// F52 — Familia de variante con cuántas fichas (y stock) tiene en el catálogo.
+/// La llena `get_variant_families` para el desplegable de «Variante» del inventario.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct VariantFamily {
+    /// familia en minúsculas (`incell`, `oled`, `original`, `am`) o `""` = sin variante
+    pub family: String,
+    pub products: i64,
+    pub stock: i64,
+}
+
+/// F53 — Resultado de «separar los modelos» (vista previa y aplicación): es el mismo informe para
+/// las dos, así el dueño ve ANTES exactamente lo que va a pasar (`preview_phone_split`) y después
+/// lo que pasó (`apply_phone_split`).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PhoneSplitPreview {
+    pub phones_before: i64,
+    pub phones_after: i64,
+    /// teléfonos que APARECEN (los modelos que estaban pegados en una entrada compuesta)
+    pub created: Vec<String>,
+    /// teléfonos que DEJAN de existir (la entrada combinada, «Samsung A70 A705»)
+    pub removed: Vec<String>,
+    /// filas del padrón con nombre/marca refrescados
+    pub updated: i64,
+    /// teléfonos que quedan «por revisar» (sin familia)
+    pub needs_review: i64,
+    /// variantes que estaban escritas en el TEXTO y pasaron al campo `variant`
+    pub variants_extracted: i64,
+    pub variant_samples: Vec<String>,
+    /// respaldo de la base antes de escribir (solo al aplicar)
+    pub backup: Option<String>,
+}
+
+/// Foto del padrón: clave → (id, nombre). La usan la vista previa y la aplicación del split para
+/// decir con nombres y apellidos qué se crea y qué se borra.
+fn phone_snapshot(conn: &Connection) -> SqlResult<std::collections::BTreeMap<String, (i64, String)>> {
+    let mut stmt = conn.prepare("SELECT COALESCE(key,''), id, COALESCE(name,'') FROM phones")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, String>(2)?))))?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (k, v) = row?;
+        out.insert(k, v);
+    }
+    Ok(out)
+}
+
+/// F53 — fichas de pantalla SIN variante y con el material escrito en el texto de compatibilidad.
+fn productos_sin_variante(conn: &Connection) -> SqlResult<Vec<(i64, String, String, String, String)>> {
+    let cats: Vec<String> = crate::catalog::PHONE_CATEGORIES.iter().map(|c| c.to_string()).collect();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, COALESCE(name,''), COALESCE(brand,''), COALESCE(model,''), COALESCE(compatibility,'')
+         FROM products
+         WHERE COALESCE(variant,'')='' AND COALESCE(compatibility,'') NOT IN ('','[]')
+           AND COALESCE(category_id,0) IN ({})",
+        cats.join(",")
+    ))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
+    rows.collect::<SqlResult<Vec<_>>>()
+}
+
+/// F53 — las variantes que se pueden sacar del texto (para el informe de la vista previa).
+fn variantes_a_extraer(conn: &Connection) -> SqlResult<Vec<String>> {
+    let mut out = Vec::new();
+    for (_, nombre, _, _, compat) in productos_sin_variante(conn)? {
+        if let Some(v) = crate::catalog::variant_in_text(&compat) {
+            out.push(format!("{nombre} → {v}"));
+        }
+    }
+    Ok(out)
 }
 
 /// Candidata del desplegable "Pantalla a instalar" del formulario de servicio.
@@ -1190,6 +1310,34 @@ impl Database {
                 let _ = conn.execute("UPDATE products SET search_text=?1 WHERE id=?2", params![text, id]);
             }
         }
+        // ── F50: «LO QUE USO» + CÓDIGOS DE REFERENCIA ─────────────────────────────────────────
+        // Pedido del dueño: «él no lo usa todo; aplicar un check con su número de cada producto o
+        // modelo que él pueda seleccionar: esos son los que le van a aparecer cuando registra un
+        // servicio… así es más rápida la búsqueda». El check va en los DOS (producto y modelo) y el
+        // número sirve para identificarlos rápido y ver la relación modelo ↔ pantalla.
+        // Columnas nuevas AL FINAL del orden físico (regla del proyecto: nunca SELECT * posicional).
+        // OJO — CADA TABLA SE MIGRA DONDE SU TABLA YA EXISTE. La de `phones` va MÁS ABAJO (después de
+        // su `CREATE TABLE IF NOT EXISTS`): en una base nueva esa tabla todavía no existe acá y el
+        // ALTER dentro del mismo batch fallaba en silencio (`let _ =`) dejando la base a medias
+        // («no such column: code» en la primera consulta del padrón). Y cada columna se prueba por
+        // separado: si una ya existe, las otras igual entran.
+        let products_cols_new: bool = conn.prepare("SELECT in_use FROM products LIMIT 1").is_err();
+        if products_cols_new {
+            let _ = conn.execute("ALTER TABLE products ADD COLUMN in_use INTEGER DEFAULT 1", []);
+        }
+        if conn.prepare("SELECT code FROM products LIMIT 1").is_err() {
+            let _ = conn.execute("ALTER TABLE products ADD COLUMN code TEXT", []);
+        }
+        if products_cols_new {
+            // SEED (una sola vez, en la misma migración que crea las columnas): queda EN USO lo que
+            // tiene stock cargado — es lo que el taller realmente tiene en el cajón — y se apaga el
+            // resto. Así la búsqueda del servicio se acorta desde el primer día sin que el dueño
+            // tenga que marcar cientos de fichas; después prende/apaga lo que quiera a mano.
+            let _ = conn.execute_batch("UPDATE products SET in_use = CASE WHEN stock > 0 THEN 1 ELSE 0 END;");
+        }
+        // Códigos cortos y secuenciales por id: P-0001 / M-0001 (el local los puede dictar).
+        // Filas nuevas sin código (por si alguien insertó a mano): se completa sin pisar lo que haya.
+        let _ = conn.execute_batch("UPDATE products SET code = 'P-' || printf('%04d', id) WHERE code IS NULL OR code = '';");
         let _ = conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
              CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
@@ -1227,6 +1375,28 @@ impl Database {
             .unwrap_or(0);
         if phones_count == 0 {
             let _ = crate::catalog::rebuild_phones(&conn, false);
+        }
+        // ── F50 (continuación): «LO QUE USO» + CÓDIGO en el PADRÓN de teléfonos ───────────────
+        // Recién ACÁ existe la tabla `phones` (el bloque de arriba corre antes de su CREATE TABLE).
+        // Columnas nuevas AL FINAL del orden físico; se prueba cada una por separado.
+        let phones_cols_new: bool = conn.prepare("SELECT in_use FROM phones LIMIT 1").is_err();
+        if phones_cols_new {
+            let _ = conn.execute("ALTER TABLE phones ADD COLUMN in_use INTEGER DEFAULT 0", []);
+        }
+        if conn.prepare("SELECT code FROM phones LIMIT 1").is_err() {
+            let _ = conn.execute("ALTER TABLE phones ADD COLUMN code TEXT", []);
+        }
+        if conn.prepare("SELECT default_product_id FROM phones LIMIT 1").is_err() {
+            let _ = conn.execute("ALTER TABLE phones ADD COLUMN default_product_id INTEGER", []);
+        }
+        // Filas nuevas sin código (el padrón se rearma desde el catálogo / alguien inserta a mano):
+        // se numera lo que falte sin pisar los códigos que ya están (el local los usa para hablar).
+        let _ = conn.execute_batch("UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE code IS NULL OR code = '';");
+        if phones_cols_new {
+            // Un teléfono queda EN USO si alguno de sus repuestos quedó en uso (misma fuente que el
+            // padrón: la compatibilidad ya indexada en `phones.key`). Una sola vez: después manda el
+            // check del dueño, que puede apagar un modelo sin que el arranque se lo vuelva a prender.
+            let _ = crate::phones::seed_phone_in_use(&conn);
         }
         // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
         // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
@@ -1509,13 +1679,151 @@ impl Database {
 
     // --- Inventario unificado: consultas del módulo de pantallas/productos ---
 
+    // ── F53 — MODELOS: UN SOLO NOMBRE POR TELÉFONO (separar, numerar y marcar lo nuevo) ─────────
+    /// Vista previa (NO escribe nada) de «separar los modelos»: qué teléfonos nuevos aparecen al
+    /// partir las entradas compuestas («Samsung A70 A705» → **A70** + **A705**), cuáles dejan de
+    /// existir y cuántas variantes se sacan del texto.
+    ///
+    /// Se calcula **ejecutando el rebuild de verdad dentro de una transacción que se revierte**: la
+    /// vista previa muestra exactamente lo que va a pasar, no una estimación.
+    pub fn preview_phone_split(&self) -> SqlResult<PhoneSplitPreview> {
+        let conn = self.conn.lock().unwrap();
+        let antes = phone_snapshot(&conn)?;
+        let variantes = variantes_a_extraer(&conn)?;
+        conn.execute_batch("BEGIN")?;
+        let r = crate::catalog::rebuild_phones(&conn, false);
+        let despues = phone_snapshot(&conn);
+        let _ = conn.execute_batch("ROLLBACK");
+        let despues = despues?;
+        let r = r?;
+        let mut nuevos: Vec<String> = despues.iter()
+            .filter(|(k, _)| !antes.contains_key(*k))
+            .map(|(_, n)| n.1.clone())
+            .collect();
+        let mut borrados: Vec<String> = antes.iter()
+            .filter(|(k, _)| !despues.contains_key(*k))
+            .map(|(_, n)| n.1.clone())
+            .collect();
+        nuevos.sort();
+        borrados.sort();
+        Ok(PhoneSplitPreview {
+            phones_before: antes.len() as i64,
+            phones_after: despues.len() as i64,
+            created: nuevos,
+            removed: borrados,
+            updated: r.updated,
+            needs_review: r.needs_review,
+            variants_extracted: variantes.len() as i64,
+            variant_samples: variantes,
+            ..Default::default()
+        })
+    }
+
+    /// Aplica la separación: respalda la base, saca del texto las variantes que falten, reconstruye
+    /// el padrón (una fila por teléfono REAL), **numera los nuevos** (`M-…`) y les pone el «en uso»
+    /// con la misma regla del seed (en uso ⇔ alguno de sus repuestos está en uso y con stock).
+    /// NO toca stock, precios, movimientos, ventas ni órdenes (lo verifica el test).
+    pub fn apply_phone_split(&self) -> SqlResult<PhoneSplitPreview> {
+        let conn = self.conn.lock().unwrap();
+        let antes = phone_snapshot(&conn)?;
+        // respaldo ANTES de escribir (mismo patrón que la limpieza del catálogo)
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        let backup = (|| -> Option<PathBuf> {
+            let stamp: String = conn
+                .query_row("SELECT strftime('%Y%m%d_%H%M%S','now','localtime')", [], |r| r.get(0))
+                .unwrap_or_else(|_| "sin_fecha".to_string());
+            let padre = self.db_path.parent()?;
+            // si la base ya vive en una carpeta `backup/` (copias de verificación), no se anida otra
+            let dir = if padre.file_name().map(|n| n.eq_ignore_ascii_case("backup")).unwrap_or(false) {
+                padre.to_path_buf()
+            } else {
+                padre.join("backup")
+            };
+            std::fs::create_dir_all(&dir).ok()?;
+            let dest = dir.join(format!("registro_pre_modelos_{stamp}.db"));
+            std::fs::copy(&self.db_path, &dest).ok()?;
+            Some(dest)
+        })();
+
+        // 1) la variante que estaba escrita en el TEXTO pasa al campo `variant` (y se reindexa)
+        let mut extraidas: Vec<String> = Vec::new();
+        for (id, nombre, marca, modelo, compat) in productos_sin_variante(&conn)? {
+            let Some(v) = crate::catalog::variant_in_text(&compat) else { continue };
+            let texto = crate::catalog::search_text(&nombre, &marca, &modelo, &v, &compat);
+            conn.execute(
+                "UPDATE products SET variant=?1, search_text=?2, updated_at=datetime('now','localtime') WHERE id=?3",
+                params![v, texto, id],
+            )?;
+            extraidas.push(format!("{nombre} → {v}"));
+        }
+
+        // 2) el padrón se reconstruye con el split (una fila por teléfono real)
+        let r = crate::catalog::rebuild_phones(&conn, false)?;
+        let despues = phone_snapshot(&conn)?;
+        let mut nuevos: Vec<(i64, String)> = despues.iter()
+            .filter(|(k, _)| !antes.contains_key(*k))
+            .map(|(_, v)| v.clone())
+            .collect();
+        let mut borrados: Vec<String> = antes.iter()
+            .filter(|(k, _)| !despues.contains_key(*k))
+            .map(|(_, v)| v.1.clone())
+            .collect();
+        nuevos.sort_by_key(|(_, n)| n.clone());
+        borrados.sort();
+
+        // 3) los NUEVOS se numeran y se marcan «en uso» con la regla del seed (solo los nuevos: un
+        //    check hecho a mano por el dueño no se toca nunca).
+        //    OJO RENDIMIENTO: los repuestos «en uso y con stock» se leen UNA sola vez (con 201
+        //    teléfonos nuevos, preguntar producto por producto era un N+1 que tardaba minutos).
+        let en_uso: std::collections::BTreeSet<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM products WHERE COALESCE(in_use,1)=1 AND COALESCE(stock,0)>0")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let mut cache = self.cache.lock().unwrap();
+        let idx = cache.phone_index(&conn)?.clone();
+        for (id, _) in &nuevos {
+            let _ = conn.execute(
+                "UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE id=?1 AND (code IS NULL OR code='')",
+                params![id],
+            );
+            let key: String = conn
+                .query_row("SELECT COALESCE(key,'') FROM phones WHERE id=?1", params![id], |x| x.get(0))
+                .unwrap_or_default();
+            let tiene = idx.get(&key).map(|e| e.ids.iter().any(|pid| en_uso.contains(pid))).unwrap_or(false);
+            let _ = conn.execute("UPDATE phones SET in_use=?1 WHERE id=?2",
+                params![if tiene { 1 } else { 0 }, id]);
+        }
+        drop(cache);
+
+        Ok(PhoneSplitPreview {
+            phones_before: antes.len() as i64,
+            phones_after: despues.len() as i64,
+            created: nuevos.into_iter().map(|(_, n)| n).collect(),
+            removed: borrados,
+            updated: r.updated,
+            needs_review: r.needs_review,
+            variants_extracted: extraidas.len() as i64,
+            variant_samples: extraidas,
+            backup: backup.map(|p| p.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+    }
+
     /// Página de productos con filtros y orden server-side (la tabla ya no trae 1126 filas).
+    ///
+    /// `variant_family` (F52) filtra por FAMILIA de la variante (`INCELL` / `OLED` / `ORIGINAL` /
+    /// `""` = sin variante). Se compara por familia, no por texto exacto: pedir «OLED» trae «OLED» y
+    /// «OLED Con Marco» — la regla vive en `catalog::variant_family` y el SQL escribe la MISMA
+    /// (primera palabra del texto recortado); la paridad la fija un test.
     pub fn get_products_page(
         &self,
         search: &str,
         category_id: Option<i64>,
         brand: Option<&str>,
         stock_filter: Option<&str>,
+        variant_family: Option<&str>,
         sort: Option<&str>,
         limit: i64,
         offset: i64,
@@ -1524,10 +1832,23 @@ impl Database {
         let mut where_sql = String::from(" WHERE 1=1");
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
+        // Búsqueda por tokens: misma regla de siempre (TODOS tienen que aparecer, en cualquier
+        // orden) y, además, F50: la ficha se encuentra por su CÓDIGO («p-142», «142») — es como el
+        // local la dicta. El código se compara SIN guiones ni espacios (`p0142`) porque `norm` no
+        // deja puntuación (misma normalización que usa el buscador de modelos con `M-007`).
+        // Se escribe acá y no en `catalog::search_clause` porque el código es una columna más del
+        // producto (esa función solo conoce el `search_text`).
         let tokens = crate::catalog::search_tokens(search);
-        let (clause, vals) = crate::catalog::search_clause(&tokens, values.len() + 1);
-        where_sql.push_str(&clause);
-        for v in vals { values.push(Box::new(v)); }
+        for t in tokens.iter() {
+            values.push(Box::new(format!("%{t}%")));
+            let i = values.len();
+            values.push(Box::new(format!("%{}%", t.replace(' ', ""))));
+            let j = values.len();
+            where_sql.push_str(&format!(
+                " AND (COALESCE(p.search_text,'') LIKE ?{i}
+                       OR REPLACE(REPLACE(LOWER(COALESCE(p.code,'')),'-',''),' ','') LIKE ?{j})"
+            ));
+        }
 
         if let Some(cid) = category_id {
             values.push(Box::new(cid));
@@ -1546,17 +1867,63 @@ impl Database {
             "bajo_minimo" => " AND p.min_stock > 0 AND p.stock <= p.min_stock",
             "sin_precio" => " AND COALESCE(p.price_cost,0)=0 AND COALESCE(p.price_sale,0)=0",
             "sin_compat" => " AND COALESCE(p.compatibility,'') IN ('','[]')",
+            // F50: el check «lo uso» — el filtro que muestra solo lo marcado (y su inverso).
+            "solo_uso" => " AND COALESCE(p.in_use,1) = 1",
+            "sin_uso" => " AND COALESCE(p.in_use,1) = 0",
             _ => "",
         };
         where_sql.push_str(stock_clause);
 
+        // F52 — FILTRO POR FAMILIA DE VARIANTE. La familia es la PRIMERA PALABRA del texto recortado
+        // (misma regla que `catalog::variant_family`, que es la que usan los chips de la vista «Por
+        // modelo»): pedir «OLED» trae «OLED» y «OLED Con Marco»; el valor vacío trae las fichas SIN
+        // variante (613 en el catálogo real). La paridad de las dos implementaciones la fija el test
+        // `test_variant_family_sql_matches_rust`.
+        if let Some(f) = variant_family {
+            let fam = crate::catalog::norm(f);
+            values.push(Box::new(fam));
+            let idx = values.len();
+            where_sql.push_str(&format!(
+                " AND {VARIANT_FAMILY_SQL} = ?{idx}"
+            ));
+        }
+
+        // F51 — ORDEN POR COLUMNAS: el frontend manda la clave de la columna (y `_desc` para el
+        // orden inverso). Convención: `<col>` = el orden ÚTIL de esa columna (nombre A-Z, stock/
+        // precio/costo/mínimo de MAYOR a menor) y `<col>_desc` = el inverso. TODAS las columnas
+        // tienen sus DOS claves: si falta la inversa, la consulta caía en «orden por nombre» y el
+        // segundo clic del encabezado no hacía nada (bug real medido en vivo).
+        // Se conservan las claves viejas del desplegable (`stock`, `stock_asc`, `marca`, `reciente`).
         let order = match sort.unwrap_or("nombre") {
-            "stock" => "p.stock DESC, p.name",
-            "stock_asc" => "p.stock ASC, p.name",
+            "nombre" => "p.name",
+            "nombre_desc" => "p.name DESC",
             "marca" => "p.brand, p.model, p.name",
+            "marca_desc" => "p.brand DESC, p.model DESC, p.name",
+            "modelo" => "p.model, p.name",
+            "modelo_desc" => "p.model DESC, p.name",
+            "variante" => "COALESCE(p.variant,'') ASC, p.name",
+            "variante_desc" => "COALESCE(p.variant,'') DESC, p.name",
+            "categoria" => "c.name, p.name",
+            "categoria_desc" => "c.name DESC, p.name",
+            "stock" => "p.stock DESC, p.name",
+            "stock_desc" => "p.stock ASC, p.name",
+            "stock_asc" => "p.stock ASC, p.name",              // alias viejo del desplegable
+            "precio" => "p.price_sale DESC, p.name",
+            "precio_desc" => "p.price_sale ASC, p.name",
+            "precio_asc" => "p.price_sale ASC, p.name",        // alias
+            "costo" => "p.price_cost DESC, p.name",
+            "costo_desc" => "p.price_cost ASC, p.name",
+            "costo_asc" => "p.price_cost ASC, p.name",         // alias
+            "minimo" => "p.min_stock DESC, p.name",
+            "minimo_desc" => "p.min_stock ASC, p.name",
+            "minimo_asc" => "p.min_stock ASC, p.name",         // alias
             "reciente" => "p.updated_at DESC, p.name",
+            // F50: «lo que uso» primero (y su inverso).
+            "uso" => "COALESCE(p.in_use,1) DESC, p.name",
+            "uso_desc" => "COALESCE(p.in_use,1) ASC, p.name",
             _ => "p.name",
         };
+        // (F52/F53 van a usar esta misma base para la vista por modelo.)
 
         let total: i64 = {
             let sql = format!("SELECT COUNT(*) FROM products p{}", where_sql);
@@ -1582,6 +1949,7 @@ impl Database {
                 price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
                 min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
                 category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
             })
         })?;
         let mut items = Vec::new();
@@ -1597,6 +1965,94 @@ impl Database {
         let mut cache = self.cache.lock().unwrap();
         let stats = cache.inventory_stats(&conn)?;
         Ok((*stats).clone())
+    }
+
+    /// F53 — GRUPOS DE MODELOS REPETIDOS (propuesta para el asistente, con vista previa).
+    ///
+    /// Señal que usa el taller: **dos teléfonos que se sirven con EXACTAMENTE los mismos repuestos**
+    /// son, para el local, el mismo teléfono (le pone la misma pantalla). Se agrupan por marca +
+    /// conjunto de repuestos, así que la propuesta sale de los DATOS y no de parecidos de texto.
+    /// **Los que se juntan los decide el dueño**, grupo por grupo, y la fusión conserva los nombres
+    /// viejos como ALIAS (buscar «A705» sigue encontrando «A70»).
+    pub fn get_phone_duplicate_groups(&self) -> SqlResult<Vec<PhoneDuplicateGroup>> {
+        let conn = self.conn.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap();
+        let idx = cache.phone_index(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(brand,''), COALESCE(name,''), COALESCE(code,''),
+                    COALESCE(aliases,'[]'), COALESCE(key,''), COALESCE(in_use,0)
+             FROM phones",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?;
+        // firma = marca + ids de sus repuestos (los MISMOS para todos los del grupo)
+        let mut grupos: std::collections::BTreeMap<String, Vec<PhoneDuplicateRow>> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (id, brand, name, code, aliases_json, key, in_use) = row?;
+            let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+            // unión clave + alias (misma fuente que el stock y la ficha)
+            let mut ids: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            let mut claves: Vec<String> = vec![key.clone()];
+            for a in &aliases {
+                let phone = crate::catalog::canonical_phone(a, &brand);
+                claves.push(crate::catalog::phone_registry_key(&phone));
+            }
+            for k in &claves {
+                if let Some(e) = idx.get(k) {
+                    for pid in &e.ids {
+                        ids.insert(*pid);
+                    }
+                }
+            }
+            if ids.is_empty() {
+                continue;
+            }
+            let firma = format!("{}|{}", crate::catalog::norm(&brand), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+            grupos.entry(firma).or_default().push(PhoneDuplicateRow {
+                id, brand, name, code, in_use, repuestos: ids.len() as i64, aliases,
+            });
+        }
+        let mut out: Vec<PhoneDuplicateGroup> = grupos
+            .into_iter()
+            .filter(|(_, v)| v.len() > 1)
+            .map(|(_, mut phones)| {
+                // el que MÁS repuestos/stock tiene primero (es el más probable de quedar)
+                phones.sort_by(|a, b| b.repuestos.cmp(&a.repuestos).then(a.name.cmp(&b.name)));
+                PhoneDuplicateGroup { phones }
+            })
+            .collect();
+        // los grupos con más teléfonos primero (los más útiles de revisar)
+        out.sort_by(|a, b| b.phones.len().cmp(&a.phones.len()).then(a.phones[0].name.cmp(&b.phones[0].name)));
+        out.truncate(60);
+        Ok(out)
+    }
+
+    /// es lo que llena el desplegable de «Variante» del inventario. Sale de la MISMA expresión SQL
+    /// que el filtro (`VARIANT_FAMILY_SQL`), así que las opciones y lo que devuelve el filtro no
+    /// pueden discrepar. `family` vacío = fichas sin variante (se muestra «Sin variante»).
+    pub fn get_variant_families(&self) -> SqlResult<Vec<VariantFamily>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {VARIANT_FAMILY_SQL} AS familia, COUNT(*) AS n, COALESCE(SUM(p.stock),0) AS stock
+             FROM products p GROUP BY familia"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(VariantFamily {
+                family: r.get(0)?,
+                products: r.get(1)?,
+                stock: r.get(2)?,
+            })
+        })?;
+        let mut out: Vec<VariantFamily> = rows.collect::<SqlResult<Vec<_>>>()?;
+        // orden canónico del local: sin variante primero, después INCELL → OLED → AM → ORIGINAL…
+        out.sort_by(|a, b| crate::catalog::variant_rank(&a.family).cmp(&crate::catalog::variant_rank(&b.family)));
+        Ok(out)
     }
 }
 
@@ -1684,6 +2140,7 @@ pub(crate) fn build_parsed_products(conn: &Connection) -> SqlResult<Vec<ParsedPr
             price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
             min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
             category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
         })
     })?;
     let mut out: Vec<ParsedProduct> = Vec::new();
@@ -1752,6 +2209,13 @@ impl Database {
     /// clave canónica (evita el mismo teléfono dos veces por escribir la marca
     /// de otra forma). Incluye cuántos repuestos le sirven y su stock.
     pub fn get_phone_models(&self, search: &str, limit: i64) -> SqlResult<Vec<PhoneModelRow>> {
+        self.get_phone_models_filtered(search, limit, false)
+    }
+
+    /// F50 — igual que `get_phone_models` pero con `in_use_only`: el formulario de servicio ofrece
+    /// **solo los modelos que el local usa** (el check del padrón), con «Ver todos» para el caso
+    /// raro. La búsqueda también entiende el CÓDIGO (`M-007`) además del nombre.
+    pub fn get_phone_models_filtered(&self, search: &str, limit: i64, in_use_only: bool) -> SqlResult<Vec<PhoneModelRow>> {
         let conn = self.conn.lock().unwrap();
         let mut cache = self.cache.lock().unwrap();
         #[derive(Default)]
@@ -1760,6 +2224,10 @@ impl Database {
             brand: String,
             products: i64,
             stock: i64,
+            in_use: i64,
+            code: String,
+            /// F53: pantalla de REFERENCIA del modelo (se auto-selecciona al registrar el servicio).
+            default_product_id: Option<i64>,
         }
         // FUENTE ÚNICA: el PADRÓN (`phones`), no la compatibilidad cruda. Así el
         // formulario de servicio ofrece el MISMO nombre que el taller ve (y corrige)
@@ -1772,7 +2240,8 @@ impl Database {
             // repetía en cada consulta del selector de modelo (230-300 ms medidos).
             let totals = cache.phone_totals(&conn)?;
             let mut stmt = conn.prepare(
-                "SELECT COALESCE(key,''), COALESCE(brand,''), COALESCE(name,''), COALESCE(source,'catalogo')
+                "SELECT COALESCE(key,''), COALESCE(brand,''), COALESCE(name,''), COALESCE(source,'catalogo'),
+                        COALESCE(in_use,0), COALESCE(code,''), default_product_id
                  FROM phones",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -1781,17 +2250,24 @@ impl Database {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<i64>>(6).unwrap_or(None),
                 ))
             })?;
             for row in rows {
-                let (key, brand, name, source) = row?;
+                let (key, brand, name, source, in_use, code, default_product_id) = row?;
                 let (products, stock) = totals.get(&key).copied().unwrap_or((0, 0));
                 // los teléfonos dados de ALTA a mano salen siempre (aunque todavía no tengan
                 // repuesto cargado): el taller los agregó justamente para poder usarlos
                 if products == 0 && source != "manual" {
                     continue;
                 }
-                map.insert(key, Acc { label: name, brand, products, stock });
+                // F50: con «solo lo que uso» se esconden los modelos apagados del padrón (el check).
+                if in_use_only && in_use != 1 {
+                    continue;
+                }
+                map.insert(key, Acc { label: name, brand, products, stock, in_use, code, default_product_id });
             }
         }
 
@@ -1800,9 +2276,13 @@ impl Database {
             .into_iter()
             .filter(|(_, a)| {
                 // se busca por marca + nombre: el nombre comercial del padrón no repite la
-                // marca («110» es un Nokia 110), así que «nokia» tiene que encontrarlo
+                // marca («110» es un Nokia 110), así que «nokia» tiene que encontrarlo.
+                // F50: además se puede BUSCAR POR CÓDIGO («M-007»): el local lo dicta y aparece.
                 tokens.is_empty()
-                    || tokens.iter().all(|t| crate::catalog::norm(&format!("{} {}", a.brand, a.label)).contains(t))
+                    || tokens.iter().all(|t| {
+                        crate::catalog::norm(&format!("{} {} {}", a.brand, a.label, a.code)).contains(t)
+                            || crate::catalog::norm(&a.code).contains(t)
+                    })
             })
             .map(|(key, a)| PhoneModelRow {
                 label: a.label,
@@ -1811,9 +2291,13 @@ impl Database {
                 screens: a.products,
                 stock: a.stock,
                 with_stock: if a.stock > 0 { 1 } else { 0 },
+                in_use: a.in_use,
+                code: a.code,
+                default_product_id: a.default_product_id,
             })
             .collect();
-        list.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        // F50: lo que el local USA va primero (y con el mismo nombre, el orden es estable).
+        list.sort_by(|a, b| b.in_use.cmp(&a.in_use).then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase())));
         if limit > 0 { list.truncate(limit as usize); }
         Ok(list)
     }
@@ -2082,14 +2566,125 @@ impl Database {
         let n = crate::catalog::normalize_fields(&cat, brand, model, variant, compatibility);
         let search = crate::catalog::search_text(name, &n.brand, &n.model, &n.variant, &n.compatibility);
         conn.execute(
-            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd, search_text) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![name, category_id, n.brand, n.model, n.variant, n.compatibility, price_cost, price_sale, stock, min_stock, price_usd, search],
+            "INSERT INTO products (name, category_id, brand, model, variant, compatibility, price_cost, price_sale, stock, min_stock, price_usd, search_text, in_use) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![name, category_id, n.brand, n.model, n.variant, n.compatibility, price_cost, price_sale, stock, min_stock, price_usd, search,
+                // F50 — MISMA regla que el seed de la migración: arranca EN USO lo que tiene stock y
+                // lo demás se marca a mano (un toque en Inventario). Una sola regla, sin sorpresas.
+                if stock > 0 { 1 } else { 0 }],
         )?;
         // OJO: el rowid se captura ANTES del rebuild (que inserta en `phones`)
         let new_id = conn.last_insert_rowid();
+        // F50: código corto del producto («P-0142») y, si nace con stock, queda EN USO (el mismo
+        // criterio del seed de la migración: lo que entra al cajón es lo que el taller usa).
+        let _ = conn.execute(
+            "UPDATE products SET code = 'P-' || printf('%04d', id) WHERE id=?1 AND (code IS NULL OR code='')",
+            params![new_id],
+        );
         // el padrón de teléfonos sigue la compatibilidad del catálogo
+        // F50: los teléfonos que NACEN con este producto se numeran (`M-…`) y, si el producto entró
+        // al cajón (stock > 0), quedan EN USO — la misma regla del seed de la migración. Un modelo
+        // que YA existía no se toca: si el dueño lo apagó a mano, el sistema no se lo vuelve a
+        // prender (para prender todo un modelo está «usar todo el modelo», a un toque).
+        let ultimo_phone: i64 = conn
+            .query_row("SELECT COALESCE(MAX(id),0) FROM phones", [], |r| r.get(0))
+            .unwrap_or(0);
         let _ = crate::catalog::rebuild_phones(&conn, false);
+        let _ = conn.execute(
+            "UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE id > ?1 AND (code IS NULL OR code='')",
+            params![ultimo_phone],
+        );
+        let _ = conn.execute(
+            "UPDATE phones SET in_use=?1 WHERE id > ?2",
+            params![if stock > 0 { 1 } else { 0 }, ultimo_phone],
+        );
         Ok(new_id)
+    }
+
+    // ── F50: «LO QUE USO» (el check) + CÓDIGOS DE REFERENCIA ────────────────────────────────────
+    // Comandos ANGOSTOS (una columna cada uno): así el check del inventario no puede pisar precios,
+    // stock ni compatibilidad, y el código se corrige sin tocar nada más.
+    // El check NO toca el stock ni el descuento por servicio: solo decide qué se OFRECE al registrar.
+
+    /// El local marca/desmarca un PRODUCTO (una pantalla concreta) como «lo uso».
+    pub fn set_product_in_use(&self, id: i64, in_use: bool) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE products SET in_use=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+            params![if in_use { 1 } else { 0 }, id],
+        )?;
+        if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        Ok(())
+    }
+
+    /// El local marca/desmarca un MODELO del padrón (el teléfono) como «lo uso».
+    pub fn set_phone_in_use(&self, id: i64, in_use: bool) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE phones SET in_use=?1 WHERE id=?2",
+            params![if in_use { 1 } else { 0 }, id],
+        )?;
+        if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        Ok(())
+    }
+
+    /// «Usar todo el modelo» / «Apagar todo el modelo»: prende (o apaga) el teléfono Y TODOS sus
+    /// repuestos en UNA transacción — así el padrón y el inventario no quedan en estados distintos.
+    /// Devuelve cuántos productos cambiaron (para avisar en pantalla).
+    pub fn set_phone_use_all(&self, phone_id: i64, in_use: bool) -> SqlResult<i64> {
+        let mut conn = self.conn.lock().unwrap();
+        let key: String = conn.query_row(
+            "SELECT COALESCE(key,'') FROM phones WHERE id=?1", params![phone_id], |r| r.get(0),
+        )?;
+        let tx = conn.transaction()?;
+        // ids de repuesto de ese teléfono: MISMA fuente que el padrón (clave + alias), sin depender
+        // de un segundo criterio de compatibilidad.
+        let total = {
+            let mut cache = self.cache.lock().unwrap();
+            let idx = cache.phone_index(&tx)?;
+            let ids: Vec<i64> = idx.get(&key).map(|e| e.ids.iter().copied().collect()).unwrap_or_default();
+            let mut n = 0i64;
+            for id in ids {
+                n += tx.execute(
+                    "UPDATE products SET in_use=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+                    params![if in_use { 1 } else { 0 }, id],
+                )? as i64;
+            }
+            n
+        };
+        tx.execute("UPDATE phones SET in_use=?1 WHERE id=?2", params![if in_use { 1 } else { 0 }, phone_id])?;
+        tx.commit()?;
+        Ok(total)
+    }
+
+    /// F53: la PANTALLA DE REFERENCIA del modelo (la que el local instala siempre). `None` = ninguna.
+    pub fn set_phone_default_product(&self, phone_id: i64, product_id: Option<i64>) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(pid) = product_id {
+            let existe: i64 = conn.query_row("SELECT COUNT(*) FROM products WHERE id=?1", params![pid], |r| r.get(0))?;
+            if existe == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        }
+        conn.execute("UPDATE phones SET default_product_id=?1 WHERE id=?2", params![product_id, phone_id])?;
+        Ok(())
+    }
+
+    /// Corregir el CÓDIGO de un producto (el número con el que el local lo dicta: `P-0142`).
+    pub fn set_product_code(&self, id: i64, code: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let limpio = code.trim().to_uppercase();
+        let changed = conn.execute(
+            "UPDATE products SET code=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+            params![if limpio.is_empty() { None } else { Some(limpio) }, id],
+        )?;
+        if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        Ok(())
+    }
+
+    /// Corregir el CÓDIGO de un teléfono del padrón (`M-007`).
+    pub fn set_phone_code(&self, id: i64, code: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let limpio = code.trim().to_uppercase();
+        conn.execute("UPDATE phones SET code=?1 WHERE id=?2", params![if limpio.is_empty() { None } else { Some(limpio) }, id])?;
+        Ok(())
     }
 
     pub fn update_product(&self, id: i64, name: &str, category_id: Option<i64>, brand: &str, model: &str,
@@ -2173,6 +2768,7 @@ impl Database {
                 category_name: r.get(14)?,
                 price_usd: r.get(13)?,
                 supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -2194,6 +2790,7 @@ impl Database {
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
                 updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -2220,6 +2817,7 @@ impl Database {
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
                 updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -4097,6 +4695,7 @@ impl Database {
                 compatibility: r.get(6)?, price_cost: r.get(7)?, price_sale: r.get(8)?,
                 stock: r.get(9)?, min_stock: r.get(10)?, created_at: r.get(11)?,
                 updated_at: r.get(12)?, category_name: r.get(14)?, price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
             })
         })?;
         let mut products = Vec::new();
@@ -7080,6 +7679,311 @@ mod tests {
         let _ = std::fs::remove_file(&test_path);
     }
 
+    /// F50 — EL CHECK NO FRENA EL INVENTARIO (invariante que el dueño pidió sostener: «el inventario
+    /// tiene que seguir descontando por servicio»). `in_use` decide **qué se OFRECE** al registrar
+    /// (la lista de modelos del formulario), NUNCA qué se descuenta: una pantalla apagada a mano que
+    /// igual se elige y se entrega **se descuenta** y al reabrir **se devuelve** a esa misma ficha.
+    /// Si el check pudiera parar el descuento, apagar una ficha del catálogo dejaría el stock
+    /// mintiendo con el repuesto ya instalado en la calle.
+    #[test]
+    fn test_in_use_never_stops_the_inventory_deduction() {
+        let test_path = PathBuf::from("test_in_use_stock.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        let p = db.add_product("Pantalla Samsung A70 Incell", Some(1), "Samsung", "A70", "Incell",
+            r#"["Samsung A70"]"#, 8.0, 15.0, 3, 0, 0.0).unwrap();
+
+        // el local APAGA la pantalla y el modelo (no los usa: no quieren verlos en el formulario)
+        db.set_product_in_use(p, false).unwrap();
+        let phone_id: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT id FROM phones WHERE name LIKE '%A70%'", [], |r| r.get(0)).unwrap()
+        };
+        db.set_phone_use_all(phone_id, false).unwrap();
+        assert!(db.get_phone_models_filtered("A70", 50, true).unwrap().iter().all(|m| m.in_use == 0),
+            "apagado NO se ofrece en el formulario (para eso es el check)");
+        // …pero la pantalla SIGUE estando entre las compatibles del modelo: apagar una ficha no
+        // puede dejar al taller sin poder elegir el repuesto que tiene que instalar.
+        assert!(db.find_compatible_products("Samsung A70", None, 40).unwrap().iter().any(|c| c.product.id == p),
+            "la lista de pantallas del modelo no se filtra por «en uso»");
+
+        let sid = db.add_service("DEV-0500", "Luis", "0412-1", "Samsung A70",
+            "Pantalla rota", "Cambio pantalla", r#"["Cambio pantalla"]"#,
+            15.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "V-1", "", "{}", None, "", None, "",
+            Some(p), 0.0).unwrap();
+        db.update_service(sid, "Luis", "0412-1", "Samsung A70", "Pantalla rota",
+            "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Divisas (USD Cash)", "", "Entregado", "",
+            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p), 0.0).unwrap();
+
+        let stock = |id: i64| -> i64 {
+            conn_query(|| {
+                let c = db.conn.lock().unwrap();
+                c.query_row("SELECT stock FROM products WHERE id=?1", params![id], |r| r.get(0)).unwrap()
+            })
+        };
+        assert_eq!(stock(p), 2, "entregar descuenta la pantalla ELEGIDA aunque esté apagada (3→2)");
+
+        db.update_service(sid, "Luis", "0412-1", "Samsung A70", "Pantalla rota",
+            "Cambio pantalla", r#"["Cambio pantalla"]"#, 15.0, "Divisas (USD Cash)", "", "Recibido", "",
+            0.0, "", "USD", "V-1", "", "{}", "", None, "", Some(p), 0.0).unwrap();
+        assert_eq!(stock(p), 3, "reabrir la devuelve a la MISMA ficha (el check no la desvía)");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F52 — LA FAMILIA DE LA VARIANTE TIENE UNA SOLA REGLA, escrita dos veces (Rust para los chips y
+    /// el orden, SQL para el filtro) y **comparada acá contra los valores REALES del catálogo**: si
+    /// las dos implementaciones se separan, el filtro del inventario y los chips dirían cosas
+    /// distintas y esto se pone rojo.
+    #[test]
+    fn test_variant_family_sql_matches_rust() {
+        let test_path = PathBuf::from("test_variant_family.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        // los valores reales del catálogo del local + casos de borde (espacios, minúsculas, AM).
+        // OJO: `add_product` NORMALIZA la variante, así que la comparación se hace contra lo que
+        // quedó GUARDADO (que es lo que el filtro va a ver), no contra el texto de entrada.
+        let valores = ["INCELL", "OLED", "OLED Con Marco", "ORIGINAL", "ORIGINAL Sin Marco",
+                       "INCELL Con Marco", "AM (OLED)", "", "  oled  "];
+        for (i, v) in valores.iter().enumerate() {
+            db.add_product(&format!("Pantalla Prueba {i}"), Some(1), "Samsung", "A70", v,
+                r#"["Samsung A70"]"#, 1.0, 10.0, 1, 0, 0.0).unwrap();
+        }
+
+        // (1) la familia calculada en Rust == la que calcula el SQL, para CADA variante guardada
+        // (se leen TODAS las filas, no los valores distintos: el filtro cuenta fichas, no textos)
+        let guardadas: Vec<String> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT COALESCE(variant,'') FROM products ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(guardadas.len() >= 6, "el catálogo de prueba debe tener varias variantes: {guardadas:?}");
+        for v in &guardadas {
+            let conn = db.conn.lock().unwrap();
+            let sql: String = conn.query_row(
+                &format!("SELECT {VARIANT_FAMILY_SQL} FROM products p WHERE COALESCE(p.variant,'')=?1 LIMIT 1"),
+                params![v], |r| r.get(0)).unwrap();
+            drop(conn);
+            assert_eq!(sql, crate::catalog::variant_family(v),
+                "la familia de «{v}» difiere entre el SQL del filtro y catalog::variant_family");
+        }
+
+        // (2) el FILTRO agrupa por familia: la expectativa sale de aplicar la regla de Rust a TODAS
+        // las fichas guardadas, y el SQL tiene que devolver exactamente lo mismo.
+        for familia in ["oled", "incell", "original", "am", ""] {
+            let esperadas = guardadas.iter().filter(|v| crate::catalog::variant_family(v) == familia).count() as i64;
+            let page = db.get_products_page("", None, None, Some("todos"), Some(familia), Some("nombre"), 50, 0).unwrap();
+            assert_eq!(page.total, esperadas, "la familia «{familia}» debe traer {esperadas} fichas (trajo {})", page.total);
+            for p in &page.items {
+                let v = p.variant.clone().unwrap_or_default();
+                assert_eq!(crate::catalog::variant_family(&v), familia,
+                    "el filtro «{familia}» trajo «{v}» (familia {})", crate::catalog::variant_family(&v));
+            }
+        }
+        // (3) «OLED» trae también «OLED Con Marco» (es la familia, no el texto exacto)
+        let oled = db.get_products_page("", None, None, Some("todos"), Some("OLED"), Some("nombre"), 50, 0).unwrap();
+        let variantes: Vec<String> = oled.items.iter().map(|p| p.variant.clone().unwrap_or_default()).collect();
+        assert!(variantes.iter().any(|v| v == "OLED") && variantes.iter().any(|v| v == "OLED Con Marco"),
+            "el filtro OLED trae la familia completa: {variantes:?}");
+        // (4) sin filtro salen todas
+        let todas = db.get_products_page("", None, None, Some("todos"), None, Some("nombre"), 50, 0).unwrap();
+        assert_eq!(todas.total, valores.len() as i64, "sin filtro de variante salen todas las fichas");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F52 — LA FILA DE UN MODELO trae sus VARIANTES y su RANGO DE PRECIOS (lo que muestra la vista
+    /// «Por modelo»): una sola ficha por teléfono, con las variantes ADENTRO, no como modelos aparte.
+    #[test]
+    fn test_model_row_carries_variants_and_price_range() {
+        let test_path = PathBuf::from("test_model_variants.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // 4 pantallas del MISMO teléfono (variantes reales) — precios y stock distintos a propósito
+        db.add_product("Pantalla Samsung A70 Incell", Some(1), "Samsung", "A70", "INCELL",
+            r#"["Samsung A70"]"#, 8.0, 10.0, 3, 0, 0.0).unwrap();
+        db.add_product("Pantalla Samsung A70 OLED", Some(1), "Samsung", "A70", "OLED",
+            r#"["Samsung A70"]"#, 9.0, 15.0, 2, 0, 0.0).unwrap();
+        db.add_product("Pantalla Samsung A70 OLED Con Marco", Some(1), "Samsung", "A70", "OLED Con Marco",
+            r#"["Samsung A70"]"#, 10.0, 12.5, 1, 0, 0.0).unwrap();
+        // una ficha SIN precio: no puede arruinar el rango (min/max salen de las que tienen precio).
+        // Es también la que se APAGA a mano más abajo, para comprobar que la ficha lo dice.
+        let sin_precio = db.add_product("Pantalla Samsung A70 sin precio", Some(1), "Samsung", "A70", "ORIGINAL",
+            r#"["Samsung A70"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+
+        let page = db.get_phones_page(None, "A70", false, false, false, "nombre", "asc", 50, 0).unwrap();
+        let fila = page.items.iter().find(|p| p.model.to_lowercase().contains("a70"))
+            .unwrap_or_else(|| panic!("el teléfono existe en el padrón: {:?}",
+                page.items.iter().map(|p| format!("{}|{}", p.brand, p.model)).collect::<Vec<_>>()));
+        assert_eq!(fila.products, 4, "una sola fila por MODELO con sus 4 repuestos adentro");
+        assert_eq!(fila.stock, 7, "el stock del modelo es la suma de sus repuestos (3+2+1+1)");
+        // variantes en ORDEN canónico (INCELL → OLED → ORIGINAL) y sin repetir: las dos OLED son familia
+        // distinta pero la lista muestra el texto real de cada una
+        assert_eq!(fila.variants, vec!["INCELL".to_string(), "OLED".to_string(), "OLED Con Marco".to_string(), "ORIGINAL".to_string()],
+            "las variantes del modelo salen ordenadas y completas: {:?}", fila.variants);
+        assert!((fila.price_min - 10.0).abs() < 1e-6, "el mínimo ignora la ficha sin precio ({})", fila.price_min);
+        assert!((fila.price_max - 15.0).abs() < 1e-6, "el máximo es el precio más alto ({})", fila.price_max);
+
+        // la ficha del teléfono trae lo mismo (es la misma fuente: merged_stats)
+        let detalle = db.get_phone_detail(fila.id).unwrap().expect("ficha del teléfono");
+        assert_eq!(detalle.phone.variants, fila.variants, "la ficha y la lista dicen las mismas variantes");
+        assert_eq!(detalle.phone.products, 4, "la ficha lista los 4 repuestos del modelo");
+        // …y cada repuesto de la ficha trae SU código y SU «en uso» de la base (bug real: la lista de
+        // columnas del detalle se había quedado sin `code`/`in_use` y el despliegue mostraba todo
+        // «en uso» y sin código — lo cazó la verificación en vivo de la vista «Por modelo»).
+        db.set_product_in_use(sin_precio, false).unwrap();
+        let detalle2 = db.get_phone_detail(fila.id).unwrap().expect("ficha del teléfono");
+        let repuestos: Vec<&crate::db::Product> = detalle2.blocks.iter().flat_map(|b| b.items.iter()).collect();
+        for r in &repuestos {
+            let code: String = {
+                let conn = db.conn.lock().unwrap();
+                conn.query_row("SELECT COALESCE(code,'') FROM products WHERE id=?1", params![r.id], |x| x.get(0)).unwrap()
+            };
+            assert_eq!(r.code, code, "el repuesto {} de la ficha tiene que traer su código real", r.id);
+        }
+        let apagado = repuestos.iter().find(|r| r.id == sin_precio).expect("el repuesto apagado está en la ficha");
+        assert_eq!(apagado.in_use, 0, "el repuesto apagado a mano se muestra apagado en la ficha (no «todo en uso»)");
+        assert!(repuestos.iter().filter(|r| r.id != sin_precio).all(|r| r.in_use == 1),
+            "los demás siguen en uso");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F52 — el ORDEN de las variantes es canonico y estable (lo que el taller espera ver primero).
+    #[test]
+    fn test_variant_order_is_canonical() {
+        let mut v: Vec<String> = ["ORIGINAL Sin Marco", "OLED", "", "INCELL Con Marco", "AM", "ORIGINAL", "OLED Con Marco"]
+            .iter().map(|s| s.to_string()).collect();
+        crate::catalog::sort_variants(&mut v);
+        assert_eq!(v, vec!["INCELL Con Marco", "OLED", "OLED Con Marco", "AM", "ORIGINAL", "ORIGINAL Sin Marco"],
+            "orden canónico: material (INCELL→OLED→AM→ORIGINAL) y, dentro de cada uno, el pelado antes de sus marcos, sin vacíos");
+        assert_eq!(crate::catalog::variant_family("OLED Con Marco"), "oled");
+        assert_eq!(crate::catalog::variant_family(""), "");
+        assert!(crate::catalog::variant_is_family("OLED Con Marco", "OLED"));
+        assert!(!crate::catalog::variant_is_family("OLED Con Marco", "incell"));
+    }
+
+    /// F53 — SEPARAR LOS MODELOS: la pantalla queda compatible con **los dos** teléfonos, los nuevos
+    /// se numeran y se marcan «en uso», y **no se mueve ni el stock ni los precios** (ni los
+    /// movimientos). El patrón es el del dueño: «Samsung A70 A705» → «Samsung A70» + «Samsung A705».
+    #[test]
+    fn test_split_models_preview_and_apply() {
+        let test_path = PathBuf::from("test_split_models.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // una pantalla que hoy sirve a los DOS teléfonos en una sola entrada pegada
+        let p = db.add_product("Pantalla Samsung A70 A705 Incell", Some(1), "Samsung", "A70 A705", "INCELL",
+            r#"["Samsung A70 A705","Samsung A70"]"#, 8.0, 15.0, 4, 0, 0.0).unwrap();
+        let (stock_antes, precio_antes) = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock, price_sale FROM products WHERE id=?1", params![p],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))).unwrap()
+        };
+
+        // El padrón de una base que viene de la versión VIEJA: una sola fila con los dos teléfonos
+        // pegados en el nombre («Samsung A70 A705»). Se arma a mano porque `add_product` ya reconstruye
+        // con la regla nueva: acá se prueba justamente la MIGRACIÓN de lo que ya estaba.
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute("DELETE FROM phones", []).unwrap();
+            c.execute(
+                "INSERT INTO phones (brand, line, model, name, key, aliases, source, in_use, code)
+                 VALUES ('Samsung','','A70 A705','Samsung A70 A705','samsung|a70a705','[\"Samsung A70 A705\"]','catalogo',1,'M-0001')",
+                [],
+            ).unwrap();
+        }
+
+        // 1) VISTA PREVIA: no escribe nada y dice qué aparece y qué se va
+        let prev = db.preview_phone_split().unwrap();
+        assert!(prev.created.iter().any(|n| n.contains("A70")), "aparece «A70»: {:?}", prev.created);
+        assert!(prev.created.iter().any(|n| n.contains("A705")), "aparece «A705»: {:?}", prev.created);
+        assert!(prev.removed.iter().any(|n| n.contains("A70 A705")), "deja de existir el nombre pegado: {:?}", prev.removed);
+        let phones_previos: i64 = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT COUNT(*) FROM phones", [], |r| r.get(0)).unwrap()
+        };
+        assert!(!prev.created.is_empty() && prev.phones_after > prev.phones_before,
+            "la vista previa dice que el padrón crece ({} → {})", prev.phones_before, prev.phones_after);
+
+        // 2) APLICAR
+        let rep = db.apply_phone_split().unwrap();
+        assert!(rep.backup.is_some(), "antes de escribir se guarda una copia de seguridad");
+        assert!(rep.created.iter().any(|n| n.contains("A70")) && rep.created.iter().any(|n| n.contains("A705")));
+
+        // el padrón ya NO tiene el nombre pegado y SÍ los dos reales, cada uno numerado y EN USO
+        let filas: Vec<(i64, String, String, i64)> = {
+            let c = db.conn.lock().unwrap();
+            let mut stmt = c.prepare("SELECT id, name, COALESCE(code,''), COALESCE(in_use,0) FROM phones").unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let nombres: Vec<String> = filas.iter().map(|(_, n, _, _)| n.clone()).collect();
+        assert!(nombres.iter().any(|n| n.ends_with("A70")), "existe el teléfono «…A70»: {nombres:?}");
+        assert!(nombres.iter().any(|n| n.ends_with("A705")), "existe el teléfono «…A705»: {nombres:?}");
+        assert!(!nombres.iter().any(|n| n.contains("A70 A705")), "el nombre pegado ya no está: {nombres:?}");
+        for (id, nombre, code, in_use) in &filas {
+            if nombre.ends_with("A70") || nombre.ends_with("A705") {
+                assert!(!code.is_empty(), "el modelo nuevo queda numerado ({nombre})");
+                assert_eq!(*in_use, 1, "el modelo nuevo queda EN USO (su repuesto está en uso y con stock)");
+                // y el teléfono nuevo encuentra la pantalla (compatible con los dos)
+                let det = db.get_phone_detail(*id).unwrap().expect("ficha del teléfono nuevo");
+                assert_eq!(det.phone.products, 1, "{nombre} tiene que ver la pantalla");
+                assert_eq!(det.phone.stock, stock_antes, "{nombre} ve el stock de la pantalla");
+            }
+        }
+        let _ = phones_previos;
+
+        // 3) NADA de plata ni de stock se movió
+        let (stock_despues, precio_despues): (i64, f64) = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT stock, price_sale FROM products WHERE id=?1", params![p],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        assert_eq!(stock_despues, stock_antes, "el stock no se toca");
+        assert!((precio_despues - precio_antes).abs() < 1e-9, "el precio no se toca");
+        let movs: i64 = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT COUNT(*) FROM inventory_movements", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(movs, 0, "no se inventa ningún movimiento de inventario");
+        // y la compatibilidad del producto sigue diciendo lo mismo (no se reescribe el texto)
+        let compat: String = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT COALESCE(compatibility,'') FROM products WHERE id=?1", params![p], |r| r.get(0)).unwrap()
+        };
+        assert!(compat.contains("A70 A705"), "la compatibilidad del repuesto NO se toca: {compat}");
+
+        // 4) idempotente: correrlo otra vez no cambia nada
+        let rep2 = db.apply_phone_split().unwrap();
+        assert!(rep2.created.is_empty(), "la segunda corrida no crea nada: {:?}", rep2.created);
+        assert!(rep2.removed.is_empty(), "la segunda corrida no borra nada: {:?}", rep2.removed);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F53 — la variante escrita en el TEXTO pasa al campo `variant` (y solo cuando falta).
+    #[test]
+    fn test_variant_extracted_from_text() {
+        assert_eq!(crate::catalog::variant_in_text("Samsung A25 5G OLED C"), Some("OLED".to_string()));
+        assert_eq!(crate::catalog::variant_in_text("Samsung A52 A525 OLED Con Marco"), Some("OLED Con Marco".to_string()));
+        assert_eq!(crate::catalog::variant_in_text("Apple 13 Pro Max AM"), Some("AM".to_string()));
+        assert_eq!(crate::catalog::variant_in_text("Xiaomi Redmi 9A Incell"), Some("INCELL".to_string()));
+        // trampa real medida en el catálogo: «Camon» NO es la variante AM
+        assert_eq!(crate::catalog::variant_in_text("Tecno Camon 20"), None);
+        // «American» tampoco
+        assert_eq!(crate::catalog::variant_in_text("Motorola E4 Plus Americano"), None);
+        assert_eq!(crate::catalog::variant_in_text("Samsung A70"), None);
+    }
+
     #[test]
     fn test_service_screen_gate_non_screen_job() {
         // (2026-08-12) Gate: SOLO los trabajos que incluyen "Cambio pantalla" consumen
@@ -7824,7 +8728,7 @@ discount_amount: 0.0,
         };
 
         ok("get_products", &db.get_products("", None).unwrap());
-        ok("get_products_page", &db.get_products_page("", None, None, None, None, 50, 0).unwrap().items);
+        ok("get_products_page", &db.get_products_page("", None, None, None, None, None, 50, 0).unwrap().items);
         ok("get_low_stock_products", &db.get_low_stock_products().unwrap());
         ok("get_reorder_suggestions", &db.get_reorder_suggestions().unwrap());
         ok("suggest_products", &db.suggest_products("note", 10).unwrap());
@@ -7852,34 +8756,181 @@ discount_amount: 0.0,
         db.add_product("Pantalla Samsung A06", Some(1), "Samsung", "A06 4G", "", r#"["Samsung A06 4G"]"#, 8.0, 15.0, 0, 2, 0.0).unwrap();
         db.add_product("Táctil Tecno", Some(2), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 0.0, 0.0, -1, 0, 0.0).unwrap();
 
-        let all = db.get_products_page("", None, None, None, None, 50, 0).unwrap();
+        let all = db.get_products_page("", None, None, None, None, None, 50, 0).unwrap();
         assert_eq!(all.total, 3);
         assert_eq!(all.items.len(), 3);
 
         // búsqueda con la jerga vieja sobre catálogo canónico
-        let red = db.get_products_page("red note", None, None, None, None, 50, 0).unwrap();
+        let red = db.get_products_page("red note", None, None, None, None, None, 50, 0).unwrap();
         assert_eq!(red.total, 0, "no hay Redmi Note en este fixture");
-        let old = db.get_products_page("Red 10", None, None, None, None, 50, 0).unwrap();
+        let old = db.get_products_page("Red 10", None, None, None, None, None, 50, 0).unwrap();
         assert_eq!(old.total, 1, "'Red 10' encuentra 'Redmi 10 4G'");
 
         // filtros
-        let out = db.get_products_page("", None, None, Some("agotado"), None, 50, 0).unwrap();
+        let out = db.get_products_page("", None, None, Some("agotado"), None, None, 50, 0).unwrap();
         assert_eq!(out.total, 1);
-        let neg = db.get_products_page("", None, None, Some("negativo"), None, 50, 0).unwrap();
+        let neg = db.get_products_page("", None, None, Some("negativo"), None, None, 50, 0).unwrap();
         assert_eq!(neg.total, 1);
-        let low = db.get_products_page("", None, None, Some("bajo_minimo"), None, 50, 0).unwrap();
+        let low = db.get_products_page("", None, None, Some("bajo_minimo"), None, None, 50, 0).unwrap();
         assert_eq!(low.total, 1, "solo el de stock 0 con min 2 (el negativo tiene min 0)");
-        let cat = db.get_products_page("", Some(2), None, None, None, 50, 0).unwrap();
+        let cat = db.get_products_page("", Some(2), None, None, None, None, 50, 0).unwrap();
         assert_eq!(cat.total, 1, "filtro por categoría");
-        let brand = db.get_products_page("", None, Some("Xiaomi"), None, None, 50, 0).unwrap();
+        let brand = db.get_products_page("", None, Some("Xiaomi"), None, None, None, 50, 0).unwrap();
         assert_eq!(brand.total, 1, "filtro por marca canónica");
 
         // paginación
-        let p1 = db.get_products_page("", None, None, None, Some("stock"), 2, 0).unwrap();
+        let p1 = db.get_products_page("", None, None, None, None, Some("stock"), 2, 0).unwrap();
         assert_eq!(p1.total, 3);
         assert_eq!(p1.items.len(), 2);
-        let p2 = db.get_products_page("", None, None, None, Some("stock"), 2, 2).unwrap();
+        let p2 = db.get_products_page("", None, None, None, None, Some("stock"), 2, 2).unwrap();
         assert_eq!(p2.items.len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F51 — TODAS las claves de orden por columna existen y son SQL válido.
+    ///
+    /// El bug real que esto evita (medido en vivo): el encabezado mandaba `costo_desc` y la clave no
+    /// estaba en el `match`, así que caía en el `_ => "p.name"` y el clic **no hacía nada** (la tabla
+    /// se veía igual). Un test que solo mira el código no lo ve; esto ejecuta cada clave contra SQLite.
+    #[test]
+    fn test_product_sort_keys_are_valid() {
+        let test_path = PathBuf::from("test_sort_keys.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.add_product("P1", Some(1), "Xiaomi", "Redmi 9A", "INCELL", r#"["Xiaomi Redmi 9A"]"#, 5.0, 10.0, 2, 1, 0.0).unwrap();
+        db.add_product("P2", Some(1), "Samsung", "A70", "OLED", r#"["Samsung A70"]"#, 7.0, 15.0, 0, 1, 0.0).unwrap();
+
+        // Las DOS claves de cada columna que ofrece la tabla (más las viejas del desplegable).
+        for key in [
+            "nombre", "nombre_desc", "marca", "marca_desc", "modelo", "modelo_desc",
+            "variante", "variante_desc", "categoria", "categoria_desc", "stock", "stock_desc",
+            "stock_asc", "precio", "precio_desc", "precio_asc", "costo", "costo_desc", "costo_asc",
+            "minimo", "minimo_desc", "minimo_asc", "reciente",
+        ] {
+            let page = db.get_products_page("", None, None, Some("todos"), None, Some(key), 50, 0)
+                .unwrap_or_else(|e| panic!("la clave de orden «{key}» rompe la consulta: {e}"));
+            assert_eq!(page.total, 2, "la clave «{key}» no debe filtrar nada");
+        }
+
+        // Y que ORDENE de verdad: el más caro primero con `precio` y el más barato con `precio_desc`.
+        let caro = db.get_products_page("", None, None, Some("todos"), None, Some("precio"), 50, 0).unwrap();
+        assert_eq!(caro.items[0].name, "P2", "precio = más caro primero");
+        let barato = db.get_products_page("", None, None, Some("todos"), None, Some("precio_desc"), 50, 0).unwrap();
+        assert_eq!(barato.items[0].name, "P1", "precio_desc = más barato primero");
+        let variante = db.get_products_page("", None, None, Some("todos"), None, Some("variante"), 50, 0).unwrap();
+        assert_eq!(variante.items[0].variant.as_deref(), Some("INCELL"), "variante ordena por su valor");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F50 — «LO QUE USO» (el check) + CÓDIGOS de referencia (`P-0001` / `M-0001`).
+    ///
+    /// Lo que fija: (1) las columnas nacen en la migración con su SEED (queda en uso lo que tiene
+    /// stock); (2) los códigos se asignan solos; (3) el check del producto y el del modelo son
+    /// comandos ANGOSTOS que no tocan nada más; (4) `set_phone_use_all` prende el teléfono Y sus
+    /// repuestos; (5) el formulario de servicio (`get_phone_models_filtered`) puede ofrecer SOLO lo
+    /// que el local usa, sin perder el camino de «ver todos».
+    #[test]
+    fn test_in_use_and_codes() {
+        let test_path = PathBuf::from("test_in_use.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        // P1 con stock (debería quedar EN USO) y P2 sin stock (apagado)
+        db.add_product("Pantalla Xiaomi Redmi 9A", Some(1), "Xiaomi", "Redmi 9A", "INCELL",
+            r#"["Xiaomi Redmi 9A"]"#, 5.0, 10.0, 3, 1, 0.0).unwrap();
+        db.add_product("Pantalla Samsung A70", Some(1), "Samsung", "A70", "OLED",
+            r#"["Samsung A70"]"#, 7.0, 15.0, 0, 1, 0.0).unwrap();
+
+        // (1) SEED + (2) códigos
+        let con_stock = db.get_products_page("", None, None, Some("con_stock"), None, Some("nombre"), 10, 0).unwrap();
+        assert_eq!(con_stock.items[0].in_use, 1, "lo que tiene stock queda EN USO al migrar");
+        assert!(con_stock.items[0].code.starts_with("P-"), "el código del producto es P-… ({})", con_stock.items[0].code);
+        let sin_stock = db.get_products_page("", None, None, Some("agotado"), None, Some("nombre"), 10, 0).unwrap();
+        assert_eq!(sin_stock.items[0].in_use, 0, "lo agotado queda apagado (se prende a mano)");
+
+        // (3) el check del producto es angosto: cambia `in_use` y NADA más
+        let pid = con_stock.items[0].id;
+        let leer = |id: i64| db.get_products_page("", None, None, Some("todos"), None, Some("nombre"), 50, 0)
+            .unwrap().items.into_iter().find(|p| p.id == id).unwrap();
+        let antes = leer(pid);
+        db.set_product_in_use(pid, false).unwrap();
+        let despues = leer(pid);
+        assert_eq!(despues.in_use, 0);
+        assert_eq!(despues.stock, antes.stock, "el check NO toca el stock");
+        assert_eq!(despues.price_sale, antes.price_sale, "el check NO toca el precio");
+        assert_eq!(despues.compatibility, antes.compatibility, "el check NO toca la compatibilidad");
+        // el filtro del inventario lo respeta
+        assert_eq!(db.get_products_page("", None, None, Some("solo_uso"), None, Some("nombre"), 10, 0).unwrap().total, 0);
+        assert_eq!(db.get_products_page("", None, None, Some("sin_uso"), None, Some("nombre"), 10, 0).unwrap().total, 2);
+        db.set_product_in_use(pid, true).unwrap();
+
+        // (3b) la ficha también se encuentra por su CÓDIGO (como la dicta el local): con el guion y
+        // sin él. Es la otra mitad del «check con su número» que pidió el dueño.
+        let cod = leer(pid).code;
+        assert!(!cod.is_empty(), "el producto tiene código para dictar");
+        for escrito in [cod.clone(), cod.replace('-', "")] {
+            let hallado = db.get_products_page(&escrito, None, None, Some("todos"), None, Some("nombre"), 10, 0).unwrap();
+            assert!(hallado.items.iter().any(|p| p.id == pid), "se encuentra por código «{escrito}» ({cod})");
+        }
+
+        // (4) el padrón y su check: el teléfono con repuesto EN USO queda en uso; el otro no
+        let (phone_redmi, phone_samsung) = {
+            let conn = db.conn.lock().unwrap();
+            let uno = |like: &str| conn.query_row(
+                "SELECT id, COALESCE(code,''), COALESCE(in_use,0) FROM phones WHERE name LIKE ?1",
+                params![like], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            ).unwrap();
+            (uno("%Redmi 9A%"), uno("%A70%"))
+        };
+        assert_eq!(phone_redmi.2, 1, "el modelo con repuesto en uso queda EN USO");
+        assert!(phone_redmi.1.starts_with("M-"), "el modelo nace con código M-… ({})", phone_redmi.1);
+        assert_eq!(phone_samsung.2, 0, "el modelo sin repuesto en uso queda apagado");
+
+        // (4b) la REGLA DEL SEED, probada sobre la MISMA función que corre en la migración (`init()`):
+        // un catálogo que ya existía (repuesto en uso y con stock) prende su teléfono, y el padrón
+        // sale numerado. Se simula una base de la versión vieja (todo apagado y sin códigos).
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE phones SET in_use=0, code=NULL", []).unwrap();
+            conn.execute("UPDATE products SET in_use = CASE WHEN stock > 0 THEN 1 ELSE 0 END", []).unwrap();
+            crate::phones::seed_phone_in_use(&conn).unwrap();
+            conn.execute("UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE code IS NULL OR code=''", []).unwrap();
+            let en_uso: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM phones WHERE COALESCE(in_use,0)=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(en_uso, 1, "el seed prende SOLO el teléfono con repuesto en uso y con stock");
+            let code: String = conn.query_row(
+                "SELECT COALESCE(code,'') FROM phones WHERE name LIKE '%Redmi 9A%'", [], |r| r.get(0)).unwrap();
+            assert!(code.starts_with("M-"), "el padrón queda numerado para poder dictarlo ({code})");
+        }
+
+        // «usar todo el modelo» prende el teléfono Y sus repuestos (una transacción)
+        let n = db.set_phone_use_all(phone_samsung.0, true).unwrap();
+        assert!(n >= 1, "marcó al menos un repuesto del modelo (marcó {n})");
+        {
+            let conn = db.conn.lock().unwrap();
+            let in_use: i64 = conn.query_row("SELECT COALESCE(in_use,0) FROM phones WHERE id=?1",
+                params![phone_samsung.0], |r| r.get(0)).unwrap();
+            assert_eq!(in_use, 1, "el modelo quedó en uso");
+        }
+        let n2 = db.set_phone_use_all(phone_samsung.0, false).unwrap();
+        assert!(n2 >= 1, "apagó al menos un repuesto (apagó {n2})");
+        assert_eq!(db.get_products_page("", None, None, Some("solo_uso"), None, Some("nombre"), 10, 0).unwrap().total, 1,
+            "quedó en uso solo el producto del otro modelo");
+
+        // (5) el formulario de servicio: solo lo que se usa, y «ver todos» lo trae todo
+        let solo_uso = db.get_phone_models_filtered("", 50, true).unwrap();
+        let todos = db.get_phone_models_filtered("", 50, false).unwrap();
+        assert!(solo_uso.iter().all(|p| p.in_use == 1), "con in_use_only solo salen los marcados");
+        assert!(todos.len() > solo_uso.len(), "«ver todos» trae más que «solo lo que uso» ({solo_uso:?} vs {} )", todos.len());
+        let con_uso = db.get_phone_models_filtered("", 50, false).unwrap().iter().find(|p| p.label.contains("Redmi 9A")).unwrap().clone();
+        assert_eq!(con_uso.in_use, 1);
+        assert!(!con_uso.code.is_empty(), "el modelo del formulario trae su código");
+        // buscar por CÓDIGO (el local lo dicta)
+        let por_codigo = db.get_phone_models_filtered(&con_uso.code, 50, false).unwrap();
+        assert!(por_codigo.iter().any(|p| p.label == con_uso.label), "se puede buscar por código ({})", con_uso.code);
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
@@ -8006,7 +9057,7 @@ discount_amount: 0.0,
         assert_eq!(merged_stock, 7, "6 del que se queda + 1 del duplicado");
         let after = db.get_inventory_movements_page(Some(keep), None, None, None, None, 10, 0).unwrap();
         assert_eq!(after.total, 2, "los dos movimientos quedaron en el producto que se queda");
-        let gone = db.get_products_page("duplicado", None, None, None, None, 10, 0).unwrap();
+        let gone = db.get_products_page("duplicado", None, None, None, None, None, 10, 0).unwrap();
         assert_eq!(gone.total, 0, "el duplicado se borró");
 
         drop(db);
@@ -9102,13 +10153,13 @@ discount_amount: 0.0,
 
         ms("Inventario: get_categories", 20, || { db.get_categories().unwrap(); });
         ms("Productos : get_products_page (Pantalla, 50)", 20, || {
-            db.get_products_page("", Some(1), None, Some("todos"), Some("nombre"), 50, 0).unwrap();
+            db.get_products_page("", Some(1), None, Some("todos"), None, Some("nombre"), 50, 0).unwrap();
         });
         ms("Productos : get_products_page (sin filtro, 50)", 20, || {
-            db.get_products_page("", None, None, Some("todos"), Some("nombre"), 50, 0).unwrap();
+            db.get_products_page("", None, None, Some("todos"), None, Some("nombre"), 50, 0).unwrap();
         });
         ms("Productos : get_products_page (busca 'red note')", 20, || {
-            db.get_products_page("red note", None, None, Some("todos"), Some("nombre"), 50, 0).unwrap();
+            db.get_products_page("red note", None, None, Some("todos"), None, Some("nombre"), 50, 0).unwrap();
         });
         ms("Movim.    : get_inventory_movements_page (50)", 20, || {
             db.get_inventory_movements_page(None, None, None, None, None, 50, 0).unwrap();

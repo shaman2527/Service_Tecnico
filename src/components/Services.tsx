@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, Printer, Undo2, AlertTriangle, Zap, Camera } from 'lucide-react';
+import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, UserPlus, Printer, Undo2, AlertTriangle, Zap, Camera, Percent } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -30,9 +30,11 @@ import { PaymentMethodPicker } from './PaymentMethodPicker';
 // quitó el aviso flotante al registrar porque tapaba lo que el operario estaba escribiendo.
 import { FichaIngreso } from './FichaIngreso';
 import { firePolicyReminders } from './policy-actions';
+import { PolicyModalHost } from './PolicyModal';
+import DiscountDialog from './DiscountDialog';
 import { EntregadosHoy } from './EntregadosHoy';
 import { buildFicha } from '@/lib/ficha';
-import { nextStep, DEFAULT_NEW_STATUS, isCreatableStatus, photoOutIsCurrent } from '@/lib/service-guide';
+import { nextStep, DEFAULT_NEW_STATUS, isCreatableStatus, photoOutIsCurrent, needsTechnician } from '@/lib/service-guide';
 import { deliverReminders, receiveReminders, payIntentLabel, isDelivered } from '@/lib/reminders';
 // Piezas compartidas con el asistente de cierre (Harness F30): el stepper del wizard y la
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
@@ -43,6 +45,11 @@ import { updateOrderKeepingFields } from '@/lib/service-update';
 // F38: el saldo se dice en la moneda en que se cobró (+ equivalencia del día). Regla pura con test node.
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
 import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
+// F44: TRABAJOS HECHOS — los contadores de la lista cuentan LO QUE SE ESTÁ VIENDO (entregados
+// incluidos) con la misma regla que el filtro, y la línea de alcance dice sobre qué se cuenta.
+// Reglas puras con prueba node (`tools/service_report_test.ts`).
+import { ACTIVE_SENTINEL, NO_WORK_FILTER, matchesWorkFilter, scopeLabel, scopeProblem, serviceReport } from '@/lib/service-report';
+import type { ScopeInput } from '@/lib/service-report';
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
@@ -260,10 +267,13 @@ export default function Services() {
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('__activos__');
-  // true = el estado lo ajustó el conmutador «Entregados» (no el operario): al volver a
-  // «Recibidos» se restaura «Activos en taller» en lugar de dejar un filtro que el operario no pidió.
-  const estadoAuto = useRef(false);
+  // F44 (pedido del dueño: «el filtro predeterminado debería ser todos los estados, el que tengo
+  // actual es activos en taller, no debería ser ese»): `''` = TODOS LOS ESTADOS. Antes la lista
+  // abría con el sentinel `__activos__` y, como lo entregado no está activo, el mostrador abría en
+  // una lista vacía (en la base real las 4 órdenes son Entregado/Devuelto) justo cuando el cliente
+  // pregunta «¿cuántas pantallas hiciste?». El eje Recibidos/Entregados sigue igual: con el eje de
+  // ENTREGA una orden sin `date_out` no entra por sí sola, así que ya no hace falta forzar el estado.
+  const [statusFilter, setStatusFilter] = useState('');
   // F32: eje del rango de fechas — 'in' recibidos (histórico) · 'out' ENTREGADOS (permite
   // «entregados hoy», que con el eje de recibido era imposible de ver).
   const [dateField, setDateField] = useState<'in' | 'out'>('in');
@@ -279,6 +289,8 @@ export default function Services() {
   const [refundFor, setRefundFor] = useState<Service | null>(null);
   // F30: asistente de cierre (pide solo lo que falta para entregar la orden)
   const [cierreFor, setCierreFor] = useState<Service | null>(null);
+  // F49: descuento rápido del servicio (el botón que reemplazó al «Cerrar» de la tarjeta)
+  const [discountFor, setDiscountFor] = useState<Service | null>(null);
   // F30: cola de entregas — se abre con F4 y elige la orden a cerrar
   const [showQueue, setShowQueue] = useState(false);
   const [printFor, setPrintFor] = useState<Service | null>(null);
@@ -327,6 +339,8 @@ export default function Services() {
 
   // Pagos reales por servicio (para el chip de método honesto en las tarjetas)
   const [paymentsMap, setPaymentsMap] = useState<Record<number, ServicePayment[]>>({});
+  // F44: la lista pasó el tope de 120 filas y no se pudieron traer los pagos (se avisa en pantalla).
+  const [pagosSinCargar, setPagosSinCargar] = useState(false);
 
   const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
@@ -384,12 +398,21 @@ export default function Services() {
       conPagos(entregados),
     ]);
     setPaymentsMap({ ...mapaLista, ...mapaHoy });
+    // F44: se avisa en pantalla cuándo el mapa de pagos NO se pudo cargar (el chip del método real
+    // se pierde por encima del tope). Antes pasaba en silencio y el operario creía que la orden no
+    // se había cobrado: es una limitación, así que se dice.
+    setPagosSinCargar(s.length > 120);
   };
 
   useEffect(() => { load(); }, []);
   useEffect(() => { api.getProducts('', null).then(setCatalog).catch(() => {}); }, []);
-  // Debounce: la búsqueda solo consulta tras 350ms de inactividad
+  // Debounce: la búsqueda solo consulta tras 350ms de inactividad.
+  // F44: la PRIMERA corrida se saltea — el montaje ya cargó la lista, y con el filtro por defecto en
+  // «Todos los estados» esa consulta es todo el historial: pagarla dos veces es pagar dos veces la
+  // lista entera (y su mapa de pagos).
+  const primerRender = useRef(true);
   useEffect(() => {
+    if (primerRender.current) { primerRender.current = false; return; }
     const t = setTimeout(load, 350);
     return () => clearTimeout(t);
   }, [search, statusFilter, dateStart, dateEnd, dateField]);
@@ -452,16 +475,36 @@ export default function Services() {
     setTypeFilter('');
   };
 
-  const totalAmount = services.reduce((a, s) => a + s.amount, 0);
+  // F44 — TRABAJOS HECHOS: los contadores cuentan LA LISTA QUE SE ESTÁ VIENDO (búsqueda + estado +
+  // rango de fechas), con los ENTREGADOS INCLUIDOS. Antes se contaban solo las órdenes activas
+  // (`enTaller`), así que al filtrar por «Entregado» —justo cuando el dueño quiere contar lo que ya
+  // salió— desaparecían todos los chips, y los trabajos escritos a mano («Otro») no tenían contador.
+  // El reporte y el filtro salen del MISMO módulo puro (`lib/service-report`), así el número del chip
+  // no puede mentir: dice exactamente las tarjetas que aparecen al hacerle clic.
+  const report = useMemo(() => serviceReport(services), [services]);
+  const filtrosActivos = !!(search || statusFilter || dateStart || dateEnd || typeFilter);
+  const alcance: ScopeInput = { status: statusFilter, dateField, start: dateStart, end: dateEnd };
+  const problemaAlcance = scopeProblem({ status: statusFilter, dateField });
+  // Lista visible: la cargada por backend (búsqueda + estado) filtrada por trabajo client-side.
+  // F44: los KPIs y la línea de reporte usan ESTA lista, no `services`: antes «Total Equipos» y
+  // «Monto Total» ignoraban el chip de trabajo activo y mostraban otro número que el de las tarjetas.
+  const visibleServices = useMemo(
+    () => (typeFilter ? services.filter(s => matchesWorkFilter(s, typeFilter)) : services),
+    [services, typeFilter],
+  );
 
-  // Chips: equipos en taller por tipo de trabajo (Recibido → Por entregar, sin entregados/cancelados).
-  // Un servicio con varios tipos cuenta en TODOS sus chips (pertenencia, no igualdad exacta).
-  const enTaller = services.filter(s => ACTIVE_STATUSES.includes(s.status ?? ''));
-  const typeCounts = SERVICE_TYPES
-    .map(t => ({ type: t, count: enTaller.filter(s => parseServiceTypes(s).includes(t)).length }))
-    .filter(x => x.count > 0);
-  // Lista visible: la cargada por backend (búsqueda + estado) filtrada por tipo client-side
-  const visibleServices = typeFilter ? services.filter(s => parseServiceTypes(s).includes(typeFilter)) : services;
+  const totalAmount = visibleServices.reduce((a, s) => a + s.amount, 0);
+  const listos = visibleServices.filter(s => s.status === 'Por entregar').length;
+
+  // Quitar TODOS los filtros de una vez (F44: antes «Limpiar» borraba solo las fechas y quedaba el
+  // resto puesto sin que se notara; el eje Recibidos/Entregados se conserva porque sin rango no filtra).
+  const limpiarFiltros = () => {
+    setSearch('');
+    setStatusFilter('');
+    setDateStart('');
+    setDateEnd('');
+    setTypeFilter('');
+  };
 
   // Órdenes multi-equipo: los equipos con group_id se renderizan juntos bajo un banner de orden
   type GroupItem =
@@ -633,6 +676,20 @@ export default function Services() {
 
             <div className="flex flex-col gap-3">
               <div className="flex flex-wrap gap-1.5">
+                {/* F45 — SEÑAL de que el trabajo todavía no tiene técnico (pedido del dueño: «en la
+                    tarjeta aparezca una señal con un color: necesita asignar al técnico para ese
+                    trabajo»). Es un BOTÓN: un clic abre el selector rápido de F34 y se asigna sin
+                    entrar al formulario. No se muestra en órdenes entregadas ni anuladas (el trabajo
+                    ya salió: reclamar el técnico después sería ruido permanente en la lista). */}
+                {needsTechnician(s) && (
+                  <button type="button" data-needs-tech={s.id}
+                    title="Esta orden todavía no tiene técnico: hacé clic para asignarlo"
+                    aria-label={`Asignar técnico a la orden ${s.order_num}`}
+                    onClick={() => setQuickTech(s)}
+                    className="inline-flex items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-500/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-500">
+                    <UserPlus className="size-3" /> Falta asignar técnico
+                  </button>
+                )}
                 {parseServiceTypes(s).map(t => (
                   <Badge key={t} variant="outline" className="text-xs whitespace-nowrap">{t}</Badge>
                 ))}
@@ -689,11 +746,17 @@ export default function Services() {
                 )}
               </div>
               <div className="flex flex-wrap gap-1.5 border-t pt-3">
-                {ACTIVE_STATUSES.includes(s.status ?? '') && (
-                  <Button size="sm" className="flex-1 bg-amber-500 text-white hover:bg-amber-600"
-                    title="Asistente: te pide solo lo que falta y cierra la orden"
-                    onClick={() => setCierreFor(s)}>
-                    <Zap className="size-3.5" /> Cerrar
+                {/* F49: el botón «Cerrar» (asistente de cierre) se quitó de la tarjeta — el cliente
+                    lo pidió — y en su lugar va el DESCUENTO de ese servicio, que se refleja en la
+                    factura. El asistente de cierre sigue a un toque desde la barra de arriba
+                    («Cerrar entrega», o F4 → buscar la orden) y desde «Entregar». */}
+                {!finalized && (
+                  <Button size="sm" variant="outline"
+                    className="flex-1 border-violet-500/50 text-violet-700 hover:bg-violet-500/10"
+                    title="Aplicar un descuento a este servicio (sale impreso en la factura)"
+                    data-discount={s.id}
+                    onClick={() => setDiscountFor(s)}>
+                    <Percent className="size-3.5" /> Descuento
                   </Button>
                 )}
                 {ACTIVE_STATUSES.includes(s.status ?? '') && (
@@ -792,16 +855,24 @@ export default function Services() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Total Equipos</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold">{services.length}</div></CardContent>
+          {/* F44: el KPI cuenta LA LISTA (con el chip de trabajo y los filtros puestos), no todo lo
+              que trajo el backend: antes este número no coincidía con las tarjetas de abajo. */}
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Equipos en la lista</CardTitle>
+          </CardHeader>
+          <CardContent><div className="text-2xl font-bold" data-kpi="equipos">{visibleServices.length}</div></CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Listos para entregar</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold text-warning">{services.filter(s => s.status === 'Por entregar').length}</div></CardContent>
+          <CardContent><div className="text-2xl font-bold text-warning">{listos}</div></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Monto Total</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold">${totalAmount.toFixed(2)}</div></CardContent>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Monto de la lista</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold" title="Suma de los equipos que estás viendo (incluye devueltos y cancelados)">${totalAmount.toFixed(2)}</div>
+          </CardContent>
         </Card>
         {/* F32: el dueño quiere ver de un vistazo los teléfonos que SALIERON hoy (fecha de entrega) */}
         <Card
@@ -834,25 +905,38 @@ export default function Services() {
         onSeeAll={verEntregadosHoy}
       />
 
+      {/* ── FILTROS (F44) ────────────────────────────────────────────────────────────────────────
+          El estado va PRIMERO (es lo que más se consulta) y arranca en «Todos los estados»: el
+          dueño pidió no abrir en «Activos en taller» porque lo entregado —justo lo que el cliente
+          pregunta— quedaba escondido. Los tres controles son los mismos de siempre: BÚSQUEDA,
+          ESTADO y FECHA (eje Recibidos/Entregados + rango + atajos de período). Un solo botón
+          «Limpiar filtros» los quita todos (antes «Limpiar» borraba solo las fechas y el resto
+          quedaba puesto sin que se notara). */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input placeholder="Buscar cliente, cédula, modelo, orden..." className="pl-9"
             ref={searchRef} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-44" aria-label="Filtrar por estado">
+            <SelectValue placeholder="Todos los estados" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">Todos los estados</SelectItem>
+            <SelectItem value={ACTIVE_SENTINEL}>Activos en taller</SelectItem>
+            {statuses.map(st => (
+              <SelectItem key={st.id} value={st.name}>{st.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <div className="flex items-center gap-2">
           {/* F32: el rango puede ir por fecha de RECIBIDO o de ENTREGADO (los rótulos lo dicen).
-              «Entregados» + el filtro por defecto «Activos en taller» daba SIEMPRE una lista vacía
-              (una orden entregada no está activa): el rótulo decía una cosa y la pantalla otra, así
-              que al pasar a «Entregados» se ajusta el estado a Entregado — y al volver se devuelve
-              «Activos en taller» solo si ese ajuste fue automático, no si lo eligió el operario. */}
+              F44: al pasar a «Entregados» ya NO se fuerza el estado a Entregado — con el filtro por
+              defecto en «Todos los estados» el eje de entrega ya muestra solo lo que tiene fecha de
+              entrega, así que el parche `estadoAuto` (y su lista vacía) dejó de ser necesario. */}
           <ToggleGroup type="single" value={dateField} className="h-9"
-            onValueChange={v => {
-              if (!v) return;
-              setDateField(v as 'in' | 'out');
-              if (v === 'out' && statusFilter === '__activos__') { setStatusFilter('Entregado'); estadoAuto.current = true; }
-              else if (v === 'in' && estadoAuto.current) { setStatusFilter('__activos__'); estadoAuto.current = false; }
-            }}>
+            onValueChange={v => { if (v) setDateField(v as 'in' | 'out'); }}>
             <ToggleGroupItem value="in" className="h-8 px-2.5 text-xs" title="Filtrar por fecha en que se recibió el equipo">Recibidos</ToggleGroupItem>
             <ToggleGroupItem value="out" className="h-8 px-2.5 text-xs" title="Filtrar por fecha en que se entregó el equipo">Entregados</ToggleGroupItem>
           </ToggleGroup>
@@ -866,57 +950,110 @@ export default function Services() {
             onChange={e => setDateEnd(e.target.value)}
             title={dateField === 'out' ? 'Entregados hasta' : 'Recibidos hasta'}
             aria-label={dateField === 'out' ? 'Entregados hasta' : 'Recibidos hasta'} />
-          {(dateStart || dateEnd) && (
-            <Button variant="ghost" size="sm" onClick={() => { setDateStart(''); setDateEnd(''); }}>
-              Limpiar
-            </Button>
-          )}
         </div>
         <div className="flex items-center gap-1">
+          <span className="text-xs text-muted-foreground">Período:</span>
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(0)}>Hoy</Button>
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(7)}>7 días</Button>
           <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(30)}>30 días</Button>
-          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(null)}>Todo</Button>
-          {/* F32: el pedido del dueño en un solo botón */}
-          <Button variant="outline" size="sm" className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10"
-            onClick={verEntregadosHoy} data-action="entregados-hoy">
-            <CheckCircle2 className="size-3.5" /> Entregados hoy
-            {entregadosHoy.length > 0 && (
-              <span className="ml-1 rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold text-white">{entregadosHoy.length}</span>
-            )}
-          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setQuickPeriod(null)}
+            title="Ver todo el historial (sin límite de fechas)">Todo el historial</Button>
         </div>
-        <Select value={statusFilter} onValueChange={v => { estadoAuto.current = false; setStatusFilter(v); }}>
-          <SelectTrigger className="w-44">
-            <SelectValue placeholder="Todos los estados" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__activos__">Activos en taller</SelectItem>
-            <SelectItem value="">Todos los estados</SelectItem>
-            {statuses.map(st => (
-              <SelectItem key={st.id} value={st.name}>{st.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {filtrosActivos && (
+          <Button variant="ghost" size="sm" onClick={limpiarFiltros} data-action="limpiar-filtros"
+            title="Quitar la búsqueda, el estado, el rango de fechas y el trabajo elegido">
+            Limpiar filtros
+          </Button>
+        )}
+        {/* F32: el pedido del dueño en un solo botón (y la respuesta rápida a «¿cuántas pantallas
+            hiciste hoy?»: se pulsa acá y se lee el chip del trabajo) */}
+        <Button variant="outline" size="sm" className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10"
+          onClick={verEntregadosHoy} data-action="entregados-hoy">
+          <CheckCircle2 className="size-3.5" /> Entregados hoy
+          {entregadosHoy.length > 0 && (
+            <span className="ml-1 rounded-full bg-emerald-600 px-1.5 text-[11px] font-bold text-white">{entregadosHoy.length}</span>
+          )}
+        </Button>
+      </div>
+
+      {/* ── TRABAJOS HECHOS (F44) ────────────────────────────────────────────────────────────────
+          La respuesta a «¿cuántas pantallas hice hoy?» sin adivinar: cuántos equipos y QUÉ trabajos
+          hay en lo que se está viendo, con los entregados incluidos, y —debajo— sobre qué se está
+          contando (estado, eje de fecha y rango) para poder decirlo con seguridad. */}
+      <div className="flex flex-col gap-0.5" data-report="trabajos">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="font-semibold">Trabajos hechos:</span>
+          <span data-report-total><span className="font-bold">{report.equipos}</span> equipos</span>
+          <span className="text-emerald-700">{report.entregados} entregados</span>
+          <span className="text-warning">{report.taller} en taller</span>
+          {report.anulados > 0 && <span className="text-danger">{report.anulados} devueltos/cancelados</span>}
+          {report.sinTrabajo > 0 && (
+            <span className="text-muted-foreground">{report.sinTrabajo} sin trabajo anotado</span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground" data-report-scope>{scopeLabel(alcance)}</p>
+        {pagosSinCargar && (
+          <p className="text-xs text-warning" data-note="pagos-no-cargados">
+            Lista muy larga: el método de pago real se muestra hasta 120 equipos — acotá el rango de fechas para verlo.
+          </p>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-2">
         <Button variant={typeFilter === '' ? 'default' : 'outline'} size="sm"
+          data-work-chip="todos" data-work-count={services.length}
           onClick={() => setTypeFilter('')}>
-          Todos <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{enTaller.length}</span>
+          Todos <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{services.length}</span>
         </Button>
-        {typeCounts.map(tc => (
-          <Button key={tc.type} variant={typeFilter === tc.type ? 'default' : 'outline'} size="sm"
-            onClick={() => setTypeFilter(typeFilter === tc.type ? '' : tc.type)}>
-            {tc.type} <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{tc.count}</span>
+        {report.porTrabajo.map(tc => (
+          <Button key={tc.key} variant={typeFilter === tc.key ? 'default' : 'outline'} size="sm"
+            data-work-chip={tc.key} data-work-count={tc.total}
+            title={`${tc.total} equipos · ${tc.entregados} entregados · ${tc.taller} en taller${tc.anulados ? ` · ${tc.anulados} devueltos/cancelados` : ''}`}
+            onClick={() => setTypeFilter(typeFilter === tc.key ? '' : tc.key)}>
+            {tc.label} <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{tc.total}</span>
           </Button>
         ))}
+        {/* F44: los equipos sin ningún trabajo anotado tienen su propio chip para que los números
+            cierren (nunca «desaparece» un equipo sin explicación). */}
+        {report.sinTrabajo > 0 && (
+          <Button variant={typeFilter === NO_WORK_FILTER ? 'default' : 'outline'} size="sm"
+            data-work-chip={NO_WORK_FILTER} data-work-count={report.sinTrabajo}
+            title="Equipos sin ningún trabajo/falla anotado (órdenes viejas o recepciones sin tipo)"
+            onClick={() => setTypeFilter(typeFilter === NO_WORK_FILTER ? '' : NO_WORK_FILTER)}>
+            Sin trabajo anotado <span className="ml-1 rounded-full bg-background/60 px-1.5 text-[11px] font-bold">{report.sinTrabajo}</span>
+          </Button>
+        )}
       </div>
 
       {visibleServices.length === 0 ? (
         <Card>
-          <CardContent className="p-8 text-center text-muted-foreground">
-            {services.length === 0 ? 'Sin servicios registrados' : 'Sin servicios de este tipo de trabajo'}
+          {/* F44: el estado vacío explica la CAUSA. Antes decía «Sin servicios registrados» también
+              cuando el culpable era el filtro (o una combinación imposible), y eso hacía creer que no
+              había servicios. «Sin servicios registrados» queda solo para la base de verdad vacía
+              (sin ningún filtro puesto): ahí el backend devuelve todo, así que 0 = no hay nada. */}
+          <CardContent className="p-8 flex flex-col items-center gap-3 text-center text-muted-foreground"
+            data-empty={services.length === 0 && !filtrosActivos ? 'sin-datos' : 'filtro'}>
+            {services.length === 0 && !filtrosActivos ? (
+              <span>Sin servicios registrados</span>
+            ) : (
+              <>
+                <span>
+                  {problemaAlcance === 'activos-sin-entrega'
+                    ? 'Ningún equipo con fecha de ENTREGA puede seguir «Activo en taller»: una orden en el taller todavía no tiene fecha de entrega.'
+                    : 'Sin equipos con estos filtros.'}
+                </span>
+                <span className="text-xs">{scopeLabel(alcance)}</span>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  {problemaAlcance === 'activos-sin-entrega' && (
+                    <Button variant="outline" size="sm" onClick={() => setDateField('in')}>Cambiar a Recibidos</Button>
+                  )}
+                  {!!statusFilter && (
+                    <Button variant="outline" size="sm" onClick={() => setStatusFilter('')}>Ver todos los estados</Button>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={limpiarFiltros}>Limpiar filtros</Button>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       ) : (
@@ -980,6 +1117,20 @@ export default function Services() {
           onSaved={() => { setShowForm(false); setEditing(null); load(); }}
         />
       )}
+
+      {/* F46: los recordatorios de política (foto de entrada/salida y acuerdo de pago) salen como
+          MODAL CENTRADO. El host se monta una sola vez acá, y como los tres momentos que avisan
+          (guardar la recepción, entregar y abrir el comprobante) pasan por esta pantalla, alcanza
+          con un host. */}
+      <PolicyModalHost />
+
+      {/* F49: descuento del servicio desde la tarjeta (se imprime en la factura). */}
+      <DiscountDialog
+        service={discountFor}
+        open={!!discountFor}
+        onOpenChange={o => { if (!o) setDiscountFor(null); }}
+        onSaved={load}
+      />
 
       <PaymentDialog
         service={payFor}
@@ -1140,7 +1291,11 @@ function emptyDevice(): FormDevice {
   return {
     model: '', color: '', fault: '', serviceTypes: ['Cambio pantalla'], otherFault: '', amount: 0,
     discount: 0, payment: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '', checklist: checklistDefaults(),
-    amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null, screenConfirm: false,
+    amountTouched: false, discountTouched: false, modelPicked: false, screenProductId: null,
+    // F47: la confirmación de «pantalla agotada» arranca MARCADA — el aviso queda en rojo y el
+    // guardado no depende de tocarla (pedido del dueño: «dejarlo predeterminado, que no te bloquee
+    // pero sí deje el mensaje en rojo»).
+    screenConfirm: true,
   };
 }
 
@@ -1175,12 +1330,16 @@ function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouche
   return patch;
 }
 // Colores predefinidos del equipo — selección rápida sin escribir.
+// F46: se agregaron «Lila» y «Marrón» (pedido del dueño: «en los colores de servicios agregar un
+// color más lila y marrón»). El color del equipo se guarda por NOMBRE en la orden, así que sumar
+// opciones no toca nada de lo ya registrado.
 const DEVICE_COLORS = [
   'Azul', 'Azul oscuro', 'Celeste',
   'Rojo', 'Rosado',
   'Blanco', 'Negro', 'Gris',
   'Amarillo', 'Naranja',
-  'Verde', 'Morado', 'Dorado', 'Plateado',
+  'Verde', 'Morado', 'Lila',
+  'Dorado', 'Marrón', 'Plateado',
 ];
 
 // Select de color con valores predefinidos (colores viejos escritos a mano se conservan como opción).
@@ -1190,7 +1349,8 @@ function ColorSelect({ value, onChange }: { value: string; onChange: (v: string)
     : DEVICE_COLORS;
   return (
     <Select value={value} onValueChange={onChange}>
-      <SelectTrigger className={cn(!value && 'text-muted-foreground')}>
+      {/* F48: `data-ficha-target` para que «Ir al campo» de la ficha deje el foco acá. */}
+      <SelectTrigger className={cn(!value && 'text-muted-foreground')} data-ficha-target="color">
         <SelectValue placeholder="Sin especificar" />
       </SelectTrigger>
       <SelectContent>
@@ -1215,7 +1375,8 @@ function colorDot(color: string): string {
     'Rojo': 'bg-red-600', 'Rosado': 'bg-pink-500',
     'Blanco': 'bg-white', 'Negro': 'bg-neutral-950', 'Gris': 'bg-neutral-400',
     'Amarillo': 'bg-yellow-400', 'Naranja': 'bg-orange-500',
-    'Verde': 'bg-green-600', 'Morado': 'bg-purple-600', 'Dorado': 'bg-amber-500', 'Plateado': 'bg-slate-300',
+    'Verde': 'bg-green-600', 'Morado': 'bg-purple-600', 'Lila': 'bg-violet-400',
+    'Dorado': 'bg-amber-500', 'Marrón': 'bg-amber-800', 'Plateado': 'bg-slate-300',
   };
   return map[color] || 'bg-neutral-400';
 }
@@ -1249,21 +1410,45 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   const isScreenJob = device.serviceTypes.includes('Cambio pantalla');
 
+  /**
+   * F53 — la pantalla de REFERENCIA del modelo elegido en el padrón (`phones.default_product_id`).
+   * Viene con la fila del combobox (el mismo dato que el local fija en Inventario → Productos →
+   * «Por modelo»); `autoScreen` la usa para auto-seleccionarla.
+   */
+  const [refProductId, setRefProductId] = useState<number | null>(null);
+  useEffect(() => {
+    // al escribir un modelo a mano (o al abrir una orden vieja) se busca su referencia en el padrón
+    const label = device.model.trim();
+    if (label.length < 3) { setRefProductId(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      api.getPhoneModelsInUse(label, 5, false)
+        .then(list => {
+          if (!alive) return;
+          const fila = list.find(m => m.label.trim().toLowerCase() === label.toLowerCase());
+          setRefProductId(fila?.default_product_id ?? null);
+        })
+        .catch(() => { if (alive) setRefProductId(null); });
+    }, 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [device.model]);
+
   // El formulario necesita saber si este equipo tiene la pantalla resuelta
   const screenValid = screenOk(device.serviceTypes, device.screenProductId, screenOptions);
   useEffect(() => {
     onScreenValid?.(index, screenValid);
   }, [index, screenValid, onScreenValid]);
 
-  // Si hay UNA sola pantalla con stock, DE LA MISMA MARCA del teléfono, se elige sola (evita
-  // que el operario entregue una agotada por descuido y que se descuente la pantalla de OTRO
-  // teléfono por coincidir el texto del modelo). Regla pura en lib/screen-rules.ts.
+  // La pantalla de REFERENCIA del modelo se elige sola (F53); sin referencia, UNA sola con stock Y de
+  // la MISMA marca del teléfono (evita que el operario entregue una agotada por descuido y que se
+  // descuente la pantalla de OTRO teléfono por coincidir el texto del modelo). Regla pura
+  // en lib/screen-rules.ts.
   useEffect(() => {
     if (!isScreenJob || device.screenProductId != null) return;
-    const auto = autoScreen(screenOptions);
+    const auto = autoScreen(screenOptions, refProductId);
     if (auto) onChange({ screenProductId: auto.product.id, screenConfirm: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screenOptions, isScreenJob, device.screenProductId]);
+  }, [screenOptions, isScreenJob, device.screenProductId, refProductId]);
 
   const selectModel = (label: string) => {
     onChange({ model: label, modelPicked: true });
@@ -1307,7 +1492,12 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           <label className="text-sm font-medium">Modelo *</label>
           <ModelCombobox
             value={device.model}
-            onChange={selectModel}
+            onChange={(label, phone) => {
+              // F53: la fila del padrón trae la pantalla de REFERENCIA del modelo → se guarda acá
+              // (y `autoScreen` la elige sola un instante después).
+              setRefProductId(phone?.default_product_id ?? null);
+              selectModel(label);
+            }}
             autoFocus={autoFocus}
             placeholder="Buscar el modelo del teléfono (ej: Spark 10 Pro)…"
           />
@@ -1326,8 +1516,10 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           )}
         </div>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Color del equipo</label>
+          <label className="text-sm font-medium">Color del equipo <span className="text-danger">*</span></label>
           <ColorSelect value={device.color} onChange={c => onChange({ color: c })} />
+          {/* F48: el color es obligatorio; se dice acá (además de la ficha y del «Falta: …» del pie). */}
+          {!device.color.trim() && <p className="text-xs text-danger">Elegí el color del equipo</p>}
         </div>
       </div>
 
@@ -1613,7 +1805,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [showPayDialog, setShowPayDialog] = useState(false);
   const [svc, setSvc] = useState<Service | null>(service);
   const [screenProductId, setScreenProductId] = useState<number | null>(null);
-  const [screenConfirm, setScreenConfirm] = useState(false);
+  const [screenConfirm, setScreenConfirm] = useState(true);  // F47: arranca marcada (ver emptyDevice)
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techSel, setTechSel] = useState('');
   const [showTechDialog, setShowTechDialog] = useState(false);
@@ -1636,7 +1828,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   }, []);
 
   const devicesValid = devices.length > 0 &&
-    devices.every((d, i) => d.model.trim() && d.serviceTypes.length > 0 && (deviceScreenValid[i] ?? true));
+    devices.every((d, i) => d.model.trim() && d.serviceTypes.length > 0 && d.color.trim() && (deviceScreenValid[i] ?? true));
 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
@@ -1648,11 +1840,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     const list = await api.getTechnicians().catch(() => [] as Technician[]);
     setTechnicians(list);
     if (revalidate && techSel && !list.some(t => t.id === Number(techSel))) setTechSel('');
-    // Al crear: prefill con el último técnico usado (queda la marca lista en segundos)
-    if (!service) {
-      const last = localStorage.getItem('last_technician');
-      if (last && list.some(t => t.id === Number(last))) setTechSel(last);
-    }
+    // F45 (pedido del dueño: «cuando vas a crear un nuevo servicio [el técnico] esté predeterminado
+    // como sin asignar… que me deje seguir registrando el servicio nuevo»): al CREAR **no se
+    // preselecciona** ningún técnico. Antes se prellenaba con el último usado (`last_technician` en
+    // localStorage) y el operario registraba con un nombre que quizá no era el que iba a reparar el
+    // equipo; ahora arranca en «Sin asignar» y —si nadie lo asigna— la TARJETA lo reclama con la
+    // señal ámbar «Falta asignar técnico» (un clic y se asigna, con el selector rápido de F34).
+    // En EDICIÓN se conserva el técnico que ya tiene la orden (lo carga el efecto de `service`).
   };
 
   useEffect(() => {
@@ -1742,15 +1936,33 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   const isScreenJobEdit = serviceTypes.includes('Cambio pantalla');
 
-  // Auto-selección: UNA sola pantalla con stock Y de la MISMA marca del teléfono (regla pura
-  // `autoScreen`; antes esta puerta —el modo EDICIÓN— seguía con la regla vieja «una sola con
-  // stock» y podía asignar la pantalla de OTRO teléfono al guardar).
+  /** F53 — pantalla de REFERENCIA del modelo (se busca en el padrón cuando la orden ya tiene modelo). */
+  const [refProductIdEdit, setRefProductIdEdit] = useState<number | null>(null);
+  useEffect(() => {
+    const label = model.trim();
+    if (label.length < 3) { setRefProductIdEdit(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      api.getPhoneModelsInUse(label, 5, false)
+        .then(list => {
+          if (!alive) return;
+          const fila = list.find(m => m.label.trim().toLowerCase() === label.toLowerCase());
+          setRefProductIdEdit(fila?.default_product_id ?? null);
+        })
+        .catch(() => { if (alive) setRefProductIdEdit(null); });
+    }, 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [model]);
+
+  // La referencia del modelo manda (F53); sin ella, UNA sola pantalla con stock Y de la MISMA marca
+  // del teléfono (regla pura `autoScreen`; antes esta puerta —el modo EDICIÓN— seguía con la regla
+  // vieja «una sola con stock» y podía asignar la pantalla de OTRO teléfono al guardar).
   useEffect(() => {
     if (!isScreenJobEdit || screenProductId != null) return;
-    const auto = autoScreen(screenOptions);
+    const auto = autoScreen(screenOptions, refProductIdEdit);
     if (auto) { setScreenProductId(auto.product.id); setScreenConfirm(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screenOptions, isScreenJobEdit, screenProductId]);
+  }, [screenOptions, isScreenJobEdit, screenProductId, refProductIdEdit]);
 
   const selectModel = (label: string) => {
     modelPicked.current = true;
@@ -1773,10 +1985,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     () => candidates.length > 0 && candidates.every(c => c.product.price_sale <= 0),
     [candidates],
   );
-  const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions, screenConfirm, status) === false
-    ? (status === 'Entregado'
-        ? 'La pantalla elegida está AGOTADA: confirma la entrega sin stock registrado'
-        : 'Elige la pantalla exacta a instalar')
+  // F48: el color del equipo es OBLIGATORIO en los dos modos (pedido del dueño: «en los colores que
+  // sea un campo requerido; si no selecciono un color lo salte de una vez a que elija un color»).
+  // El aviso lo dice con el paso del color, y la ficha lleva al selector con un toque.
+  const colorMissing = !color.trim() ? 'Elegí el color del equipo' : null;
+
+  // F47: el ÚNICO bloqueo de la pantalla es no haberla elegido (sin eso el inventario bajaría del
+  // repuesto equivocado). Que la pantalla esté AGOTADA ya no bloquea: se avisa en rojo en el
+  // selector (`ScreenSelect`) y el guardado sigue disponible.
+  const screenMissing = screenOk(serviceTypes, screenProductId, screenOptions) === false
+    ? 'Elige la pantalla exacta a instalar'
     : null;
 
   const save = async () => {
@@ -1796,6 +2014,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
     if (service) {
       if (!client) bloqueos.push('nombre del cliente');
       if (!model || serviceTypes.length === 0) bloqueos.push('modelo y trabajo del equipo');
+      if (colorMissing) bloqueos.push(colorMissing);
       if (screenMissing) bloqueos.push(screenMissing);
     } else {
       if (!client) bloqueos.push('nombre del cliente');
@@ -1803,6 +2022,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         const n = devices.length > 1 ? ` del equipo ${i + 1}` : '';
         if (!d.model.trim()) bloqueos.push(`modelo${n}`);
         if (d.serviceTypes.length === 0) bloqueos.push(`trabajo o falla${n}`);
+        if (!d.color.trim()) bloqueos.push(`color del equipo${n}`);   // F48: dato obligatorio
         if (deviceScreenValid[i] === false) bloqueos.push(`elegir la pantalla${n}`);
       });
     }
@@ -1816,7 +2036,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
       }
       const techName = currentTech?.name ?? '';
       const techId = currentTech?.id ?? null;
-      if (techId) localStorage.setItem('last_technician', String(techId));
+      // F45: ya NO se recuerda el «último técnico» en localStorage (ver `loadTechnicians`): el
+      // elegido se guarda en la ORDEN, que es donde tiene que estar. Sin técnico la orden se guarda
+      // igual y la tarjeta la reclama con la señal ámbar.
       if (service) {
         const checklistJson = JSON.stringify(checklist);
         // El texto de "Otro" se guarda como trabajo propio (badge propio en la orden)
@@ -1909,7 +2131,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const steps = service
     ? [
         { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
-        { label: 'Equipo', done: !!model && serviceTypes.length > 0 },
+        // F48: el COLOR del equipo es dato obligatorio (pedido del dueño). Vive en este mismo paso,
+        // así que exigirlo no encierra a nadie: se elige de la lista y «Siguiente» se habilita.
+        { label: 'Equipo', done: !!model && serviceTypes.length > 0 && !!color.trim() },
         { label: 'Blindaje', done: true },
         // El MONTO **no** es un paso bloqueante en EDICIÓN: no bloquea el guardado (una orden de $0
         // es legítima) y este paso NO es el último, así que exigirlo acá dejaba al operario
@@ -1924,7 +2148,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
         // «Siguiente» y el aviso «Falta: …» digan lo mismo (antes el botón avanzaba y el guardado
         // fallaba al final).
         { label: 'Cliente', done: client.trim().length > 0 && (!needCi || clientCi.trim().length > 0) },
-        { label: 'Equipos', done: devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0) },
+        // F48: el color del equipo es obligatorio (mismo criterio en crear y editar).
+        { label: 'Equipos', done: devices.length > 0 && devices.every(d => d.model.trim() && d.serviceTypes.length > 0 && d.color.trim()) },
         { label: 'Blindaje', done: true },
         // Mismo criterio que en edición: el monto se AVISA, no bloquea (el paso «Revisar» es el
         // último, así que el guardado siempre se alcanza; el monto vive en la ficha como pendiente).
@@ -1935,6 +2160,24 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
   const [wizStep, setWizStep] = useState(0);
   const goTo = (i: number) => {
     if (i < wizStep || stepCurrent === -1) setWizStep(i);
+  };
+
+  /**
+   * F48 — «IR AL CAMPO» de la ficha (el «te va llevando de la mano» del dueño): además de cambiar de
+   * paso, deja el FOCO en el control de ese dato (`data-ficha-target="<clave>"`), así el operario
+   * escribe/toca sin buscar. Si el control no declara el atributo, se enfoca el primer input del paso.
+   */
+  const irAlCampo = (step: number, key?: string) => {
+    setWizStep(Math.max(0, Math.min(step, steps.length - 1)));
+    if (!key) return;
+    // El paso tiene que pintarse antes de poder enfocar: se reintenta unas cuantas veces.
+    let intentos = 0;
+    const enfocar = () => {
+      const el = document.querySelector<HTMLElement>(`[data-ficha-target="${key}"]`);
+      if (el) { el.focus(); return; }
+      if (++intentos < 6) setTimeout(enfocar, 80);
+    };
+    setTimeout(enfocar, 60);
   };
 
   // ── F33: FICHA DE INGRESO (el asistente que pide un dato por vez) ─────────────────────────
@@ -2160,7 +2403,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
           ficha={ficha}
           nextProcess={pasoDelProceso}
           className="shrink-0"
-          onGoToStep={i => setWizStep(Math.max(0, Math.min(i, steps.length - 1)))}
+          onGoToStep={irAlCampo}
         />
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           {wizStep === 0 && (
@@ -2234,6 +2477,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
+              {/* F45: el rótulo se deja CORTO a propósito (el «se puede asignar después» ya lo dice la
+                  ficha de ingreso al pie del dato, y alargar el rótulo empujaba el contenido del paso). */}
               <label className="text-sm font-medium">Técnico responsable</label>
               <Select value={techSel} onValueChange={setTechSel}>
                 <SelectTrigger className="w-full">
@@ -2728,7 +2973,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved }: {
                   Siguiente
                 </Button>
               ) : (
-                <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+                <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
                   {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
                 </Button>
               )}

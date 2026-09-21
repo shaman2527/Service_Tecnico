@@ -1,0 +1,113 @@
+[
+  {
+    "model": "A70 A705",
+    "expect": [
+      "A70",
+      "A705"
+    ]
+  },
+  {
+    "model": "Galaxy A70 A705",
+    "expect": [
+      "Galaxy A70",
+      "Galaxy A705"
+    ]
+  },
+  {
+    "model": "A16 4G A165",
+    "expect": [
+      "A16 4G",
+      "A165"
+    ]
+  },
+  {
+    "model": "A13 4G A135 M13",
+    "expect": [
+      "A13 4G",
+      "A135",
+      "M13"
+    ]
+  },
+  {
+    "model": "K20 Plus MP260",
+    "expect": [
+      "K20 Plus",
+      "MP260"
+    ]
+  },
+  {
+    "model": "A01 Core A013",
+    "expect": [
+      "A01 Core",
+      "A013"
+    ]
+  },
+  {
+    "model": "Y6 2019 8A",
+    "expect": [
+      "Y6 2019",
+      "8A"
+    ]
+  },
+  {
+    "model": "K42 K52",
+    "expect": [
+      "K42",
+      "K52"
+    ]
+  },
+  {
+    "model": "A70 A70",
+    "expect": [
+      "A70 A70"
+    ]
+  },
+  {
+    "model": "Redmi Note 11",
+    "expect": [
+      "Redmi Note 11"
+    ]
+  },
+  {
+    "model": "A06 4G",
+    "expect": [
+      "A06 4G"
+    ]
+  },
+  {
+    "model": "Galaxy S21 Ultra 5G",
+    "expect": [
+      "Galaxy S21 Ultra 5G"
+    ]
+  },
+  {
+    "model": "Redmi 9A",
+    "expect": [
+      "Redmi 9A"
+    ]
+  },
+  {
+    "model": "iPhone 11 Pro Max",
+    "expect": [
+      "iPhone 11 Pro Max"
+    ]
+  },
+  {
+    "model": "5001 1V 2019",
+    "expect": [
+      "5001 1V 2019"
+    ]
+  },
+  {
+    "model": "Note 20",
+    "expect": [
+      "Note 20"
+    ]
+  },
+  {
+    "model": "",
+    "expect": [
+      ""
+    ]
+  }
+]

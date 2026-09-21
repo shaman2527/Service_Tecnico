@@ -237,6 +237,49 @@ pub fn add_service_refund(db: State<Database>, service_id: i64, amount: f64, pay
         .map_err(|e| e.to_string())
 }
 
+// ── F50: «LO QUE USO» (el check del inventario y del padrón) + códigos de referencia ──────────
+// Son columnas propias (in_use / code / default_product_id): comandos ANGOSTOS para que el check no
+// pueda pisar precios, stock ni compatibilidad. El check solo decide QUÉ SE OFRECE al registrar un
+// servicio; el descuento de inventario al entregar sigue por `screen_product_id` como siempre.
+#[tauri::command]
+pub fn set_product_in_use(db: State<Database>, id: i64, in_use: bool) -> Result<(), String> {
+    db.set_product_in_use(id, in_use).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_phone_in_use(db: State<Database>, id: i64, in_use: bool) -> Result<(), String> {
+    db.set_phone_in_use(id, in_use).map_err(|e| e.to_string())
+}
+
+/// «Usar todo el modelo» / «Apagar todo el modelo»: el teléfono y sus repuestos en una transacción.
+#[tauri::command]
+pub fn set_phone_use_all(db: State<Database>, id: i64, in_use: bool) -> Result<i64, String> {
+    db.set_phone_use_all(id, in_use).map_err(|e| e.to_string())
+}
+
+/// F53: la pantalla de REFERENCIA del modelo (la que el local instala). `None` = ninguna.
+#[tauri::command]
+pub fn set_phone_default_product(db: State<Database>, id: i64, product_id: Option<i64>) -> Result<(), String> {
+    db.set_phone_default_product(id, product_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_product_code(db: State<Database>, id: i64, code: String) -> Result<(), String> {
+    db.set_product_code(id, &code).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_phone_code(db: State<Database>, id: i64, code: String) -> Result<(), String> {
+    db.set_phone_code(id, &code).map_err(|e| e.to_string())
+}
+
+/// F50: la lista de modelos del formulario de servicio, con `in_use_only` (el check del padrón).
+#[tauri::command]
+pub fn get_phone_models_in_use(db: State<Database>, search: String, limit: i64, in_use_only: bool)
+    -> Result<Vec<crate::db::PhoneModelRow>, String> {
+    db.get_phone_models_filtered(&search, limit, in_use_only).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn add_purchase_order(db: State<Database>, supplier: String, notes: String, items_json: String) -> Result<i64, String> {
     // Pedir al proveedor es una compra (plata del negocio): decisión del dueño.
@@ -636,10 +679,43 @@ pub fn restore_prices(db: State<Database>, path: Option<String>, only_zero: bool
 
 #[tauri::command]
 pub fn get_products_page(db: State<Database>, search: String, category_id: Option<i64>,
-                         brand: Option<String>, stock_filter: Option<String>, sort: Option<String>,
+                         brand: Option<String>, stock_filter: Option<String>,
+                         variant_family: Option<String>, sort: Option<String>,
                          limit: i64, offset: i64) -> Result<crate::db::ProductPage, String> {
-    db.get_products_page(&search, category_id, brand.as_deref(), stock_filter.as_deref(), sort.as_deref(), limit, offset)
+    db.get_products_page(&search, category_id, brand.as_deref(), stock_filter.as_deref(),
+                         variant_family.as_deref(), sort.as_deref(), limit, offset)
         .map_err(|e| e.to_string())
+}
+
+/// F52 — las familias de variante del catálogo (INCELL / OLED / ORIGINAL / sin variante) con su
+/// conteo: lo que llena el filtro «Variante» del inventario.
+#[tauri::command]
+pub fn get_variant_families(db: State<Database>) -> Result<Vec<crate::db::VariantFamily>, String> {
+    db.get_variant_families().map_err(|e| e.to_string())
+}
+
+/// F53 — grupos de MODELOS que se sirven con los MISMOS repuestos (propuesta del asistente de
+/// duplicados; el dueño confirma grupo por grupo y la fusión conserva los nombres viejos como alias).
+#[tauri::command]
+pub fn get_phone_duplicate_groups(db: State<Database>) -> Result<Vec<crate::db::PhoneDuplicateGroup>, String> {
+    db.get_phone_duplicate_groups().map_err(|e| e.to_string())
+}
+
+/// F53 — vista previa de «separar los modelos» (NO escribe nada): qué teléfonos aparecen, cuáles
+/// dejan de existir y cuántas variantes se sacan del texto.
+#[tauri::command]
+pub fn preview_phone_split(db: State<Database>) -> Result<crate::db::PhoneSplitPreview, String> {
+    db.preview_phone_split().map_err(|e| e.to_string())
+}
+
+/// F53 — aplica la separación (respalda la base antes): una fila por teléfono REAL, numerada y con
+/// su «en uso». Solo el dueño puede (es una reescritura del padrón, no del catálogo).
+#[tauri::command]
+pub fn apply_phone_split(db: State<Database>) -> Result<crate::db::PhoneSplitPreview, String> {
+    if !db.owner_can_edit() {
+        return Err("Solo el dueño puede separar los modelos del padrón.".to_string());
+    }
+    db.apply_phone_split().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

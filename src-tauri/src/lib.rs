@@ -125,8 +125,23 @@ commands::get_sales_stats,
             commands::normalize_catalog,
             commands::restore_prices,
             commands::get_products_page,
+            // F52: las familias de variante del catálogo (filtro «Variante» del inventario).
+            commands::get_variant_families,
+            // F53: separar los modelos pegados en una entrada («A70 A705» → A70 + A705), con vista previa.
+            commands::preview_phone_split,
+            commands::apply_phone_split,
+            commands::get_phone_duplicate_groups,
             commands::get_inventory_stats,
             commands::get_phone_models,
+            // F50: «lo que uso» (check en producto y modelo), códigos de referencia y la lista de
+            // modelos del formulario de servicio filtrada por lo que el local usa.
+            commands::get_phone_models_in_use,
+            commands::set_product_in_use,
+            commands::set_phone_in_use,
+            commands::set_phone_use_all,
+            commands::set_phone_default_product,
+            commands::set_product_code,
+            commands::set_phone_code,
             commands::find_compatible_screens,
             commands::find_compatible_products,
             commands::get_inventory_movements_page,

@@ -129,9 +129,50 @@ const clickOption = async (label) => {
   await sleep(900);
 };
 
-/** Cierra TODO lo que haya abierto (diálogos + portales de Select) para no dejar basura. */
+/** Elige una opción de un Select de Radix POR TECLADO, a partir de un selector del control.
+ *  Los clics por coordenadas fallan cuando el control quedó fuera del área visible del diálogo
+ *  (la ventana en la que se prueba es chica): acá se lleva al centro, se enfoca y se navega
+ *  leyendo el resaltado (`data-highlighted`). Misma técnica que usa `verify_trabajos_hechos`. */
+const elegirSelectPorTeclado = async (selector, texto) => {
+  const hay = await evalx(`(() => {
+    const t = document.querySelector(${JSON.stringify(selector)});
+    if (!t) return false;
+    t.scrollIntoView({ block: 'center' });
+    t.focus();
+    return true;
+  })()`);
+  if (!hay) return false;
+  await sleep(400);
+  await keyNav('ArrowDown', 'ArrowDown', 40);
+  await sleep(600);
+  for (let i = 0; i < 16; i++) {
+    const hi = await evalx(`document.querySelector('[role="option"][data-highlighted]')?.innerText?.trim() ?? null`);
+    if (String(hi).includes(texto)) {
+      await keyNav('Enter', 'Enter', 13);
+      await sleep(800);
+      return true;
+    }
+    await keyNav('ArrowDown', 'ArrowDown', 40);
+    await sleep(200);
+  }
+  await keyNav('Escape', 'Escape', 27);
+  await sleep(400);
+  return false;
+};
+
+/** Cierra TODO lo que haya abierto (diálogos + portales de Select) para no dejar basura.
+ *  OJO (F54): el AVISO DE POLÍTICA es un modal centrado a propósito — se cierra con su ✕, con un
+ *  toque en la tarjeta o con Escape — y mientras está abierto **no se le puede hacer clic a la app**.
+ *  Un script que no lo cierre falla en el paso siguiente culpando a la pantalla (nos pasó: el
+ *  asistente de cierre «no abría» y en realidad el primer clic lo comía el velo del aviso). */
 const closeAllDialogs = async () => {
   for (let i = 0; i < 6; i++) {
+    const aviso = await evalx(`!!document.querySelector('[data-policy-modal]')`).catch(() => false);
+    if (aviso) {
+      await clickCenter(`document.querySelector('[data-policy-close]')`).catch(() => {});
+      await sleep(400);
+      continue;
+    }
     if ((await dialogsOpen().catch(() => 0)) === 0) break;
     await evalx(`(() => {
       const el = document.querySelector('${DLG}') || document;
@@ -155,9 +196,15 @@ const activeTable = () => evalx(`(() => {
   });
 })()`);
 
-/** Navegación por el sidebar: los módulos son botones dentro de <aside> con texto EXACTO. */
+/** Navegación por el sidebar: los módulos son botones dentro de <aside>.
+ *  OJO: la barra se puede COLAPSAR (`localStorage.sidebar_collapsed`) y entonces queda solo con
+ *  íconos: `innerText` viene VACÍO y buscar por texto falla aunque la app esté perfecta. Se busca
+ *  por el `title` («Servicio Técnico (Alt+3)»), que existe en los dos estados (lección de F51). */
 const goto = async (label) => {
-  const ok = await clickCenter(`([...document.querySelectorAll('aside button')].find(b => b.innerText.trim() === ${JSON.stringify(label)}) || null)`).then(() => true).catch(() => false);
+  const ok = await clickCenter(`([...document.querySelectorAll('aside button')].find(b => {
+    const t = (b.innerText || '').trim();
+    return t === ${JSON.stringify(label)} || (b.getAttribute('title') || '').startsWith(${JSON.stringify(label + ' (')});
+  }) || null)`).then(() => true).catch(() => false);
   await handleDialog(true); // por si quedó un confirm/alert nativo de un paso anterior
   await sleep(1000);
   return ok;
@@ -595,6 +642,16 @@ const clickCardButton = async (orderNum, label) => {
     })()`);
     check('el monto del servicio queda en 10', Number(montoPuesto) === 10, `monto: ${montoPuesto}`);
 
+    // --- F48: el COLOR del equipo es OBLIGATORIO (el dueño lo pidió). Sin él «Siguiente» no
+    //     avanza y el smoke se quedaba en el paso 2 culpando al wizard (el gate es real y correcto).
+    //     Se elige por TECLADO desde el control (`data-ficha-target="color"`, el mismo que usa el
+    //     botón «Ir al campo» de la ficha): los clics por coordenadas fallan si el campo quedó
+    //     fuera del área visible del diálogo.
+    const colorOk = await elegirSelectPorTeclado('[role="dialog"] [data-ficha-target="color"]', 'Negro');
+    const colorPuesto = await evalx(`document.querySelector('[role="dialog"] [data-ficha-target="color"]')?.innerText?.trim() ?? null`);
+    check('el color del equipo queda elegido (dato obligatorio desde F48)',
+      colorOk && /Negro/.test(String(colorPuesto)), `eligió=${colorOk} · color: ${colorPuesto}`);
+
     // La pantalla exacta se auto-selecciona si hay UNA sola con stock (regla del proyecto).
     await waitFor(`/Pantalla a instalar/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 12000);
     await sleep(1500);
@@ -634,22 +691,36 @@ const clickCardButton = async (orderNum, label) => {
         `screen_product_id ${svcNuevo[0].screen_product_id} (esperado ${elegido.pantallaId})`);
 
       // --- la tarjeta aparece en la lista: se pasa el filtro de estado a «Todos los estados» ---
-      // El trigger del Select se reconoce por su `aria-label` de accesibilidad ("Filtrar por estado").
-      // Si el componente no lo tuviera, se cae al primer combobox de la barra de filtros.
-      const triggerEstado = `([...document.querySelectorAll('main [role="combobox"]')].find(b => (b.getAttribute('aria-label') || '').includes('estado')) || document.querySelectorAll('main [role="combobox"]')[0] || null)`;
-      await clickCenter(triggerEstado).catch(() => {});
-      await waitFor(`document.querySelectorAll('[role="option"]').length > 0`, 4000);
-      const opcionesEstado = await evalx(`[...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim())`);
-      check('el filtro de estados ofrece «Todos los estados»', (opcionesEstado ?? []).includes('Todos los estados'), (opcionesEstado ?? []).join(' · '));
-      await clickOption('Todos los estados');
+      // Se usa la MISMA técnica que para el color (teclado + `data-highlighted`): el clic por
+      // coordenadas sobre el portal de Radix falla cuando la opción cae fuera del área visible.
+      const eligioEstado = await elegirSelectPorTeclado('main [role="combobox"][aria-label="Filtrar por estado"]', 'Todos los estados');
+      const estadoPuesto = await evalx(`document.querySelector('main [role="combobox"][aria-label="Filtrar por estado"]')?.innerText?.trim() ?? null`);
+      check('el filtro de estados ofrece «Todos los estados»',
+        eligioEstado && /Todos los estados/.test(String(estadoPuesto)), `eligió=${eligioEstado} · estado=${estadoPuesto}`);
       await sleep(1500);
       const tarjeta = await evalx(`!!(${cardOf(ordenPrueba.num)})`);
       check('la tarjeta de la orden de prueba aparece en la lista', tarjeta === true, ordenPrueba.num);
 
-      // --- asistente «Cerrar»: los 3 chips de método, SIN confirmar cobro ni entrega ---
-      await clickCardButton(ordenPrueba.num, 'Cerrar');
+      // --- F49: la tarjeta ya NO tiene «Cerrar» (lo reemplazó «Descuento»); el asistente de cierre
+      //     se abre por la COLA DE ENTREGAS (botón «Cerrar entrega»), como en el mostrador ---
+      const botonesTarjeta = await evalx(`JSON.stringify({
+        descuento: [...document.querySelectorAll('button')].some(b => (b.innerText || '').trim() === 'Descuento'),
+        cerrar: [...document.querySelectorAll('button')].some(b => (b.innerText || '').trim() === 'Cerrar'),
+      })`);
+      const bt = JSON.parse(botonesTarjeta ?? '{}');
+      check('F49: la tarjeta ofrece «Descuento» y ya no «Cerrar»', bt.descuento === true && bt.cerrar === false, String(botonesTarjeta));
+      // F54: si quedó un aviso de política pendiente (el guardado del wizard lo dispara), el primer
+      // clic lo come su velo: se cierra ANTES de pulsar «Cerrar entrega» (como haría el operario).
+      await closeAllDialogs();
+      await clickButton('Cerrar entrega');
+      await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('entrega')`, 8000);
+      await clickCenter(`document.querySelector('[role="dialog"] input')`).catch(() => {});
+      await insertText(ordenPrueba.num);
+      await sleep(1500);
+      await clickCenter(`([...document.querySelectorAll('[role="dialog"] [role="option"]')].find(o => (o.innerText || '').includes(${JSON.stringify(ordenPrueba.num)})) || document.querySelector('[role="dialog"] [role="option"]') || null)`).catch(() => {});
+      await sleep(1800);
       const asistente = await waitFor(`(document.querySelector('[role="dialog"]')?.innerText ?? '').includes('Cerrar ${ordenPrueba.num}')`, 10000);
-      check('el asistente «Cerrar» abre para la orden de prueba', asistente,
+      check('el asistente «Cerrar» abre por la cola de entregas', asistente,
         (String(await dialogTxt()).split('\n')[0] || ''));
       const chipsCierre = await evalx(`[...document.querySelectorAll('[role="dialog"] button[data-state]')]
         .map(b => (b.innerText || '').replace(/\\s+/g, ' ').trim())
@@ -805,6 +876,9 @@ const clickCardButton = async (orderNum, label) => {
   await waitFor(`!!document.querySelector('input[placeholder^="Buscar por producto"]')`, 8000);
   // El buscador de Productos también indexa la COMPATIBILIDAD: buscar el modelo del padrón trae
   // todas las pantallas que le sirven. Para la ficha se usa el NOMBRE del repuesto (más preciso).
+  // La tabla de Productos ganó columnas (F50: «En uso»; F51: Precio y Costo siempre visibles), así
+  // que las celdas se leen por NOMBRE DE COLUMNA (del `thead`), nunca por posición: un índice fijo se
+  // corre solo con la próxima columna que se agregue (misma regla que el backend: nada posicional).
   const buscar = (t) => setValue('input[placeholder^="Buscar por producto"]', t);
   const nombrePantalla = pantallaDePrueba ? pantallaDePrueba.pantalla : '';
   const modeloBuscar = pantallaDePrueba ? pantallaDePrueba.label : 'Redmi Note 11';
@@ -812,32 +886,57 @@ const clickCardButton = async (orderNum, label) => {
   await buscar(modeloBuscar);
   await sleep(2200);
 
-  const filaPantalla = await evalx(`(() => {
+  /** Fila de la tabla de Productos que cumple un criterio, con su badge de stock (por columna). */
+  const filaDeProductos = (criterio) => evalx(`(() => {
     const p = document.querySelector('[role="tabpanel"]');
-    const rows = [...p.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
-    const r = rows.find(c => (c[4] || '').includes(${JSON.stringify(modeloBuscar)}) || (c[3] || '') === ${JSON.stringify(modeloBuscar)});
-    const badges = r ? [...p.querySelectorAll('table tbody tr')][rows.indexOf(r)].querySelectorAll('td [title]') : [];
-    return JSON.stringify(r ? {
-      producto: r[0], categoria: r[1], marca: r[2], modelo: r[3], compat: r[4],
-      stock: [...badges].map(b => ({ t: b.getAttribute('title'), v: b.innerText.trim() })).find(b => /AGOTADO|DISPONIBLE|BAJO|FALTANTE/.test(b.t)) ?? null,
-    } : null);
+    const heads = [...p.querySelectorAll('table thead th')].map(h => (h.innerText || '').trim().toLowerCase());
+    // Los rótulos reales de hoy: Producto · En uso · Categoría · Marca · Modelo · Modelos compatibles ·
+    // Precio · Costo · Stock · Mín. Se buscan por nombre (varias grafías posibles), nunca por posición.
+    const col = (...ns) => heads.findIndex(h => ns.some(n => h.startsWith(n)));
+    const iProd = col('producto'), iCat = col('categor'), iMarca = col('marca'), iMod = col('modelo'),
+          iStock = col('stock');
+    // «Modelos compatibles» empieza con «Modelo»… pero la columna del teléfono del repuesto también:
+    // se busca PRIMERO «compat» y solo si no existe se cae a «modelo».
+    const iComp = (() => { const a = heads.findIndex(h => h.includes('compat')); return a >= 0 ? a : col('modelo'); })();
+    const rows = [...p.querySelectorAll('table tbody tr')];
+    const celdas = (tr) => [...tr.querySelectorAll('td')].map(td => td.innerText.trim());
+    const tr = rows.find(x => { const c = celdas(x); return ${criterio}; });
+    if (!tr) return null;
+    const c = celdas(tr);
+    const badges = [...tr.querySelectorAll('td [title]')].map(b => ({ t: b.getAttribute('title'), v: b.innerText.trim() }));
+    return JSON.stringify({
+      producto: c[iProd], categoria: c[iCat], marca: c[iMarca], modelo: c[iMod], compat: c[iComp],
+      stock: badges.find(b => /AGOTADO|DISPONIBLE|BAJO|FALTANTE/.test(b.t)) ?? null,
+      stockTexto: c[iStock] ?? null,
+    });
   })()`);
+
+  const filaPantalla = await filaDeProductos(
+    `(c[iComp] || '').includes(${JSON.stringify(modeloBuscar)}) || (c[iMod] || '') === ${JSON.stringify(modeloBuscar)}`);
   const fp = JSON.parse(filaPantalla || 'null');
   check('la pantalla compatible con el modelo aparece en Productos',
     !!fp, fp ? `${fp.producto} · ${fp.categoria} · compat: ${String(fp.compat).slice(0, 60)}` : 'no se encontró la fila');
   check('esa pantalla muestra su STOCK (badge con estado y número)',
     !!fp && fp.stock != null && fp.stock.v !== '', fp && fp.stock ? `${fp.stock.t} = ${fp.stock.v}` : 'sin badge de stock');
-  check('la pantalla elegida por el servicio está entre las filas listadas y con stock',
-    !!pantallaDePrueba && !!fp && Number(fp.stock?.v) > 0,
-    pantallaDePrueba ? `esperada: ${pantallaDePrueba.pantalla} (stock ${pantallaDePrueba.stock})` : 'sin pantalla de referencia');
 
-  // --- ficha/editar: se abre y se cierra SIN guardar ---
-  // Se afina la búsqueda con el NOMBRE del repuesto (así la primera fila es la que se quiere abrir).
+  // La pantalla ELEGIDA por el servicio: se busca por SU nombre y se lee SU stock (no el de
+  // cualquiera de las compatibles, que es lo que hacía antes y no probaba la pantalla elegida).
+  // El nombre de la ficha trae las tres grafías separadas por « / »; en la tabla la primera parte es
+  // la que está en la columna Producto (el resto vive en «Modelos compatibles»).
+  const nucleoPantalla = nombrePantalla.replace(/^Pantalla\s+/i, '').split('/')[0].trim();
   if (nombrePantalla) {
     await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
     await buscar(nombrePantalla);
     await sleep(2000);
   }
+  const filaElegidaRaw = await filaDeProductos(`c.some(v => (v || '').includes(${JSON.stringify(nucleoPantalla)}))`);
+  const fe = JSON.parse(filaElegidaRaw || 'null');
+  check('la pantalla elegida por el servicio está entre las filas listadas y con stock',
+    !!pantallaDePrueba && !!fe && Number(fe.stock?.v) > 0,
+    `esperada: ${pantallaDePrueba?.pantalla} (stock ${pantallaDePrueba?.stock}) · listada: ${fe?.producto ?? 'ninguna'} · ${fe?.stock ? `${fe.stock.t} = ${fe.stock.v}` : 'sin badge'}`);
+
+  // --- ficha/editar: se abre y se cierra SIN guardar ---
+  // La búsqueda ya está afinada con el NOMBRE del repuesto (primera fila = la que se quiere abrir).
   const filaParaAbrir = `(() => {
     const p = document.querySelector('[role="tabpanel"]');
     const rows = [...p.querySelectorAll('table tbody tr')];

@@ -171,11 +171,13 @@ registro/
 │   │   ├── order-balance.ts   # F38: saldo en la moneda del cobro
 │   │   ├── refund-math.ts     # F36/F42: topes por moneda y MÉTODO de la devolución
 │   │   ├── payment-math.ts / payment-methods.ts / queue.ts / service-update.ts / phoneOrder.ts
+│   │   ├── service-report.ts  # F44: trabajos hechos (contadores por trabajo, alcance de la lista)
 │   │   └── ficha.ts / reminders.ts / service-guide.ts / screen-rules.ts / update.ts
 │   ├── components/
 │   │   ├── Dashboard.tsx      # KPIs, diagrama de flujo, top modelos, stock bajo
 │   │   ├── Sales.tsx          # Ventas: conversión Bs, filtros, stats
 │   │   ├── Services.tsx       # Órdenes + abonos + devoluciones + checklist + técnicos + imprimir
+│   │   │                      #   F44: abre en «Todos los estados», contadores de trabajos y alcance
 │   │   ├── RefundDialog.tsx   # Devolución: vuelve POR DONDE ENTRÓ la plata (F42)
 │   │   ├── PaymentDialog.tsx  # Pago/Abono reutilizable + imprimir factura
 │   │   ├── PrintReceiptDialog.tsx / PrinterSettingsDialog.tsx
@@ -207,6 +209,8 @@ registro/
 │   ├── *_test.ts              # pruebas de las reglas PURAS (moneda, arqueo, devoluciones, ficha…)
 │   ├── bench_inventory_ui.mjs # F41: mide en vivo lo que tarda cada pestaña en mostrar datos
 │   ├── audit_inventory.mjs / snapshot_db.mjs / seed_dev_db.mjs / canonical_brands.json
+│   │                          # F55: el split de modelos se espeja acá y su paridad con Rust
+│   │                          #   se fija con split_fixtures.json (--gen-split-fixtures)
 │   ├── release.ps1            # Publicar versión: bump + build firmado + latest.json + gh release
 │   └── progress/              # history.md (append-only) · specs/ (una spec por feature) · patterns.md
 ├── instaladores/              # Setup + guía para copiar a pendrive
@@ -297,7 +301,14 @@ await window.__TAURI_INTERNALS__.invoke('get_products', { search: '', categoryId
 | `node tools/bench_inventory_ui.mjs` | **F41** — ms hasta VER LOS DATOS en cada pestaña del Inventario (medianas, en frío) | Mide, no afirma. Pide `REGISTRO_DB` a una **copia** |
 | `node tools/verify_inventario_rapido.mjs` | **F41** — que la memoria del catálogo no muestre números viejos: compara la pantalla contra la **base leída aparte** con `node:sqlite` | Escribe una ficha de prueba y la borra; **aborta si falta `REGISTRO_DB`** |
 | `node tools/verify_devolucion_metodo.mjs` | **F42** — la devolución vuelve por donde entró: el backend rechaza el método que no cobró y el diálogo propone el real | Crea un pedido de prueba y lo borra |
+| `node tools/verify_trabajos_hechos.mjs` | **F44** — los contadores de trabajos cuentan lo que se ve (entregados incluidos): el chip == las tarjetas al hacerle clic == el KPI, el trabajo escrito a mano tiene chip y el alcance se dice en pantalla | Escribe 3 órdenes de prueba ($0) y las borra; **aborta si falta `REGISTRO_DB`** o el día abierto; comprueba que el stock vuelva |
+| `node tools/verify_tecnico_sin_asignar.mjs` | **F45/F46/F48** — el wizard crea una orden **sin técnico** y **con color** (obligatorio), la ficha pide el color y lleva el foco al selector, la observación del teléfono no bloquea, el **modal de política** aparece al guardar y se pospone, y la **señal ámbar** aparece/desaparece al asignar | Crea la orden por la UI y la borra; **aborta si falta `REGISTRO_DB`** o el día abierto |
+| `node tools/verify_pantalla_agotada.mjs` | **F47/F48** — pantalla **agotada**: aviso en rojo con el texto del inventario, confirmación marcada por defecto, «Actualizar Servicio» habilitado con el estado Entregado, y sin color el paso no avanza | **No guarda nada** (el stock no se mueve, verificado contra la base); **aborta si falta `REGISTRO_DB`** |
+| `node tools/verify_descuento.mjs` | **F49** — la tarjeta con «Descuento» (y sin «Cerrar»), el diálogo que aplica el descuento desde el precio de lista, y **la factura con PRECIO / DESCUENTO / TOTAL** | Crea una orden de $30, le aplica y le quita el descuento, comprueba por IPC y **borra** la orden; **aborta si falta `REGISTRO_DB`** |
 | `node tools/verify_models_tab.mjs` | Pestaña Modelos: KPIs, filtros, orden de 3 estados, ficha por categoría | `EXPECT_PHONES`/`EXPECT_REVIEW` son la expectativa independiente |
+| `node tools/verify_orden_columnas.mjs` | **F51** — orden por columnas en Inventario → Productos: cada encabezado reordena de verdad, con ciclo asc→desc→sin orden y `aria-sort` | **Solo lectura**: compara el orden de la pantalla contra el **mismo orden calculado sobre la base** (`node:sqlite`) |
+| `node tools/verify_uso_modelos.mjs` | **F50** — «lo que uso»: el check por producto y por modelo cambia SOLO `in_use` (stock/precio/compat intactos, contra la base), el código `P-…`/`M-…` se ve y se busca (con guion y sin guion), los filtros «Solo lo que uso» / «Lo que NO uso», y el formulario de servicio ofrece solo lo marcado (con «Ver todos» y el aviso «sin usar») | Escribe SOLO los checks y los **restaura**; **aborta si falta `REGISTRO_DB`**; compara siempre contra la base leída aparte |
+| `node tools/verify_aviso_no_tapa.mjs` | **F54** — el aviso de política **no tapa la factura** ni se traga los clics: con el comprobante abierto no se dibuja (queda en la cola), el clic sobre la factura cae dentro de la factura, al cerrarla el aviso vuelve y **tocar el mensaje lo quita** (y la ✕ también) | Entrega UNA orden de prueba por la UI **sin cobrar** y la borra; **aborta si falta `REGISTRO_DB`** |
 | `node tools/verify_screen_brand_gate.mjs` | Gate de marca de la pantalla en el servicio (OTRA marca nunca se auto-elige) | Solo lectura |
 | `node tools/verify_tecnico_y_fecha_pago.mjs` | F34/F35/F36/F38/F39: técnico rápido, fecha del pago, saldo en Bs. y las dos columnas del arqueo | Aborta si no hay turno abierto |
 | `node tools/verify_recordatorios.mjs` · `verify_servicio_cierre.mjs` · `verify_cola_entregas.mjs` · `verify_metodos_en_cobros.mjs` · `verify_wizard_metodos.mjs` | F30–F33: recordatorios, asistente de cierre, cola de entregas, métodos de pago | Escriben y limpian sus órdenes de prueba |
@@ -315,10 +326,13 @@ npx tsc -b && npx oxlint src                   # 0 errores
 node tools/pos_cuadre_test.ts        # arqueo por moneda (F39)            66/66
 node tools/refund_math_test.ts       # topes y MÉTODO de la devolución    45/45
 node tools/payment_math_test.ts      # cuentas de los cobros             595/595
-node tools/receipt_acuerdo_test.ts   # recibo (montos y anchos de papel)   52/52
-node tools/ficha_test.ts             # ficha de ingreso (F33)              66/66
+node tools/receipt_acuerdo_test.ts   # recibo (montos, descuento, anchos)   74/74
+node tools/ficha_test.ts             # ficha de ingreso (F33/F48)           75/75
 node tools/reminders_test.ts         # recordatorios (F32)                 38/38
 node tools/service_guide_test.ts · queue_test.ts (npx tsx) · local_date_test.ts (npx tsx) · method_picker_test.ts (npx tsx)
+node tools/service_report_test.ts    # trabajos hechos / contadores (F44)   68/68
+node tools/policy_queue_test.ts      # cola del modal de política (F46)     13/13
+node tools/discount_test.ts          # descuento del servicio (F49)         21/21
 ```
 
 ## Lecciones clave (resumen)
@@ -355,3 +369,61 @@ node tools/service_guide_test.ts · queue_test.ts (npx tsx) · local_date_test.t
     bench queda en `tools/bench_inventory_ui.mjs`.
 
 Detalles y registro completo de problemas en [AGENTS.md](AGENTS.md).
+
+#### F45–F48 (2026-09-20) — alta guiada y avisos que no bloquean
+- **F45 — Técnico «Sin asignar» por defecto:** al crear una orden no se prellena ningún técnico (se quitó el `last_technician` de localStorage) y la orden se guarda sin él; la tarjeta en taller muestra el chip ámbar **«Falta asignar técnico»** (`data-needs-tech`) que abre el selector rápido. Regla pura `needsTechnician` (`lib/service-guide.ts`).
+- **F46 — Recordatorio de política como MODAL CENTRADO** (`PolicyModal.tsx` + `policy-queue.ts`, reemplaza `PolicyToast.tsx`): velo suave, tarjeta con tinte por tono, acciones a un toque y **«Después»**; bloquea la pantalla, nunca los datos; dedupe por aviso+orden; Escape solo si no hay otro diálogo encima. Test puro `tools/policy_queue_test.ts`.
+- **F47 — Pantalla AGOTADA: aviso en rojo, predeterminado y SIN bloquear** (`screenOk` ya no pide confirmación; `outOfStockChoice` detecta el caso; la confirmación arranca marcada; el asistente de cierre pasó el aviso a rojo). Sigue siendo obligatorio ELEGIR la pantalla cuando hay opciones.
+- **F48 — Alta guiada:** el **color del equipo es obligatorio** (ficha en `falta`, paso del wizard, guardado), la ficha agrega **observaciones que no bloquean** («Falta el número de teléfono del cliente», sin técnico) con `data-ficha-nota`, y **«Ir al campo» lleva el FOCO** al control del dato (`data-ficha-target`). Colores nuevos: **Lila** y **Marrón**.
+- **En vivo:** `node tools/verify_tecnico_sin_asignar.mjs` (F45+F46+F48, 30/30) · `node tools/verify_pantalla_agotada.mjs` (F47+F48, 16/16, no guarda nada: el stock no se mueve) · `verify_recordatorios` 65/65.
+
+#### F49 (2026-09-20) — El «Cerrar» de la tarjeta es ahora «Descuento» (y sale en la factura)
+- **La tarjeta:** se quitó el botón **«Cerrar»** y va **«Descuento»** (`data-discount="<id>"`). El asistente de cierre sigue a un toque desde **«Cerrar entrega»** de la barra (o F4 → elegir la orden).
+- **Diálogo de descuento** (`DiscountDialog.tsx`): abre con el descuento actual, muestra PRECIO/DESCUENTO/TOTAL en vivo, chips $1/$2/$3/$5/$10 + «Sin descuento», avisa cómo queda el saldo si ya hay abonos, y guarda con `updateOrderKeepingFields` (no pisa nada más). **No toca la caja.**
+- **Regla pura** `src/lib/discount.ts` (+ `tools/discount_test.ts` 21/21): el precio de lista es `amount + discount_amount` y el descuento nuevo se calcula desde ahí (nunca dos veces), acotado a `[0, precio]`.
+- **La factura** imprime `PRECIO` / `DESCUENTO` / `TOTAL` (principal y talón) **solo cuando hay descuento**; sin descuento el papel queda idéntico.
+- **En vivo:** `node tools/verify_descuento.mjs` (15/15) · `receipt_acuerdo_test.ts` 74/74 · regresiones actualizadas al botón nuevo: `verify_servicio_cierre` 18/18, `verify_recordatorios` 65/65, `verify_metodos_en_cobros` 16/16.
+
+#### F51 (2026-09-20) — Inventario: orden por COLUMNAS en Productos
+- Clic en el encabezado: **asc → desc → sin orden**, con flecha y `aria-sort`; la paginación vuelve a la página 1. Server-side, con las **dos claves** de cada columna (nombre, categoría, marca, modelo, variante, precio, costo, stock, mín) y las viejas del desplegable conservadas.
+- **Dos defectos reales cazados al verificar:** faltaba la clave inversa de varias columnas (`costo_desc`…) → el segundo clic no hacía nada (ahora hay **test Rust** `test_product_sort_keys_are_valid` con las 23 claves); y las columnas de Precio/Costo **desaparecían según la página** (con su encabezado para ordenar) → ahora se muestran siempre, en columnas separadas.
+- **En vivo:** `node tools/verify_orden_columnas.mjs` (12/12, solo lectura) comparando el orden de la pantalla **contra la base leída aparte**. `cargo test --lib` 134/134.
+
+#### F50 (2026-09-20) — Inventario: «lo que uso» (el check) + códigos de referencia
+- Pedido del dueño: «no lo usa todo; un check con su número de cada producto o modelo… ésos son los que le van a aparecer cuando registra un servicio, así la búsqueda es más rápida».
+- **Dos columnas nuevas en cada tabla** (`products.in_use` / `products.code`, `phones.in_use` / `phones.code` / `phones.default_product_id`), **al final** del orden físico. La migración se hace **por tabla y por columna** (probando cada una): en una base nueva la tabla `phones` nace **después** del bloque de `products`, así que el `ALTER` de `phones` fallaba en silencio y la base quedaba a medias («no such column: code»).
+- **Seed** una sola vez: queda **en uso lo que tiene stock** (es lo que el taller tiene en el cajón) y se apaga el resto; **códigos** `P-0001` / `M-0001` completados siempre, sin pisar los que ya están. La misma regla se aplica a los productos nuevos. El dueño prende/apaga a mano lo que quiera.
+- **El check es ANGOSTO:** `set_product_in_use`, `set_phone_in_use`, `set_phone_use_all` (transaccional: el teléfono **y sus repuestos**, con la misma unión clave+alias del padrón), `set_product_code`, `set_phone_code`, `set_phone_default_product`. **Nunca** tocan stock, precios, movimientos ni compatibilidad.
+- **Inventario → Productos:** columna «En uso» ordenable, filtros **«Solo lo que uso»** / **«Lo que NO uso (apagado)»**, y la búsqueda encuentra por **código** (con guion y sin guion). **Inventario → Modelos:** el código `M-…` y el check por fila.
+- **Registro de servicio:** el selector de modelo ofrece **solo lo que está en uso**, con el interruptor **«Ver todos»** (persistido en `localStorage`) y el aviso **«sin usar»** en lo apagado. La lista de **pantallas** de un modelo **no** se filtra: apagar una ficha no puede dejar al taller sin poder elegir el repuesto que tiene que instalar (decisión revisada frente a la spec).
+- **El inventario sigue descontando:** test `test_in_use_never_stops_the_inventory_deduction` (una pantalla apagada a mano que se elige y se entrega **se descuenta**, y al reabrir vuelve a la MISMA ficha).
+- **En vivo:** `node tools/verify_uso_modelos.mjs` (35/35) · `cargo test --lib` **136/136** · regresiones: `verify_orden_columnas` 12/12, `verify_trabajos_hechos` 26/26, `verify_smoke_integral` 110 comprobaciones. `tsc -b` 0 · `oxlint` 0 errores · `harness_security` PASS · `harness_truth` PASS.
+
+#### F54 (2026-09-20) — El aviso de política no tapa la factura (y se quita con un toque)
+- Pedido del dueño: «al finalizar el mensaje que sale de tlf y otro mensaje **no me deja ver la factura la orden**; le doy clic al mensaje y **no se quita**».
+- **Qué pasaba (medido en vivo):** al entregar con «Imprimir la orden al cerrar», el asistente de cierre encola los avisos de política **y** abre la factura en el mismo paso. El modal centrado (F46) traía un velo a `z-[100]`, **por encima** de los diálogos (`z-50`): tapaba la factura y el **primer clic** (el de «Cerrar entrega» o el de la factura) lo consumía el velo — había que tocar dos veces. Y en la tarjeta solo cerraban los botones, el velo o Escape (con un diálogo abierto, Escape se ignora a propósito).
+- **Arreglo:** (1) **el aviso no se dibuja mientras hay un diálogo a la vista** — queda en la cola y sale apenas se cierra (no se pierde ninguno) — y el velo pasa a `z-40`, por debajo de los diálogos; (2) **un toque en cualquier parte de la tarjeta lo cierra** (equivale a «Después»: no anota nada) más una **✕** visible; los botones de acción siguen igual; (3) nada de plata ni stock: el trabajo ya estaba guardado.
+- **En vivo:** `node tools/verify_aviso_no_tapa.mjs` (14/14, con una **entrega real** sin cobro y su limpieza) · regresión `verify_recordatorios.mjs` **67/67** (los dos chequeos que exigían la conducta vieja se reescribieron a la nueva).
+
+#### F52 (2026-09-20) — Inventario: vista «Por modelo» (una fila por teléfono, con sus variantes adentro)
+- **Conmutador de vista** en Productos: **«Lista (ficha por ficha)»** | **«Por modelo (una fila por teléfono)»** (`data-view` / `data-view-state`).
+- **Una fila por TELÉFONO del padrón** (`ProductsByModel.tsx`): código `M-…`, nombre, marca, **chips de variante adentro** (no como modelos distintos), cantidad de repuestos, **stock total**, **rango de precios**, el check **«lo uso»** del modelo y su **pantalla de referencia**.
+- **Se despliega**: sus repuestos con **código, variante, precio, costo, stock** y su propio check, más el botón para **fijar/quitar la pantalla de referencia** del modelo (lo que el registro de servicio va a auto-seleccionar).
+- **La variante es COLUMNA** (ordenable) y **FILTRO por familia** en la lista plana: pedir «OLED» trae OLED y «OLED Con Marco» (161 fichas en el catálogo real).
+- **Reglas canónicas** en `catalog.rs` (`variant_family`, `variant_rank`, `sort_variants`) y su gemela en SQL (`VARIANT_FAMILY_SQL`) con **test de paridad**; puras en `src/lib/variant.ts` (+ `tools/variant_test.ts` 22/22).
+- **Bug real cazado en vivo:** el detalle del teléfono no traía `code`/`in_use` de cada repuesto (la lista de columnas del SELECT se había quedado corta y los `unwrap_or` lo tapaban) → el despliegue mostraba todo «en uso» y sin código. Arreglado y fijado por test.
+- **En vivo:** `node tools/verify_por_modelo.mjs` (27/27, contra la base) · `cargo test --lib` **139/139** · regresiones: `verify_orden_columnas` 12/12, `verify_uso_modelos` 35/35, `verify_trabajos_hechos` 26/26, `verify_aviso_no_tapa` 14/14, `verify_smoke_integral` **110/110**.
+
+#### F53 (2026-09-20) — Un solo nombre por modelo, pantalla de referencia y duplicados
+- **Split del padrón:** `catalog::split_model_models` parte el texto cuando tiene **2+ códigos** («Samsung A70 A705» → **A70** + **A705**; «K20 Plus MP260» → «K20 Plus» + «MP260»); NO parte «Redmi Note 11», «A06 4G» ni «Galaxy S21 Ultra 5G». La pantalla queda **compatible con los dos** (no se reescribe la compatibilidad del repuesto).
+- **Migración guiada con vista previa** en **Inventario → Ajustes**: `preview_phone_split` calcula el informe *ejecutando el rebuild en una transacción que se revierte* (real: 1135 → 1205 teléfonos, 201 aparecen, 131 nombres pegados desaparecen) y `apply_phone_split` respalda la base, saca del texto la variante que falte, numera los nuevos (`M-…`) y los marca «en uso». **Idempotente**, ~4 s.
+- **La pantalla de referencia manda:** `autoScreen(options, referenciaId)` elige la del modelo (el operario puede cambiarla). Verificado en vivo: al elegir el modelo, «Pantalla a instalar» aparece **elegida sola**.
+- **Asistente de modelos repetidos:** grupos según los **repuestos compartidos**, con **vista previa** («queda X · se le suman Y, Z como alias»), «No son el mismo» y fusión sin tocar stock.
+- **En vivo:** `node tools/verify_modelos_f53.mjs` **20/20** (unidades/capital/movimientos/órdenes/ventas/pagos idénticos antes y después) · `cargo test --lib` **143/143** · `queue_test.ts` 72/72 · auditoría antes/después: unidades 703 = 703. El pendiente menor (espejar el split en `audit_inventory.mjs`) se cerró como feature **55**.
+
+#### F55 (2026-09-20/21) — La auditoría cuenta los mismos teléfonos que el padrón (y su espejo queda fijado por test)
+- **El defecto:** `node tools/audit_inventory.mjs` contaba los teléfonos con su **propia** extracción de compatibilidad, **sin partir las entradas compuestas**. Después del split de F53 el reporte decía **1267** teléfonos distintos (script) mientras el padrón de la app tenía otro número: dos cifras que se leían como si una estuviera mal, cuando la diferencia era que **una aplicaba la regla nueva y la otra no**.
+- **Qué se hizo:** se espejó `catalog::split_model_models` en el script (`isModelCode` + `splitModelModels`: un código es un token con **letras Y dígitos**, sin `4G/5G/LTE` ni números puros; con 2+ códigos cada parte es `[familia] + [código] + [palabras hasta el próximo código]`) y el resumen ahora **dice cuál número es cuál**: «teléfonos distintos en el catálogo **(script)**» junto a «teléfonos en el **padrón (app)**», este último leído de la tabla `phones` cuando la copia auditada la tiene (el número que ve el local manda).
+- **La paridad dejó de ser una promesa:** como el script tiene una **copia a mano** de la regla (no puede llamar a Rust), se agregó el fixture **`tools/split_fixtures.json`** (17 casos: los reales «A70 A705», «A13 4G A135 M13», «Y6 2019 8A»…, el mismo código dos veces, y los que **no** se parten) generado con `node tools/audit_inventory.mjs --gen-split-fixtures` y verificado por el test **`catalog::tests::test_split_model_models_match_node_fixtures`**, el mismo patrón de `canonical_fixtures.json`. Si alguien toca una de las dos copias, el test de Rust **falla a propósito** en vez de que el reporte empiece a contar otra cosa en silencio.
+- **Residual documentado (no es un bug):** las dos cifras siguen **cerca pero no idénticas** (script 1267 · padrón 1135 en la base de trabajo, que todavía **no** tiene aplicado el split de F53) porque el script no aplica el filtro de familia/marca ni los «junk» del backend, y porque el padrón solo se actualiza cuando el dueño aplica la migración desde **Inventario → Ajustes**. El número de **negocio** coincide exacto: productos **1087**, unidades totales **703**.
+- **Verificación:** `cargo test --lib` **144/144** (6 ignorados) · `node tools/audit_inventory.mjs` corre y muestra las dos cifras · `node tools/audit_inventory.mjs --gen-split-fixtures` regenera el fixture sin diffs inesperados · `tsc -b` 0 · `oxlint` 0 errores.

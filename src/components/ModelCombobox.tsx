@@ -26,6 +26,8 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
   const [options, setOptions] = useState<PhoneModelRow[]>([]);
   /** para qué texto son las `options` que tenemos (null = todavía no se consultó nada) */
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  /** F50: con qué alcance se cargaron las opciones («ver todos» o solo lo que usa). */
+  const [loadedInUse, setLoadedInUse] = useState<boolean | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const focused = useRef(false);
@@ -41,6 +43,11 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
   // por modelo» lo monta al abrirse, así que esa consulta se pagaba siempre y no servía para
   // nada (tampoco en el asistente de servicio, donde el campo arranca vacío). Ahora consulta
   // cuando el campo tiene el foco o cuando ya hay un modelo escrito.
+  // F50 — «SOLO LO QUE USO» (pedido del dueño: «él no lo usa todo… que le aparezcan los modelos que
+  // usa, así es más rápida la búsqueda»). El padrón marca los modelos con un check y acá se ofrece
+  // SOLO eso; el interruptor «Ver todos» trae el catálogo completo para el modelo raro. Se recuerda
+  // la elección (el operario que trabaja con todo no tiene que pelearse con el filtro cada vez).
+  const [verTodos, setVerTodos] = useState(() => localStorage.getItem('modelos_ver_todos') === '1');
   const wanted = open || value.trim() !== '';
   useEffect(() => {
     // El desplegable ya NO se gatea con un `loading` de estado: se pinta según `optionsForQuery`
@@ -48,15 +55,15 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
     // anterior se abortaba (escribir y borrar dentro de los 180 ms del rebote: su `finally` no
     // bajaba `loading` porque `alive` ya era false) y el desplegable quedaba en «Buscando…» para
     // siempre — bloqueante de la revisión adversarial. Ahora no hace falta ningún estado extra.
-    if (!wanted || loadedFor === query) return;
+    if (!wanted || (loadedFor === query && loadedInUse === verTodos)) return;
     let alive = true;
     const t = setTimeout(() => {
-      api.getPhoneModels(query, 60)
-        .then(list => { if (!alive) return; setOptions(list); setLoadedFor(query); })
-        .catch(() => { if (!alive) return; setOptions([]); setLoadedFor(query); });
+      api.getPhoneModelsInUse(query, 60, !verTodos)
+        .then(list => { if (!alive) return; setOptions(list); setLoadedFor(query); setLoadedInUse(verTodos); })
+        .catch(() => { if (!alive) return; setOptions([]); setLoadedFor(query); setLoadedInUse(verTodos); });
     }, 180);
     return () => { alive = false; clearTimeout(t); };
-  }, [query, wanted, loadedFor]);
+  }, [query, wanted, loadedFor, loadedInUse, verTodos]);
 
   useEffect(() => {
     if (!open) return;
@@ -70,7 +77,7 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
   // «exacto» sólo vale para las opciones de ESTE texto: con las de una consulta anterior
   // (o sin haber consultado) no se puede afirmar nada — de ahí el aviso falso de «no está
   // en la lista» que tenía la versión que consultaba siempre.
-  const optionsForQuery = loadedFor === query;
+  const optionsForQuery = loadedFor === query && loadedInUse === verTodos;
   const exact = useMemo(
     () => (optionsForQuery ? options.find(o => normPhoneModel(o.label) === normPhoneModel(query)) : undefined),
     [options, query, optionsForQuery],
@@ -133,6 +140,27 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
 
       {open && (
         <div className="absolute top-full z-50 mt-1 w-full max-h-72 overflow-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
+          {/* F50 — el interruptor que trae TODO el catálogo. Va arriba, es un botón (no un check de
+              Radix) y deja claro qué está mostrando. */}
+          <div className="flex items-center justify-between gap-2 border-b border-border/60 px-2 pb-1.5 pt-1">
+            <span className="text-[11px] text-muted-foreground" data-model-scope>
+              {verTodos ? 'Mostrando TODO el catálogo' : 'Mostrando solo los modelos que usás'}
+            </span>
+            <button
+              type="button"
+              data-model-all={verTodos ? '1' : '0'}
+              onClick={() => {
+                const n = !verTodos;
+                setVerTodos(n);
+                localStorage.setItem('modelos_ver_todos', n ? '1' : '0');
+                setLoadedFor(null);
+                inputRef.current?.focus();
+              }}
+              className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              {verTodos ? 'Ver solo lo que uso' : 'Ver todos'}
+            </button>
+          </div>
           {/* El desplegable se pinta según `optionsForQuery` (¿las opciones son de ESTE texto?),
               no según `loading`: si se gateaba con `loading`, un `loading` trabado dejaba el
               cuadro en «Buscando…» sin lista (bloqueante de la revisión adversarial). */}
@@ -159,6 +187,8 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
               <button
                 key={o.key}
                 type="button"
+                data-model-option={o.label}
+                data-model-in-use={o.in_use ?? 0}
                 onClick={() => pick(o.label, o)}
                 className={cn(
                   'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent',
@@ -170,6 +200,19 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
                 {/* la marca aparte: el nombre comercial del padrón no la repite («110» = Nokia 110) */}
                 {o.brand && !normPhoneModel(o.label).startsWith(normPhoneModel(o.brand)) && (
                   <span className="shrink-0 text-[11px] text-muted-foreground">{o.brand}</span>
+                )}
+                {/* F50: el CÓDIGO del modelo (el local lo dicta) y si está en uso */}
+                {o.code && <span className="shrink-0 text-[10px] font-mono text-muted-foreground">{o.code}</span>}
+                {(o.in_use ?? 0) !== 1 && (
+                  <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] text-muted-foreground" title="Este modelo está apagado en el padrón (marcalo como «lo uso» en Inventario → Modelos)">
+                    sin usar
+                  </span>
+                )}
+                {o.screens > 0 && (
+                  <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                    {o.screens} pantalla{o.screens === 1 ? '' : 's'}
+                    {o.stock > 0 && ` · ${o.stock} u.`}
+                  </span>
                 )}
               </button>
             );

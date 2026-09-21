@@ -87,6 +87,28 @@ for (const width of [58, 80] as const) {
   ok(`${etiqueta} · el talón trae FIRMA SALIDA`, base.stub.includes('FIRMA SALIDA'));
   sinDesbordes(`${etiqueta} · talón base`, base.stub, ancho);
 
+  // 5b) F49 — EL DESCUENTO SE VE EN LA FACTURA (pedido del dueño: «que se refleje en la factura que
+  // se le aplicó un descuento de X monto»). `amount` es lo que el cliente DEBE (ya descontado) y
+  // `discount_amount` el descuento: el PRECIO de lista es la suma.
+  eq(`${etiqueta} · sin descuento NO se imprime la línea DESCUENTO`, base.main.includes('DESCUENTO'), false);
+  eq(`${etiqueta} · sin descuento tampoco se imprime PRECIO`, base.main.includes('PRECIO'), false);
+  const conDesc = buildServiceReceiptParts(svc({ amount: 25, discount_amount: 5 }), [], { width });
+  ok(`${etiqueta} · con descuento el recibo imprime PRECIO, DESCUENTO y TOTAL`,
+    conDesc.main.includes('PRECIO') && conDesc.main.includes('DESCUENTO') && conDesc.main.includes('TOTAL'));
+  ok(`${etiqueta} · el PRECIO de lista es el monto + el descuento`,
+    conDesc.main.includes('$ 30.00') || conDesc.main.includes('$30.00'), conDesc.main.split('\n').filter(l => /PRECIO/.test(l)).join(''));
+  ok(`${etiqueta} · el DESCUENTO va con su monto y en negativo`,
+    /DESCUENTO:\s*-\$\s*5\.00/.test(conDesc.main), conDesc.main.split('\n').filter(l => /DESCUENTO/.test(l)).join(''));
+  ok(`${etiqueta} · el TOTAL sigue siendo lo que el cliente paga (25)`,
+    conDesc.main.split('\n').some(l => /TOTAL/.test(l) && /\$ ?25\.00/.test(l)), conDesc.main.split('\n').filter(l => /TOTAL/.test(l)).join(''));
+  ok(`${etiqueta} · el talón también muestra el descuento`, conDesc.stub.includes('DESCUENTO'));
+  sinDesbordes(`${etiqueta} · recibo con descuento`, conDesc.main, ancho);
+  sinDesbordes(`${etiqueta} · talón con descuento`, conDesc.stub, ancho);
+  // Descuento del 100% (cortesía): el cliente no paga nada y la factura lo dice
+  const cortesia = buildServiceReceiptParts(svc({ amount: 0, discount_amount: 30 }), [], { width });
+  ok(`${etiqueta} · cortesía: PRECIO 30 y TOTAL 0`, cortesia.main.includes('PRECIO') && cortesia.main.split('\n').some(l => /TOTAL/.test(l) && /\$ ?0\.00/.test(l)));
+  sinDesbordes(`${etiqueta} · factura de cortesía`, cortesia.main, ancho);
+
   // 6) F38 — EL SALDO EN LA MONEDA DEL COBRO: si el cliente viene pagando en BOLÍVARES, el comprobante
   // dice lo que le falta EN Bs. (con la tasa del turno) además del $: es el número que el operario le
   // va a pedir en el mostrador. El $ sigue estando (es la deuda real y NO se revalúa).

@@ -5,8 +5,9 @@ import type {
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
   ServiceDeviceInput, DaySummary, ExportResult, Expense, ProfitSummary,
   ReceivablesSummary, InventoryValue, PaymentSearchResult,
-  ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage,
-  CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile,
+  ProductPage, InventoryStats, PhoneModelRow, ScreenCandidate, MovementPage, VariantFamily,
+  CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile, PhoneSplitPreview,
+  PhoneDuplicateGroup,
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
   LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup
 } from './types';
@@ -80,10 +81,24 @@ export const api = {
 
   // --- Inventario unificado (2026-09-15) ---
   getProductsPage: (search: string = '', categoryId: number | null = null, brand: string | null = null,
-    stockFilter: string = 'todos', sort: string = 'nombre', limit: number = 50, offset: number = 0) =>
+    stockFilter: string = 'todos', variantFamily: string | null = null, sort: string = 'nombre',
+    limit: number = 50, offset: number = 0) =>
     tauriInvoke<ProductPage>('get_products_page', {
-      search, categoryId, brand, stockFilter, sort, limit, offset
+      search, categoryId, brand, stockFilter, variantFamily, sort, limit, offset
     }).catch(() => mock<ProductPage>({ items: [], total: 0 })),
+  /** F53 — grupos de MODELOS que usan los mismos repuestos (asistente de duplicados). */
+  getPhoneDuplicateGroups: () =>
+    tauriInvoke<PhoneDuplicateGroup[]>('get_phone_duplicate_groups').catch(e => {
+      if (isTauri) throw e;
+      return mock<PhoneDuplicateGroup[]>([]);
+    }),
+  /** F53 — vista previa de «separar los modelos» (NO escribe nada). */
+  previewPhoneSplit: () => tauriInvoke<PhoneSplitPreview>('preview_phone_split'),
+  /** F53 — aplica la separación del padrón (respalda la base antes; solo el dueño). */
+  applyPhoneSplit: () => tauriInvoke<PhoneSplitPreview>('apply_phone_split'),
+  /** F52 — las familias de variante del catálogo (INCELL / OLED / ORIGINAL / sin variante). */
+  getVariantFamilies: () =>
+    tauriInvoke<VariantFamily[]>('get_variant_families').catch(() => mock<VariantFamily[]>([])),
   getInventoryStats: () =>
     tauriInvoke<InventoryStats>('get_inventory_stats').catch(() =>
       mock<InventoryStats>({
@@ -94,6 +109,26 @@ export const api = {
   getPhoneModels: (search: string = '', limit: number = 0) =>
     tauriInvoke<PhoneModelRow[]>('get_phone_models', { search, limit }).catch(() =>
       mock<PhoneModelRow[]>([])),
+  /**
+   * F50 — lista de modelos del formulario de servicio con el CHECK del padrón: con
+   * `inUseOnly` devuelve SOLO los modelos que el local marcó como «lo uso» (más rápido de buscar),
+   * y sin él devuelve todo (el interruptor «Ver todos»). También busca por código (`M-007`).
+   */
+  getPhoneModelsInUse: (search: string = '', limit: number = 0, inUseOnly: boolean = true) =>
+    tauriInvoke<PhoneModelRow[]>('get_phone_models_in_use', { search, limit, inUseOnly }).catch(() =>
+      tauriInvoke<PhoneModelRow[]>('get_phone_models', { search, limit }).catch(() => mock<PhoneModelRow[]>([]))),
+  /** F50 — el check «lo uso» de un PRODUCTO (una pantalla concreta). */
+  setProductInUse: (id: number, inUse: boolean) => tauriInvoke<void>('set_product_in_use', { id, inUse }),
+  /** F50 — el check «lo uso» de un MODELO del padrón. */
+  setPhoneInUse: (id: number, inUse: boolean) => tauriInvoke<void>('set_phone_in_use', { id, inUse }),
+  /** F50 — «usar/apagar todo el modelo»: el teléfono y sus repuestos en una transacción. */
+  setPhoneUseAll: (id: number, inUse: boolean) => tauriInvoke<number>('set_phone_use_all', { id, inUse }),
+  /** F53 — pantalla de REFERENCIA del modelo (la que el local instala siempre). */
+  setPhoneDefaultProduct: (id: number, productId: number | null) =>
+    tauriInvoke<void>('set_phone_default_product', { id, productId }),
+  /** F50 — corregir el código de un producto (`P-0142`) o de un modelo (`M-007`). */
+  setProductCode: (id: number, code: string) => tauriInvoke<void>('set_product_code', { id, code }),
+  setPhoneCode: (id: number, code: string) => tauriInvoke<void>('set_phone_code', { id, code }),
   findCompatibleScreens: (model: string, limit: number = 0) =>
     tauriInvoke<ScreenCandidate[]>('find_compatible_screens', { model, limit }).catch(() =>
       mock<ScreenCandidate[]>([])),

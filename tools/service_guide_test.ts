@@ -8,7 +8,7 @@
 // Uso:  node tools/service_guide_test.ts
 
 import {
-  photoOutIsCurrent, nextStep, isFinalStatus, isCreatableStatus, DEFAULT_NEW_STATUS,
+  photoOutIsCurrent, nextStep, isFinalStatus, isCreatableStatus, needsTechnician, DEFAULT_NEW_STATUS,
   STATUS_RECIBIDO, STATUS_REPARACION, STATUS_REPUESTO, STATUS_REPARADO, STATUS_POR_ENTREGAR,
   STATUS_ENTREGADO, STATUS_CANCELADO,
 } from '../src/lib/service-guide.ts';
@@ -81,6 +81,26 @@ const paso = (status: string, patch: Partial<Parameters<typeof nextStep>[1]> = {
   eq('Cancelado / Devuelto no tiene paso siguiente', paso(STATUS_CANCELADO), null);
   ok('todos los pasos explican el motivo', [STATUS_RECIBIDO, STATUS_REPARACION, STATUS_REPUESTO, STATUS_REPARADO, STATUS_POR_ENTREGAR]
     .every(s => (paso(s)?.why ?? '').length > 20));
+}
+
+// ── 5. F45 — la orden que TODAVÍA necesita técnico (la señal ámbar de la tarjeta) ────────────
+{
+  const enTaller = { status: STATUS_RECIBIDO };
+  ok('orden en taller sin técnico → necesita', needsTechnician(enTaller) === true);
+  ok('orden en taller sin técnico (id null y nombre vacío) → necesita',
+    needsTechnician({ status: STATUS_POR_ENTREGAR, technician: '   ', technician_id: null }) === true);
+  ok('con técnico asignado → no necesita',
+    needsTechnician({ status: STATUS_RECIBIDO, technician: 'Aldri', technician_id: 2 }) === false);
+  ok('con SOLO el id (nombre aún sin cargar) → no necesita',
+    needsTechnician({ status: STATUS_RECIBIDO, technician_id: 2 }) === false);
+  ok('con SOLO el nombre del snapshot (técnico borrado del padrón) → no necesita',
+    needsTechnician({ status: STATUS_RECIBIDO, technician: 'William', technician_id: null }) === false);
+  ok('ENTREGADA sin técnico → NO se reclama (el trabajo ya salió)',
+    needsTechnician({ status: STATUS_ENTREGADO, technician_id: null }) === false);
+  ok('Devuelta sin técnico → NO se reclama', needsTechnician({ status: 'Devuelto' }) === false);
+  ok('Cancelada sin técnico → NO se reclama', needsTechnician({ status: STATUS_CANCELADO }) === false);
+  ok('sin estado (dato viejo raro) sin técnico → se reclama igual',
+    needsTechnician({ status: null }) === true);
 }
 
 console.log(`\nservice-guide: ${checks} comprobaciones · ${checks - failures} OK · ${failures} fallas`);

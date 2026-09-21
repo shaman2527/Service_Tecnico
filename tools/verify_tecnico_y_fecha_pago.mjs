@@ -194,11 +194,13 @@ try {
   const antes = await invoke('get_service', { id });
   check('F34: (preparación) la orden entregada tiene su fecha de entrega vieja',
     String(antes?.date_out ?? '').slice(0, 10) === fechaVieja, `date_out=${antes?.date_out} · estado=${antes?.status}`);
-  // La lista tiene que estar FRESCA y VER la orden entregada: el filtro por defecto es «Activos en
-  // taller» (una entregada no está activa), así que se pasa a «Entregados» y se limpia el rango.
+  // La lista tiene que estar FRESCA y VER la orden entregada. F44: el filtro de estado por defecto
+  // es «Todos los estados» (una orden entregada YA se ve sin tocar nada); alcanza con pasar el eje de
+  // fecha a «Entregados» para que el rango —que acá no se usa— hable de la fecha de entrega. Antes se
+  // clickeaba «Limpiar» para borrar el rango, pero ese botón solo existía si había fechas cargadas:
+  // era un clic muerto (ahora el botón se llama «Limpiar filtros» y borra también la búsqueda, que acá
+  // hace falta para no traer todo el historial).
   await clickCenter(`[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Entregados')`);
-  await sleep(1600);
-  await clickCenter(`[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Limpiar')`).catch(() => {});
   await sleep(3000);
   // El modal de la tarjeta (Card) no lleva `data-slot`: se comprueba lo que importa — que el botón
   // del técnico de ESA orden esté en pantalla (el estado «Entregado» ya se verificó por invoke).

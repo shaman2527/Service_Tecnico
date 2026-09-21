@@ -155,6 +155,15 @@ const sections = [
         </div>
 
         <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Contar lo que hiciste (pantallas, cambios de pin, baterías…):</p>
+          <p>En <Badge variant="outline">Servicio Técnico</Badge> la lista abre en <span className="font-medium text-foreground">"Todos los estados"</span> (antes abría en "Activos en taller", así que lo <span className="font-medium">entregado</span> quedaba escondido justo cuando el cliente pregunta «¿cuántas pantallas hiciste hoy?»).</p>
+          <p>Debajo de los filtros está la línea <span className="font-medium text-foreground">"Trabajos hechos"</span> — cuántos equipos, cuántos <span className="font-medium text-emerald-700">entregados</span>, cuántos <span className="font-medium text-warning">en taller</span> y cuántos devueltos/cancelados — y los <span className="font-medium text-foreground">chips por trabajo</span> con su cantidad («Cambio pantalla 4», «Pin de Carga 2», …). Los trabajos escritos a mano en <Badge variant="outline">Otro</Badge> (por ejemplo "cambio de pin de carga") también tienen su chip, y los equipos sin ningún trabajo anotado aparecen en <Badge variant="outline">Sin trabajo anotado</Badge> para que los números cierren siempre.</p>
+          <p><span className="font-medium">Los contadores cuentan exactamente la lista que estás viendo</span> (la búsqueda, el estado y el rango de fechas que tengas puestos, con los entregados incluidos) y el número del chip es el mismo que el de las tarjetas que aparecen al hacerle clic y el del KPI "Equipos en la lista". La línea de abajo te dice <span className="font-medium">sobre qué se está contando</span> ("Contando: todos los estados · por fecha de RECIBO · del … al …") — así podés decir el número con seguridad. Un equipo con varios trabajos cuenta en cada uno de sus chips (lo dice la misma línea).</p>
+          <p>Para responder <span className="font-medium text-foreground">«¿cuántas pantallas hice hoy?»</span>: pulsá <Badge variant="outline">Entregados hoy</Badge> (o la tarjeta verde del mismo nombre) y leé el chip <Badge variant="outline">Cambio pantalla</Badge> — la cuenta es por <span className="font-medium">fecha de entrega</span>, o sea lo que salió hoy. Si querés otro día, poné la fecha en el rango con el conmutador en <Badge variant="outline">Entregados</Badge>.</p>
+          <p>El botón <Badge variant="outline">Limpiar filtros</Badge> aparece cuando hay algún filtro puesto y quita <span className="font-medium">todos</span> de una vez (búsqueda, estado, fechas y trabajo): antes el "Limpiar" borraba solo las fechas y el resto quedaba puesto sin que se notara.</p>
+        </div>
+
+        <div className="space-y-1.5">
           <p className="font-medium text-foreground">Ver los teléfonos entregados hoy:</p>
           <ol className="list-decimal list-inside space-y-1">
             <li>En <Badge variant="outline">Servicio Técnico</Badge> tienes la tarjeta <span className="font-medium text-foreground">"Entregados hoy"</span> con el número del día: <span className="font-medium">haz clic en la tarjeta y la lista se filtra sola</span>. También está el botón <Badge variant="outline">Entregados hoy</Badge> en la fila de filtros, con el conteo al lado.</li>
@@ -163,8 +172,27 @@ const sections = [
           </ol>
         </div>
 
+        <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Asignar el técnico (y la señal que lo reclama):</p>
+          <p>Al crear un servicio el técnico viene en <span className="font-medium text-foreground">"Sin asignar"</span>: <span className="font-medium">podés registrar la orden igual</span> (no bloquea nada) y asignarlo después. Cuando una orden en taller se queda sin técnico, su tarjeta muestra una señal ámbar <Badge variant="outline" className="border-amber-500/50 text-amber-700">Falta asignar técnico</Badge> — <span className="font-medium">hacé clic ahí y elegís el técnico</span> (mismo selector rápido que el nombre de la tarjeta). En las órdenes ya entregadas o anuladas la señal no aparece: el trabajo ya salió.</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Datos que se piden y datos que solo se observan:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>El <span className="font-medium text-foreground">color del equipo</span> es obligatorio: si no lo elegís, la ficha de ingreso lo marca y el botón <Badge variant="outline">Ir al campo</Badge> te deja el cursor en el selector. El guardado espera a que elijas uno (también al editar una orden vieja sin color).</li>
+            <li>Lo que <span className="font-medium">no</span> bloquea aparece como observación en ámbar: <span className="font-medium text-amber-700">"Para completar (no bloquea): Falta el número de teléfono del cliente"</span>, o que el equipo todavía no tenga técnico. La orden se guarda igual: son recordatorios, no requisitos (el teléfono es para avisarle al cliente).</li>
+            <li>Los colores del equipo ahora incluyen <Badge variant="outline">Lila</Badge> y <Badge variant="outline">Marrón</Badge>, además de los de siempre.</li>
+          </ul>
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="font-medium text-foreground">Pantalla sin stock (sigue, pero avisada en rojo):</p>
+          <p>Si elegís una pantalla <span className="font-medium">agotada</span>, el formulario muestra el aviso rojo <span className="font-medium text-destructive">"Esa pantalla no tiene stock… si se entrega igual, el inventario de «X» queda en -1 y el movimiento se marca como faltante"</span> con la confirmación ya marcada por defecto. <span className="font-medium">No bloquea</span>: podés guardar y entregar igual — el faltante queda registrado en el inventario, que es justo lo que hay que ver al comprar repuestos.</p>
+        </div>
+
         <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-sm text-emerald-700">
-          <span className="font-semibold">Cada aviso tiene su color:</span> foto de <span className="font-medium">ENTRADA</span> azul, foto de <span className="font-medium">SALIDA</span> verde, <span className="font-medium">pago</span> ámbar y los avisos de <span className="font-medium">política</span> naranja. Son la misma infraestructura de avisos que ya usaba la app, así que no hay dos sistemas de notificaciones peleándose en pantalla.
+          <span className="font-semibold">Los recordatorios de política salen al CENTRO de la pantalla:</span> al guardar una recepción, al entregar y al abrir el comprobante, la app te pide lo que quedó pendiente (la foto del teléfono, si el cliente paga ahora o al retirar) en un <span className="font-medium">modal centrado con colores suaves</span> — entrada celeste, salida verde, pago ámbar, política naranja. <span className="font-medium">Se responde con un toque</span> («Ya le tomé la foto», «Paga al retirar») o se pospone con <Badge variant="outline">Después</Badge> (y vuelve la próxima vez que corresponda: no se pierde). Bloquea la pantalla, <span className="font-medium">nunca los datos</span>: lo que registraste ya quedó guardado antes de que aparezca.
         </div>
       </div>
     ),
@@ -181,7 +209,7 @@ const sections = [
           <span className="font-semibold">Regla de oro:</span> el día de la caja es una cosa y los servicios son otra. Cerrar el día NO borra ni archiva los servicios pendientes: solo cierra el conteo de ese día.
         </div>
         <ol className="list-decimal list-inside space-y-1 text-sm">
-          <li>Al abrir el día en <span className="font-medium text-foreground">Libro Diario</span> la caja empieza de cero. Los equipos que quedaron en taller ayer <span className="font-medium text-foreground">siguen activos</span> (se ven al entrar a Servicios: el filtro "Activos en taller").</li>
+          <li>Al abrir el día en <span className="font-medium text-foreground">Libro Diario</span> la caja empieza de cero. Los equipos que quedaron en taller ayer <span className="font-medium text-foreground">siguen activos</span> y <span className="font-medium">se ven al entrar a Servicios</span>, que ahora abre mostrando <span className="font-medium text-foreground">todos los estados</span> (si querés ver solo lo que está en el taller, elegí "Activos en taller" en el filtro de estado).</li>
           <li>Un cliente dejó el teléfono hace 3 días y viene hoy a retirar: búscalo en <span className="font-medium text-foreground">Servicios</span> (por nombre, cédula u orden). La tarjeta muestra si tiene saldo pendiente.</li>
           <li>Si le falta pagar algo → botón <Badge variant="outline">Pago / Abono</Badge>: ese abono se registra <span className="font-medium text-foreground">con la fecha de hoy</span>, aunque el equipo haya entrado hace días. Luego botón <Badge variant="default" className="bg-success">Entregar</Badge> (o entregar con saldo pendiente, si quedó a deber).</li>
           <li>Si el cliente se arrepiente o reclama y hay que <span className="font-medium text-foreground">devolverle el dinero</span> → botón rojo <Badge variant="outline" className="border-danger/40 text-danger">Devolución</Badge> en la tarjeta (aparece cuando la orden tiene algo abonado): registras el reembolso (total o parcial), el estado pasa a <Badge variant="outline">Devuelto</Badge> y el monto se <span className="font-medium text-foreground">resta del Libro Diario</span> del día — la caja cuadra.</li>

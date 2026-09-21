@@ -125,6 +125,28 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
     return () => clearTimeout(t);
   }, [searchInput, search]);
 
+  /**
+   * F50 — el check «lo uso» del MODELO. Usa el comando `set_phone_use_all` (el teléfono y sus
+   * repuestos en UNA transacción) para que el padrón y el inventario no queden en estados distintos,
+   * y recarga para que se vean los contadores nuevos.
+   */
+  const [savingUse, setSavingUse] = useState<number | null>(null);
+  const toggleUsoModelo = async (p: PhoneListRow, inUse: boolean) => {
+    if (savingUse != null) return;
+    setSavingUse(p.id);
+    try {
+      const n = await api.setPhoneUseAll(p.id, inUse);
+      toast.success(inUse
+        ? `«${p.name}» en uso${n > 0 ? ` · ${n} repuesto${n === 1 ? '' : 's'} marcado${n === 1 ? '' : 's'}` : ''}`
+        : `«${p.name}» apagado: no aparece al registrar`, { id: `uso-modelo-${p.id}` });
+      setReloadKey(k => k + 1);
+    } catch (e) {
+      toast.error('No se pudo cambiar el «en uso» del modelo', { description: e instanceof Error ? e.message : String(e), id: `uso-modelo-${p.id}` });
+    } finally {
+      setSavingUse(null);
+    }
+  };
+
   useEffect(() => {
     let alive = true;
     api.getPhoneBrands()
@@ -305,10 +327,12 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
                 </TableRow>
               )}
               {!loading && items.map(p => (
-                <TableRow key={p.id}>
+                <TableRow key={p.id} data-phone={p.id}>
                   <TableCell className="font-medium">
                     <div className="flex flex-wrap items-center gap-2">
                       <span>{p.name}</span>
+                      {/* F50: el código del modelo (el local lo dicta: M-007) */}
+                      {p.code && <span className="font-mono text-[10px] text-muted-foreground" data-phone-code={p.code}>{p.code}</span>}
                       {p.line && <Badge variant="secondary" className="text-[10px]">{p.line}</Badge>}
                       {p.aliases.length > 0 && (
                         <Tooltip>
@@ -353,6 +377,25 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
+                      {/* F50: el check «lo uso» POR MODELO + «usar/apagar todo el modelo» (prende el
+                          teléfono y sus repuestos en una transacción). Es lo que decide si este
+                          modelo aparece al registrar un servicio. */}
+                      <button
+                        type="button"
+                        data-phone-in-use={p.id}
+                        data-phone-in-use-state={(p.in_use ?? 0) === 1 ? '1' : '0'}
+                        disabled={savingUse === p.id}
+                        title={(p.in_use ?? 0) === 1
+                          ? 'Lo usás: aparece al registrar un servicio. Clic para apagarlo'
+                          : 'Apagado: NO aparece al registrar. Clic para usarlo'}
+                        onClick={() => toggleUsoModelo(p, (p.in_use ?? 0) !== 1)}
+                        className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold transition-colors',
+                          (p.in_use ?? 0) === 1
+                            ? 'bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25'
+                            : 'text-muted-foreground hover:bg-accent')}
+                      >
+                        {(p.in_use ?? 0) === 1 ? '✓ Lo uso' : 'No lo uso'}
+                      </button>
                       <Button variant="outline" size="sm" onClick={() => setDetailId(p.id)}>
                         <Eye data-icon="inline-start" /> Ficha
                       </Button>

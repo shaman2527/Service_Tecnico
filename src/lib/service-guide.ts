@@ -51,8 +51,31 @@ export function photoOutIsCurrent(photoOutAt: string | null, dateOut: string | n
   return dia(photoOutAt) === dia(dateOut);
 }
 
-export interface NextStepInput {
-  technician: string;
+/**
+ * F45 — ¿la orden TODAVÍA necesita que le asignen un técnico?
+ *
+ * Pedido del dueño (2026-09-20): «cuando vas a crear un nuevo servicio [el técnico] esté
+ * predeterminado como sin asignar, que me deje seguir registrando el servicio nuevo y en la tarjeta
+ * aparezca una señal con un color: necesita asignar al técnico para ese trabajo».
+ *
+ * Reglas:
+ *  · una orden en TALLER sin técnico → **sí** (la señal se ve en la tarjeta: falta quién lo repare);
+ *  · ya ENTREGADA o anulada (Devuelto/Cancelado) → **no**: el trabajo salió (o se anuló), reclamar el
+ *    técnico después sería ruido permanente en la lista;
+ *  · con `technician_id` o con el nombre del snapshot (`technician`) → no: ya tiene responsable
+ *    (el snapshot cubre el caso del técnico borrado del padrón, donde la orden conserva su nombre).
+ */
+export function needsTechnician(sv: {
+  status?: string | null;
+  technician?: string | null;
+  technician_id?: number | null;
+}): boolean {
+  const status = sv.status ?? '';
+  if (status === STATUS_ENTREGADO || isFinalStatus(status)) return false;
+  return sv.technician_id == null && !(sv.technician ?? '').trim();
+}
+
+export interface NextStepInput {  technician: string;
   hasPaid: boolean;
   payIntent: string | null;
   needsScreen: boolean;

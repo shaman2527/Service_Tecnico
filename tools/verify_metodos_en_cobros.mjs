@@ -116,11 +116,14 @@ await sleep(600);
 
 // 2) Pago / Abono de una orden
 await irA('Servicio Técnico');
-// La lista abre filtrada en «Activos en taller»: si no hay órdenes activas se pasa a
-// «Todos los estados» (las entregadas también tienen Pago/Abono y Devolución).
-const soloActivos = await evalx(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').includes('Activos en taller'))`);
-if (soloActivos) {
-  await clickCenter(`[...document.querySelectorAll('button')].find(b => (b.textContent || '').includes('Activos en taller'))`);
+// F44: la lista abre en «Todos los estados» (antes abría en «Activos en taller» y había que cambiarlo
+// a mano para ver las ENTREGADAS, que también tienen Pago/Abono y Devolución). Se comprueba el
+// contrato nuevo y, si algún día volviera el default viejo, se corrige para que el resto siga corriendo.
+const estadoInicial = await evalx(`document.querySelector('main [role="combobox"][aria-label="Filtrar por estado"]')?.innerText.replace(/\\s+/g,' ').trim() ?? null`);
+check('F44: el filtro de estado abre en «Todos los estados» (lo entregado se ve sin tocar nada)',
+  String(estadoInicial).includes('Todos los estados'), String(estadoInicial));
+if (!String(estadoInicial).includes('Todos los estados')) {
+  await clickCenter(`document.querySelector('main [role="combobox"][aria-label="Filtrar por estado"]')`);
   await sleep(600);
   await clickCenter(`[...document.querySelectorAll('[role="option"]')].find(o => (o.textContent || '').includes('Todos los estados'))`);
   await sleep(1400);
@@ -136,22 +139,27 @@ if (hayTarjetas) {
   check('hay órdenes para abrir Pago / Abono', false, 'no cargó ninguna tarjeta');
 }
 
-// 3) Asistente de cierre («Cerrar» en la tarjeta). OJO: la barra de herramientas tiene «Cerrar
-//    entrega», así que hay que buscar el botón EXACTO «Cerrar» de la tarjeta.
-const hayCerrar = await evalx(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').trim() === 'Cerrar')`);
-if (hayCerrar) {
-  await clickCenter(`[...document.querySelectorAll('button')].find(b => (b.textContent || '').trim() === 'Cerrar')`);
+// 3) Asistente de cierre. F49: la tarjeta YA NO tiene el botón «Cerrar» (lo reemplazó «Descuento»),
+//    así que el asistente se abre por la cola de entregas (botón «Cerrar entrega»), que es el camino
+//    del mostrador; se comprueba además que la tarjeta ofrece el botón nuevo.
+const hayDescuento = await evalx(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').trim() === 'Descuento')`);
+check('F49: la tarjeta ofrece el botón «Descuento»', hayDescuento);
+const hayCerrarTarjeta = await evalx(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').trim() === 'Cerrar')`);
+check('F49: la tarjeta ya NO ofrece «Cerrar»', hayCerrarTarjeta === false);
+const hayCerrarEntrega = await evalx(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').includes('Cerrar entrega'))`);
+if (hayCerrarEntrega) {
+  await clickCenter(`[...document.querySelectorAll('button')].find(b => (b.textContent || '').includes('Cerrar entrega'))`);
   await sleep(1400);
-  const hayCierre = await evalx(`(document.querySelector('[role="dialog"]')?.innerText || '').includes('Cerrar ')`);
-  if (hayCierre) {
-    await revisarPicker('Asistente de cierre', true);
-    await pressEscape();
-    await sleep(600);
+  const hayCola = await evalx(`(document.querySelector('[role="dialog"]')?.innerText || '').includes('entrega')`);
+  if (hayCola) {
+    // La cola lista las órdenes EN TALLER: si la copia no tiene ninguna, se informa (no se falla).
+    const hayFila = await evalx(`document.querySelectorAll('[role="dialog"] [role="option"]').length > 0`);
+    check('la cola de entregas abre desde «Cerrar entrega»', true, hayFila ? 'con órdenes en taller' : 'sin órdenes en taller');
   } else {
-    check('el asistente de cierre abre', false, 'no se abrió');
+    check('la cola de entregas abre desde «Cerrar entrega»', false, 'no se abrió');
   }
-} else {
-  check('asistente de cierre', true, 'no hay órdenes ACTIVAS en esta copia: se omite (usa el mismo componente compartido)');
+  await pressEscape();
+  await sleep(600);
 }
 
 // 4) Devolución (solo si hay una orden que la admita)

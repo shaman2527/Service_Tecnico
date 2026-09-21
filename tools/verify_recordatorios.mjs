@@ -72,6 +72,19 @@ if (!dia) {
 }
 console.log(`· día abierto (${dia.close_date ?? 'hoy'}) · tasa ${dia.tasa_bcv}`);
 
+// ── helpers del MODAL de política (F46: el aviso ya no es una tarjeta flotante de sonner, es un
+//    modal CENTRADO que hay que responder) ───────────────────────────────────────────────────
+const modalAbierto = () => evalx(`!!document.querySelector('[data-policy-modal]')`);
+/** Cierra el modal de política si está abierto, SIN anotar nada (botón «Después»). */
+const posponerModal = async () => {
+  const hay = await modalAbierto();
+  if (hay) {
+    await clickCenter(`document.querySelector('[data-policy-later]')`);
+    await sleep(900);
+  }
+  return hay;
+};
+
 // ── 1) el eje de fecha nuevo: con 'out' y SIN el argumento (llamadores viejos) ──────────────
 const hoy = await evalx(`(() => { const d = new Date(); const p = n => String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); })()`);
 const conOut = await invoke('get_services', { search: '', status: '', startDate: hoy, endDate: hoy, dateField: 'out' });
@@ -133,6 +146,50 @@ await sleep(1800);
 const chipEntrada = await evalx(`document.body.innerText.includes('Sin foto de entrada')`);
 check('F32: la tarjeta avisa «Sin foto de entrada» (política pendiente)', chipEntrada);
 
+/** Clic que VERIFICA el efecto y reintenta: clic real y, si el efecto no aparece, el clic del propio
+ *  elemento (los tilde de política viven al borde inferior del diálogo y un clic por coordenadas puede
+ *  caer al lado). Se ESPERA el efecto, no se supone. */
+const clicSeguro = async (expr, verificar, intentos = 4) => {
+  for (let i = 0; i < intentos; i++) {
+    if (await evalx(verificar).catch(() => false)) return true;
+    await clickCenter(expr).catch(() => {});
+    await sleep(300);
+    if (await evalx(verificar).catch(() => false)) return true;
+    await evalx(`(() => { const el = (${expr}); if (el && el.click) el.click(); return !!el; })()`).catch(() => {});
+    await sleep(450);
+  }
+  return await evalx(verificar).catch(() => false);
+};
+
+// ── helper F47/F48: elegir el COLOR del equipo con el teclado (el dato es obligatorio desde F48, y
+//    las órdenes que crea esta prueba nacen por IPC sin color). Se abre el paso «Equipo» si hace
+//    falta y se elige «Azul»: foco en el selector → Enter abre → flechas → Enter confirma.
+const elegirColor = async (label = 'Azul') => {
+  if (!(await evalx(`!!document.querySelector('[data-ficha-target="color"]')`))) {
+    // La ficha ES la que lleva al campo (F48): se despliega el detalle y se toca el dato «Color /
+    // acabado» → el wizard salta al paso del equipo y deja el foco en el selector.
+    if (!(await evalx(`!!document.querySelector('[data-ficha-detalle]')`))) {
+      await clickCenter(`([...document.querySelectorAll('[data-ficha] button')].find(b => /Ver ficha/i.test(b.innerText.trim())) || null)`).catch(() => {});
+      await sleep(700);
+    }
+    await clickCenter(`([...document.querySelectorAll('[data-ficha-field="color"]')].find(e => e.closest('[role="dialog"]')) || null)`).catch(async () => {
+      await evalx(`(() => { const e = [...document.querySelectorAll('[data-ficha-field="color"]')].find(x => x.closest('[role="dialog"]')); if (e) e.click(); return !!e; })()`);
+    });
+    await sleep(1000);
+  }
+  if (!(await evalx(`!!document.querySelector('[data-ficha-target="color"]')`))) return false;
+  await evalx(`(() => { const t = document.querySelector('[data-ficha-target="color"]'); if (t) t.focus(); return !!t; })()`);
+  await keyNav('Enter', 'Enter', 13);
+  await sleep(700);
+  for (let i = 0; i < 14; i++) {
+    const hi = await evalx(`document.querySelector('[role="option"][data-highlighted]')?.innerText.replace(/\\s+/g, ' ').trim() ?? null`);
+    if (String(hi).includes(label)) { await keyNav('Enter', 'Enter', 13); await sleep(900); return true; }
+    await keyNav('ArrowDown', 'ArrowDown', 40);
+    await sleep(220);
+  }
+  return false;
+};
+
 // ── 3) el wizard: FICHA DE INGRESO (asistente) + controles de política ──────────────────────
 await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Editar$/.test(b.innerText.trim()))`);
 await sleep(1800);
@@ -141,9 +198,15 @@ check('F33: el wizard muestra la FICHA DE INGRESO', /Ficha de ingreso/i.test(dlg
 check('F33: la ficha trae el progreso y pide el dato que toca',
   await evalx(`!!document.querySelector('[data-ficha] [data-ficha-progreso]')`) &&
   await evalx(`!!document.querySelector('[data-ficha] [data-ficha-next]')`));
-// La ficha completa se abre a un clic y muestra los cuatro bloques del mostrador
-await clickCenter(`[...document.querySelectorAll('[data-ficha] button')].find(b => /Ver ficha/i.test(b.innerText.trim()))`);
-await sleep(700);
+check('F48 (preparación): el color del equipo se elige en el wizard',
+  await elegirColor(), `color=${await evalx(`document.querySelector('[data-ficha-target="color"]')?.innerText.trim() ?? null`)}`);
+// La ficha completa se abre a un clic y muestra los cuatro bloques del mostrador.
+// (El botón alterna «Ver ficha»/«Ocultar ficha»: si el detalle ya quedó abierto al elegir el color,
+// no hay nada que clickear.)
+if (!(await evalx(`!!document.querySelector('[data-ficha-detalle]')`))) {
+  await clickCenter(`([...document.querySelectorAll('[data-ficha] button')].find(b => /Ver ficha/i.test(b.innerText.trim())) || null)`).catch(() => {});
+}
+await sleep(600);
 const detalle = String(await evalx(`document.querySelector('[data-ficha-detalle]')?.innerText ?? ''`));
 const dtxt = detalle.toLowerCase();
 check('F33: la ficha completa trae los cuatro bloques',
@@ -156,29 +219,52 @@ await clickCenter(`(() => { const it = document.querySelector('[data-ficha-field
 await sleep(900);
 const hayPago = await evalx(`!!document.querySelector('[data-policy-block="pago"]')`);
 check('F33: tocar el dato del pago lleva al paso donde se anota', hayPago);
-await clickCenter(`[...document.querySelectorAll('[role="dialog"] [data-policy-block="pago"] button')].find(b => /^Paga al retirar$/i.test(b.innerText.trim()))`);
-await sleep(600);
+const pagoOk = await clicSeguro(
+  `([...document.querySelectorAll('[role="dialog"] [data-policy-block="pago"] button')].find(b => /^Paga al retirar$/i.test(b.innerText.trim())) || null)`,
+  `(() => { const b = [...document.querySelectorAll('[role="dialog"] [data-policy-block="pago"] button')].find(x => /^Paga al retirar$/i.test(x.innerText.trim())); return b?.getAttribute('data-state') === 'on'; })()`,
+);
+check('F32: el acuerdo «Paga al retirar» queda marcado', pagoOk);
+await sleep(500);
 // ir al paso Blindaje tocando el dato de la foto de ENTRADA y marcarla
 await clickCenter(`(() => { const it = document.querySelector('[data-ficha-field="photo_in"]'); return it; })()`);
 await sleep(900);
 const hayFotoIn = await evalx(`!!document.querySelector('[data-policy="photo_in"]')`);
 check('F33: tocar el dato de la foto de ENTRADA lleva al paso Blindaje', hayFotoIn);
-if (hayFotoIn) { await clickCenter(`document.querySelector('[data-policy="photo_in"]')`); await sleep(500); }
-// El botón de guardar vive en el ÚLTIMO paso: se llega con «Siguiente» (los pasos están completos:
-// el monto de la orden es 30).
-await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Siguiente$/.test(b.innerText.trim()))`);
-await sleep(800);
+if (hayFotoIn) {
+  const fotoOk = await clicSeguro(`document.querySelector('[data-policy="photo_in"]')`,
+    `document.querySelector('[data-policy="photo_in"]')?.checked === true`);
+  check('F32: el tilde «Ya le tomé la foto de ENTRADA» queda marcado', fotoOk);
+}
+// El botón de guardar vive en el ÚLTIMO paso y la foto se anota en «Blindaje»: se avanza con
+// «Siguiente» hasta que aparezca el botón (con el color obligatorio de F48 el camino puede tener un
+// paso más, así que se ESPERA la condición en vez de contar clics).
+const irAlUltimoPaso = async () => {
+  for (let i = 0; i < 6; i++) {
+    if (await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar Servicio$/.test(b.innerText.trim()))`)) return true;
+    await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Siguiente$/.test(b.innerText.trim())) || null)`).catch(async () => {
+      await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test(x.innerText.trim())); if (b) b.click(); return !!b; })()`);
+    });
+    await sleep(800);
+  }
+  return await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar Servicio$/.test(b.innerText.trim()))`);
+};
+await irAlUltimoPaso();
 // Con la foto marcada, la ficha ya no la pide como pendiente (se mira dentro del detalle)
+if (!(await evalx(`!!document.querySelector('[data-ficha-detalle]')`))) {
+  await evalx(`(() => { const b = [...document.querySelectorAll('[data-ficha] button')].find(x => /Ver ficha/i.test(x.innerText)); if (b) b.click(); return !!b; })()`);
+  await sleep(600);
+}
 const estadoFotoIn = await evalx(`(() => {
   const it = document.querySelector('[data-ficha-field="photo_in"]');
   return it ? (it.innerText.includes('Tomada') ? 'ok' : it.getAttribute('data-state')) : 'sin-fila';
 })()`);
 check('F33: con la foto de ENTRADA marcada, la ficha muestra «Tomada»', estadoFotoIn === 'ok', `estado=${estadoFotoIn}`);
-await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Siguiente$/.test(b.innerText.trim()))`);
-await sleep(900);
+await irAlUltimoPaso();
 const botonGuardar = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/i.test(x.innerText.trim())); return b ? !b.disabled : null; })()`);
 check('F32: el wizard llega al paso de guardar con el botón habilitado', botonGuardar === true, `disabled=${botonGuardar === null ? 'no existe' : !botonGuardar}`);
-await clickCenter(`[...document.querySelectorAll('[role="dialog"] button')].find(b => /^Actualizar Servicio$/i.test(b.innerText.trim()))`);
+await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Actualizar Servicio$/i.test(b.innerText.trim())) || null)`).catch(async () => {
+  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/i.test(x.innerText.trim())); if (b) b.click(); return !!b; })()`);
+});
 await sleep(2500);
 dlg = String(await dialogText() ?? '');
 if (/Actualizar Servicio/i.test(dlg)) { await keyNav('Escape', 'Escape', 27); await sleep(800); }
@@ -201,10 +287,18 @@ await keyNav('Escape', 'Escape', 27);
 await sleep(900);
 
 // ── 5) la entrega: tira informativa + aviso de foto de SALIDA que se puede confirmar ────────
-await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Cerrar$/.test(b.innerText.trim()))`);
+// F49: el botón «Cerrar» de la tarjeta se reemplazó por «Descuento» → el asistente de cierre se abre
+// por la cola de entregas (botón «Cerrar entrega»), que es el camino del mostrador.
+await clickCenter(`[...document.querySelectorAll('button')].find(b => (b.textContent || '').includes('Cerrar entrega'))`);
+await sleep(1400);
+await clickCenter(`document.querySelector('[role="dialog"] input')`).catch(() => {});
+await keyNav('Backspace', 'Backspace', 8);
+await insertText(`Recordatorio ${marca}`);
+await sleep(1600);
+await clickCenter(`([...document.querySelectorAll('[role="dialog"] [role="option"]')].find(o => (o.innerText || '').includes(${JSON.stringify(String(nueva))})) || document.querySelector('[role="dialog"] [role="option"]') || null)`).catch(() => {});
 await sleep(1800);
 const asistente = String(await dialogText() ?? '');
-check('F32: el asistente avisa la foto de salida (informativo, no bloquea)', /Foto de salida pendiente/i.test(asistente));
+check('F32: el asistente avisa la foto de salida (informativo, no bloquea)', /Foto de salida pendiente/i.test(asistente), asistente.split('\n')[0]);
 await keyNav('Escape', 'Escape', 27);
 await sleep(900);
 // Se entrega con el botón de la tarjeta (la orden tiene saldo: pide confirmación y NO bloquea)
@@ -214,44 +308,97 @@ const confirmacion = String(await dialogText() ?? '');
 check('F32: entregar con saldo pide confirmación (flujo de siempre)', /saldo pendiente/i.test(confirmacion));
 await clickCenter(`[...document.querySelectorAll('[role="alertdialog"] button, [role="dialog"] button')].find(b => /^Entregar con saldo pendiente$/i.test(b.innerText.trim()))`);
 await sleep(3000);
-const avisoSalida = await evalx(`(() => { const t = document.querySelector('[data-reminder="photo_out"]'); return t ? t.innerText.replace(/\\s+/g, ' ').slice(0, 80) : null; })()`);
-check('F32: al entregar sale el recordatorio de la foto de salida', !!avisoSalida, String(avisoSalida));
-// El aviso NO debe comerse los clics (taparía botones del pie del diálogo / de la cabecera):
-// su tarjeta y su contenedor son pointer-events-none y solo los botones del aviso reciben el clic.
-const noIntercepta = await evalx(`(() => {
-  const t = document.querySelector('[data-reminder="photo_out"]');
-  if (!t) return 'sin aviso';
-  const li = t.closest('li') ?? t;
-  const boton = t.querySelector('button');
+const avisoSalida = await evalx(`(() => { const t = document.querySelector('[data-reminder="photo_out"]'); return t ? t.innerText.replace(/\\s+/g, ' ').slice(0, 120) : null; })()`);
+check('F32/F46: al entregar sale el recordatorio de la foto de salida (modal centrado)', !!avisoSalida, String(avisoSalida));
+// F46 (pedido del dueño: «que sea centro de la pantalla… estilo modal bloqueante, colores suaves»):
+// el aviso es un MODAL centrado con velo detrás — bloquea la pantalla (hay que responderlo) y no
+// bloquea el DATO (la orden ya quedó entregada antes de que aparezca).
+const centrado = await evalx(`(() => {
+  const card = document.querySelector('[data-policy-modal]');
+  const velo = document.querySelector('[data-policy-overlay]');
+  if (!card || !velo) return JSON.stringify({ hayCard: !!card, hayVelo: !!velo });
+  const r = card.getBoundingClientRect();
+  const centroCard = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  const fondo = getComputedStyle(card).backgroundColor;
   return JSON.stringify({
-    tarjeta: getComputedStyle(t).pointerEvents,
-    contenedor: getComputedStyle(li).pointerEvents,
-    boton: boton ? getComputedStyle(boton).pointerEvents : null,
+    hayCard: true,
+    hayVelo: true,
+    desvioX: Math.round(Math.abs(centroCard.x - window.innerWidth / 2)),
+    desvioY: Math.round(Math.abs(centroCard.y - window.innerHeight / 2)),
+    role: card.getAttribute('role'),
+    ariaModal: card.getAttribute('aria-modal'),
+    veloEventos: getComputedStyle(velo).pointerEvents,
+    fondo,
+    tono: card.getAttribute('data-tone'),
   });
 })()`);
-check('F32: el aviso no intercepta los clics (solo sus botones)',
-  /"tarjeta":"none"/.test(String(noIntercepta)) && /"contenedor":"none"/.test(String(noIntercepta)) && /"boton":"auto"/.test(String(noIntercepta)),
-  String(noIntercepta));
+const ce = JSON.parse(String(centrado));
+check('F46: el aviso está CENTRADO en la pantalla (≤40px de desvío)', ce.desvioX <= 40 && ce.desvioY <= 40, String(centrado));
+check('F46: es un modal bloqueante (velo que intercepta clics + role alertdialog aria-modal)',
+  ce.hayVelo && ce.veloEventos === 'auto' && ce.role === 'alertdialog' && ce.ariaModal === 'true', String(centrado));
+// «Colores suaves»: el fondo NO es el gris del sistema ni un color saturado, es un tinte claro.
+const rgbFondo = (String(ce.fondo).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/) ?? []).slice(1).map(Number);
+check('F46: colores suaves (tinte claro, no saturado ni gris del sistema)',
+  rgbFondo.length === 3 ? (Math.min(...rgbFondo) >= 200 && Math.max(...rgbFondo) - Math.min(...rgbFondo) <= 60) : /oklch/.test(String(ce.fondo)),
+  `fondo=${ce.fondo}`);
 const entregada = await invoke('get_service', { id });
 check('F32: la orden quedó Entregado con la fecha de hoy', entregada?.status === 'Entregado' && String(entregada?.date_out ?? '').slice(0, 10) === hoy,
   `estado=${entregada?.status} · salida=${entregada?.date_out}`);
 check('F32: la entrega NO se bloqueó por el aviso (foto todavía sin confirmar)', !entregada?.photo_out_at);
-// La orden entregada ya no está en la lista (el filtro por defecto es «en taller»), pero sí en el
-// panel «Entregados hoy»: de ahí se imprimen/abren las órdenes del día.
+// El modal bloquea la pantalla pero NO los datos: posponerlo con «Después» cierra el aviso y deja la
+// foto SIN anotar (no se inventa una respuesta que el operario no dio).
+await posponerModal();
+const trasPosponer = await invoke('get_service', { id });
+check('F46: «Después» cierra el aviso sin anotar nada (la foto sigue pendiente)', !trasPosponer?.photo_out_at);
+check('F46: después de cerrarlo no queda ningún aviso abierto', (await modalAbierto()) === false);
+// Al abrir el comprobante el aviso VUELVE (la política sigue pendiente) y con UN solo aviso (dedupe).
 await evalx(`(() => { const p = document.querySelector('[data-panel="entregados-hoy"]'); if (p) p.scrollIntoView({ block: 'center' }); return true; })()`);
 await sleep(700);
-// M2: abrir el comprobante con el aviso de foto de salida AÚN visible NO debe apilar otra tarjeta
-// igual (mismo id de sonner).
 await clickCenter(`(() => { const f = document.querySelector('[data-delivered-order="${nueva}"]'); return f ? [...f.querySelectorAll('button')].find(b => /Factura/i.test(b.innerText)) : null; })()`);
-await sleep(2200);
-check('F32: el comprobante abre desde el panel de entregados de hoy', /CORTA TIJERA/i.test(String(await dialogText() ?? '')));
+await sleep(2400);
+// OJO: con el modal de política abierto (role="alertdialog"), `dialogText()` devuelve EL MODAL (vive
+// dentro del árbol de la pantalla y va antes que el portal de Radix). El comprobante se lee del
+// último `[role="dialog"]`, que es el que Radix acaba de abrir.
+const comprobanteTxt = String(await evalx(`(() => { const ds = [...document.querySelectorAll('[role="dialog"]')]; const d = ds[ds.length - 1]; return d ? d.innerText : null; })()`) ?? '');
+check('F32: el comprobante abre desde el panel de entregados de hoy', /CORTA TIJERA/i.test(comprobanteTxt),
+  comprobanteTxt.replace(/\s+/g, ' ').slice(0, 100));
+// F54 (2026-09-20, pedido del dueño): «no me deja ver la factura la orden». Ahora el aviso **no se
+// dibuja encima de un diálogo**: queda en la cola y sale apenas el comprobante se cierra. Antes el
+// velo tapaba la factura y el primer clic lo comía el velo (había que tocar dos veces).
 const cuantos = await evalx(`document.querySelectorAll('[data-reminder="photo_out"]').length`);
-check('F32: el mismo aviso no se apila al abrir el comprobante (dedupe)', cuantos === 1, `tarjetas=${cuantos}`);
+check('F54: con el comprobante abierto el aviso NO se dibuja encima (la factura se ve entera)',
+  cuantos === 0, `avisos dibujados=${cuantos}`);
+const clicEnElComprobante = await evalx(`(() => {
+  const d = [...document.querySelectorAll('[role="dialog"]')].pop();
+  const b = [...(d?.querySelectorAll('button') ?? [])].find(x => /Imprimir|Cerrar/i.test(x.innerText || ''));
+  const r = b?.getBoundingClientRect();
+  const el = r ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
+  if (!el) return null;
+  return (el.closest('[data-policy-overlay]') ? 'VELO' : '') + (el.closest('[role="dialog"]') ? 'COMPROBANTE' : 'FUERA');
+})()`);
+check('F54: el clic sobre el comprobante NO cae en el velo del aviso', clicEnElComprobante === 'COMPROBANTE',
+  String(clicEnElComprobante));
 await keyNav('Escape', 'Escape', 27);
-await sleep(900);
-// confirmar la foto desde el aviso (botón «Ya le tomé la foto»)
+await sleep(1200);
+// …y al cerrarlo el aviso VUELVE (la cola lo conservó) y con UN solo modal para la misma orden.
+let volvioElAviso = false;
+for (let i = 0; i < 20 && !volvioElAviso; i++) {
+  volvioElAviso = (await evalx(`document.querySelectorAll('[data-reminder="photo_out"]').length`)) === 1;
+  if (!volvioElAviso) await sleep(400);
+}
+check('F32/F46: al cerrar el comprobante el aviso vuelve y NO se apila (un solo modal para la misma orden)',
+  volvioElAviso, `modales=${await evalx(`document.querySelectorAll('[data-reminder="photo_out"]').length`)}`);// El aviso queda POR DEBAJO de los diálogos de la app (z-40 < z-50): red de seguridad para que nunca
+// pueda tapar la factura aunque las dos cosas coincidan en el mismo cuadro.
+const zOverlay = await evalx(`(() => {
+  const v = document.querySelector('[data-policy-overlay]');
+  return v ? Number(getComputedStyle(v).zIndex) : null;
+})()`);
+check('F46/F54: el aviso queda POR DEBAJO de los diálogos (nunca tapa la factura)',
+  zOverlay !== null && zOverlay < 50, `z=${zOverlay} (los diálogos son z-50)`);
+// ...y el aviso sigue ahí después del Escape del comprobante: se confirma la foto desde el MODAL
+await evalx(`(() => { const c = document.querySelector('[data-policy-modal]'); if (c) c.scrollIntoView({ block: 'center' }); return true; })()`);
 await clickCenter(`(() => { const t = document.querySelector('[data-reminder="photo_out"]'); return t ? [...t.querySelectorAll('button')].find(b => /Ya le tomé la foto/i.test(b.innerText)) : null; })()`);
-await sleep(2200);
+await sleep(2400);
 const conFoto = await invoke('get_service', { id });
 check('F32: el aviso ANOTA la foto de salida en la orden', !!conFoto?.photo_out_at, `foto_salida=${conFoto?.photo_out_at}`);
 // F33: con la foto YA tomada, la ficha del wizard no puede seguir mostrándola pendiente
@@ -290,6 +437,9 @@ if (await evalx(`!!document.querySelector('[role="dialog"]')`)) { await keyNav('
     await sleep(1600);
     await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Editar$/.test(b.innerText.trim()))`);
     await sleep(1800);
+    // F48: el color es obligatorio — esta orden también nació por IPC sin color, así que se elige
+    // antes de comprobar el botón (el punto de esta sección es el MONTO, no el color).
+    check('F48 (preparación): la orden de $0 recibe su color', await elegirColor(), String(await evalx(`document.querySelector('[data-ficha-target="color"]')?.innerText.trim() ?? null`)));
     // la ficha abre el detalle con un clic y ahí se ve el dato del monto
     await clickCenter(`[...document.querySelectorAll('[data-ficha] button')].find(b => /Ver ficha/i.test(b.innerText.trim()))`).catch(() => {});
     await sleep(700);
@@ -404,9 +554,14 @@ const fichaConCliente = await evalx(`(() => ({
   next: document.querySelector('[data-ficha-next]')?.getAttribute('data-ficha-next') ?? null,
 }))()`);
 const fc = fichaConCliente ?? {};
-// Se despliega la ficha completa (las filas por dato viven dentro de «Ver ficha»)
+// Se despliega la ficha completa (las filas por dato viven dentro de «Ver ficha»).
+// OJO: antes se dormía 700 ms a ojo y la corrida fallaba 1 de cada 3 (los 3 chequeos de la ficha
+// salían con `abierta:false`: el detalle todavía no estaba dibujado). Se ESPERA la condición.
 await clickCenter(`[...document.querySelectorAll('button')].find(b => /Ver ficha/i.test(b.innerText))`).catch(() => {});
-await sleep(700);
+for (let i = 0; i < 15; i++) {
+  if (await evalx(`!!document.querySelector('[data-ficha-detalle]')`).catch(() => false)) break;
+  await sleep(400);
+}
 const bloques = await evalx(`(() => {
   const det = document.querySelector('[data-ficha-detalle]');
   return JSON.stringify({

@@ -70,10 +70,25 @@ const buscar = async (texto) => {
   await sleep(1500);
 };
 await buscar(`A${marca}`);
-const hayCerrar = await evalx(`!!([...document.querySelectorAll('button')].find(b => /^Cerrar$/i.test(b.innerText.trim())))`);
-check('F30: la tarjeta de la orden ofrece el botón «Cerrar» (asistente)', hayCerrar);
-await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Cerrar$/i.test(b.innerText.trim()))`);
-await sleep(1500);
+// F49: el botón «Cerrar» de la tarjeta se quitó (lo reemplazó «Descuento») → el asistente de cierre
+// se abre por la COLA DE ENTREGAS (botón «Cerrar entrega»), que es el camino del mostrador.
+const tarjeta = await evalx(`JSON.stringify({
+  descuento: [...document.querySelectorAll('button')].some(b => /^Descuento$/.test(b.innerText.trim())),
+  cerrar: [...document.querySelectorAll('button')].some(b => /^Cerrar$/.test(b.innerText.trim())),
+})`);
+const tarj = JSON.parse(tarjeta);
+check('F49: la tarjeta ofrece «Descuento»', tarj.descuento === true, tarjeta);
+check('F49: la tarjeta ya no ofrece «Cerrar»', tarj.cerrar === false, tarjeta);
+const abrirAsistente = async (texto) => {
+  await clickCenter(`[...document.querySelectorAll('button')].find(b => (b.textContent || '').includes('Cerrar entrega'))`);
+  await sleep(1400);
+  await clickCenter(`document.querySelector('[role="dialog"] input')`);
+  await typeText(texto);
+  await sleep(1600);
+  await clickCenter(`[...document.querySelectorAll('[role="dialog"] [role="option"]')].find(o => o.innerText.includes('Cierre'))`);
+  await sleep(2000);
+};
+await abrirAsistente(`A${marca}`);
 
 // --- A) el asistente pide pantalla + cobro ---
 // El asistente consulta las pantallas compatibles al abrir; esa consulta se encola detrás de las que
@@ -136,8 +151,7 @@ check('F30: quedó el movimiento «Servicio Entregado»',
 
 // --- B) entregar con saldo: exige motivo ---
 await buscar(`B${marca}`);
-await clickCenter(`[...document.querySelectorAll('button')].find(b => /^Cerrar$/i.test(b.innerText.trim()))`);
-await sleep(1500);
+await abrirAsistente(`B${marca}`);
 const botonSaldo = await evalx(`(() => [...document.querySelectorAll('[role="dialog"] button')].map(b => b.innerText.trim()).find(t => /^Entregar con saldo$/i.test(t)) ?? null)()`);
 check('F30: sin cobrar, el botón dice «Entregar con saldo»', botonSaldo !== null, String(botonSaldo));
 const bloqueado = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Entregar con saldo$/i.test(x.innerText.trim())); return b ? b.disabled : null; })()`);

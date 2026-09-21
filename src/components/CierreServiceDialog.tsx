@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { api } from '@/db';
 import type { ScreenCandidate, Service, ServicePayment } from '@/types';
-import { cn, currencySymbol, methodCurrency, parseServiceTypes, shortMethodLabel } from '@/lib/utils';
+import { cn, currencySymbol, methodCurrency, parseServiceTypes, partLabel, shortMethodLabel } from '@/lib/utils';
 // F38: el saldo se dice en la moneda del cobro (+ equivalencia del día) también al cerrar/entregar.
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
 // Regla del proyecto (AGENTS.md): entregar una pantalla AGOTADA exige confirmación explícita
@@ -178,9 +178,12 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   const elegida = candidatos.find(c => c.product.id === screenId) ?? null;
   const pantallaPendiente = necesitaPantalla && candidatos.length > 0 && screenId == null;
   const elegidaAgotada = elegida != null && !elegida.in_stock;
-  // La pantalla agotada no bloquea, pero exige confirmación (el inventario queda como faltante).
-  const pantallaOk = screenOk(trabajos, screenId, candidatos, screenConfirm, 'Entregado');
-  const faltaConfirmarAgotada = !pantallaOk && elegidaAgotada;
+  // F47 (pedido del dueño: «dejarlo predeterminado, que no te bloquee pero sí deje el mensaje en
+  // rojo»): una pantalla AGOTADA ya NO bloquea el cierre. Se ve el aviso rojo con lo que va a pasar
+  // (el stock queda en negativo y el movimiento se marca como faltante) y el operario puede cerrar.
+  // Lo que sí sigue siendo obligatorio es ELEGIR la pantalla cuando hay opciones en el catálogo: sin
+  // eso el descuento cae en otro repuesto (o no cae).
+  const pantallaOk = screenOk(trabajos, screenId, candidatos);
   const faltaMotivo = tieneSaldo && saldoDespues > 0.005 && motivoSaldo.trim().length < 3;
   // GATES (los mismos que Pago / Abono, no una copia simplificada):
   //  · con un monto escrito, el monto FINAL tiene que ser > 0 — si no, el cobro se perdería
@@ -202,7 +205,6 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
 
   const faltantes: string[] = [];
   if (pantallaPendiente) faltantes.push('elegir la pantalla instalada');
-  else if (faltaConfirmarAgotada) faltantes.push('confirmar que la pantalla agotada se entregó igual');
   if (sinPantallas) faltantes.push('revisar la pantalla (el modelo no tiene pantallas en el catálogo)');
   if (tieneSaldo) faltantes.push(`cobrar el saldo (${currencySymbol('USD')}${saldo.toFixed(2)})`);
 
@@ -424,8 +426,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
               )}
               {elegidaAgotada && (
                 <div className="flex flex-col gap-1.5">
-                  <span className="flex items-center gap-1.5 text-[11px] text-warning">
-                    <AlertTriangle className="size-3" /> Esa pantalla no tiene stock: al entregar el stock queda en negativo (faltante).
+                  {/* F47: el aviso va en ROJO (antes ámbar) y NO bloquea el cierre; la confirmación
+                      arranca marcada, así el operario no tiene que tocar nada para seguir. */}
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-destructive">
+                    <AlertTriangle className="size-3" /> Esa pantalla no tiene stock: si se entrega igual, el inventario de «{partLabel(elegida!.product)}» queda en {elegida!.product.stock - 1} y el movimiento se marca como faltante.
                   </span>
                   <button
                     type="button"

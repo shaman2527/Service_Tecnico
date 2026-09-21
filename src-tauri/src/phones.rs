@@ -38,6 +38,20 @@ pub struct PhoneListRow {
     pub stock: i64,
     /// categorías con repuesto para este teléfono ("Pantalla, Táctil")
     pub categories: String,
+    /// F50: 1 = el local lo usa (el check del padrón: es lo que aparece al registrar un servicio).
+    pub in_use: i64,
+    /// F50: código corto del modelo (`M-007`), el número con el que el local lo dicta.
+    pub code: String,
+    /// F53: pantalla de REFERENCIA del modelo (la que el local instala siempre). `None` = ninguna.
+    pub default_product_id: Option<i64>,
+    /// F53: nombre y código de esa pantalla de referencia (para mostrarla sin otra consulta).
+    pub default_product_name: String,
+    pub default_product_code: String,
+    /// F52: variantes que tiene entre sus repuestos (para los chips de la vista «Por modelo»).
+    pub variants: Vec<String>,
+    /// F52: rango de precios de venta de sus repuestos (0/0 = ninguna ficha tiene precio).
+    pub price_min: f64,
+    pub price_max: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,15 +76,49 @@ pub struct PhoneDetail {
 /// Índice teléfono -> (ids de producto, stock de cada uno, categorías).
 /// (La marca y la etiqueta salen de la fila del padrón, no del índice.)
 pub(crate) struct Idx {
-    ids: BTreeSet<i64>,
+    /// F50: lo lee también el «usar todo el modelo» de `db.rs` (misma fuente que el padrón).
+    pub(crate) ids: BTreeSet<i64>,
     stock_by_id: BTreeMap<i64, i64>,
     cats: BTreeMap<i64, Vec<i64>>,
+    /// F52 — variante y precio de venta de cada repuesto: con eso la vista «Por modelo» muestra los
+    /// chips de variante y el rango de precios SIN una segunda consulta por teléfono.
+    variant_by_id: BTreeMap<i64, String>,
+    price_by_id: BTreeMap<i64, f64>,
 }
 
 impl Idx {
     fn stock_of(&self, product_id: i64) -> i64 {
         self.stock_by_id.get(&product_id).copied().unwrap_or(0)
     }
+}
+
+/// F50 — SEED del «en uso» de los teléfonos (una sola vez, desde la migración de `init()`).
+///
+/// Queda **en uso** el teléfono que tiene al menos un repuesto **en uso con stock** (lo que el
+/// taller tiene de verdad en el cajón); el resto queda apagado y el dueño prende lo que quiera.
+/// Se apoya en el MISMO índice que el padrón (`build_index`), así que no hay una segunda regla de
+/// qué repuesto sirve a qué teléfono.
+pub(crate) fn seed_phone_in_use(conn: &Connection) -> SqlResult<()> {
+    let idx = build_index(conn)?;
+    // ids de producto EN USO y con stock (una sola consulta)
+    let mut en_uso: BTreeSet<i64> = BTreeSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT id FROM products WHERE COALESCE(in_use,1) = 1 AND COALESCE(stock,0) > 0")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            en_uso.insert(row?);
+        }
+    }
+    let mut stmt = conn.prepare("SELECT id, COALESCE(key,'') FROM phones")?;
+    let filas: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    drop(stmt);
+    for (phone_id, key) in filas {
+        let tiene = idx.get(&key).map(|e| e.ids.iter().any(|id| en_uso.contains(id))).unwrap_or(false);
+        conn.execute("UPDATE phones SET in_use=?1 WHERE id=?2", params![if tiene { 1 } else { 0 }, phone_id])?;
+    }
+    Ok(())
 }
 
 /// Índice `teléfono -> repuestos` (cálculo crudo, SIN memoria): recorre los productos de las
@@ -83,12 +131,12 @@ pub(crate) fn build_index(conn: &Connection) -> SqlResult<HashMap<String, Idx>> 
     // pantalla — `catalog::PHONE_CATEGORIES` (Pantalla + Táctil + Táctil Tablet).
     let mut stmt = conn.prepare(
         "SELECT id, COALESCE(brand,''), COALESCE(compatibility,''), COALESCE(stock,0),
-                COALESCE(category_id,0)
+                COALESCE(category_id,0), COALESCE(variant,''), COALESCE(price_sale,0)
          FROM products
          WHERE COALESCE(compatibility,'') NOT IN ('','[]')
            AND COALESCE(category_id,0) IN (SELECT value FROM json_each(?1))",
     )?;
-    let cats_json = serde_json::to_string(crate::catalog::PHONE_CATEGORIES).unwrap_or_else(|_| "[1]".to_string());
+    let cats_json = serde_json::to_string(&crate::catalog::PHONE_CATEGORIES).unwrap_or_else(|_| "[1]".to_string());
     let rows = stmt.query_map(params![cats_json], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -96,19 +144,25 @@ pub(crate) fn build_index(conn: &Connection) -> SqlResult<HashMap<String, Idx>> 
             r.get::<_, String>(2)?,
             r.get::<_, i64>(3)?,
             r.get::<_, i64>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, f64>(6)?,
         ))
     })?;
     for row in rows {
-        let (id, brand, compat, stock, cat) = row?;
+        let (id, brand, compat, stock, cat, variant, price) = row?;
         for (_, phone) in compat_phones_raw(&compat, &brand) {
             let key = phone_registry_key(&phone);
             let e = idx.entry(key).or_insert_with(|| Idx {
                 ids: BTreeSet::new(),
                 stock_by_id: BTreeMap::new(),
                 cats: BTreeMap::new(),
+                variant_by_id: BTreeMap::new(),
+                price_by_id: BTreeMap::new(),
             });
             e.ids.insert(id);
             e.stock_by_id.insert(id, stock);
+            e.variant_by_id.insert(id, variant.clone());
+            e.price_by_id.insert(id, price);
             let list = e.cats.entry(cat).or_default();
             if !list.contains(&id) {
                 list.push(id);
@@ -116,6 +170,19 @@ pub(crate) fn build_index(conn: &Connection) -> SqlResult<HashMap<String, Idx>> 
         }
     }
     Ok(idx)
+}
+
+/// Lo que el padrón (y la vista «Por modelo») muestra de un teléfono.
+pub(crate) struct PhoneStats {
+    pub(crate) products: i64,
+    pub(crate) stock: i64,
+    pub(crate) categories: String,
+    pub(crate) by_cat: Vec<(i64, Vec<i64>)>,
+    /// F52 — variantes que tiene entre sus repuestos (orden canónico, sin vacíos).
+    pub(crate) variants: Vec<String>,
+    /// F52 — rango de precios de venta (0/0 = ninguna ficha tiene precio).
+    pub(crate) price_min: f64,
+    pub(crate) price_max: f64,
 }
 
 /// Repuestos de un teléfono: une la clave actual con las claves de sus ALIAS, así
@@ -132,7 +199,7 @@ fn merged_stats(
     aliases: &[String],
     brand: &str,
     cats: &HashMap<i64, String>,
-) -> (i64, i64, String, Vec<(i64, Vec<i64>)>) {
+) -> PhoneStats {
     let mut set: BTreeSet<String> = BTreeSet::new();
     set.insert(key.to_string());
     for a in aliases {
@@ -143,10 +210,15 @@ fn merged_stats(
     // y en un alias (tras renombrar) y debe contar UNA sola vez.
     let mut stock_by_id: BTreeMap<i64, i64> = BTreeMap::new();
     let mut by_cat: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut variant_by_id: BTreeMap<i64, String> = BTreeMap::new();
+    let mut price_by_id: BTreeMap<i64, f64> = BTreeMap::new();
     for k in &set {
         let Some(i) = idx.get(k) else { continue };
         for id in &i.ids {
             stock_by_id.entry(*id).or_insert_with(|| i.stock_of(*id));
+            // F52: la variante y el precio salen de la MISMA unión (clave + alias) que el stock.
+            if let Some(v) = i.variant_by_id.get(id) { variant_by_id.entry(*id).or_insert_with(|| v.clone()); }
+            if let Some(pr) = i.price_by_id.get(id) { price_by_id.entry(*id).or_insert(*pr); }
         }
         for (cat, list) in &i.cats {
             let e = by_cat.entry(*cat).or_default();
@@ -161,7 +233,24 @@ fn merged_stats(
     let stock: i64 = stock_by_id.values().sum();
     let mut names: Vec<String> = by_cat.keys().filter_map(|c| cats.get(c).cloned()).collect();
     names.sort();
-    (products, stock, names.join(", "), by_cat.into_iter().collect())
+    // F52 — variantes del teléfono (chips) y rango de precios de sus repuestos.
+    let mut variants: Vec<String> = variant_by_id.values().cloned().collect();
+    crate::catalog::sort_variants(&mut variants);
+    let mut precios: Vec<f64> = price_by_id.values().copied().filter(|p| *p > 0.0).collect();
+    precios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let (price_min, price_max) = match (precios.first(), precios.last()) {
+        (Some(a), Some(b)) => (*a, *b),
+        _ => (0.0, 0.0),
+    };
+    PhoneStats {
+        products,
+        stock,
+        categories: names.join(", "),
+        by_cat: by_cat.into_iter().collect(),
+        variants,
+        price_min,
+        price_max,
+    }
 }
 pub(crate) fn category_names(conn: &Connection) -> SqlResult<HashMap<i64, String>> {
     let mut out = HashMap::new();
@@ -188,9 +277,11 @@ fn parse_aliases(json: &str) -> Vec<String> {
 pub(crate) fn build_rows(conn: &Connection, idx: &HashMap<String, Idx>) -> SqlResult<Vec<PhoneListRow>> {
     let cats = category_names(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(brand,''), COALESCE(line,''), COALESCE(model,''), COALESCE(name,''),
-                COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]')
-         FROM phones",
+        "SELECT ph.id, COALESCE(ph.brand,''), COALESCE(ph.line,''), COALESCE(ph.model,''), COALESCE(ph.name,''),
+                COALESCE(ph.key,''), COALESCE(ph.needs_review,0), COALESCE(ph.aliases,'[]'),
+                COALESCE(ph.in_use,0), COALESCE(ph.code,''), ph.default_product_id,
+                COALESCE(dp.name,''), COALESCE(dp.code,'')
+         FROM phones ph LEFT JOIN products dp ON dp.id = ph.default_product_id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -202,14 +293,21 @@ pub(crate) fn build_rows(conn: &Connection, idx: &HashMap<String, Idx>) -> SqlRe
             r.get::<_, String>(5)?,
             r.get::<_, i64>(6)?,
             r.get::<_, String>(7)?,
+            // F50/F52/F53: las columnas nuevas van AL FINAL de la lista explícita (nunca `SELECT *`)
+            r.get::<_, i64>(8).unwrap_or(0),
+            r.get::<_, String>(9).unwrap_or_default(),
+            r.get::<_, Option<i64>>(10).unwrap_or(None),
+            r.get::<_, String>(11).unwrap_or_default(),
+            r.get::<_, String>(12).unwrap_or_default(),
         ))
     })?;
 
     let mut items: Vec<PhoneListRow> = Vec::new();
     for row in rows {
-        let (id, brand_row, line, model, name, key, needs_review, aliases) = row?;
+        let (id, brand_row, line, model, name, key, needs_review, aliases, in_use, code,
+             default_product_id, default_product_name, default_product_code) = row?;
         let aliases_vec = parse_aliases(&aliases);
-        let (products, stock, cats_txt, _) = merged_stats(idx, &key, &aliases_vec, &brand_row, &cats);
+        let st = merged_stats(idx, &key, &aliases_vec, &brand_row, &cats);
         items.push(PhoneListRow {
             id,
             brand: brand_row,
@@ -219,9 +317,17 @@ pub(crate) fn build_rows(conn: &Connection, idx: &HashMap<String, Idx>) -> SqlRe
             key,
             needs_review: needs_review != 0,
             aliases: aliases_vec,
-            products,
-            stock,
-            categories: cats_txt,
+            products: st.products,
+            stock: st.stock,
+            categories: st.categories,
+            in_use,
+            code,
+            default_product_id,
+            default_product_name,
+            default_product_code,
+            variants: st.variants,
+            price_min: st.price_min,
+            price_max: st.price_max,
         });
     }
     Ok(items)
@@ -446,8 +552,9 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
     let row = conn
         .query_row(
             "SELECT id, COALESCE(brand,''), COALESCE(line,''), COALESCE(model,''), COALESCE(name,''),
-                    COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]')
-             FROM phones WHERE id=?1",
+                COALESCE(key,''), COALESCE(needs_review,0), COALESCE(aliases,'[]'),
+                COALESCE(in_use,0), COALESCE(code,''), default_product_id
+         FROM phones WHERE id=?1",
             params![phone_id],
             |r| {
                 Ok((
@@ -459,12 +566,15 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
                     r.get::<_, String>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, String>(7)?,
+                    r.get::<_, i64>(8).unwrap_or(0),
+                    r.get::<_, String>(9).unwrap_or_default(),
+                    r.get::<_, Option<i64>>(10).unwrap_or(None),
                 ))
             },
         )
         .ok();
 
-    let Some((id, brand, line, model, name, key, needs_review, aliases)) = row else {
+    let Some((id, brand, line, model, name, key, needs_review, aliases, in_use, code, default_product_id)) = row else {
         return Ok(None);
     };
 
@@ -472,7 +582,9 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
     // devuelve `merged_stats`: así la ficha no se contradice con el stock y sigue
     // funcionando después de RENOMBRAR el teléfono (la clave cambia, los alias no).
     let aliases_vec2 = parse_aliases(&aliases);
-    let (nproducts, nstock, cats_txt, by_cat) = merged_stats(&idx, &key, &aliases_vec2, &brand, &cats);
+    let st = merged_stats(&idx, &key, &aliases_vec2, &brand, &cats);
+    let (nproducts, nstock, cats_txt) = (st.products, st.stock, st.categories.clone());
+    let by_cat = st.by_cat.clone();
     let mut cat_ids: Vec<i64> = by_cat.iter().map(|(c, _)| *c).collect();
     // Pantalla (1) primero; el resto por nombre
     cat_ids.sort_by_key(|c| (if *c == 1 { 0 } else { 1 }, cats.get(c).cloned().unwrap_or_default()));
@@ -485,9 +597,13 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
                 // Lista EXPLÍCITA de columnas: `p.*` cambia de orden cuando una
                 // migración hace ALTER TABLE (search_text quedó en 14) y el mapeo
                 // posicional leería la columna equivocada (regla del proyecto).
+                // OJO (bug real medido en vivo con F52): la lista tiene que incluir TAMBIÉN las
+                // columnas nuevas (`supplier`, `in_use`, `code`); si no, `r.get(15..17)` caía en los
+                // `unwrap_or` y el despliegue mostraba TODOS los repuestos «en uso» y sin código.
                 "SELECT p.id, p.name, p.category_id, p.brand, p.model, p.variant, p.compatibility,
                         p.price_cost, p.price_sale, p.stock, p.min_stock, p.created_at, p.updated_at,
-                        p.price_usd, c.name as category_name
+                        p.price_usd, c.name as category_name, COALESCE(p.supplier,''),
+                        COALESCE(p.in_use,1), COALESCE(p.code,'')
                  FROM products p LEFT JOIN categories c ON c.id = p.category_id
                  WHERE p.id=?1",
                 params![pid],
@@ -498,6 +614,7 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
                         price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?,
                         min_stock: r.get(10)?, created_at: r.get(11)?, updated_at: r.get(12)?,
                         price_usd: r.get(13)?, category_name: r.get(14)?, supplier: r.get(15).unwrap_or_default(),
+                        in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
                     })
                 },
             ) {
@@ -512,6 +629,14 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
         });
     }
 
+    // F53: la pantalla de REFERENCIA con su nombre y código (el detalle se lee una vez por teléfono).
+    let (default_product_name, default_product_code) = match default_product_id {
+        Some(pid) => conn
+            .query_row("SELECT COALESCE(name,''), COALESCE(code,'') FROM products WHERE id=?1",
+                params![pid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap_or_default(),
+        None => (String::new(), String::new()),
+    };
     Ok(Some(PhoneDetail {
         phone: PhoneListRow {
             id,
@@ -525,6 +650,14 @@ pub fn get_phone_detail(conn: &Connection, cache: &mut crate::cache::CatalogCach
             products: nproducts,
             stock: nstock,
             categories: cats_txt,
+            in_use,
+            code,
+            default_product_id,
+            default_product_name,
+            default_product_code,
+            variants: st.variants,
+            price_min: st.price_min,
+            price_max: st.price_max,
         },
         blocks,
     }))
@@ -632,7 +765,14 @@ pub fn add_phone(conn: &Connection, brand: &str, line: &str, model: &str) -> Sql
          VALUES (?1,?2,?3,?4,?5,'[]','manual',0)",
         params![n.brand, n.line, n.model, n.name, n.key],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    // F50: el teléfono nace con su código (`M-007`) y —si el taller lo dio de alta a mano— EN USO
+    // (lo agregó justamente para poder usarlo).
+    conn.execute(
+        "UPDATE phones SET code = 'M-' || printf('%04d', id), in_use = 1 WHERE id=?1 AND (code IS NULL OR code='')",
+        params![id],
+    )?;
+    Ok(id)
 }
 
 /// Lo que va a pasar si se renombra el teléfono — para que la UI lo muestre ANTES de
@@ -677,7 +817,7 @@ pub fn preview_rename_phone(
     let idx = cache.phone_index(conn)?;
     let cats = category_names(conn)?;
     // los repuestos se cuentan con la clave NUEVA + los alias que ya tenía el teléfono
-    let (products, stock, _, _) = merged_stats(&idx, &n.key, &parse_aliases(&aliases), &n.brand, &cats);
+    let st = merged_stats(&idx, &n.key, &parse_aliases(&aliases), &n.brand, &cats);
     Ok(Some(RenamePreview {
         name: n.name,
         brand: n.brand,
@@ -685,8 +825,8 @@ pub fn preview_rename_phone(
         model: n.model,
         key: n.key,
         clash,
-        products,
-        stock,
+        products: st.products,
+        stock: st.stock,
     }))
 }
 
