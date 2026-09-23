@@ -214,9 +214,18 @@ export function parseCompatList(compat: string | null | undefined): string[] {
   return compat.split('/').map(s => s.trim()).filter(Boolean);
 }
 
-// Nombre corto de un repuesto: sin el prefijo de categoría (Pantalla / Táctil).
+// Nombre corto de un repuesto: sin el prefijo de categoría (Pantalla / Táctil…).
+//
+// F65 (2ª vuelta): el prefijo sale de la CATEGORÍA REAL de la ficha (`category_name`, que el backend
+// manda por JOIN) y no de una lista fija de tres. Con una categoría propia («Tapa trasera») y la
+// limpieza «Ordenar los nombres» de Ajustes, el nombre canónico queda «Tapa trasera Samsung A15»: sin
+// esto, la lista mostraba el nombre entero en vez del teléfono.
 export function partLabel(p: Product): string {
-  const base = p.name.replace(/^(Pantalla|Táctil Tablet|Táctil)\s+/i, '').split('/')[0].trim() || p.name;
+  const categoria = (p.category_name ?? '').trim();
+  const prefijoTocado = categoria && p.name.toLowerCase().startsWith(`${categoria.toLowerCase()} `)
+    ? p.name.slice(categoria.length + 1)
+    : p.name.replace(/^(Pantalla|Táctil Tablet|Táctil)\s+/i, '');
+  const base = prefijoTocado.split('/')[0].trim() || p.name;
   if (p.variant && !base.toLowerCase().includes(p.variant.toLowerCase())) {
     return `${base} (${p.variant})`;
   }

@@ -16,6 +16,8 @@ const QUALITY_LABEL: Record<ScreenCandidate['match_quality'], string> = {
   exacta: 'Exacta',
   prefijo: 'Coincidencia',
   parcial: 'Parecida',
+  // F65c: la eligió el operario buscándola en el catálogo (no viene del cruce con el modelo).
+  buscada: 'Elegida a mano',
 };
 
 // "¿Qué repuesto le sirve a este teléfono?" — el buscador que antes era la

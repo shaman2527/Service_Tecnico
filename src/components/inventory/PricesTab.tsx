@@ -7,6 +7,7 @@ import { api } from '@/db';
 import type { CatalogReport, PhoneSplitPreview, PriceRestoreReport } from '@/types';
 import { toast } from 'sonner';
 import { LoadInventoryDialog } from './LoadInventoryDialog';
+import { CategoriesCard } from './CategoriesCard';
 
 // AJUSTES del inventario, en lenguaje de tienda (sin tecnicismos):
 //   1) Traer los precios de la lista de la tienda.
@@ -28,7 +29,12 @@ function Fila({ label, value }: { label: string; value: string | number }) {
  * `onRefresh` solo refresca: lo usa el asistente de carga, que tiene que quedarse abierto
  * para mostrar su resumen (antes saltaba de pestaña y el resumen nunca se veía).
  */
-export function PricesTab({ onChanged, onRefresh }: { onChanged: () => void; onRefresh: () => void }) {
+export function PricesTab({ onChanged, onRefresh, refreshKey = 0 }: {
+  onChanged: () => void;
+  onRefresh: () => void;
+  /** F65: sube cuando el inventario cambió (p. ej. al cargar la lista del local mueve el stock) */
+  refreshKey?: number;
+}) {
   const [priceCheck, setPriceCheck] = useState<PriceRestoreReport | null>(null);
   const [catalogCheck, setCatalogCheck] = useState<CatalogReport | null>(null);
   /** F53 — «separar los modelos»: vista previa y resultado (es el MISMO informe). */
@@ -215,6 +221,12 @@ export function PricesTab({ onChanged, onRefresh }: { onChanged: () => void; onR
           )}
         </CardContent>
       </Card>
+
+      {/* F65 — crear, corregir y borrar las categorías con las que se organiza el inventario.
+          `onRefresh` (y NO `onChanged`): renombrar o borrar una categoría NO puede sacar al dueño de
+          la pestaña Ajustes — `onChanged` refresca y salta a Productos, que es lo correcto al
+          aplicar precios/nombres pero no acá. */}
+      <CategoriesCard onChanged={onRefresh} refreshKey={refreshKey} />
 
       <Card data-card="modelos-separados">
         <CardHeader>

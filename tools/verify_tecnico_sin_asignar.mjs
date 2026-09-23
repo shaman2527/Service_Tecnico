@@ -55,6 +55,24 @@ const setValue = (sel, value) => evalx(`(() => {
 /** Botón del diálogo por texto exacto. */
 const clickDialogExact = (label) => clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => (b.innerText || '').trim() === ${JSON.stringify(label)}) || null)`);
 
+/**
+ * F65b — Abre/cierra el DETALLE de la ficha de ingreso. Desde el pedido del dueño («ocupa demasiado
+ * espacio del wizard»), la ficha es UNA línea y los 4 bloques, los obligatorios que faltan, los avisos
+ * que no bloquean y la explicación del paso siguiente viven adentro de «Ver ficha». Las pruebas que
+ * leen esos datos tienen que desplegarla, igual que el operario.
+ */
+const fichaAbierta = () => evalx(`!!document.querySelector('[data-ficha-detalle]')`);
+const abrirFicha = async () => {
+  if (await fichaAbierta()) return true;
+  await evalx(`(() => { const b = [...document.querySelectorAll('[data-ficha] button')].find(x => /Ver ficha/i.test(x.innerText)); if (b) b.click(); return !!b; })()`);
+  return waitFor(`!!document.querySelector('[data-ficha-detalle]')`, 6000);
+};
+const cerrarFicha = async () => {
+  if (!(await fichaAbierta())) return true;
+  await evalx(`(() => { const b = [...document.querySelectorAll('[data-ficha] button')].find(x => /Ocultar/i.test(x.innerText)); if (b) b.click(); return !!b; })()`);
+  return waitFor(`!document.querySelector('[data-ficha-detalle]')`, 6000);
+};
+
 /** ¿Está activo el chip de un trabajo? (los chips de TRABAJOS no son toggles de Radix: se pintan
  *  con `bg-primary` cuando están activos — los de MÉTODO de pago sí llevan `data-state`). */
 const chipOn = (label) => evalx(`(([...document.querySelectorAll('[role="dialog"] button')]
@@ -180,14 +198,12 @@ try {
     (combos ?? []).includes('Sin asignar'), JSON.stringify(combos));
 
   // La ficha lo trata como AVISO, no como bloqueo (F33: `falta` = bloquea, `pendiente` = se puede seguir)
-  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Ver ficha/i.test(x.innerText)); if (b) b.click(); return true; })()`);
-  await sleep(700);
+  check('la ficha se despliega con «Ver ficha»', await abrirFicha(), 'data-ficha-detalle');
   const estadoTecnico = await evalx(`document.querySelector('[data-ficha-field="technician"]')?.getAttribute('data-state') ?? null`);
   check('F45: la ficha marca el técnico como «pendiente» (aviso), no como «falta» (bloqueo)',
     estadoTecnico !== 'falta' && estadoTecnico !== null, `data-state=${estadoTecnico}`);
   // Se vuelve a plegar la ficha: desplegada empuja los chips y el formulario queda largo de más.
-  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Ver ficha/i.test(x.innerText)); if (b) b.click(); return true; })()`);
-  await sleep(600);
+  await cerrarFicha();
 
   // ── 3) registrar SIN técnico: cliente + cédula (#) y el equipo con «Cambio batería» ───────
   await setValue('[role="dialog"] input[placeholder^="Buscar por nombre o cédula"]', PREFIJO);
@@ -266,10 +282,15 @@ try {
     return b ? b.disabled : null;
   })()`);
   check('F48: sin color, «Siguiente» queda bloqueado (el color es dato obligatorio)', siguienteBloqueado === true, `disabled=${siguienteBloqueado}`);
+  // F65b — los avisos que NO bloquean ya no ocupan un renglón: viven adentro del detalle (la línea
+  // compacta solo muestra su cuenta con el ⚠). Se despliega para leerlos, como haría el operario.
+  check('la ficha se despliega para leer los avisos que no bloquean', await abrirFicha(), 'data-ficha-detalle');
   const notaTelefono = await evalx(`(() => { const n = document.querySelector('[data-ficha-nota="phone"]'); return n ? n.innerText.replace(/\\s+/g, ' ').trim() : null; })()`);
   check('F48: la ficha OBSERVA que falta el teléfono del cliente (sin bloquear)',
     /falta el n[uú]mero de tel[eé]fono/i.test(String(notaTelefono)), String(notaTelefono));
-  // «Ir al campo» deja el FOCO en el selector de color (el asistente lleva de la mano).
+  await cerrarFicha();
+  // «Ir al campo» deja el FOCO en el selector de color (el asistente lleva de la mano). El botón vive
+  // en la línea compacta, así que está disponible con la ficha plegada.
   await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /Ir al campo/i.test(b.innerText)) || null)`);
   await sleep(900);
   const foco = await evalx(`document.activeElement?.getAttribute('data-ficha-target') ?? document.activeElement?.tagName ?? null`);

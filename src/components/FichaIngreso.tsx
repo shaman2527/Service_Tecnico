@@ -4,19 +4,23 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { Ficha, FichaField } from '@/lib/ficha';
 
-// F33 — ASISTENTE DE FICHA DE INGRESO (reemplaza al panel de guía que tapaba el formulario).
+// F33/F65b — ASISTENTE DE FICHA DE INGRESO, ahora en UNA SOLA LÍNEA.
 //
-// Pedido del usuario: al registrar un servicio el aviso flotante «se siente invasivo… no me deja ver
-// lo que estoy registrando». Ahora el asistente vive DENTRO del formulario y es discreto:
+// Historia: (F33) el aviso flotante «se siente invasivo… no me deja ver lo que estoy registrando» →
+// el asistente se mudó ADENTRO del formulario, en dos líneas. (Pedido del dueño, 2026-09-23): «cuando
+// vas a crear un servicio esta información ocupa demasiado espacio del wizard, no debería estar ahí,
+// está muy grande» — con 4 renglones (título + progreso + «faltan N» + el dato pedido + «para
+// completar» + «siguiente en el proceso») se comía el alto del formulario en cada paso.
 //
-//   · Línea 1: «Ficha de ingreso · 6/16» + «Revisá: …» si algún dato quedó con formato dudoso.
-//   · Línea 2: el DATO QUE TOCA AHORA, con su nombre técnico y una guía de una línea + «Ir al campo».
-//     Se actualiza solo: al completar un dato, pasa al siguiente.
-//   · «Ver ficha»: despliega la ficha completa (los 4 bloques del mostrador) con cada dato en su
-//     valor o «Pendiente». Tocar cualquier dato lleva a su paso para CORREGIRLO sin perder el resto.
+// QUÉ QUEDA VISIBLE (una línea, se acomoda con `flex-wrap` en pantallas angostas):
+//   «📋 Ficha de ingreso · 6/16 · Falta: Marca y modelo exacto * [Ir al campo] · → Siguiente en el
+//    proceso: En reparación [Ver ficha]»
+// La GUÍA del dato y el detalle del paso siguiente van en el `title` (tooltip), así no ocupan alto.
 //
-// Compacto por defecto (dos líneas) y sin nada flotando encima del formulario: el operario ve
-// siempre lo que está escribiendo.
+// DENTRO DE «Ver ficha» (a un clic, y se acuerda el operario de que está ahí): los 4 bloques del
+// mostrador dato por dato —tocar cualquiera lleva a su paso para corregirlo sin perder el resto—, el
+// contador de obligatorios que faltan, los avisos que NO bloquean (F48) y la explicación completa del
+// paso siguiente. NADA se perdió: se movió a donde no estorba mientras se escribe.
 
 function DatoFila({ field, onGo }: { field: FichaField; onGo?: (step: number, key?: string) => void }) {
   const puedeIr = !!onGo && field.step >= 0;
@@ -64,104 +68,133 @@ export function FichaIngreso({ ficha, nextProcess, onGoToStep, className }: {
 }) {
   const [abierta, setAbierta] = useState(false);
   const next = ficha.next;
+  const faltan = ficha.groups.flatMap(g => g.fields).filter(f => f.state === 'falta').length;
 
   return (
     <div
       data-ficha
-      className={cn('flex flex-col gap-1.5 rounded-lg border px-3 py-2',
+      className={cn('flex flex-col gap-1.5 rounded-lg border px-3 py-1.5',
         ficha.completa ? 'border-border bg-muted/30' : 'border-primary/25 bg-primary/5', className)}
     >
-      {/* Línea 1 — estado de la ficha (siempre visible y sin tapar nada) */}
+      {/* ── LA ÚNICA LÍNEA: progreso + el dato que toca AHORA + el paso del proceso + acciones ── */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="flex items-center gap-1.5 text-xs font-semibold">
           <ClipboardList className="size-3.5 text-primary" /> Ficha de ingreso
         </span>
         <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-bold text-primary ring-1 ring-primary/20"
-          data-ficha-progreso>
+          data-ficha-progreso
+          title={`${ficha.done} de ${ficha.total} datos de la ficha${faltan > 0 ? ` · faltan ${faltan} obligatorio(s)` : ''}`}>
           {ficha.done}/{ficha.total}
         </span>
-        {ficha.completa ? (
-          <span className="text-[11px] font-medium text-success">Lista para guardar</span>
+
+        {next ? (
+          <span className="flex min-w-0 items-center gap-1" data-ficha-next={next.key} title={`${next.label} — ${next.guide}`}>
+            {/* «Siguiente dato», NO «Falta:»: el pie de cada paso del wizard usa «Falta: …» para decir
+                qué le falta a ESE paso, y esta línea habla de la FICHA COMPLETA (que abarca todos los
+                pasos). Con la misma palabra, en el paso Cliente parecía que faltaba algo del paso. */}
+            <span className="truncate text-xs text-muted-foreground">Siguiente dato:</span>
+            <span className="truncate text-xs font-semibold text-foreground">
+              {next.label}{next.required && <span className="text-danger"> *</span>}
+            </span>
+          </span>
         ) : (
-          <span className="text-[11px] text-muted-foreground">
-            Faltan {ficha.groups.flatMap(g => g.fields).filter(f => f.state === 'falta').length} dato(s) obligatorio(s)
+          <span className="text-[11px] font-medium text-success" data-ficha-next="completa">
+            Lista para guardar — todos los datos están cargados
           </span>
         )}
+
         {ficha.warns.length > 0 && (
           <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700" data-ficha-warns>
             <AlertTriangle className="size-3" /> Revisá: {ficha.warns.map(w => w.label.split(' (')[0]).join(' · ')}
           </span>
         )}
-        <Button type="button" variant="ghost" size="sm" className="ml-auto h-6 shrink-0 px-1.5 text-[11px]"
-          onClick={() => setAbierta(v => !v)}>
-          {abierta
-            ? <><ChevronDown className="size-3" /> Ocultar ficha</>
-            : <><ChevronRight className="size-3" /> Ver ficha</>}
-        </Button>
-      </div>
 
-      {/* Línea 2 — el dato que toca AHORA, con su guía (el asistente «pide de a uno») */}
-      {next ? (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-ficha-next={next.key}>
-          <span className="text-xs font-semibold text-foreground">
-            {next.label}
-            {next.required && <span className="text-danger"> *</span>}
+        {/* El paso siguiente del PROCESO, en la misma línea y sólo con el estado: la explicación
+            («asigná el técnico responsable y empezá el diagnóstico») va en el tooltip y completa
+            adentro de «Ver ficha». */}
+        {nextProcess && (
+          <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground"
+            data-ficha-paso title={nextProcess.why}>
+            <ArrowRight className="size-3 shrink-0" />
+            <span className="truncate">
+              Siguiente en el proceso: <strong className="font-semibold text-foreground">{nextProcess.status}</strong>
+            </span>
           </span>
-          <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">— {next.guide}</span>
-          {onGoToStep && next.step >= 0 && (
+        )}
+
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {/* Los avisos que NO bloquean (F48) se anuncian acá con su cuenta y se abren con un toque:
+              así el operario sabe que hay algo para completar sin que le ocupe un renglón. */}
+          {ficha.notas.length > 0 && (
+            <button type="button" data-ficha-notas-hay
+              title={ficha.notas.map(n => n.texto).join(' · ')}
+              className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-500/20"
+              onClick={() => setAbierta(true)}>
+              <AlertTriangle className="size-3" /> {ficha.notas.length}
+            </button>
+          )}
+          {onGoToStep && next && next.step >= 0 && (
             <Button type="button" size="sm" variant="outline" className="h-6 shrink-0 px-2 text-[11px]"
-              aria-label={`Ir al campo ${next.label}`}
+              aria-label={`Ir al campo ${next.label}`} title={next.guide}
               onClick={() => onGoToStep(next.step, next.key)}>
               Ir al campo <ArrowRight className="size-3" />
             </Button>
           )}
+          <Button type="button" variant="ghost" size="sm" className="h-6 shrink-0 px-1.5 text-[11px]"
+            data-ficha-ver onClick={() => setAbierta(v => !v)}>
+            {abierta
+              ? <><ChevronDown className="size-3" /> Ocultar</>
+              : <><ChevronRight className="size-3" /> Ver ficha</>}
+          </Button>
         </div>
-      ) : (
-        <p className="text-[11px] text-success" data-ficha-next="completa">
-          Todos los datos de la ficha están cargados — podés guardar (Ctrl+Enter).
-        </p>
-      )}
+      </div>
 
-      {/* F48 — OBSERVACIONES que NO bloquean (el dueño: «hacerle una observación pero no
-          bloqueante: falta número de tlf del cliente»). Van en ámbar, se pueden tocar para ir al
-          campo, y NO impiden guardar: la orden se registra igual. */}
-      {ficha.notas.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-ficha-notas>
-          <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700">
-            <AlertTriangle className="size-3" /> Para completar (no bloquea):
-          </span>
-          {ficha.notas.map(n => (
-            <button key={n.key} type="button" data-ficha-nota={n.key} title={n.guia}
-              onClick={() => onGoToStep?.(n.step, n.key)}
-              className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-500/20">
-              {n.texto}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Ficha completa (a un clic): los 4 bloques del mostrador, dato por dato */}
+      {/* ── DETALLE (a un clic): la ficha completa, los obligatorios que faltan, los avisos que no
+             bloquean y la explicación del paso siguiente ── */}
       {abierta && (
-        <div className="grid gap-x-4 gap-y-2 border-t border-border/60 pt-2 sm:grid-cols-2" data-ficha-detalle>
-          {ficha.groups.map(g => (
-            <div key={g.title} className="flex flex-col">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{g.title}</p>
-              <div className="flex flex-col divide-y divide-border/40">
-                {g.fields.map(f => <DatoFila key={f.key} field={f} onGo={onGoToStep} />)}
+        <div className="flex flex-col gap-2 border-t border-border/60 pt-2" data-ficha-detalle>
+          <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
+            {ficha.groups.map(g => (
+              <div key={g.title} className="flex flex-col">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{g.title}</p>
+                <div className="flex flex-col divide-y divide-border/40">
+                  {g.fields.map(f => <DatoFila key={f.key} field={f} onGo={onGoToStep} />)}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
 
-      {/* Siguiente paso del PROCESO por estado (una línea, informativa) */}
-      {nextProcess && (
-        <p className="flex items-start gap-1.5 border-t border-border/60 pt-1.5 text-[11px] text-muted-foreground" data-ficha-paso>
-          <ArrowRight className="mt-0.5 size-3 shrink-0" />
-          <span>
-            <strong className="font-semibold text-foreground">Siguiente en el proceso: {nextProcess.status}</strong> — {nextProcess.why}
-          </span>
-        </p>
+          <p className="text-[11px] text-muted-foreground" data-ficha-faltan>
+            {ficha.completa
+              ? 'Todos los datos de la ficha están cargados — podés guardar (Ctrl+Enter).'
+              : `Faltan ${faltan} dato(s) obligatorio(s): ${ficha.groups.flatMap(g => g.fields)
+                .filter(f => f.state === 'falta').map(f => f.label).join(' · ')}`}
+          </p>
+
+          {ficha.notas.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-ficha-notas>
+              <span className="flex items-center gap-1 text-[11px] font-medium text-amber-700">
+                <AlertTriangle className="size-3" /> Para completar (no bloquea):
+              </span>
+              {ficha.notas.map(n => (
+                <button key={n.key} type="button" data-ficha-nota={n.key} title={n.guia}
+                  onClick={() => onGoToStep?.(n.step, n.key)}
+                  className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-500/20">
+                  {n.texto}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {nextProcess && (
+            <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground" data-ficha-paso-detalle>
+              <ArrowRight className="mt-0.5 size-3 shrink-0" />
+              <span>
+                <strong className="font-semibold text-foreground">Siguiente en el proceso: {nextProcess.status}</strong> — {nextProcess.why}
+              </span>
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

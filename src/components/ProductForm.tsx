@@ -7,15 +7,44 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
 import type { Product, Category } from '../types';
+import { NewCategoryInline } from './inventory/NewCategoryInline';
+import { toast } from 'sonner';
 
-export function ProductForm({ product, categories, onClose, onSaved }: {
+export function ProductForm({ product, categories, onClose, onSaved, onCategoryChanged, defaultCategoryId, canManageCategories = true }: {
   product: Product | null;
   categories: Category[];
   onClose: () => void;
   onSaved: () => void;
+  /** F65: avisa al inventario que se creó/elegió una categoría (para refrescar el filtro) */
+  onCategoryChanged?: () => void;
+  /**
+   * F65 (2ª vuelta) — la categoría del FILTRO activo de la pestaña Productos. La pestaña abre
+   * filtrada en «Pantalla» (regla del local), pero el desplegable arrancaba en `categories[0]`, que
+   * por orden alfabético es «Accesorio»: la ficha nacía en la categoría equivocada y, como la tabla
+   * seguía filtrada en Pantalla, **parecía que no se había guardado** (y el reintento creaba un
+   * duplicado). Ahora el formulario arranca en la categoría que el operario está mirando.
+   */
+  defaultCategoryId?: number | null;
+  /**
+   * F65 (2ª vuelta) — crear/corregir categorías es del DUEÑO (`require_owner` en el backend, igual
+   * que `add_product`): a la cajera no se le dibuja el botón en vez de dejar que choque contra el
+   * mensaje del PIN (la convención del proyecto: «la cajera no ve esos botones»).
+   */
+  canManageCategories?: boolean;
 }) {
   const [name, setName] = useState(product?.name ?? '');
-  const [categoryId, setCategoryId] = useState<number | null>(product?.category_id ?? (categories[0]?.id ?? null));
+  const [categoryId, setCategoryId] = useState<number | null>(
+    product?.category_id ?? defaultCategoryId ?? (categories[0]?.id ?? null),
+  );
+  // F65: las categorías que ve este formulario = las del inventario + las que se crean acá mismo. Se
+  // DERIVA del prop (2ª vuelta adversarial) en vez de copiarlo a un estado: copiarlo dejaba un
+  // desplegable VACÍO si el formulario se abría antes de que el inventario terminara de leerlas (y la
+  // lista nunca se refrescaba después).
+  const [creadas, setCreadas] = useState<Category[]>([]);
+  const cats = useMemo(
+    () => [...categories, ...creadas.filter(c => !categories.some(x => x.id === c.id))],
+    [categories, creadas],
+  );
   const [brand, setBrand] = useState(product?.brand ?? '');
   const [model, setModel] = useState(product?.model ?? '');
   const [variant, setVariant] = useState(product?.variant ?? '');
@@ -46,7 +75,13 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
   );
 
   const save = async () => {
-    if (!name) return;
+    // F65 (2ª vuelta) — el guardado ya NO falla en silencio: `add_product`/`update_product` son del
+    // DUEÑO, así que una cajera (o el dueño con la sesión vencida) veía el diálogo quedarse abierto
+    // sin un solo mensaje y creía que la ficha estaba cargada (y la volvía a cargar → duplicados).
+    if (!name.trim()) {
+      toast.error('Falta el nombre', { description: 'El nombre del producto es obligatorio para guardar.' });
+      return;
+    }
     setSaving(true);
     try {
       const compatList = compatibility.split('/').map(s => s.trim()).filter(Boolean);
@@ -55,11 +90,15 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
         await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
         // el proveedor va por su propio comando (update_product no lo toca)
         if ((product.supplier ?? '') !== supplier.trim()) await api.setProductSupplier(product.id, supplier.trim());
+        toast.success(`Producto «${name.trim()}» actualizado`);
       } else {
         const id = await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
         if (supplier.trim()) await api.setProductSupplier(id, supplier.trim());
+        toast.success(`Producto «${name.trim()}» guardado`);
       }
       onSaved();
+    } catch (e) {
+      toast.error('No se pudo guardar el producto', { description: String(e) });
     } finally {
       setSaving(false);
     }
@@ -87,13 +126,25 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Categoría</label>
               <Select value={String(categoryId ?? '')} onValueChange={v => setCategoryId(v ? Number(v) : null)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger data-field="categoria"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {categories.map(c => (
-                    <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                  {cats.map(c => (
+                    <SelectItem key={c.id} value={String(c.id)} data-categoria-opcion={c.name}>{c.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {/* F65: si el repuesto que llegó no entra en ninguna categoría, se crea acá mismo y
+                  queda elegida en este producto (no hay que salir del formulario ni perder lo escrito). */}
+              {canManageCategories && (
+                <NewCategoryInline
+                  existing={cats}
+                  onCreated={c => {
+                    setCreadas(prev => (prev.some(x => x.id === c.id) ? prev : [...prev, c]));
+                    setCategoryId(c.id);
+                    onCategoryChanged?.();
+                  }}
+                />
+              )}
             </div>
           </div>
 
@@ -183,7 +234,7 @@ export function ProductForm({ product, categories, onClose, onSaved }: {
               }
             }}>Eliminar</Button>
           )}
-          <Button onClick={save} disabled={saving}>
+          <Button onClick={save} disabled={saving || !name.trim()}>
             {saving ? 'Guardando...' : (product ? 'Actualizar' : 'Guardar Producto')}
           </Button>
         </DialogFooter>

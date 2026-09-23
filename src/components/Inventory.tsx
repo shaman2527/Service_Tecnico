@@ -32,6 +32,13 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
   const [editing, setEditing] = useState<Product | null>(null);
   const [showDuplicates, setShowDuplicates] = useState(false);
   const [modelQuery, setModelQuery] = useState(initialModel);
+  /**
+   * F65 (2ª vuelta) — la categoría del FILTRO activo de la pestaña Productos. Sirve para que un
+   * producto NUEVO nazca en la categoría que el operario está mirando (la pestaña abre filtrada en
+   * «Pantalla»): antes nacía en `categories[0]` = «Accesorio» y, como la tabla seguía filtrada, la
+   * ficha recién guardada NO aparecía — el operario la volvía a cargar y quedaba duplicada.
+   */
+  const [catFiltro, setCatFiltro] = useState<number | null>(null);
   // Sube al guardar/editar/fusionar: hace que las pestañas vuelvan a consultar
   // (antes había que refrescar la app para ver el producto nuevo).
   const [refreshKey, setRefreshKey] = useState(0);
@@ -39,6 +46,13 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
 
   const loadStats = () => {
     api.getInventoryStats().then(setStats).catch(() => setStats(null));
+  };
+
+  // F65: al crear o corregir una categoría hay que VOLVER A LEERLAS (la lista se cachea por sesión,
+  // `api.reloadCategories` rompe esa caché). Sin esto la categoría nueva se guardaba en la base pero
+  // el filtro de Productos seguía mostrando la lista vieja.
+  const reloadCategories = () => {
+    api.reloadCategories().then(setCategories).catch(() => { /* la pantalla sigue con la lista que tiene */ });
   };
 
   useEffect(() => {
@@ -124,6 +138,7 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
               onEdit={p => { setEditing(p); setShowForm(true); }}
               onReviewDuplicates={() => setShowDuplicates(true)}
               onByModel={openByModel}
+              onCategoryFilter={setCatFiltro}
             />
           </TabsContent>
 
@@ -143,8 +158,13 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
             <TabsContent value="precios">
               {/* onChanged = refresca y salta a Productos (precios/nombres);
                   onRefresh = solo refresca: el asistente de carga tiene que poder
-                  mostrar su resumen sin que la pestaña se desmonte. */}
-              <PricesTab onChanged={() => { refreshAll(); setTab('productos'); }} onRefresh={refreshAll} />
+                  mostrar su resumen sin que la pestaña se desmonte.
+                  F65: las categorías también se releen (el filtro de Productos las usa). */}
+              <PricesTab
+                refreshKey={refreshKey}
+                onChanged={() => { refreshAll(); reloadCategories(); setTab('productos'); }}
+                onRefresh={() => { refreshAll(); reloadCategories(); }}
+              />
             </TabsContent>
           )}
         </Tabs>
@@ -153,6 +173,9 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
           <ProductForm
             product={editing}
             categories={categories}
+            defaultCategoryId={catFiltro}
+            canManageCategories={role === 'owner'}
+            onCategoryChanged={reloadCategories}
             onClose={() => { setShowForm(false); setEditing(null); }}
             onSaved={() => { setShowForm(false); setEditing(null); refreshAll(); }}
           />

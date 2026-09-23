@@ -30,6 +30,10 @@ pub fn run() {
         .manage(database)
         .invoke_handler(tauri::generate_handler![
             commands::get_categories,
+            commands::get_categories_with_usage,
+            commands::add_category,
+            commands::rename_category,
+            commands::delete_category,
             commands::get_payment_methods,
             commands::get_service_statuses,
             commands::next_order_num,

@@ -172,6 +172,7 @@ registro/
 │   │   ├── refund-math.ts     # F36/F42: topes por moneda y MÉTODO de la devolución
 │   │   ├── payment-math.ts / payment-methods.ts / queue.ts / service-update.ts / phoneOrder.ts
 │   │   ├── service-report.ts  # F44: trabajos hechos (contadores por trabajo, alcance de la lista)
+│   │   ├── product-categories.ts # F65: categorías de producto (plegado, problemas, bloqueo de borrado)
 │   │   └── ficha.ts / reminders.ts / service-guide.ts / screen-rules.ts / update.ts
 │   ├── components/
 │   │   ├── Dashboard.tsx      # KPIs, diagrama de flujo, top modelos, stock bajo
@@ -311,6 +312,7 @@ await window.__TAURI_INTERNALS__.invoke('get_products', { search: '', categoryId
 | `node tools/verify_aviso_no_tapa.mjs` | **F54** — el aviso de política **no tapa la factura** ni se traga los clics: con el comprobante abierto no se dibuja (queda en la cola), el clic sobre la factura cae dentro de la factura, al cerrarla el aviso vuelve y **tocar el mensaje lo quita** (y la ✕ también) | Entrega UNA orden de prueba por la UI **sin cobrar** y la borra; **aborta si falta `REGISTRO_DB`** |
 | `node tools/verify_screen_brand_gate.mjs` | Gate de marca de la pantalla en el servicio (OTRA marca nunca se auto-elige) | Solo lectura |
 | `node tools/verify_tecnico_y_fecha_pago.mjs` | F34/F35/F36/F38/F39: técnico rápido, fecha del pago, saldo en Bs. y las dos columnas del arqueo | Aborta si no hay turno abierto |
+| `node tools/verify_categorias_producto.mjs` | **F65** — las categorías de producto dejan de ser una lista cerrada: se crea una desde el formulario del producto (y queda elegida y **guardada en la base**), el filtro de Productos la ve al instante, un nombre que ya existe **no** crea una gemela (avisa y ofrece usarla), **Escape cierra el panel y no el formulario**, en Ajustes se ve el uso real, se **corrige** el nombre y se **elimina** la vacía — y las del padrón de teléfonos o con productos **no se pueden borrar** | Escribe en la tabla `categories` y limpia; **aborta si falta `REGISTRO_DB`**; compara siempre contra la base leída aparte |
 | `node tools/verify_recordatorios.mjs` · `verify_servicio_cierre.mjs` · `verify_cola_entregas.mjs` · `verify_metodos_en_cobros.mjs` · `verify_wizard_metodos.mjs` | F30–F33: recordatorios, asistente de cierre, cola de entregas, métodos de pago | Escriben y limpian sus órdenes de prueba |
 
 **Receta:** abrir la app con la copia (`$env:REGISTRO_DB="…\backup\perf_app.db"` + el puerto 9222), pasar el PIN, correr el script. Los scripts **esperan condiciones** (nunca duermen a ojo) y varios **abortan** si falta el día abierto o la variable de la copia.
@@ -333,6 +335,7 @@ node tools/service_guide_test.ts · queue_test.ts (npx tsx) · local_date_test.t
 node tools/service_report_test.ts    # trabajos hechos / contadores (F44)   68/68
 node tools/policy_queue_test.ts      # cola del modal de política (F46)     13/13
 node tools/discount_test.ts          # descuento del servicio (F49)         21/21
+node tools/category_rules_test.ts    # categorías de producto (F65)         42/42
 ```
 
 ## Lecciones clave (resumen)

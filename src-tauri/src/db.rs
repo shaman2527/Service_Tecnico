@@ -10,6 +10,31 @@ pub struct Category {
     pub description: Option<String>,
 }
 
+/// F65 — Una categoría de PRODUCTO vista desde «Ajustes»: además del nombre, cuánto la usa el
+/// catálogo (fichas y unidades) y si es una de las del PADRÓN DE TELÉFONOS (esas tres no se
+/// renombran ni se borran: las reglas del padrón y los nombres de las fichas dependen de ellas).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CategoryUsage {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    /// fichas de producto que la tienen puesta
+    pub products: i64,
+    /// unidades de stock sumadas de esas fichas
+    pub units: i64,
+    /// es una categoría del padrón de teléfonos (`catalog::PHONE_CATEGORIES`) → fija
+    pub phone_padron: bool,
+}
+
+/// F65 — Resultado de crear una categoría: la categoría (nueva o la que YA existía) y si de verdad
+/// se creó. La UI necesita los dos datos: si el nombre ya existía se elige ESA categoría y se avisa
+/// («ya existía»), en vez de crear una gemela y partir el catálogo en dos.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CategoryOutcome {
+    pub category: Category,
+    pub created: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Client {
     pub id: i64,
@@ -1247,6 +1272,16 @@ impl Database {
         let has_price_usd: bool = conn.prepare("SELECT price_usd FROM products LIMIT 1").is_ok();
         if !has_price_usd {
             let _ = conn.execute_batch("ALTER TABLE products ADD COLUMN price_usd REAL NOT NULL DEFAULT 0;");
+        }
+        // Migration: `categories.description` (F65, 2026-09-23). La columna viaja en el CREATE TABLE
+        // desde el principio, pero una base instalada ANTES de que existiera la tiene sin ella (la
+        // guarda es `SELECT description … LIMIT 1`: falla si la columna no está). Sin esta migración,
+        // leer las categorías de esa instalación fallaba y el frontend caía a su mock
+        // (`[{Pantalla}]`): el local veía UNA sola categoría y no había forma de arreglarlo desde la
+        // pantalla. La columna va al FINAL (patrón de siempre: mover una columna rompe el orden físico).
+        let has_cat_description: bool = conn.prepare("SELECT description FROM categories LIMIT 1").is_ok();
+        if !has_cat_description {
+            let _ = conn.execute_batch("ALTER TABLE categories ADD COLUMN description TEXT;");
         }
         let has_svc_discount: bool = conn.prepare("SELECT discount_amount FROM services LIMIT 1").is_ok();
         if !has_svc_discount {
@@ -4801,13 +4836,210 @@ impl Database {
     // --- Lookups ---
     pub fn get_categories(&self) -> SqlResult<Vec<Category>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT * FROM categories ORDER BY name")?;
+        // Columnas EXPLÍCITAS (nunca `SELECT *` con mapping posicional: regla del proyecto).
+        let mut stmt = conn.prepare("SELECT id, name, description FROM categories ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(Category { id: r.get(0)?, name: r.get(1)?, description: r.get(2)? })
         })?;
         let mut cats = Vec::new();
         for row in rows { cats.push(row?); }
         Ok(cats)
+    }
+
+    // --- F65: CATEGORÍAS DE PRODUCTO QUE AGREGA EL LOCAL ---
+    // Pedido del dueño (2026-09-23): «cuando en este inventario pueda registrar nuevas categorías,
+    // no esté limitado a crear categorías de productos». Antes la categoría era una lista CERRADA
+    // (las 6 del `init` + lo que trajeran los catálogos importados): si el repuesto que llegó no
+    // entraba en Pantalla/Teléfono/Accesorio/Repuesto/Batería/Flex no había forma de anotarlo.
+    //
+    // La tabla `categories` es REAL (id + name UNIQUE + description) y los productos la referencian
+    // por ID, así que crear/renombrar una categoría NO toca ninguna ficha: el nombre se lee por JOIN.
+    // Reglas (todas en el backend, fail-closed):
+    //   · nombre no vacío, recortado y con tope de 40 caracteres;
+    //   · sin duplicados comparando el nombre PLEGADO (mayúsculas/acentos): crear «pantalla» cuando
+    //     existe «Pantalla» devuelve la que ya está (nunca una gemela);
+    //   · las tres categorías del PADRÓN DE TELÉFONOS (`catalog::PHONE_CATEGORIES`) no se renombran
+    //     ni se borran: `phones.rs`/`loadlist.rs` filtran por su ID y el catálogo arma el nombre de la
+    //     ficha con su nombre («Pantalla Samsung A15»), que el frontend recorta con `partLabel`;
+    //   · una categoría CON productos no se borra (se dice cuántos son: el remedio es pasarlos a otra);
+    //   · renombrar NO reescribe los nombres de las fichas ya cargadas (esas quedan como se guardaron).
+
+    /// ¿Esta categoría es una de las del PADRÓN DE TELÉFONOS (`catalog::PHONE_CATEGORIES`)?
+    ///
+    /// **El padrón es por ID** (es lo que filtran `phones.rs`, `loadlist.rs` y `catalog.rs`), así que
+    /// el criterio también es por ID: el badge de la pantalla dice exactamente lo que el motor hace.
+    /// Antes también se protegía por NOMBRE y eso mentía en una base chica: una categoría propia
+    /// llamada «Táctil» quedaba marcada como padrón (y sin poder renombrar ni borrar) mientras el
+    /// padrón de modelos NO la miraba. Los nombres del padrón no se pueden DUPLICAR (el duplicado
+    /// plegado devuelve la existente), así que protegerlas por id alcanza — y `add_category` además
+    /// **reserva** esos ids para que una categoría nueva nunca caiga en ellos.
+    fn es_categoria_del_padron(id: i64) -> bool {
+        crate::catalog::PHONE_CATEGORIES.contains(&id)
+    }
+
+    /// Nombre de categoría validado (recortado, no vacío, tope 40) — el mismo criterio para crear
+    /// y para renombrar, así lo que se puede escribir es exactamente lo que se puede corregir.
+    fn nombre_de_categoria(name: &str) -> SqlResult<String> {
+        let nombre = name.trim();
+        if nombre.is_empty() {
+            return Err(day_shift_error("El nombre de la categoría no puede estar vacío."));
+        }
+        if nombre.chars().count() > 40 {
+            return Err(day_shift_error("El nombre de la categoría es muy largo (máximo 40 caracteres)."));
+        }
+        Ok(nombre.to_string())
+    }
+
+    /// Descripción opcional (vacía → NULL, nunca cadena vacía guardada).
+    fn descripcion_de_categoria(description: &str) -> Option<String> {
+        let d = description.trim();
+        if d.is_empty() { None } else { Some(d.chars().take(200).collect()) }
+    }
+
+    /// F65 — Las categorías del catálogo con su uso real (fichas, unidades y si son del padrón).
+    /// Lo llama la pestaña «Ajustes» (dueño): con esto la pantalla puede decir POR QUÉ una categoría
+    /// no se puede borrar antes de intentarlo. Es de SOLO LECTURA (sin gate de rol, como el resto).
+    pub fn get_categories_with_usage(&self) -> SqlResult<Vec<CategoryUsage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.name, c.description,
+                    (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id),
+                    (SELECT COALESCE(SUM(p.stock), 0) FROM products p WHERE p.category_id = c.id)
+             FROM categories c ORDER BY c.name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let name: String = r.get(1)?;
+            Ok(CategoryUsage {
+                phone_padron: Self::es_categoria_del_padron(id),
+                id,
+                name,
+                description: r.get(2)?,
+                products: r.get(3)?,
+                units: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows { out.push(row?); }
+        Ok(out)
+    }
+
+    /// F65 — Crea una categoría de producto y devuelve la categoría resultante.
+    /// Si el nombre ya existe (comparando plegado) NO se crea: se devuelve la que ya está con
+    /// `created = false`, para que la UI la deje elegida y avise en vez de partir el catálogo en dos.
+    /// No exige día abierto: es una preferencia del local, no plata (igual que las categorías de trabajo).
+    pub fn add_category(&self, name: &str, description: &str) -> SqlResult<CategoryOutcome> {
+        let nombre = Self::nombre_de_categoria(name)?;
+        let desc = Self::descripcion_de_categoria(description);
+        let conn = self.conn.lock().unwrap();
+        let clave = plegar_texto(&nombre);
+        let existentes: Vec<(i64, String, Option<String>)> = {
+            let mut stmt = conn.prepare("SELECT id, name, description FROM categories")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut v = Vec::new();
+            for row in rows { v.push(row?); }
+            v
+        };
+        if let Some((id, ya, ya_desc)) = existentes.iter().find(|(_, n, _)| plegar_texto(n) == clave) {
+            return Ok(CategoryOutcome {
+                category: Category { id: *id, name: ya.clone(), description: ya_desc.clone() },
+                created: false,
+            });
+        }
+        // EL ID SE ELIGE A MANO (2ª vuelta adversarial): `PHONE_CATEGORIES = [1, 18, 19]` es el padrón
+        // de teléfonos **por ID** — lo filtran `phones.rs`, `loadlist.rs` y `catalog.rs`, y el barrido
+        // «la lista es todo» pone en 0 el stock de esas categorías. `AUTOINCREMENT` reparte los ids de
+        // a uno, así que en una base creada por `init()` (6 categorías del arranque, sin Táctil ni
+        // Táctil Tablet) la **12.ª y la 13.ª** categoría que creaba el dueño caían JUSTO en 18 y 19: sus
+        // fichas entraban al padrón de Modelos, el barrido les ponía el stock en 0 y la categoría
+        // quedaba fija (sin poder renombrar ni borrar) sin que nadie lo hubiera pedido. Reservar esos
+        // ids es más barato —y más seguro— que cambiar el padrón.
+        //
+        // Se toma `MAX(id) + 1` (y no el `last_insert_rowid`): un id que se libere al borrar la última
+        // categoría puede volver a usarse, y eso es inocuo porque una categoría SOLO se puede borrar
+        // cuando ningún producto la usa (nada queda apuntando a ese id).
+        let mut id_nuevo: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM categories", [], |r| r.get(0))?;
+        while crate::catalog::PHONE_CATEGORIES.contains(&id_nuevo) {
+            id_nuevo += 1;
+        }
+        conn.execute(
+            "INSERT INTO categories (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id_nuevo, nombre, desc],
+        )?;
+        Ok(CategoryOutcome { category: Category { id: id_nuevo, name: nombre, description: desc }, created: true })
+    }
+
+    /// F65 — Renombra una categoría (y actualiza su descripción). NO toca ningún producto: el
+    /// `category_id` de las fichas sigue siendo el mismo, así que lo ya cargado se lee igual (las
+    /// fichas conservan el nombre con el que se guardaron; el nombre nuevo se usa de acá en adelante).
+    /// Las del padrón de teléfonos solo aceptan cambio de DESCRIPCIÓN (mismo nombre exacto).
+    pub fn rename_category(&self, id: i64, name: &str, description: &str) -> SqlResult<Category> {
+        let nombre = Self::nombre_de_categoria(name)?;
+        let desc = Self::descripcion_de_categoria(description);
+        let conn = self.conn.lock().unwrap();
+        let actual: Option<String> = conn
+            .query_row("SELECT name FROM categories WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?;
+        let actual = actual.ok_or_else(|| day_shift_error("Categoría no encontrada."))?;
+        // Las del padrón de teléfonos: el NOMBRE es fijo (el buscador de modelos y el nombre de las
+        // fichas dependen de él), pero la DESCRIPCIÓN sí se puede anotar — por eso el gate compara el
+        // nombre exacto: mandar el mismo nombre es «solo descripción», cualquier otro es renombrar.
+        // Las del PADRÓN DE TELÉFONOS: el NOMBRE es fijo (el buscador de modelos y el nombre de las
+        // fichas dependen de él), pero la DESCRIPCIÓN sí se puede anotar — por eso el gate compara el
+        // nombre exacto: mandar el mismo nombre es «solo descripción», cualquier otro es renombrar.
+        if Self::es_categoria_del_padron(id) && nombre != actual {
+            return Err(day_shift_error(&format!(
+                "«{}» es una de las categorías del padrón de teléfonos: su nombre es fijo (el buscador de modelos y el nombre de las fichas dependen de él). Sí podés cambiarle la descripción.",
+                actual
+            )));
+        }
+        let clave = plegar_texto(&nombre);
+        let repetida: Option<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM categories WHERE id <> ?1")?;
+            let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for row in rows { v.push(row?); }
+            v.into_iter().find(|n| plegar_texto(n) == clave)
+        };
+        if let Some(otra) = repetida {
+            return Err(day_shift_error(&format!("Ya existe otra categoría con ese nombre: «{}».", otra)));
+        }
+        conn.execute(
+            "UPDATE categories SET name=?1, description=?2 WHERE id=?3",
+            params![nombre, desc, id],
+        )?;
+        Ok(Category { id, name: nombre, description: desc })
+    }
+
+    /// F65 — Borra una categoría VACÍA (deshacer un error de tipeo). Fail-closed:
+    ///   · no existe → error;
+    ///   · es del padrón de teléfonos → error (aunque esté vacía);
+    ///   · la usan productos → error diciendo CUÁNTOS (el remedio: pasarlos a otra categoría).
+    pub fn delete_category(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let actual: Option<String> = conn
+            .query_row("SELECT name FROM categories WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?;
+        let actual = actual.ok_or_else(|| day_shift_error("Categoría no encontrada."))?;
+        if Self::es_categoria_del_padron(id) {
+            return Err(day_shift_error(&format!(
+                "«{}» es una de las categorías del padrón de teléfonos: no se puede eliminar.",
+                actual
+            )));
+        }
+        let usos: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM products WHERE category_id=?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if usos > 0 {
+            return Err(day_shift_error(&format!(
+                "No se puede eliminar «{}»: {} productos la están usando. Pasalos a otra categoría y volvé a intentar (ninguna ficha se borra por esto).",
+                actual, usos
+            )));
+        }
+        conn.execute("DELETE FROM categories WHERE id=?1", params![id])?;
+        Ok(())
     }
 
     pub fn get_payment_methods(&self) -> SqlResult<Vec<PaymentMethod>> {
@@ -5108,25 +5340,6 @@ impl Database {
     // (no del producto) y NO tocan las órdenes viejas: la etiqueta viaja dentro de cada orden, así que
     // borrar o renombrar una categoría más adelante no rompe nada de lo ya registrado.
 
-    /// Plegado del nombre para comparar duplicados: minúsculas, sin acentos y solo alfanuméricos —
-    /// el MISMO criterio que el plegado del frontend, para que «Cambio de Tapa» y «cambio de tapa»
-    /// sean la misma categoría y no se creen dos.
-    fn plegar_trabajo(s: &str) -> String {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(|c| c.to_lowercase())
-            .map(|c| match c {
-                'á' | 'à' | 'ä' | 'â' => 'a',
-                'é' | 'è' | 'ë' | 'ê' => 'e',
-                'í' | 'ì' | 'ï' | 'î' => 'i',
-                'ó' | 'ò' | 'ö' | 'ô' => 'o',
-                'ú' | 'ù' | 'ü' | 'û' => 'u',
-                'ñ' => 'n',
-                otro => otro,
-            })
-            .collect()
-    }
-
     /// Las categorías extra del local (JSON array; `[]` si nunca se agregó ninguna o el valor guardado
     /// no es un array válido — fail-closed: nunca se devuelve basura al frontend).
     pub fn get_work_types_extra(&self) -> SqlResult<String> {
@@ -5154,8 +5367,8 @@ impl Database {
         }
         let actual = self.get_work_types_extra()?;
         let mut lista: Vec<String> = serde_json::from_str(&actual).unwrap_or_default();
-        let clave = Self::plegar_trabajo(nombre);
-        if lista.iter().any(|x| Self::plegar_trabajo(x) == clave) {
+        let clave = plegar_texto(nombre);
+        if lista.iter().any(|x| plegar_texto(x) == clave) {
             return Err(day_shift_error("Esa categoría ya existe."));
         }
         lista.push(nombre.to_string());
@@ -5169,10 +5382,10 @@ impl Database {
     /// NO toca las órdenes: la etiqueta vive dentro de cada orden, así que lo ya registrado se lee
     /// igual (y el trabajo sigue apareciendo en los contadores como etiqueta propia).
     pub fn remove_work_type_extra(&self, name: &str) -> SqlResult<String> {
-        let clave = Self::plegar_trabajo(name);
+        let clave = plegar_texto(name);
         let actual = self.get_work_types_extra()?;
         let lista: Vec<String> = serde_json::from_str(&actual).unwrap_or_default();
-        let quedan: Vec<String> = lista.into_iter().filter(|x| Self::plegar_trabajo(x) != clave).collect();
+        let quedan: Vec<String> = lista.into_iter().filter(|x| plegar_texto(x) != clave).collect();
         let json = serde_json::to_string(&quedan)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         self.set_setting("work_types_extra", &json)?;
@@ -6194,6 +6407,26 @@ fn day_shift_error(msg: &str) -> rusqlite::Error {
         rusqlite::ffi::Error::new(rusqlite::ffi::ErrorCode::CannotOpen as i32),
         Some(msg.to_string()),
     )
+}
+
+/// F62/F65 — Plegado de un NOMBRE (de trabajo o de categoría) para comparar duplicados:
+/// minúsculas, sin acentos y solo alfanuméricos. Es el MISMO criterio que `foldWork`/`normPhoneModel`
+/// del frontend, así que «Cambio de Tapa» y «cambio de tapa» son el mismo nombre y no se crean dos
+/// (una sola implementación: la usan las categorías de trabajo del local y las de producto).
+pub(crate) fn plegar_texto(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            otro => otro,
+        })
+        .collect()
 }
 
 /// F32 — ¿este estado es de TALLER (el equipo todavía está en el local)?
@@ -9549,6 +9782,160 @@ discount_amount: 0.0,
         // Un valor corrupto en `settings` no rompe la pantalla: se devuelve [].
         db.set_setting("work_types_extra", "{no es un array").unwrap();
         assert_eq!(db.get_work_types_extra().unwrap(), "[]");
+
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F65 — las categorías de PRODUCTO que agrega el local: se crean (sin duplicar), se renombran
+    /// sin tocar ninguna ficha, y solo se borran si están VACÍAS (las del padrón de teléfonos nunca).
+    #[test]
+    fn test_categories_add_rename_delete() {
+        let test_path = PathBuf::from("test_f65_categories.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // La lista de arranque trae las del `init` y «Pantalla» (id 1) es la del padrón de teléfonos.
+        let base = db.get_categories_with_usage().unwrap();
+        let n0 = base.len();
+        assert!(n0 >= 6, "categorías del init: {n0}");
+        let pantalla = base.iter().find(|c| c.name == "Pantalla").expect("Pantalla existe");
+        assert!(pantalla.phone_padron, "Pantalla es del padrón de teléfonos");
+
+        // CREAR: devuelve la categoría con su id, recién nacida y sin productos.
+        let nueva = db.add_category("Tapa trasera", "Tapas y carasas").unwrap();
+        assert!(nueva.created, "es nueva");
+        assert!(nueva.category.id > 0);
+        assert_eq!(nueva.category.name, "Tapa trasera");
+        assert_eq!(nueva.category.description.as_deref(), Some("Tapas y carasas"));
+        let tras = db.get_categories_with_usage().unwrap();
+        let fila = tras.iter().find(|c| c.id == nueva.category.id).expect("aparece en la lista");
+        assert_eq!((fila.products, fila.units), (0, 0));
+        assert!(!fila.phone_padron, "una categoría nueva NO es del padrón");
+
+        // Se recorta el espacio de los bordes y la descripción vacía queda en NULL.
+        let otra = db.add_category("  Cámaras  ", "   ").unwrap();
+        assert_eq!(otra.category.name, "Cámaras");
+        assert_eq!(otra.category.description, None);
+
+        // DUPLICADO plegado (mayúsculas/acentos) → se devuelve LA QUE YA ESTÁ, no una gemela.
+        let dup = db.add_category("CAMARAS", "otra cosa").unwrap();
+        assert!(!dup.created, "no se creó nada");
+        assert_eq!(dup.category.id, otra.category.id, "es la misma categoría");
+        assert_eq!(dup.category.description, None, "tampoco se le pisa la descripción");
+        assert_eq!(db.add_category("camaras", "").unwrap().category.id, otra.category.id);
+        assert_eq!(db.get_categories().unwrap().len(), n0 + 2, "solo dos categorías nuevas");
+
+        // Vacío y demasiado largo → rechazados con mensaje (validación del backend).
+        assert!(db.add_category("   ", "").unwrap_err().to_string().contains("vacío"));
+        assert!(db.add_category(&"x".repeat(41), "").unwrap_err().to_string().contains("muy largo"));
+
+        // Un producto entra en la categoría nueva: la lista de uso lo cuenta.
+        let pid = db.add_product("Tapa Samsung A15", Some(nueva.category.id), "Samsung", "A15", "",
+                                 "[\"Samsung A15\"]", 1.0, 2.0, 4, 0, 0.0).unwrap();
+        let antes = db.get_products("", None).unwrap().into_iter().find(|p| p.id == pid).unwrap();
+        let fila = db.get_categories_with_usage().unwrap();
+        let fila = fila.iter().find(|c| c.id == nueva.category.id).unwrap();
+        assert_eq!((fila.products, fila.units), (1, 4), "una ficha con 4 unidades");
+
+        // CON PRODUCTOS no se borra: el mensaje dice cuántos son y la categoría sigue ahí.
+        let err = db.delete_category(nueva.category.id).unwrap_err().to_string();
+        assert!(err.contains("1 productos"), "mensaje: {err}");
+        assert!(db.get_categories().unwrap().iter().any(|c| c.id == nueva.category.id));
+
+        // RENOMBRAR: cambia el nombre de la categoría; la ficha NO se toca (mismo category_id y
+        // mismo nombre guardado), y el JOIN del listado ya muestra el nombre nuevo.
+        let ren = db.rename_category(nueva.category.id, "Tapas y carcasas", "Tapas y forros").unwrap();
+        assert_eq!(ren.name, "Tapas y carcasas");
+        assert_eq!(ren.description.as_deref(), Some("Tapas y forros"));
+        let despues = db.get_products("", None).unwrap().into_iter().find(|p| p.id == pid).unwrap();
+        assert_eq!(despues.category_id, Some(nueva.category.id), "la ficha no se movió");
+        assert_eq!(despues.category_name.as_deref(), Some("Tapas y carcasas"));
+        assert_eq!(despues.name, antes.name, "el nombre de la ficha NO se reescribe al renombrar");
+
+        // Renombrar a un nombre que ya existe (plegado) → rechazado, y no cambia nada.
+        let err = db.rename_category(nueva.category.id, "cámaras", "").unwrap_err().to_string();
+        assert!(err.contains("Ya existe otra categoría"), "mensaje: {err}");
+        assert!(db.get_categories().unwrap().iter().any(|c| c.name == "Tapas y carcasas"));
+
+        // Las del PADRÓN DE TELÉFONOS no se renombran (rompería el padrón y los nombres de las fichas),
+        // pero su DESCRIPCIÓN sí se puede anotar mandando el mismo nombre.
+        let err = db.rename_category(pantalla.id, "Pantallas", "").unwrap_err().to_string();
+        assert!(err.contains("padrón de teléfonos"), "mensaje: {err}");
+        db.rename_category(pantalla.id, "Pantalla", "El vidrio completo del equipo").unwrap();
+        let p2 = db.get_categories_with_usage().unwrap();
+        assert_eq!(p2.iter().find(|c| c.id == pantalla.id).unwrap().description.as_deref(),
+                   Some("El vidrio completo del equipo"), "solo cambió la descripción");
+        let err = db.delete_category(pantalla.id).unwrap_err().to_string();
+        assert!(err.contains("padrón de teléfonos"), "mensaje: {err}");
+        // Y el padrón de teléfonos se protege POR ID (es lo que filtran phones.rs/loadlist.rs): una
+        // categoría PROPIA llamada «Táctil» en una base que no tiene la del padrón NO queda fija —
+        // antes se marcaba por nombre y la pantalla mentía (badge + sin poder renombrar) mientras el
+        // padrón de modelos ni la miraba.
+        let tactil = db.add_category("Táctil", "").unwrap();
+        assert!(tactil.created, "en una base chica la crea");
+        assert!(tactil.category.id != pantalla.id);
+        assert!(!db.get_categories_with_usage().unwrap()
+            .iter().find(|c| c.id == tactil.category.id).unwrap().phone_padron,
+            "una «Táctil» propia no es el padrón (el padrón es por id)");
+        db.rename_category(tactil.category.id, "Táctil de tablet", "").unwrap();
+        db.delete_category(tactil.category.id).unwrap();
+        assert!(!db.get_categories().unwrap().iter().any(|c| c.id == tactil.category.id));
+
+        // RESERVA DE IDS (2ª vuelta adversarial): en una base chica (las 6 del init) la 12.ª y la 13.ª
+        // categoría que crea el dueño caían en los ids 18 y 19 = `PHONE_CATEGORIES` → sus fichas
+        // entraban al padrón de Modelos, el barrido les ponía el stock en 0 y quedaban fijas sin que
+        // nadie lo hubiera pedido. `add_category` los saltea.
+        let mut creadas = Vec::new();
+        for i in 1..=14 {
+            creadas.push(db.add_category(&format!("Categoría {i:02}"), "").unwrap().category.id);
+        }
+        assert!(!creadas.contains(&18) && !creadas.contains(&19),
+                "los ids del padrón quedan reservados: {creadas:?}");
+        assert!(creadas.contains(&17) && creadas.contains(&20), "y no se pierde ningún id libre: {creadas:?}");
+        let con_uso = db.get_categories_with_usage().unwrap();
+        assert_eq!(con_uso.iter().filter(|c| c.phone_padron).map(|c| c.id).collect::<Vec<_>>(),
+                   vec![pantalla.id], "solo el padrón real queda marcado");
+        for id in &creadas { db.delete_category(*id).unwrap(); }
+        assert_eq!(db.get_categories().unwrap().len(), n0 + 2,
+                   "se limpiaron las 14 de prueba: quedan las del init + las dos de arriba");
+
+        // VACÍA → sí se borra (deshacer un error de tipeo).
+        db.delete_category(otra.category.id).unwrap();
+        assert!(!db.get_categories().unwrap().iter().any(|c| c.id == otra.category.id));
+
+        // Id inexistente → mensaje claro, nunca un error críptico de SQLite.
+        assert!(db.delete_category(99999).unwrap_err().to_string().contains("no encontrada"));
+        assert!(db.rename_category(99999, "X", "").unwrap_err().to_string().contains("no encontrada"));
+
+        // Y los TOTALES POR CATEGORÍA (memoria corta del catálogo, `cache.rs`) reflejan la categoría
+        // nueva y el nombre corregido sin quedarse pegados: la memoria se invalida con
+        // `total_changes()`, o sea que una escritura de categorías también la vence.
+        let stats = db.get_inventory_stats().unwrap();
+        assert!(stats.by_category.iter().any(|c| c.name == "Tapas y carcasas" && c.sku == 1),
+                "la categoría corregida aparece con su ficha: {:?}",
+                stats.by_category.iter().map(|c| (&c.name, c.sku)).collect::<Vec<_>>());
+        assert!(!stats.by_category.iter().any(|c| c.name == "Tapa trasera"),
+                "el nombre viejo ya no está");
+
+        drop(db);
+
+        // UNA BASE INSTALADA ANTES de que existiera `categories.description` se ARREGLA al abrir la
+        // app (migración idempotente de `init()`): sin eso, `SELECT *` con mapping posicional fallaba
+        // y el desplegable de categorías caía al mock del frontend (una sola categoría, sin arreglo).
+        {
+            let conn = Connection::open(&test_path).unwrap();
+            conn.execute_batch("ALTER TABLE categories DROP COLUMN description;").unwrap();
+            conn.execute_batch("INSERT INTO categories (name) VALUES ('De la base vieja');").unwrap();
+            drop(conn);
+            let viejo = Database::new(&test_path).expect("init sobre una base vieja");
+            let cats = viejo.get_categories().expect("la columna se agrega sola en init()");
+            assert!(cats.iter().any(|c| c.name == "De la base vieja"), "la categoría vieja sigue");
+            let con_uso = viejo.get_categories_with_usage().unwrap();
+            assert_eq!(con_uso.iter().filter(|c| c.description.is_none()).count(), con_uso.len(),
+                       "description queda NULL, no rompe la lectura");
+            assert!(con_uso.iter().any(|c| c.name == "Pantalla" && c.phone_padron));
+            drop(viejo);
+        }
 
         let _ = std::fs::remove_file(&test_path);
     }

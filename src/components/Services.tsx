@@ -54,6 +54,7 @@ import { ACTIVE_SENTINEL, matchesWorkFilter, scopeLabel, scopeProblem, serviceRe
 import type { ScopeInput, ScopeKind } from '@/lib/service-report';
 // F57: el filtro de trabajos es UN solo selector con buscador (adiós al muro de 49 chips).
 import { WorkPicker } from './WorkPicker';
+import { useEscapeGuard } from './use-escape-guard';
 // F58: la tabla de equivalencias de etiquetas («bateria» → «Cambio batería») es una sola, revisable,
 // y se aplica al contar, al filtrar y al GUARDAR (así no nacen sinónimos nuevos).
 import { canonicalWorkLabel, foldWork } from '@/lib/work-aliases';
@@ -76,7 +77,7 @@ const agregarTrabajoDeOtro = (arr: string[], texto: string): void => {
   if (!arr.some(t => foldWork(t) === clave)) arr.push(etiqueta);
 };
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput } from '../types';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate } from '../types';
 import type { PhoneModelEntry } from '@/lib/utils';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
@@ -1590,6 +1591,13 @@ interface FormDevice {
   screenProductId: number | null;
   /** true = el técnico confirmó entregar una pantalla AGOTADA (queda faltante) */
   screenConfirm: boolean;
+  /**
+   * F65c — la pantalla que el operario eligió BUSCÁNDOLA a mano: no venía en la compatibilidad del
+   * modelo, así que no está en `screenOptions` y hay que guardarla aparte para poder mostrarla como
+   * elegida (y para que los avisos de stock/otra marca sigan funcionando). Es estado de FORMULARIO:
+   * no viaja al backend (lo que se guarda es `screen_product_id`).
+   */
+  screenExtra?: ScreenCandidate | null;
 }
 
 function emptyDevice(): FormDevice {
@@ -1708,6 +1716,11 @@ function NuevaCategoriaChip({ onAgregar, onCancelar, existentes, locales = [], o
   const [abierto, setAbierto] = useState(false);
   const [nombre, setNombre] = useState('');
   const [guardando, setGuardando] = useState(false);
+  // F65 (2ª vuelta): Escape cierra ESTE panel, no el asistente de la orden. Sin esto, Radix (que
+  // escucha Escape en la captura de `document`) cerraba el formulario del servicio ENTERO y se perdía
+  // la orden que se estaba registrando. Mismo defecto medido y arreglado en el «+ Nueva categoría»
+  // del producto (`useEscapeGuard`).
+  useEscapeGuard(abierto, () => { setNombre(''); setAbierto(false); onCancelar(); });
   if (!abierto) {
     return (
       <button type="button" data-nueva-categoria
@@ -1801,6 +1814,15 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   // Compatibilidad resuelta por el backend para el modelo escrito
   const { candidates, loading: compatLoading } = useCompatibleProducts(device.model);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
+  // F65c: si el operario buscó OTRA pantalla (que no está en la compatibilidad del modelo), se suma
+  // a las opciones para que figure como ELEGIDA y con sus avisos (stock / otra marca). El gate
+  // (`screenOk`) solo pide que haya una elegida, así que esto no lo relaja: lo hace visible.
+  const screenOptionsTodas = useMemo(
+    () => (device.screenExtra && !screenOptions.some(o => o.product.id === device.screenExtra!.product.id)
+      ? [device.screenExtra, ...screenOptions]
+      : screenOptions),
+    [screenOptions, device.screenExtra],
+  );
   const isScreenJob = device.serviceTypes.includes('Cambio pantalla');
   // F63: con un trabajo que NO es de pantalla, el bloque de compatibilidad se consulta igual (la
   // consulta ya se hacía) pero se muestra plegado, para no llenar el formulario de un trabajo simple.
@@ -1830,7 +1852,7 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   }, [device.model]);
 
   // El formulario necesita saber si este equipo tiene la pantalla resuelta
-  const screenValid = screenOk(device.serviceTypes, device.screenProductId, screenOptions);
+  const screenValid = screenOk(device.serviceTypes, device.screenProductId, screenOptionsTodas);
   useEffect(() => {
     onScreenValid?.(index, screenValid);
   }, [index, screenValid, onScreenValid]);
@@ -1845,6 +1867,13 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
     if (auto) onChange({ screenProductId: auto.product.id, screenConfirm: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenOptions, isScreenJob, device.screenProductId, refProductId]);
+
+  // F65c: al CAMBIAR de modelo, la pantalla buscada a mano del modelo anterior deja de tener sentido
+  // (era «otra pantalla» para ESE teléfono): se suelta para no arrastrar un repuesto de otro equipo.
+  useEffect(() => {
+    if (device.screenExtra) onChange({ screenExtra: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device.model]);
 
   const selectModel = (label: string) => {
     onChange({ model: label, modelPicked: true });
@@ -1900,15 +1929,32 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
         </div>
         <div className="space-y-2">
           <label className="text-sm font-medium">Monto ($) — precio del servicio</label>
-          <Input type="number" step={0.01} min={0} value={device.amount}
-            onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
+          {/* F49b (pedido del dueño, 2026-09-23): «el descuento ocupa demasiado, tengo el botón de
+              descuento en la card». El descuento pasa AL LADO del precio — se escribe y el total se ve
+              en el acto, como en la factura — en vez de ocupar un renglón entero con dos líneas de
+              ayuda (las mismas palabras ahora están en el `title` del campo). */}
+          <div className="flex items-center gap-2">
+            <Input type="number" step={0.01} min={0} value={device.amount}
+              aria-label="Monto ($) del servicio"
+              onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
+            <span className="shrink-0 text-xs text-muted-foreground" aria-hidden>−</span>
+            <Input type="number" step={0.01} min={0} value={device.discount || ''} placeholder="Desc."
+              aria-label="Descuento ($) del servicio" data-field="descuento-servicio"
+              title="Descuento en $ sobre el precio. Se imprime en la factura y aplica con cualquier método de pago. (En una orden ya guardada se cambia desde el botón «Descuento» de la tarjeta.)"
+              className="w-24 shrink-0"
+              onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
+          </div>
           {isDivisas && divHints && (
             <p className="text-xs text-muted-foreground">
               Precio lista ${divHints.base.toFixed(2)} · Efectivo sugerido ${divHints.usdPrice.toFixed(2)}
             </p>
           )}
-          {device.discount > 0.005 && (
-            <p className="text-xs font-semibold text-emerald-700">Total a pagar: ${deviceNet.toFixed(2)}</p>
+          {device.discount > 0.005 ? (
+            <p className="text-xs font-semibold text-emerald-700" data-total-descuento>
+              ${device.amount.toFixed(2)} − ${device.discount.toFixed(2)} = <span className="text-sm">Total ${deviceNet.toFixed(2)}</span>
+            </p>
+          ) : noCatalogPrice && (
+            <p className="text-xs text-muted-foreground">Sin precios en el catálogo para este modelo: escribí el precio a mano.</p>
           )}
         </div>
         <div className="space-y-2">
@@ -1919,20 +1965,41 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
         </div>
       </div>
 
-      <div className="space-y-2">
-        <label className="text-sm font-medium">Descuento ($)</label>
-        <Input type="number" step={0.01} min={0} value={device.discount}
-          onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
-        <p className="text-xs text-muted-foreground">
-          {device.discount > 0.005 ? (
-            <>Precio ${device.amount.toFixed(2)} − Descuento ${device.discount.toFixed(2)} → <span className="font-semibold text-emerald-700">Total ${deviceNet.toFixed(2)}</span></>
-          ) : noCatalogPrice ? (
-            <>Sin precios en el catálogo para este modelo: escribe el precio y el descuento a mano (el total se calcula solo).</>
-          ) : (
-            <>Sin descuento: el cliente paga el precio completo. El descuento aplica con cualquier método de pago.</>
-          )}
-        </p>
-      </div>
+      {/* ── F63/F65c — LA PANTALLA DEL MODELO, JUNTO AL MODELO ──────────────────────────────────
+          Pedido del dueño (2026-09-21): «dependiendo del modelo del equipo, si tiene compatibilidad
+          en pantalla para ese modelo tiene que dejarme seleccionar la compatibilidad si tiene».
+          Y (2026-09-23): «el input debería estar cerca al colocar el modelo… que pueda elegir la
+          pantalla de ese modelo o su compatibilidad, pero con el beneficio de buscar otra pantalla
+          que desee el operador seleccionar». Antes el bloque vivía abajo de todo (después de los
+          trabajos y de la falla): ahora va JUSTO DEBAJO del modelo/monto/color, que es donde el
+          operario acaba de escribir el teléfono y decide qué repuesto le pone.
+          El comportamiento del gate no cambió: con «Cambio pantalla» va abierto y la elección es
+          obligatoria (`screenOk`); con otro trabajo queda la línea informativa con la cantidad de
+          repuestos compatibles y se abre a un toque (informativo, no descuenta stock). */}
+      {!isScreenJob && !compatLoading && screenOptionsTodas.length > 0 && (
+        <button type="button" data-ver-compat
+          onClick={() => setVerCompat(v => !v)}
+          title="Ver los repuestos de pantalla compatibles con este modelo"
+          className="self-start rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
+          <Smartphone className="size-3 inline mr-1" />
+          Compatibilidad de pantalla: {screenOptionsTodas.length} repuesto{screenOptionsTodas.length === 1 ? '' : 's'}
+          {verCompat ? ' — ocultar' : ' — ver'}
+        </button>
+      )}
+
+      {(isScreenJob || verCompat) && (
+        <ScreenSelect
+          screenProductId={device.screenProductId}
+          screenOptions={screenOptionsTodas}
+          loading={compatLoading}
+          confirmed={device.screenConfirm}
+          descuenta={isScreenJob}
+          permiteBuscar
+          onPickOtra={c => onChange({ screenExtra: c })}
+          onChange={id => onChange({ screenProductId: id })}
+          onConfirm={v => onChange({ screenConfirm: v })}
+        />
+      )}
 
       <div className="space-y-2">
         {/* F62: el rótulo y el botón «+ Nueva categoría» van juntos: el operario agrega la categoría
@@ -1989,38 +2056,6 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           </>
         )}
       </div>
-
-      {/* ── F63 — LA COMPATIBILIDAD DE PANTALLA DEL MODELO SIEMPRE SE PUEDE VER/ELEGIR ──────────
-          Pedido del dueño (2026-09-21): «dependiendo del modelo del equipo, si tiene compatibilidad
-          en pantalla para ese modelo tiene que dejarme seleccionar la compatibilidad si tiene».
-          Antes el bloque solo existía si el trabajo incluía «Cambio pantalla», así que con cualquier
-          otro trabajo la compatibilidad del modelo quedaba invisible aunque estuviera cargada.
-          Ahora: si el trabajo ES «Cambio pantalla» el bloque va ABIERTO y la pantalla es obligatoria
-          (gate de inventario intacto, `screenOk`); con cualquier otro trabajo aparece una línea con
-          la cantidad de repuestos compatibles y se abre a un toque — es informativo y NO descuenta
-          stock (el descuento sigue viviendo en el trabajo «Cambio pantalla»). */}
-      {!isScreenJob && !compatLoading && screenOptions.length > 0 && (
-        <button type="button" data-ver-compat
-          onClick={() => setVerCompat(v => !v)}
-          title="Ver los repuestos de pantalla compatibles con este modelo"
-          className="self-start rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground">
-          <Smartphone className="size-3 inline mr-1" />
-          Compatibilidad de pantalla: {screenOptions.length} repuesto{screenOptions.length === 1 ? '' : 's'}
-          {verCompat ? ' — ocultar' : ' — ver'}
-        </button>
-      )}
-
-      {(isScreenJob || verCompat) && (
-        <ScreenSelect
-          screenProductId={device.screenProductId}
-          screenOptions={screenOptions}
-          loading={compatLoading}
-          confirmed={device.screenConfirm}
-          descuenta={isScreenJob}
-          onChange={id => onChange({ screenProductId: id })}
-          onConfirm={v => onChange({ screenConfirm: v })}
-        />
-      )}
 
       <div className="space-y-2">
         <label className="text-sm font-medium">Falla / Trabajo realizado <span className="font-normal text-muted-foreground">(opcional)</span></label>
@@ -2252,6 +2287,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   const [svc, setSvc] = useState<Service | null>(service);
   const [screenProductId, setScreenProductId] = useState<number | null>(null);
   const [screenConfirm, setScreenConfirm] = useState(true);  // F47: arranca marcada (ver emptyDevice)
+  /** F65c: la pantalla que el operario buscó a mano (ver `screenOptionsTodas`). */
+  const [screenExtra, setScreenExtra] = useState<ScreenCandidate | null>(null);
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [techSel, setTechSel] = useState('');
   const [showTechDialog, setShowTechDialog] = useState(false);
@@ -2380,6 +2417,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   // Compatibilidad del modelo (backend) para el modo edición de UNA orden
   const { candidates, loading: compatLoading } = useCompatibleProducts(model);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
+  // F65c: la pantalla buscada A MANO (no estaba en la compatibilidad del modelo) se suma como opción.
+  const screenOptionsTodas = useMemo(
+    () => (screenExtra && !screenOptions.some(o => o.product.id === screenExtra.product.id)
+      ? [screenExtra, ...screenOptions]
+      : screenOptions),
+    [screenOptions, screenExtra],
+  );
   const isScreenJobEdit = serviceTypes.includes('Cambio pantalla');
 
   /** F53 — pantalla de REFERENCIA del modelo (se busca en el padrón cuando la orden ya tiene modelo). */
@@ -3007,25 +3051,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Monto ($)</label>
-              <Input type="number" step={0.01} min={0} value={amount}
-                onChange={e => { amountTouched.current = true; setAmount(Number(e.target.value)); }} />
+              {/* F49b: el descuento va al lado del precio (misma idea que el wizard de alta). */}
+              <div className="flex items-center gap-2">
+                <Input type="number" step={0.01} min={0} value={amount}
+                  aria-label="Monto ($) del servicio"
+                  onChange={e => { amountTouched.current = true; setAmount(Number(e.target.value)); }} />
+                <span className="shrink-0 text-xs text-muted-foreground" aria-hidden>−</span>
+                <Input type="number" step={0.01} min={0} value={discount || ''} placeholder="Desc."
+                  aria-label="Descuento ($) del servicio" data-field="descuento-servicio"
+                  title="Descuento en $ sobre el precio. Se imprime en la factura y aplica con cualquier método de pago. (En una orden ya guardada se cambia desde el botón «Descuento» de la tarjeta.)"
+                  className="w-24 shrink-0"
+                  onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
+              </div>
+              {discount > 0.005 ? (
+                <p className="text-xs font-semibold text-emerald-700" data-total-descuento>
+                  ${amount.toFixed(2)} − ${discount.toFixed(2)} = <span className="text-sm">Total ${Math.max(0, amount - discount).toFixed(2)}</span>
+                </p>
+              ) : editNoCatalogPrice && (
+                <p className="text-xs text-muted-foreground">Sin precios en el catálogo para este modelo: escribí el precio a mano.</p>
+              )}
             </div>
           </div>
-
-          <div className="space-y-2">
-              <label className="text-sm font-medium">Descuento ($)</label>
-              <Input type="number" step={0.01} min={0} value={discount}
-                onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
-              <p className="text-xs text-muted-foreground">
-                {discount > 0.005 ? (
-                  <>Precio ${amount.toFixed(2)} − Descuento ${discount.toFixed(2)} → <span className="font-semibold text-emerald-700">Total ${Math.max(0, amount - discount).toFixed(2)}</span></>
-                ) : editNoCatalogPrice ? (
-                  <>Sin precios en el catálogo para este modelo: escribe el precio y el descuento a mano (el total se calcula solo).</>
-                ) : (
-                  <>Sin descuento: el cliente paga el precio completo. El descuento aplica con cualquier método de pago.</>
-                )}
-              </p>
-            </div>
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Color del equipo</label>
@@ -3084,9 +3130,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
           {isScreenJobEdit && (
             <ScreenSelect
               screenProductId={screenProductId}
-              screenOptions={screenOptions}
+              screenOptions={screenOptionsTodas}
               loading={compatLoading}
               confirmed={screenConfirm}
+              permiteBuscar
+              onPickOtra={setScreenExtra}
               onChange={setScreenProductId}
               onConfirm={setScreenConfirm}
             />

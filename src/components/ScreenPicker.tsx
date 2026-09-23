@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Check, CheckCircle2, Smartphone } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { api } from '../db';
 import { cn, partLabel } from '@/lib/utils';
 import { isCrossBrand, warnsCrossBrand } from '@/lib/screen-rules';
@@ -36,7 +37,14 @@ export function useCompatibleProducts(model: string, enabled = true) {
 
 // Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala (al entregar
 // se descuenta esa y solo esa) y las agotadas se marcan aparte con confirmación obligatoria.
-export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, onChange, onConfirm }: {
+//
+// F65c (pedido del dueño, 2026-09-23): «el input debería estar cerca al colocar el modelo… que pueda
+// elegir la pantalla de ese modelo o su compatibilidad, pero con el beneficio de buscar otra pantalla
+// que desee el operador». Lo de «cerca del modelo» lo resuelve el formulario (el bloque va justo
+// debajo del modelo); acá vive la BÚSQUEDA LIBRE: el operario escribe y elige cualquier pantalla del
+// catálogo, aunque no figure en la compatibilidad de ese teléfono (se marca «buscada» y sigue
+// avisando si es de otra marca o si está agotada; al entregar descuenta ESA, como cualquier otra).
+export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, permiteBuscar = false, onPickOtra, onChange, onConfirm }: {
   screenProductId: number | null;
   screenOptions: ScreenCandidate[];
   loading: boolean;
@@ -47,11 +55,49 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
    * compatibilidad del modelo desde otro trabajo: es informativo y NO descuenta nada.
    */
   descuenta?: boolean;
+  /** F65c: muestra el buscador de «otra pantalla» (cualquiera del catálogo). */
+  permiteBuscar?: boolean;
+  /** F65c: la pantalla buscada a mano se suma a las opciones del formulario. */
+  onPickOtra?: (candidate: ScreenCandidate) => void;
   onChange: (id: number | null) => void;
   onConfirm: (v: boolean) => void;
 }) {
   const chosen = screenOptions.find(o => o.product.id === screenProductId) ?? null;
   const chosenOut = chosen != null && !chosen.in_stock;
+  const [q, setQ] = useState('');
+  const [resultados, setResultados] = useState<ScreenCandidate[]>([]);
+  const [buscando, setBuscando] = useState(false);
+
+  // Búsqueda en TODO el catálogo de pantallas (Pantalla + Táctil + Táctil Tablet, las mismas
+  // categorías del padrón del taller): una consulta paginada por categoría, con rebote.
+  useEffect(() => {
+    const s = q.trim();
+    if (!permiteBuscar || s.length < 2) { setResultados([]); return; }
+    let alive = true;
+    setBuscando(true);
+    const t = setTimeout(() => {
+      Promise.all([
+        api.getProductsPage(s, 1, null, 'todos', null, 'nombre', 4, 0),
+        api.getProductsPage(s, 18, null, 'todos', null, 'nombre', 2, 0),
+        api.getProductsPage(s, 19, null, 'todos', null, 'nombre', 2, 0),
+      ])
+        .then(rs => {
+          if (!alive) return;
+          const items = rs.flatMap(r => r.items).slice(0, 8);
+          setResultados(items.map(p => ({
+            product: p,
+            in_stock: (p.stock ?? 0) > 0,
+            match_quality: 'buscada' as const,
+            brand_match: true,
+            brand_known: false,
+          })));
+        })
+        .catch(() => { if (alive) setResultados([]); })
+        .finally(() => { if (alive) setBuscando(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(t); };
+  }, [q, permiteBuscar]);
+
   return (
     <div className="flex flex-col gap-2">
       <label className="text-sm font-medium flex items-center gap-1.5">
@@ -77,7 +123,9 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
       )}
 
       {!loading && screenOptions.length > 0 && (
-        <div data-screen-options className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-border p-1">
+        // F65c: la lista es COMPACTA a propósito (el operario ve las primeras y, si quiere otra,
+        // la busca abajo): antes medía 224 px y empujaba el formulario.
+        <div data-screen-options className="flex flex-col gap-1 max-h-40 overflow-y-auto rounded-md border border-border p-1">
           {screenOptions.map(o => {
             const { product: p, in_stock, match_quality } = o;
             const active = p.id === screenProductId;
@@ -121,6 +169,55 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
             );
           })}
         </div>
+      )}
+
+      {/* F65c — BUSCAR OTRA PANTALLA: la lista de arriba es la compatibilidad del modelo (lo que el
+          taller pone siempre); esto es para el día que el operario quiere otra cosa (una que tiene en
+          el cajón, otra variante, la que le pidió el cliente). Se elige y queda como cualquier otra:
+          al entregar descuenta ESA. */}
+      {permiteBuscar && (
+        <div className="flex flex-col gap-1" data-screen-buscar-caja>
+          <Input value={q} data-screen-buscar
+            aria-label="Buscar otra pantalla en el catálogo"
+            placeholder="Buscar otra pantalla (cualquiera del catálogo)…"
+            className="h-8 text-sm"
+            onChange={e => setQ(e.target.value)} />
+          {buscando && <p className="text-[11px] text-muted-foreground">Buscando…</p>}
+          {!buscando && q.trim().length >= 2 && resultados.length === 0 && (
+            <p className="text-[11px] text-muted-foreground" data-screen-buscar-vacio>
+              Ninguna pantalla del catálogo coincide con «{q.trim()}».
+            </p>
+          )}
+          {resultados.length > 0 && (
+            <div className="flex flex-col gap-0.5 rounded-md border border-border p-1">
+              {resultados.map(c => (
+                <button key={c.product.id} type="button" data-screen-buscada={c.product.id}
+                  onClick={() => { onChange(c.product.id); if (c.in_stock) onConfirm(false); onPickOtra?.(c); }}
+                  className="flex items-center justify-between gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-accent">
+                  <span className="truncate text-muted-foreground">
+                    {partLabel(c.product)}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {c.product.price_sale > 0 && <span className="tabular-nums text-muted-foreground">${c.product.price_sale.toFixed(2)}</span>}
+                    <Badge variant={c.in_stock ? 'default' : 'outline'}
+                      className={cn('text-[10px] tabular-nums', c.in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}>
+                      {c.in_stock ? `stock ${c.product.stock}` : 'agotada'}
+                    </Badge>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* F65c: se dice que la elegida NO venía en la compatibilidad del modelo (la buscó el operario):
+          así nadie cree que el catálogo la da por compatible con ese teléfono. */}
+      {chosen && chosen.match_quality === 'buscada' && (
+        <p className="text-[11px] text-amber-700" data-screen-elegida-a-mano>
+          «{partLabel(chosen.product)}» la elegiste a mano: no figura en la compatibilidad de este modelo.
+          Al entregar se descuenta del inventario igual (revisá medida y conector).
+        </p>
       )}
 
       {/* F47: elegir SÍ es obligatorio (si no, el descuento caería en OTRO repuesto), pero una

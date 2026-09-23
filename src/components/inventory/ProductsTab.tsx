@@ -71,13 +71,18 @@ const STOCK_FILTERS = [
   { value: 'sin_uso', label: 'Lo que NO uso (apagado)' },
 ];
 
-export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDuplicates, onByModel }: {  categories: Category[];
+export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDuplicates, onByModel, onCategoryFilter }: {  categories: Category[];
   onEdit: (p: Product) => void;
   stats: InventoryStats | null;
   onReviewDuplicates: () => void;
   onByModel: (model: string) => void;
   /** sube cuando se guarda/fusiona algo → la tabla vuelve a consultar sola */
   refreshKey: number;
+  /**
+   * F65 (2ª vuelta) — informa al inventario cuál es la categoría filtrada (o `null` = «Todas»), para
+   * que un producto NUEVO nazca en la categoría que el operario está mirando.
+   */
+  onCategoryFilter?: (categoryId: number | null) => void;
 }) {
   // `searchInput` es lo que se escribe y `search` lo que se consulta: el rebote es SÓLO para
   // escribir (feature 41). Antes la pestaña esperaba 200 ms antes de la PRIMERA consulta (y en
@@ -162,6 +167,12 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
     setCatDefaultApplied(true);
     if (pantalla) setCatFilter(String(pantalla.id));
   }, [categories, catDefaultApplied]);
+
+  // F65 (2ª vuelta): el filtro activo se informa al inventario (categoría por defecto del producto
+  // nuevo). Va en su propio efecto para no depender del filtro por defecto ni del orden de los otros.
+  useEffect(() => {
+    onCategoryFilter?.(catFilter === 'todas' ? null : Number(catFilter));
+  }, [catFilter, onCategoryFilter]);
 
   // Rebote SÓLO de lo que se escribe; el cambio de página va en el mismo paso para no
   // consultar dos veces (una con la página vieja y otra con la nueva).

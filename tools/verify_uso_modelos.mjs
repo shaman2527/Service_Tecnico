@@ -50,6 +50,45 @@ if (!dbPath || !fs.existsSync(dbPath)) {
   process.exit(2);
 }
 const db = new DatabaseSync(dbPath, { readOnly: true });
+
+/**
+ * F66b — LA PRUEBA PREPARA SU FIXTURE. F50 necesita que haya **algo apagado** («lo uso» = No) para
+ * demostrar que el filtro lo esconde y que «Ver todos» lo trae: productos para el filtro del
+ * inventario y MODELOS del padrón (con pantallas) para el buscador del servicio. Desde F64 el
+ * catálogo viaja **todo encendido** (`tools/enuso_todo.mjs`), así que en cualquier copia actual no
+ * hay ni un apagado y la prueba fallaba 6 comprobaciones por falta de datos (no por el producto).
+ * Acá se apagan UNA ficha y DOS modelos al empezar —antes de la foto «antes»— y se devuelven como
+ * estaban al terminar, así la afirmación «la base quedó como estaba» sigue siendo cierta.
+ */
+const prepararFixture = () => {
+  const w = new DatabaseSync(dbPath);
+  try {
+    const apagadas = w.prepare('SELECT COUNT(*) n FROM products WHERE in_use = 0').get().n;
+    const apagados = w.prepare('SELECT COUNT(*) n FROM phones WHERE in_use = 0').get().n;
+    const fichas = apagadas === 0 ? [Number(w.prepare('SELECT id FROM products ORDER BY id LIMIT 1').get()?.id ?? 0)].filter(Boolean) : [];
+    const modelos = apagados === 0
+      ? w.prepare(`SELECT ph.id FROM phones ph WHERE ph.in_use = 1
+                   ORDER BY (SELECT COUNT(*) FROM products pr WHERE pr.category_id = 1 AND pr.compatibility LIKE '%' || ph.name || '%') DESC
+                   LIMIT 2`).all().map(r => r.id)
+      : [];
+    for (const id of fichas) w.prepare('UPDATE products SET in_use = 0 WHERE id = ?').run(id);
+    for (const id of modelos) w.prepare('UPDATE phones SET in_use = 0 WHERE id = ?').run(id);
+    return { fichas, modelos };
+  } finally { w.close(); }
+};
+const devolverFixture = ({ fichas, modelos }) => {
+  if (fichas.length === 0 && modelos.length === 0) return;
+  const w = new DatabaseSync(dbPath);
+  try {
+    for (const id of fichas) w.prepare('UPDATE products SET in_use = 1 WHERE id = ?').run(id);
+    for (const id of modelos) w.prepare('UPDATE phones SET in_use = 1 WHERE id = ?').run(id);
+  } finally { w.close(); }
+};
+const fixtureTocado = prepararFixture();
+if (fixtureTocado.fichas.length || fixtureTocado.modelos.length) {
+  console.log(`· fixture: se apagaron para la prueba ${fixtureTocado.fichas.length} ficha(s) y ${fixtureTocado.modelos.length} modelo(s) (se devuelven al final)`);
+}
+
 const filas = (sql, ...p) => { try { return db.prepare(sql).all(...p); } catch (e) { return [{ err: String(e.message) }]; } };
 const uno = (sql, ...p) => filas(sql, ...p)[0] ?? {};
 const producto = (id) => uno(
@@ -384,7 +423,16 @@ if (enEquipos) {
   }
 
   // volver a «solo lo que uso» (con el campo vacío, como trabaja el taller)
-  await clickCenter(`document.querySelector('[data-model-all]')`);
+  //
+  // F66b — ELEGIR UN MODELO AHORA CIERRA EL DESPLEGABLE (antes quedaba abierto por un bug: el
+  // `focus()` posterior al elegir disparaba `onFocus → setOpen(true)` y había que clickear dos veces
+  // para cerrarlo). Esta prueba seguía clickeando DENTRO de la lista después de elegir, o sea que
+  // dependía del bug: ahora hay que volver a abrirla (foco en el campo) antes de tocar el interruptor.
+  await clickCenter(`document.querySelector('[role="dialog"] input[placeholder^="Buscar el modelo del teléfono"]')`);
+  await waitFor(`document.querySelector('[data-model-all]') !== null`, 8000);
+  // Por DOM y no por coordenadas, por lo mismo que dice el bloque de arriba: el interruptor vive en
+  // un popover y el clic por coordenadas puede caer en el overlay (y cerrar el wizard entero).
+  await evalx(`(() => { const b = document.querySelector('[data-model-all]'); if (b) b.click(); return !!b; })()`);
   await waitFor(`document.querySelector('[data-model-all]')?.getAttribute('data-model-all') === '0'`, 8000);
   await escribirBusqueda(campoModelo, '');
   await waitFor(`[...document.querySelectorAll('[data-model-option]')].length > 0`, 12000);
@@ -415,5 +463,8 @@ check('F50: la base quedó sana (quick_check) y con los checks como estaban',
 
 const failed = out.filter(r => !r.ok);
 await restaurarPreferencia();
+// Se devuelven las fichas/modelos que la PRUEBA apagó para tener qué probar (F66b): la copia queda
+// como estaba antes de correr, incluido lo que el local tenía apagado a propósito.
+devolverFixture(fixtureTocado);
 console.log(`\n${out.length - failed.length}/${out.length} comprobaciones OK${failed.length ? ` — FALLAN: ${failed.map(f => f.name).join('; ')}` : ''}`);
 process.exit(failed.length ? 1 : 0);

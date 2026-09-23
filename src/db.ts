@@ -1,5 +1,5 @@
 import type {
-  Category, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
+  Category, CategoryOutcome, CategoryUsage, Client, ClientSummary, Product, Sale, SaleStat, Service, ServicePayment,
   ServiceDashboard, DashboardAnalytics, InventoryMovement, PaymentMethod, ServiceStatus,
   DailyTotals, DailyClosing, BCVRate, PurchaseOrder, PurchaseOrderItem, PagoMovilDetail,
   Technician, TechnicianStat, ComPort, PrinterSettings, UpdateState, HealthReport,
@@ -38,6 +38,36 @@ export const api = {
       return c;
     }).catch(() =>
       mock<Category[]>([{ id: 1, name: 'Pantalla', description: null }]));
+  },
+
+  // --- F65: CATEGORÍAS DE PRODUCTO (crear / renombrar / borrar) ---
+  // La lista de categorías se cachea por sesión (`cachedCategories`), así que CADA escritura la
+  // invalida: si no, la categoría nueva se guardaría en la base pero el desplegable del formulario
+  // y el filtro de Productos seguirían mostrando la lista vieja hasta reiniciar la app.
+  /** F65 — las categorías con su uso real y si son del padrón (pestaña Ajustes, dueño). */
+  getCategoriesWithUsage: () =>
+    // El error NO se traga (2ª vuelta adversarial): devolver una lista vacía ante un fallo hacía
+    // creer que «desaparecieron todas las categorías». En Tauri se propaga para que la tarjeta diga
+    // qué pasó y ofrezca reintentar; sólo el modo navegador (sin backend) devuelve el mock.
+    tauriInvoke<CategoryUsage[]>('get_categories_with_usage').catch(e => {
+      if (isTauri) throw e;
+      return mock<CategoryUsage[]>([]);
+    }),
+  /** F65 — crea una categoría (o devuelve la que ya existe, con `created: false`). */
+  addCategory: (name: string, description: string = '') =>
+    tauriInvoke<CategoryOutcome>('add_category', { name, description })
+      .then(r => { cachedCategories = null; return r; }),
+  /** F65 — renombra una categoría (los productos NO se tocan). */
+  renameCategory: (id: number, name: string, description: string = '') =>
+    tauriInvoke<Category>('rename_category', { id, name, description })
+      .then(r => { cachedCategories = null; return r; }),
+  /** F65 — borra una categoría VACÍA (las del padrón y las que tienen productos se rechazan). */
+  deleteCategory: (id: number) =>
+    tauriInvoke<void>('delete_category', { id }).then(r => { cachedCategories = null; return r; }),
+  /** F65 — vuelve a leer las categorías DESPUÉS de crearlas/renombrarlas (rompe la caché). */
+  reloadCategories: () => {
+    cachedCategories = null;
+    return api.getCategories();
   },
 
   getPaymentMethods: () => {

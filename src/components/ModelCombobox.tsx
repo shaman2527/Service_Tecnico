@@ -31,6 +31,23 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const focused = useRef(false);
+  /**
+   * F66b — «al elegir el modelo, el desplegable se cierra».
+   *
+   * Bug medido (reporte del dueño: «selecciono el modelo y se cierra el desplegable, no tenga que
+   * darle dos veces al modelo para cerrarlo»): `pick()` cerraba la lista y **volvía a enfocar el
+   * input** para que el operario siga escribiendo; ese `focus()` dispara `onFocus`, que hace
+   * `setOpen(true)`, así que el desplegable **se reabría en el acto** y había que clickear afuera
+   * (o el mismo modelo otra vez) para cerrarlo. Ahora el foco programático se marca para que
+   * `onFocus` NO reabra: el foco se mantiene (el operario puede seguir tipeando) y la lista queda
+   * cerrada hasta que él la pida (foco nuevo, clic en el campo o en el chevron).
+   */
+  const focusSinReabrir = useRef(false);
+  const volverAlCampo = () => {
+    focusSinReabrir.current = true;
+    inputRef.current?.focus();          // el `onFocus` corre sincrónico y ve la marca
+    setTimeout(() => { focusSinReabrir.current = false; }, 0);
+  };
 
   // sincroniza SOLO cuando el valor viene de afuera (selección previa, orden en
   // edición): con el campo enfocado manda lo que el operario escribe.
@@ -87,7 +104,9 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
     setQuery(label);
     onChange(label, phone);
     setOpen(false);
-    inputRef.current?.focus();
+    // El foco vuelve al campo SIN reabrir la lista (ver `focusSinReabrir`): antes este `focus()`
+    // reabría el desplegable y parecía que la elección no se había cerrado.
+    volverAlCampo();
   };
 
   return (
@@ -102,7 +121,11 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
           autoComplete="off"
           spellCheck={false}
           className="pl-9 pr-9 text-foreground"
-          onFocus={() => { focused.current = true; setOpen(true); }}
+          onFocus={() => { focused.current = true; if (!focusSinReabrir.current) setOpen(true); }}
+          // F66b: el clic en el campo SIEMPRE muestra la lista. Hace falta porque después de elegir un
+          // modelo el campo queda con el foco (para seguir tipeando) y el clic en un input ya enfocado
+          // NO dispara `focus`: sin esto, volver a ver la lista obligaba a escribir o al chevron.
+          onClick={() => setOpen(true)}
           onBlur={() => { focused.current = false; }}
           onChange={e => {
             const text = e.target.value;
@@ -125,7 +148,12 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
         />
         <ChevronsUpDown
           className="absolute right-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground cursor-pointer"
-          onClick={() => { setOpen(o => !o); inputRef.current?.focus(); }}
+          onClick={() => {
+            // El chevron ABRE y CIERRA de verdad: se fija el estado que quiere el operario y el foco
+            // vuelve al campo sin que `onFocus` lo pise (mismo cuidado que en `pick`).
+            setOpen(!open);
+            volverAlCampo();
+          }}
         />
       </div>
 
@@ -157,7 +185,7 @@ export function ModelCombobox({ value, onChange, placeholder = 'Busca el modelo 
                 setVerTodos(n);
                 localStorage.setItem('modelos_ver_todos', n ? '1' : '0');
                 setLoadedFor(null);
-                inputRef.current?.focus();
+                volverAlCampo();   // la lista SIGUE abierta (no se cambia `open`)
               }}
               className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >

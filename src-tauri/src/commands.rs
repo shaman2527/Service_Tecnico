@@ -6,6 +6,46 @@ pub fn get_categories(db: State<Database>) -> Result<Vec<crate::db::Category>, S
     db.get_categories().map_err(|e| e.to_string())
 }
 
+// --- F65: CATEGORÍAS DE PRODUCTO (crear / renombrar / borrar) -----------------------------------
+// Pedido del dueño (2026-09-23): «cuando en este inventario pueda registrar nuevas categorías, no
+// esté limitado a crear categorías de productos». La categoría era una lista CERRADA; ahora el
+// catálogo del local se puede organizar como el local trabaje.
+//
+// Las tres ESCRITURAS son del DUEÑO (`require_owner`), igual que `add_product`/`update_product`/
+// `delete_product`: son cambios del catálogo, no del mostrador. La LECTURA con uso real
+// (`get_categories_with_usage`) no lleva gate, como el resto de las lecturas.
+//
+// La validación es del BACKEND (no del frontend): nombre recortado/no vacío/tope 40, sin duplicados
+// comparando el nombre PLEGADO (mayúsculas y acentos), las tres categorías del padrón de teléfonos
+// protegidas y una categoría con productos NO se borra (se dice cuántos son).
+
+/// F65 — Las categorías con su uso (fichas, unidades y si son del padrón de teléfonos).
+#[tauri::command]
+pub fn get_categories_with_usage(db: State<Database>) -> Result<Vec<crate::db::CategoryUsage>, String> {
+    db.get_categories_with_usage().map_err(|e| e.to_string())
+}
+
+/// F65 — Crea una categoría de producto (o devuelve la que ya existe, con `created: false`).
+#[tauri::command]
+pub fn add_category(db: State<Database>, name: String, description: String) -> Result<crate::db::CategoryOutcome, String> {
+    db.require_owner()?;
+    db.add_category(&name, &description).map_err(|e| e.to_string())
+}
+
+/// F65 — Renombra una categoría (los productos NO se tocan: siguen apuntando al mismo id).
+#[tauri::command]
+pub fn rename_category(db: State<Database>, id: i64, name: String, description: String) -> Result<crate::db::Category, String> {
+    db.require_owner()?;
+    db.rename_category(id, &name, &description).map_err(|e| e.to_string())
+}
+
+/// F65 — Borra una categoría VACÍA (deshacer un error de tipeo). Con productos adentro, no.
+#[tauri::command]
+pub fn delete_category(db: State<Database>, id: i64) -> Result<(), String> {
+    db.require_owner()?;
+    db.delete_category(id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_payment_methods(db: State<Database>) -> Result<Vec<crate::db::PaymentMethod>, String> {
     db.get_payment_methods().map_err(|e| e.to_string())
@@ -1055,6 +1095,7 @@ mod tests {
             "close_day", "reopen_day", "update_daily_closing_settlement",
             "set_pin", "remove_pin", "set_printer_settings",
             "rename_phone", "add_phone", "merge_phones",
+            "add_category", "rename_category", "delete_category",
         ] {
             assert!(cuerpo(cmd).contains("require_owner()"),
                     "B3: al comando «{cmd}» le falta el gate de rol (db.require_owner()?)");

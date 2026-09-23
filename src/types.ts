@@ -4,6 +4,30 @@ export interface Category {
   description: string | null;
 }
 
+/**
+ * F65 — Una categoría de producto vista desde «Ajustes»: además del nombre, cuánto la usa el
+ * catálogo y si es una de las del PADRÓN DE TELÉFONOS (esas tres no se renombran ni se borran).
+ */
+export interface CategoryUsage {
+  id: number;
+  name: string;
+  description: string | null;
+  /** fichas de producto que la tienen puesta */
+  products: number;
+  /** unidades de stock sumadas de esas fichas */
+  units: number;
+  phone_padron: boolean;
+}
+
+/**
+ * F65 — Resultado de crear una categoría: la categoría (nueva o la que YA existía) y si de verdad
+ * se creó (si el nombre ya estaba, la UI elige esa y avisa en vez de crear una gemela).
+ */
+export interface CategoryOutcome {
+  category: Category;
+  created: boolean;
+}
+
 export interface Client {
   id: number;
   name: string;
@@ -114,7 +138,9 @@ export interface PhoneModelRow {
 /** Candidata del desplegable "Pantalla a instalar" del servicio. */
 export interface ScreenCandidate {
   product: Product;
-  match_quality: 'exacta' | 'prefijo' | 'parcial';
+  /** `exacta`/`prefijo`/`parcial` las calcula el backend; `buscada` = la eligió el operario a mano
+   *  buscándola en el catálogo (F65c), porque no figuraba en la compatibilidad de ese modelo. */
+  match_quality: 'exacta' | 'prefijo' | 'parcial' | 'buscada';
   in_stock: boolean;
   /** La compatibilidad del repuesto nombra la marca del teléfono (o el repuesto es de esa
    *  marca). `false` = solo coincidió el texto del modelo: se puede elegir a mano, pero el
