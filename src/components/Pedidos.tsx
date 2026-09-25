@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { api } from '../db';
+import { useDataVersion } from '@/lib/use-data-version';
 import type { Product, PurchaseOrder, PurchaseOrderItem } from '../types';
 
 export default function Pedidos({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
@@ -45,7 +46,10 @@ export default function Pedidos({ role = 'owner' }: { role?: 'owner' | 'cashier'
     setDayOpen(day != null);
   };
 
-  useEffect(() => { load(); }, []);
+  // F76 — LA PANTALLA SE RECARGA SOLA: la versión de los datos entra en las dependencias de la
+  // carga, así que cualquier escritura (o volver a la app) la pone al día sin apretar «Actualizar».
+  const dataVersion = useDataVersion();
+  useEffect(() => { load(); }, [load, dataVersion]);
 
   const lowStock = products
     .filter(p => {

@@ -24,6 +24,7 @@ import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { ModelCombobox } from './ModelCombobox';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
+import { useDataVersion } from '@/lib/use-data-version';
 // F74 — el IVA: la configuración (prender/apagar, alícuota, modo) y la línea de desglose que se ve
 // mientras se carga el monto. La cuenta vive en la regla pura src/lib/iva.ts.
 import { parseIvaConfig, ivaActivo, totalACobrar, IVA_DEFAULT, type IvaConfig } from '@/lib/iva';
@@ -420,6 +421,8 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   const [catalog, setCatalog] = useState<Product[]>([]);
   // F62: las categorías de trabajo que AGREGA EL LOCAL (settings work_types_extra). Se cargan una
   // vez y se usan en los chips del formulario, en el selector de trabajos y en el resumen.
+  // F76 — la versión de los datos (sube con cada escritura de la app).
+  const dataVersion = useDataVersion();
   const [tiposExtra, setTiposExtra] = useState<string[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -565,7 +568,9 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   // depende de ellos y no hace falta volver a leer la base entera en cada tecla.
   const refrescar = () => { load(); setResumenVersion(v => v + 1); };
 
-  useEffect(() => { load(); }, []);
+  // F76 — la lista y los KPIs se recargan SOLOS cuando algo cambia (una venta, un cobro, una entrega,
+  // un cambio de técnico…): el operario no tiene que apretar nada.
+  useEffect(() => { refrescar(); }, [dataVersion]);
   // F56: los datos del resumen. SOLO se piden cuando la lista tiene filtros: sin filtros, las filas
   // de la lista YA son toda la base y se reusan (una sola lectura). Las deps son el BOOLEANO, no los
   // cuatro filtros: con los strings, cada tecla del buscador disparaba una lectura completa y hacía

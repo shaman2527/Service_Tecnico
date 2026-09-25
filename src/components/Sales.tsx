@@ -18,11 +18,15 @@ import type { Sale, Product, PaymentMethod, SaleStat } from '../types';
 import { impactoAnulacion, motivoOk, estadoFila, totalesVigentes } from '@/lib/void-sale';
 // F74 — el IVA: la configuración vigente y la línea de desglose (una sola cuenta, la regla pura).
 import { parseIvaConfig, ivaActivo, desgloseIva, IVA_DEFAULT, type IvaConfig } from '@/lib/iva';
+import { useDataVersion } from '@/lib/use-data-version';
 import IvaDesglose from './IvaDesglose';
 // F70: qué puede tocar cada sesión (anular es del dueño; el backend lo exige igual)
 import { abilities } from '@/lib/session';
 
 export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+  // F76 — LA PANTALLA SE RECARGA SOLA: la versión de los datos entra en las dependencias de la
+  // carga, así que cualquier escritura (o volver a la app) la pone al día sin apretar «Actualizar».
+  const dataVersion = useDataVersion();
   const ab = abilities(role === 'owner' ? 'master' : 'caja');
   const [sales, setSales] = useState<Sale[]>([]);
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
@@ -66,7 +70,7 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
     setMethods(m);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load, dataVersion]);
   // Debounce: la búsqueda solo consulta tras 350ms de inactividad
   useEffect(() => {
     const t = setTimeout(load, 350);

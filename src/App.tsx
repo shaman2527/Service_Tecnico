@@ -1,4 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
+// F76 — la app se actualiza sola: el bus avisa a las pantallas y acá se ve que está sincronizada.
+import { bumpDataVersion } from './lib/sync';
+import { useSyncLabel } from './lib/use-data-version';
 import {
   LayoutDashboard, ShoppingCart, Wrench, Package, Users, BookOpen,
   PanelLeftClose, PanelLeftOpen, LifeBuoy, ShoppingBag, Lock,
@@ -46,6 +49,9 @@ function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');
   const [role, setRole] = useState<Role>('loading');
+  // F76 — el rótulo del indicador de sincronización (sube con cada escritura y se refresca solo).
+  const sync = useSyncLabel();
+  const syncOk = role === 'owner' || role === 'cashier';
   /** F68 — QUIÉN está usando la app (Master / Caja). `null` = sesión cerrada. */
   const [who, setWho] = useState<AppUser | null>(null);
   /** F68 — las personas para elegir en el acceso (vacío = instalación de un solo usuario). */
@@ -119,6 +125,18 @@ function App() {
     if (role === 'cashier' && tab === 'dashboard') setTab('ventas');
   }, [role, tab]);
 
+  // F76 — VOLVER A LA APP LA PONE AL DÍA: si algo cambió desde afuera (otra sesión, un respaldo
+  // restaurado, la base tocada a mano), al recuperar el foco la pantalla abierta se recarga sola.
+  useEffect(() => {
+    const alVolver = () => bumpDataVersion('volviste a la app', { inmediato: true });
+    const alVisible = () => { if (!document.hidden) alVolver(); };
+    window.addEventListener('focus', alVolver);
+    document.addEventListener('visibilitychange', alVisible);
+    return () => {
+      window.removeEventListener('focus', alVolver);
+      document.removeEventListener('visibilitychange', alVisible);
+    };
+  }, []);
   /**
    * F69 (revisión adversarial) — LA SESIÓN DE 12 h NO LA VIGILABA NADIE. La sesión vive en el backend
    * y vence sola: pasadas las 12 h, los movimientos de dinero se anotaban SIN AUTOR (el objetivo de
@@ -419,6 +437,18 @@ function App() {
         </nav>
 
         <div className="px-5 py-4 border-t border-sidebar-border flex flex-col gap-2">
+          {/* F76 — EL INDICADOR DE SINCRONIZACIÓN: la app se actualiza sola, así que acá se VE que
+              está al día («Sincronizado · hace un momento») y cuándo fue el último cambio. El
+              `data-sync-version` sube con cada escritura: es lo que miran las pruebas en vivo. */}
+          <div className={cn('flex items-center gap-2.5', collapsed && 'justify-center gap-0')}
+            data-sync-indicator={sync.version} title={`Última actualización de datos: ${sync.motivo} (${sync.texto})`}>
+            <span className={cn('size-2 rounded-full', syncOk ? 'bg-success' : 'bg-warning')} />
+            {!collapsed && (
+              <span className="text-[11px] text-sidebar-foreground/70 truncate">
+                {syncOk ? `Sincronizado · ${sync.texto}` : 'Leyendo datos…'}
+              </span>
+            )}
+          </div>
           <div className={cn('flex items-center gap-2.5', collapsed && 'justify-center gap-0')}>
             <span className="size-2 rounded-full bg-success" />
             {!collapsed && (

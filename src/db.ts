@@ -16,6 +16,8 @@ import type {
   Respaldo, EstadoRespaldo
 } from './lib/backup';
 import type { GrupoIva } from './lib/iva';
+// F76 — el bus de sincronización: cada escritura avisa y las pantallas se recargan solas.
+import { bumpDataVersion, comandoEscribe } from './lib/sync';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -25,7 +27,17 @@ export const isTauri = typeof window !== 'undefined' &&
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri) return Promise.reject(new Error('Tauri not available'));
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<T>(cmd, args);
+  const r = await invoke<T>(cmd, args);
+  // F76 — LA APP SE ACTUALIZA SOLA: cada comando de ESCRITURA que salió bien avisa al bus, y las
+  // pantallas vuelven a leer lo suyo sin que el operario apriete «Actualizar». Se hace ACÁ (el único
+  // puente con el backend) para que no haya que acordarse comando por comando en cada pantalla.
+  // Los comandos de LECTURA no avisan: si no, cada consulta dispararía un refresco (bucle).
+  if (comandoEscribe(cmd)) {
+    // Las categorías se cachean por sesión (F65): una escritura las invalida SIEMPRE.
+    if (cmd.includes('categor')) cachedCategories = null;
+    bumpDataVersion(cmd);
+  }
+  return r;
 }
 
 const mock = <T>(val: T): Promise<T> => Promise.resolve(val);

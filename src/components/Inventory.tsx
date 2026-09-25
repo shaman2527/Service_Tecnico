@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { api } from '../db';
+import { useDataVersion } from '@/lib/use-data-version';
 import type { Category, InventoryStats, Product } from '../types';
 import { ProductForm } from './ProductForm';
 import { ProductsTab } from './inventory/ProductsTab';
@@ -55,10 +56,16 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
     api.reloadCategories().then(setCategories).catch(() => { /* la pantalla sigue con la lista que tiene */ });
   };
 
+  // F76 — el inventario se recarga SOLO: vender, entregar o cargar mercancía mueve el stock y acá
+  // se ve al instante (sin apretar «Actualizar» en ninguna pestaña).
+  const dataVersion = useDataVersion();
   useEffect(() => {
     api.getCategories().then(setCategories).catch(() => setCategories([]));
     loadStats();
-  }, []);
+    // Las pestañas hijas (Productos / Modelos / Repuesto por modelo / Movimientos / Ajustes) usan
+    // `refreshKey`: subirlo las vuelve a leer a TODAS, sin que el operario toque nada.
+    setRefreshKey(k => k + 1);
+  }, [dataVersion]);
 
   // PRECALENTADO EN TIEMPO LIBRE (feature 41). El backend MEMORIZA todo lo que se deriva del
   // catálogo (ver `src-tauri/src/cache.rs`) y esa memoria se paga UNA vez por versión de la

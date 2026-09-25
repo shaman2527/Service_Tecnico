@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { api } from '../db';
 import { currencySymbol, warrantyEnd, warrantyStatus, parseChecklist, checklistSummary, CHECKLIST_ITEMS, parseServiceTypes, initialsOf, isRefund, isFinalized } from '@/lib/utils';
+import { useDataVersion } from '@/lib/use-data-version';
 import { cn } from '@/lib/utils';
 import type { ClientSummary, Service, Sale, ServicePayment, Technician } from '../types';
 
@@ -28,8 +29,10 @@ export default function Clients() {
     api.getTechnicians().then(setTechnicians).catch(() => {});
   };
 
-  useEffect(() => { load(); }, []);
-  useEffect(() => { load(); }, [search]);
+  // F76 — LA PANTALLA SE RECARGA SOLA: la versión de los datos entra en las dependencias de la
+  // carga, así que cualquier escritura (o volver a la app) la pone al día sin apretar «Actualizar».
+  const dataVersion = useDataVersion();
+  useEffect(() => { load(); }, [search, dataVersion]);
 
   const openHistory = async (c: ClientSummary) => {
     setSelected(c);

@@ -46,6 +46,7 @@ import {
   type IvaConfig, type GrupoIva,
 } from '@/lib/iva';
 import TaxSettingsDialog from './TaxSettingsDialog';
+import { useDataVersion } from '@/lib/use-data-version';
 
 // El signo va ANTES del símbolo de la moneda («-$2.00», «-Bs. 1.000,00»), que es como se escribe un
 // descuadre en un libro: «$-2.00» se lee mal y en el arqueo la diferencia puede ser negativa.
@@ -424,15 +425,18 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     try { setIvaGrupos(await api.getIvaGroups(startDate, endDate)); } catch { setIvaGrupos([]); }
   };
 
-  useEffect(() => { loadTaxConfig(); }, []);
-  useEffect(() => { if (tab === 'diario') loadIva(); }, [tab, startDate, endDate, isOwner]);
-  useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner]);
-  useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
+  // F76 — TODO EL LIBRO SE RECARGA SOLO: la versión de los datos entra en las dependencias de cada
+  // carga, así que registrar una venta, un gasto o un abono se ve acá sin apretar «Actualizar».
+  const dataVersion = useDataVersion();
+  useEffect(() => { loadTaxConfig(); }, [dataVersion]);
+  useEffect(() => { if (tab === 'diario') loadIva(); }, [tab, startDate, endDate, isOwner, dataVersion]);
+  useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner, dataVersion]);
+  useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab, dataVersion]);
   // F69: el encabezado necesita saber si HOY ya se cerró (para no ofrecer «Abrir Día» sobre un día
   // cerrado, que el backend rechaza). Es una consulta chica y se refresca con las otras cargas.
-  useEffect(() => { loadClosings(); }, [activeDay]);
-  useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate]);
-  useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate]);
+  useEffect(() => { loadClosings(); }, [activeDay, dataVersion]);
+  useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate, dataVersion]);
+  useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate, dataVersion]);
 
   /**
    * F68 — el LIBRO DE PLATA del rango. El backend ya limita lo que devuelve según la sesión: una
@@ -454,7 +458,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       setPorPersona([]);
     }
     return () => { alive = false; };
-  }, [tab, startDate, endDate, isOwner, today]);
+  }, [tab, startDate, endDate, isOwner, today, dataVersion]);
 
   const loadPayments = async () => {
     setPayLoading(true);
@@ -466,8 +470,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     }
     setPayLoading(false);
   };
-  useEffect(() => { if (tab === 'pagos') loadPayments(); }, [tab, startDate, endDate, payMethodFilter, payClientFilter, payRefFilter, payCurrencyFilter]);
-  useEffect(() => { refreshActiveDay(); }, []);
+  useEffect(() => { if (tab === 'pagos') loadPayments(); }, [tab, startDate, endDate, payMethodFilter, payClientFilter, payRefFilter, payCurrencyFilter, dataVersion]);
+  useEffect(() => { refreshActiveDay(); }, [dataVersion]);
   // Al volver a la ventana (tras facturar/registrar) la tabla diaria se recarga sola
   useEffect(() => {
     const onFocus = () => { if (tab === 'diario') loadTotals(); };

@@ -10,6 +10,8 @@ import {
   Smartphone, TrendingUp, Wrench, CheckCircle2, Clock,
 } from 'lucide-react';
 import { api } from '../db';
+// F76 — la pantalla se recarga sola cuando cambian los datos (sin botón «Actualizar»).
+import { useDataVersion } from '@/lib/use-data-version';
 import { initialsOf } from '@/lib/utils';
 import { TechnicianProfileDialog } from './TechnicianProfile';
 import { cn } from '@/lib/utils';
@@ -49,6 +51,7 @@ export default function Dashboard() {
   const [synced, setSynced] = useState<boolean | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
+  const dataVersion = useDataVersion();
   const load = useCallback(async () => {
     const [d, a, low, t] = await Promise.all([
       api.getServiceDashboard(),
@@ -66,7 +69,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     load().catch(() => setSynced(false));
-  }, [load]);
+    // F76: se vuelve a leer cada vez que la app avisa que los datos cambiaron (o al volver a la app).
+  }, [load, dataVersion]);
 
   const statusCount = (status: string) =>
     (dash?.status_stats ?? []).find(s => (s.status ?? '').toLowerCase() === status.toLowerCase())?.count ?? 0;
