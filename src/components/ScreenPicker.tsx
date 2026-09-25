@@ -6,7 +6,39 @@ import { Input } from '@/components/ui/input';
 import { api } from '../db';
 import { cn, partLabel } from '@/lib/utils';
 import { isCrossBrand, warnsCrossBrand } from '@/lib/screen-rules';
-import type { ScreenCandidate } from '../types';
+import { partPrice } from '@/lib/screen-price';
+import type { Product, ScreenCandidate } from '../types';
+
+/**
+ * F67 — EL PRECIO DE LA FILA ES EL QUE SE TOMA. Pedido del dueño: «cuando yo seleccione una pantalla
+ * [que] pueda tomar el precio de venta de ese producto». Para que el número de la lista y el que
+ * aparece en el Monto sean el MISMO, acá se muestra el precio que se va a escribir: en efectivo
+ * (`Divisas (USD Cash)`) es el precio contado de la ficha y, si difiere, al lado el de lista.
+ */
+function PrecioFila({ p, efectivo }: { p: Product; efectivo: boolean }) {
+  const toma = partPrice(p, efectivo);
+  if (toma == null) return <span className="text-[10px] text-muted-foreground/70">sin precio</span>;
+  const esContado = efectivo && p.price_usd > 0;
+  return (
+    <span className="text-xs text-muted-foreground tabular-nums"
+      data-precio-ficha={toma}
+      title={esContado
+        ? `Precio contado en efectivo ($${toma.toFixed(2)}): es el que se toma al elegir esta pantalla`
+        : `Precio de venta ($${toma.toFixed(2)}): es el que se toma al elegir esta pantalla`}>
+      ${toma.toFixed(2)}
+      {esContado && p.price_sale > toma && (
+        <span className="ml-1 text-[10px] text-muted-foreground/70">lista ${p.price_sale.toFixed(2)}</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * ¿Esta ficha tiene un precio que mostrar? Se decide con la MISMA regla que usa el formulario
+ * (`partPrice`): mostrar la fila solo con `price_sale > 0` escondía el precio de una ficha sin precio
+ * de venta pero con precio contado cargado, que igual se cobra al elegirla (F67, revisión adversarial).
+ */
+const tienePrecio = (p: Product, efectivo: boolean) => partPrice(p, efectivo) != null;
 
 // Elección de la PANTALLA EXACTA que se instala: el hook que consulta la compatibilidad y el
 // componente de selección. Las REGLAS puras (onlyScreens / asPhoneEntry / screenOk) viven en
@@ -19,20 +51,29 @@ import type { ScreenCandidate } from '../types';
 export function useCompatibleProducts(model: string, enabled = true) {
   const [candidates, setCandidates] = useState<ScreenCandidate[]>([]);
   const [loading, setLoading] = useState(false);
+  /**
+   * F67 — A QUÉ MODELO CORRESPONDEN los candidatos que están cargados. Al cambiar de modelo la lista
+   * vieja sigue en memoria un instante (el rebote de 250 ms + la consulta), y sin este dato el precio
+   * del modelo ANTERIOR se aplicaba al equipo nuevo (el bug que F67 vino a arreglar): el par
+   * «candidatos cargados / modelo escrito» tiene que coincidir antes de sacar plata de ahí.
+   */
+  const [resuelto, setResuelto] = useState('');
   useEffect(() => {
     const q = model.trim();
-    if (!enabled || q.length < 3) { setCandidates([]); return; }
+    if (!enabled || q.length < 3) { setCandidates([]); setResuelto(''); return; }
     let alive = true;
     setLoading(true);
     const t = setTimeout(() => {
       api.findCompatibleProducts(q, null, 80)
-        .then(r => { if (alive) setCandidates(r); })
-        .catch(() => { if (alive) setCandidates([]); })
+        .then(r => { if (alive) { setCandidates(r); setResuelto(q); } })
+        .catch(() => { if (alive) { setCandidates([]); setResuelto(q); } })
         .finally(() => { if (alive) setLoading(false); });
     }, 250);
     return () => { alive = false; clearTimeout(t); };
   }, [model, enabled]);
-  return { candidates, loading };
+  /** `true` cuando los candidatos son de ESTE modelo (y por lo tanto se puede usar su precio). */
+  const alDia = resuelto !== '' && resuelto === model.trim();
+  return { candidates, loading, resuelto, alDia };
 }
 
 // Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala (al entregar
@@ -44,7 +85,7 @@ export function useCompatibleProducts(model: string, enabled = true) {
 // debajo del modelo); acá vive la BÚSQUEDA LIBRE: el operario escribe y elige cualquier pantalla del
 // catálogo, aunque no figure en la compatibilidad de ese teléfono (se marca «buscada» y sigue
 // avisando si es de otra marca o si está agotada; al entregar descuenta ESA, como cualquier otra).
-export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, permiteBuscar = false, onPickOtra, onChange, onConfirm }: {
+export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, permiteBuscar = false, efectivo = false, onPickOtra, onChange, onConfirm }: {
   screenProductId: number | null;
   screenOptions: ScreenCandidate[];
   loading: boolean;
@@ -57,6 +98,8 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
   descuenta?: boolean;
   /** F65c: muestra el buscador de «otra pantalla» (cualquiera del catálogo). */
   permiteBuscar?: boolean;
+  /** F67: el método de pago es efectivo → la fila muestra el precio CONTADO (el que se va a tomar). */
+  efectivo?: boolean;
   /** F65c: la pantalla buscada a mano se suma a las opciones del formulario. */
   onPickOtra?: (candidate: ScreenCandidate) => void;
   onChange: (id: number | null) => void;
@@ -135,6 +178,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
                 key={p.id}
                 type="button"
                 data-screen-option={p.id}
+                data-screen-elegida={active ? '1' : '0'}
                 onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
                 className={cn(
                   'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
@@ -155,8 +199,8 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
                   {match_quality !== 'exacta' && (
                     <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
                   )}
-                  {p.price_sale > 0 && (
-                    <span className="text-xs text-muted-foreground tabular-nums">${p.price_sale.toFixed(2)}</span>
+                  {tienePrecio(p, efectivo) && (
+                    <PrecioFila p={p} efectivo={efectivo} />
                   )}
                   <Badge
                     variant={in_stock ? 'default' : 'outline'}
@@ -198,7 +242,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
                     {partLabel(c.product)}
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
-                    {c.product.price_sale > 0 && <span className="tabular-nums text-muted-foreground">${c.product.price_sale.toFixed(2)}</span>}
+                    {tienePrecio(c.product, efectivo) && <PrecioFila p={c.product} efectivo={efectivo} />}
                     <Badge variant={c.in_stock ? 'default' : 'outline'}
                       className={cn('text-[10px] tabular-nums', c.in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}>
                       {c.in_stock ? `stock ${c.product.stock}` : 'agotada'}

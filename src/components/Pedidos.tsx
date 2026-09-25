@@ -10,7 +10,11 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { api } from '../db';
 import type { Product, PurchaseOrder, PurchaseOrderItem } from '../types';
 
-export default function Pedidos() {
+export default function Pedidos({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+  /** F69 — los COSTOS de compra (y armar un pedido a proveedor) son del dueño: `add_purchase_order`
+   *  está detrás del gate de dueño en el backend. La caja SÍ puede marcar un pedido como recibido
+   *  (es trabajo del mostrador cuando llega el proveedor y el dueño no está), pero no ve lo que costó. */
+  const verCosto = role === 'owner';
   const [products, setProducts] = useState<Product[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
@@ -152,9 +156,11 @@ export default function Pedidos() {
           <h1 className="text-2xl font-bold tracking-tight">Pedidos</h1>
           <p className="text-sm text-muted-foreground mt-1">Compras a proveedor y reposición de inventario</p>
         </div>
-        <Button onClick={() => setShowNew(true)}>
-          <Plus className="size-4" /> Nuevo Pedido
-        </Button>
+        {verCosto && (
+          <Button onClick={() => setShowNew(true)} data-action="nuevo-pedido">
+            <Plus className="size-4" /> Nuevo Pedido
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -207,7 +213,7 @@ export default function Pedidos() {
                   <TableHead>Stock actual</TableHead>
                   <TableHead className="text-right">Mínimo</TableHead>
                   <TableHead className="text-right">Sugerido</TableHead>
-                  <TableHead className="text-right">Costo</TableHead>
+                  {verCosto && <TableHead className="text-right">Costo</TableHead>}
                   <TableHead className="w-28"></TableHead>
                 </TableRow>
               </TableHeader>
@@ -224,11 +230,17 @@ export default function Pedidos() {
                       </TableCell>
                       <TableCell className="text-right">{p.min_stock}</TableCell>
                       <TableCell className="text-right font-semibold">{need}</TableCell>
-                      <TableCell className="text-right">${(p.price_cost || p.price_sale).toFixed(2)}</TableCell>
+                      {verCosto && (
+                        <TableCell className="text-right">${(p.price_cost || p.price_sale).toFixed(2)}</TableCell>
+                      )}
                       <TableCell>
-                        <Button variant="outline" size="sm" onClick={() => quickAdd(p)}>
-                          <Plus className="size-3.5" /> Pedir {need}
-                        </Button>
+                        {verCosto ? (
+                          <Button variant="outline" size="sm" onClick={() => quickAdd(p)}>
+                            <Plus className="size-3.5" /> Pedir {need}
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Lo pide el dueño</span>
+                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -257,7 +269,7 @@ export default function Pedidos() {
                   <TableHead>Proveedor</TableHead>
                   <TableHead className="text-right">Artículos</TableHead>
                   <TableHead className="text-right">Cantidad</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
+                  {verCosto && <TableHead className="text-right">Total</TableHead>}
                   <TableHead>Estado</TableHead>
                   <TableHead className="w-40"></TableHead>
                 </TableRow>
@@ -270,7 +282,9 @@ export default function Pedidos() {
                     <TableCell>{o.supplier ?? '-'}</TableCell>
                     <TableCell className="text-right">{o.item_count}</TableCell>
                     <TableCell className="text-right">{o.total_quantity}</TableCell>
-                    <TableCell className="text-right font-semibold">${o.total_cost.toFixed(2)}</TableCell>
+                    {verCosto && (
+                      <TableCell className="text-right font-semibold">${o.total_cost.toFixed(2)}</TableCell>
+                    )}
                     <TableCell>
                       {o.status === 'Recibido' ? (
                         <Badge variant="outline" className="text-success">Recibido</Badge>
@@ -280,15 +294,20 @@ export default function Pedidos() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => openDetail(o)}>Ver</Button>
+                        {/* F69: el detalle trae `unit_price`/subtotal (costo de compra) y el backend
+                            ya lo rechaza para la caja: no se ofrece. */}
+                        {verCosto && <Button variant="ghost" size="sm" onClick={() => openDetail(o)}>Ver</Button>}
                         {o.status !== 'Recibido' && (
-                          <Button variant="outline" size="sm" className="text-success" onClick={() => setConfirmReceive(o)}>
+                          <Button variant="outline" size="sm" className="text-success" onClick={() => setConfirmReceive(o)}
+                            data-action="marcar-recibido">
                             <Truck className="size-3.5" /> Recibido
                           </Button>
                         )}
-                        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger" onClick={() => setDeleting(o)}>
-                          <Trash2 className="size-3.5" />
-                        </Button>
+                        {verCosto && (
+                          <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-danger" onClick={() => setDeleting(o)}>
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

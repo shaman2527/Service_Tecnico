@@ -34,14 +34,22 @@ const r2 = (v: number) => Math.round((v ?? 0) * 100) / 100;
 /**
  * Diferencias del cierre por MONEDA: `esperado` = lo que el sistema dice que debía haber en cada
  * moneda (ventas + abonos del día, por su método), `actual` = lo que se contó.
+ *
+ * F69 — EL EFECTIVO ESPERADO INCLUYE EL AJUSTE DEL CAJÓN. `drawer_adjust_usd` = fondo de caja − gastos
+ * pagados del cajón, `drawer_adjust_bs` = − gastos pagados del cajón (migración de F69; los cierres
+ * viejos traen 0 o nada y se leen igual que antes). Sin esto, un día con fondo de caja o con un gasto
+ * pagado del cajón mostraba en la lista de Cierres un descuadre que nunca existió: el operario había
+ * contado contra el número correcto y la lista lo comparaba contra el número viejo.
  */
 export function closingDifference(c: Pick<DailyClosing,
   'cash_usd' | 'zelle_total' | 'usd_cash_total' | 'cash_bs' | 'pago_movil_total' | 'transfer_bs_total' |
   'actual_cash_usd' | 'actual_zelle' | 'actual_cash_bs' | 'actual_pago_movil' | 'actual_transfer_bs'
->): ClosingDifference {
-  const esperadoUsd = (c.cash_usd ?? 0) + (c.zelle_total ?? 0) + (c.usd_cash_total ?? 0);
+> & Partial<Pick<DailyClosing, 'drawer_adjust_usd' | 'drawer_adjust_bs'>>): ClosingDifference {
+  const ajusteUsd = c.drawer_adjust_usd ?? 0;
+  const ajusteBs = c.drawer_adjust_bs ?? 0;
+  const esperadoUsd = (c.cash_usd ?? 0) + (c.zelle_total ?? 0) + (c.usd_cash_total ?? 0) + ajusteUsd;
   const actualUsd = (c.actual_cash_usd ?? 0) + (c.actual_zelle ?? 0);
-  const esperadoBs = (c.cash_bs ?? 0) + (c.pago_movil_total ?? 0) + (c.transfer_bs_total ?? 0);
+  const esperadoBs = (c.cash_bs ?? 0) + (c.pago_movil_total ?? 0) + (c.transfer_bs_total ?? 0) + ajusteBs;
   const actualBs = (c.actual_cash_bs ?? 0) + (c.actual_pago_movil ?? 0) + (c.actual_transfer_bs ?? 0);
   const usd = r2(actualUsd - esperadoUsd);
   const bs = r2(actualBs - esperadoBs);
@@ -74,11 +82,16 @@ export function closingLabel(d: ClosingDifference): string {
 export function sinContar(c: Pick<DailyClosing,
   'cash_usd' | 'zelle_total' | 'usd_cash_total' | 'cash_bs' | 'pago_movil_total' | 'transfer_bs_total' |
   'actual_cash_usd' | 'actual_zelle' | 'actual_cash_bs' | 'actual_pago_movil' | 'actual_transfer_bs'
->): boolean {
+> & Partial<Pick<DailyClosing, 'drawer_adjust_usd' | 'drawer_adjust_bs'>>): boolean {
   const contado = (c.actual_cash_usd ?? 0) + (c.actual_zelle ?? 0) + (c.actual_cash_bs ?? 0)
     + (c.actual_pago_movil ?? 0) + (c.actual_transfer_bs ?? 0);
+  // F69 (revisión adversarial): el esperado lleva el AJUSTE del cajón (fondo − gastos del cajón),
+  // igual que `closingDifference`. Sin eso, un día con $100 cobrados y un gasto de $100 pagado del
+  // cajón —donde el operario contó $0 y cuadró— quedaba marcado «sin contar» con un `title` que
+  // mandaba a reabrirlo: F69 desmintiendo el cierre que F69 dejó bien.
   const esperado = (c.cash_usd ?? 0) + (c.zelle_total ?? 0) + (c.usd_cash_total ?? 0)
-    + (c.cash_bs ?? 0) + (c.pago_movil_total ?? 0) + (c.transfer_bs_total ?? 0);
+    + (c.cash_bs ?? 0) + (c.pago_movil_total ?? 0) + (c.transfer_bs_total ?? 0)
+    + (c.drawer_adjust_usd ?? 0) + (c.drawer_adjust_bs ?? 0);
   return contado === 0 && esperado > 0;
 }
 

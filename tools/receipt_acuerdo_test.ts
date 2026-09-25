@@ -146,6 +146,37 @@ for (const width of [58, 80] as const) {
   const mixto = buildServiceReceiptParts(svc({ amount: 30, paid_amount: 11.34 }),
     [pago(1000, 'Efectivo Bs', 'VES'), pago(10, 'Divisas (USD Cash)', 'USD')], { width, tasaBcv: 748.79 });
   eq(`${etiqueta} · cobros mixtos → sin línea FALTA Bs.`, mixto.main.includes('FALTA Bs.'), false);
+
+  // ── F74 — EL IVA EN EL RECIBO ───────────────────────────────────────────────────────────────
+  // Una orden cargada con IVA 16% «agregado»: el monto guardado (34,80) es el TOTAL cobrado, así que
+  // la factura desglosa BASE 30,00 + IVA 4,80 = TOTAL 34,80 (y el talón dice lo mismo).
+  const conIva = buildServiceReceiptParts(svc({ amount: 34.8, iva_rate: 16, iva_mode: 'agregado' }), [],
+    { width, tasaBcv: 748.79 });
+  ok(`${etiqueta} · el recibo desglosa la BASE`, conIva.main.includes('BASE: $ 30.00'),
+    (conIva.main.match(/BASE[^\n]*/) ?? [''])[0]);
+  ok(`${etiqueta} · el recibo dice el IVA con su alícuota`, conIva.main.includes('IVA 16%: $ 4.80'),
+    (conIva.main.match(/IVA[^\n]*/) ?? [''])[0]);
+  ok(`${etiqueta} · el TOTAL sigue siendo lo que paga el cliente`, conIva.main.includes('TOTAL: $ 34.80'),
+    (conIva.main.match(/TOTAL[^\n]*/) ?? [''])[0]);
+  ok(`${etiqueta} · el talón también desglosa el IVA`,
+    conIva.stub.includes('BASE: $ 30.00') && conIva.stub.includes('IVA 16%: $ 4.80'));
+  sinDesbordes(`${etiqueta} · comprobante con IVA`, conIva.main, ancho);
+  sinDesbordes(`${etiqueta} · talón con IVA`, conIva.stub, ancho);
+  // La suma impresa cierra al centavo (base + IVA = total).
+  const baseL = Number((conIva.main.match(/BASE: \$ ([\d.,]+)/) ?? [])[1]?.replace(/,/g, '') ?? NaN);
+  const ivaL = Number((conIva.main.match(/IVA 16%: \$ ([\d.,]+)/) ?? [])[1]?.replace(/,/g, '') ?? NaN);
+  const totL = Number((conIva.main.match(/TOTAL: \$ ([\d.,]+)/) ?? [])[1]?.replace(/,/g, '') ?? NaN);
+  ok(`${etiqueta} · base + IVA = total en el papel (${baseL} + ${ivaL} = ${totL})`,
+    Math.abs(baseL + ivaL - totL) < 0.005);
+  // Una orden SIN IVA (las viejas, y todas las que se cargan con el switch apagado) no cambia el
+  // recibo: no aparece ninguna línea de IVA (nada de «IVA 0%» que confunda al cliente).
+  const sinIva = buildServiceReceiptParts(svc({ amount: 30 }), [], { width, tasaBcv: 748.79 });
+  eq(`${etiqueta} · sin IVA el recibo no cambia`, /BASE|IVA/.test(sinIva.main), false);
+  // La alícuota de la ORDEN manda: una orden cargada al 8% se imprime al 8% aunque hoy sea 16%.
+  const ocho = buildServiceReceiptParts(svc({ amount: 32.4, iva_rate: 8, iva_mode: 'agregado' }), [],
+    { width, tasaBcv: 748.79 });
+  ok(`${etiqueta} · una orden vieja al 8% se imprime al 8%`, ocho.main.includes('IVA 8%: $ 2.40'),
+    (ocho.main.match(/IVA[^\n]*/) ?? [''])[0]);
 }
 
 console.log(`\nreceipt-acuerdo: ${checks} comprobaciones · ${checks - failures} OK · ${failures} fallas`);

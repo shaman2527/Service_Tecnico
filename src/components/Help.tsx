@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BookOpen, BellRing, CalendarCheck, CalendarDays, CircleDollarSign, ClipboardList, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw, Printer } from 'lucide-react';
+import { BookOpen, BellRing, CalendarCheck, CalendarDays, CircleDollarSign, ClipboardList, DatabaseBackup, LifeBuoy, Package, Users, Wrench, HelpCircle, Settings2, ArrowRight, Wallet, LayoutDashboard, ShoppingBag, Lock, RefreshCw, RotateCcw, Printer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +9,8 @@ import { toast } from 'sonner';
 import { api } from '../db';
 import { checkForUpdate } from '@/lib/update';
 import { isTauri } from '../db';
+// F71 — respaldo y restauración desde la app (bloqueante A2 de la auditoría de entrega)
+import BackupsDialog from './BackupsDialog';
 
 const sections = [
   {
@@ -438,15 +440,28 @@ const sections = [
       <div className="space-y-3">
         <div>
           <p className="font-medium text-foreground">¿Cómo respaldo mi información?</p>
-          <p>Copia el archivo <code className="rounded bg-muted px-1.5 py-0.5 text-xs">registro.db</code> (junto al programa) a un USB o nube. Ese archivo es toda tu base de datos.</p>
+          {/* F71: la respuesta vieja («copiá registro.db a un USB») era una tarea manual que nadie hacía.
+              Ahora hay respaldo DENTRO de la app, con copia automática al cerrar el día. */}
+          <p>Con el botón <Badge variant="outline">Respaldos</Badge> de esta pantalla: guarda la base entera
+          (productos, ventas, órdenes, turnos y personas) en la carpeta que elijas —un USB también— y además
+          se guarda <span className="font-medium">una copia automática al cerrar el día</span>. Desde ahí
+          mismo se puede <span className="font-medium">restaurar</span> un respaldo: antes de pisar nada, la
+          app guarda una copia de lo que hay ahora, así que siempre se puede volver atrás.</p>
         </div>
         <div>
           <p className="font-medium text-foreground">¿Qué hago si no hay internet para la tasa BCV?</p>
           <p>Escríbela manualmente al abrir el día. La tasa queda guardada en el cierre y se usa para convertir los pagos en bolívares. Si el día ya está abierto con tasa en 0, no hace falta cerrarlo: pulsa <Badge variant="outline">Actualizar día</Badge> en el banner verde del Libro Diario y corrige la tasa.</p>
         </div>
         <div>
-          <p className="font-medium text-foreground">¿Puedo corregir una venta o servicio?</p>
-          <p>Sí — edita el registro y guarda. Si era un servicio entregado y lo cambias, el stock se ajusta solo. Los abonos se pueden eliminar y el saldo se recalcula.</p>
+          <p className="font-medium text-foreground">¿Puedo corregir una venta o un servicio?</p>
+          {/* F70: una venta SÍ se puede anular ahora; antes esta respuesta mentía (decía «edita el
+              registro» y no había ninguna forma de tocar una venta). */}
+          <p>Las <span className="font-medium">órdenes de servicio</span> se editan y guardan: si era un
+          servicio entregado, el stock se ajusta solo, y los abonos se pueden eliminar (el saldo se
+          recalcula). Las <span className="font-medium">ventas</span> no se editan: se
+          <span className="font-medium"> anulan</span> (botón «Anular» en la fila, sólo el dueño), lo que
+          devuelve la mercancía al stock, saca la plata de la caja de ese día y deja el motivo anotado en el
+          libro. La venta no desaparece: queda tachada con su motivo.</p>
         </div>
         <div>
           <p className="font-medium text-foreground">¿Por qué un abono de 2000 Bs. no se refleja como $2000?</p>
@@ -607,6 +622,8 @@ export default function Help() {
   const [hasPrev, setHasPrev] = useState(false);
   const [checking, setChecking] = useState(false);
   const [openSection, setOpenSection] = useState('inicio');
+  // F71: la pantalla de respaldos (respaldar ahora / restaurar) vive detrás de este botón
+  const [showBackups, setShowBackups] = useState(false);
   const guideRef = useRef<HTMLDivElement>(null);
 
   const openGuide = (target: string) => {
@@ -686,6 +703,11 @@ export default function Help() {
               )}
               <Button variant="outline" size="sm" onClick={checkUpdates} disabled={checking}>
                 <RefreshCw className={`size-4 ${checking ? 'animate-spin' : ''}`} /> Revisar actualizaciones
+              </Button>
+              {/* F71 — RESPALDOS: hasta acá la app decía «copiá registro.db a un USB». Ahora se
+                  respalda y se restaura desde acá (y el cierre del día deja una copia automática). */}
+              <Button variant="outline" size="sm" onClick={() => setShowBackups(true)} data-action="respaldos">
+                <DatabaseBackup className="size-4" /> Respaldos
               </Button>
             </>
           )}
@@ -783,6 +805,9 @@ export default function Help() {
           </div>
         </CardContent>
       </Card>
+
+      {/* F71 — la pantalla de respaldos (respaldar ahora, elegir carpeta/USB, restaurar) */}
+      {showBackups && <BackupsDialog onClose={() => setShowBackups(false)} />}
     </div>
   );
 }

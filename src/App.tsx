@@ -39,10 +39,19 @@ const navItems: { key: Tab; label: string; icon: React.ElementType }[] = [
 
 type Role = 'owner' | 'cashier' | 'loading';
 
+/** F68 — una persona de la app (Master / Caja). El PIN no viaja nunca al frontend. */
+interface AppUser { id: number; name: string; role: 'master' | 'caja'; color: string; active: boolean; has_pin: boolean }
+
 function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');
   const [role, setRole] = useState<Role>('loading');
+  /** F68 — QUIÉN está usando la app (Master / Caja). `null` = sesión cerrada. */
+  const [who, setWho] = useState<AppUser | null>(null);
+  /** F68 — las personas para elegir en el acceso (vacío = instalación de un solo usuario). */
+  const [people, setPeople] = useState<AppUser[]>([]);
+  /** F68 — la persona elegida en la pantalla de acceso (todavía sin entrar). */
+  const [picked, setPicked] = useState<AppUser | null>(null);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState('');
@@ -55,14 +64,96 @@ function App() {
     // Fail-closed: si el IPC falla al arrancar (race en frío), se pide el PIN igual.
     // Verificado 2026-08-04: al primer arranque el invoke podía fallar y el catch
     // anterior abría la app sin PIN (bypass para cajeras) — cambio a pedir PIN.
-    api.getPinStatus()
-      .then(hasPin => setRole(hasPin ? 'loading' : 'owner'))
-      .catch(() => setRole('loading'));
+    //
+    // F68: el acceso es POR PERSONA. Si la instalación todavía no tiene usuarios (o no tiene PIN),
+    // es de un solo dueño y entra directo (comportamiento de siempre).
+    //
+    // F68 (hallazgo de la prueba en vivo): la sesión vive en el BACKEND 12 h, así que al recargar la
+    // página (F5, o el WebView que se reinicia) hay que RETOMARLA — si no, la UI mostraba la pantalla
+    // de acceso mientras el backend seguía con la sesión abierta (dos verdades). Se pregunta quién
+    // está antes de decidir: sesión abierta → se sigue con esa persona.
+    Promise.all([
+      api.getPinStatus().catch(() => true),
+      // F69 (revisión adversarial): si NO se pudo leer el padrón, se reintenta UNA vez. Antes un
+      // fallo de `getUsers` devolvía una lista vacía y, si además no había PIN en `settings`, la app
+      // entraba directo como DUEÑO — o sea que un error de lectura abría la pantalla del dueño (lo
+      // que pidió el dueño es que la caja NO la vea). El gate de escritura del backend sigue siendo
+      // la seguridad real, pero la UI no puede regalarse.
+      api.getUsers(true).catch(() => api.getUsers(true).catch(() => 'error' as const)),
+      api.getCurrentUser().catch(() => null),
+    ]).then(([hasPin, listaOCatch, actual]) => {
+      const falloLista = listaOCatch === 'error';
+      const lista: AppUser[] = falloLista ? [] : (listaOCatch as AppUser[]);
+      setPeople(lista);
+      const persona = actual ? lista.find(u => u.id === actual.id) ?? null : null;
+      if (persona) {
+        // sesión vigente: se retoma con esa persona (mismo rol y mismos permisos)
+        setWho(persona);
+        setRole(persona.role === 'caja' ? 'cashier' : 'owner');
+        return;
+      }
+      // No se pudo leer quién hay: se pide el PIN de la instalación (pantalla vieja) en vez de
+      // asumir que el que está enfrente es el dueño.
+      if (falloLista) {
+        setPinError('No se pudo leer la lista de personas: entrá con el PIN de la instalación.');
+        setRole('loading');
+        return;
+      }
+      if (!hasPin && lista.length === 0) { setRole('owner'); return; }
+      if (lista.length === 0) { setRole('loading'); return; }   // instalación vieja con PIN suelto
+      // F68: con UNA sola persona no hay nada que elegir (el caso de siempre: el dueño solo) → se pide
+      // SU PIN directo, como antes de esta feature. El selector de personas aparece recién cuando hay
+      // más de una (el día que el local crea «Caja 1»).
+      if (lista.length === 1) {
+        const unico = lista[0];
+        if (!unico.has_pin) { setWho(unico); setRole(unico.role === 'caja' ? 'cashier' : 'owner'); return; }
+        setPicked(unico);
+        setRole('loading');
+        return;
+      }
+      setRole('loading');   // 2+ personas: se elige quién entra
+    });
   }, []);
 
   useEffect(() => {
     if (role === 'cashier' && tab === 'dashboard') setTab('ventas');
   }, [role, tab]);
+
+  /**
+   * F69 (revisión adversarial) — LA SESIÓN DE 12 h NO LA VIGILABA NADIE. La sesión vive en el backend
+   * y vence sola: pasadas las 12 h, los movimientos de dinero se anotaban SIN AUTOR (el objetivo de
+   * F68 se perdía en silencio) y la persona seguía viendo la pantalla como si nada. Se re-consulta
+   * quién está al volver a la ventana y cada minuto: si la sesión se cerró, se vuelve a la pantalla de
+   * acceso (con las personas releídas) y se pide el PIN otra vez.
+   */
+  useEffect(() => {
+    if (role === 'loading') return;
+    let cancelled = false;
+    const revisar = async () => {
+      try {
+        const actual = await api.getCurrentUser();
+        if (cancelled || actual) return;
+        const lista = await api.getUsers(true).catch(() => null);
+        if (cancelled) return;
+        if (lista) setPeople(lista);
+        setWho(null);
+        setPicked(null);
+        setPinInput('');
+        setPinError('La sesión venció (dura 12 h): volvé a entrar con tu PIN.');
+        setRole('loading');
+      } catch { /* un fallo de lectura no debe sacar a nadie de su trabajo */ }
+    };
+    const timer = window.setInterval(revisar, 60_000);
+    const onFocus = () => { void revisar(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [role]);
 
   // Versión real del paquete (reemplaza el texto hardcodeado "v0.2")
   useEffect(() => {
@@ -160,6 +251,20 @@ function App() {
   const enterPin = async () => {
     setPinError(null);
     try {
+      // F68: si hay personas, se entra con el PIN DE ESA PERSONA (cada una tiene el suyo).
+      if (picked) {
+        const sesion = await api.verifyUserPin(picked.id, pinInput);
+        if (sesion) {
+          setWho(picked);
+          setRole(sesion.role === 'caja' ? 'cashier' : 'owner');
+          setPinInput('');
+          setPicked(null);
+        } else {
+          setPinError('PIN incorrecto');
+        }
+        return;
+      }
+      // Compatibilidad (instalación vieja con un PIN suelto, sin personas cargadas)
       const ok = await api.verifyPin(pinInput);
       if (ok) {
         setRole('owner');
@@ -173,30 +278,78 @@ function App() {
   };
 
   if (role === 'loading') {
+    const elegir = (u: AppUser) => { setPicked(u); setPinInput(''); setPinError(null); };
     return (
       <div className="flex h-screen items-center justify-center bg-background">
-        <Card className="w-full max-w-sm">
+        <Card className="w-full max-w-md">
           <CardHeader>
             <CardTitle className="text-center">Registro — Acceso restringido</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Input
-              type="text"
-              inputMode="numeric"
-              maxLength={4}
-              autoFocus
-              className="text-center text-lg tracking-widest"
-              placeholder="PIN de 4 dígitos"
-              value={pinInput}
-              onChange={e => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
-              onKeyDown={e => { if (e.key === 'Enter') enterPin(); }}
-            />
+            {/* F68 — ACCESO POR PERSONA: se elige quién entra y cada una pone SU PIN. Antes había un
+                PIN único y un botón «Entrar como cajera» que no pedía nada. */}
+            {people.length > 0 ? (
+              <>
+                <p className="text-sm text-muted-foreground text-center">
+                  {picked ? 'Poné tu PIN para entrar' : '¿Quién va a usar la caja?'}
+                </p>
+                {!picked && (
+                  <div className="flex flex-col gap-2" data-user-picker>
+                    {people.map(u => (
+                      <button key={u.id} type="button" data-user-option={u.id} onClick={() => elegir(u)}
+                        className="flex items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-primary/50 hover:bg-accent">
+                        <span className="size-9 shrink-0 rounded-full text-white text-xs font-bold flex items-center justify-center"
+                          style={{ backgroundColor: u.color || '#0ea5e9' }}>
+                          {u.name.trim().slice(0, 2).toUpperCase()}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium truncate">{u.name}</span>
+                          <span className="block text-[11px] text-muted-foreground">
+                            {u.role === 'master' ? 'Master (dueño)' : 'Caja'}
+                          </span>
+                        </span>
+                        <Lock className="size-3.5 text-muted-foreground" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {picked && (
+                  <>
+                    <div className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2" data-user-picked={picked.name}>
+                      <span className="size-7 shrink-0 rounded-full text-white text-[10px] font-bold flex items-center justify-center"
+                        style={{ backgroundColor: picked.color || '#0ea5e9' }}>
+                        {picked.name.trim().slice(0, 2).toUpperCase()}
+                      </span>
+                      <span className="text-sm font-medium">{picked.name}</span>
+                      <button data-action="cambiar-persona" className="ml-auto text-xs text-muted-foreground underline" onClick={() => { setPicked(null); setPinInput(''); setPinError(null); }}>
+                        cambiar
+                      </button>
+                    </div>
+                    <Input
+                      type="text" inputMode="numeric" maxLength={4} autoFocus
+                      className="text-center text-lg tracking-widest"
+                      placeholder="PIN de 4 dígitos"
+                      value={pinInput}
+                      onChange={e => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      onKeyDown={e => { if (e.key === 'Enter') enterPin(); }}
+                    />
+                  </>
+                )}
+              </>
+            ) : (
+              <Input
+                type="text" inputMode="numeric" maxLength={4} autoFocus
+                className="text-center text-lg tracking-widest"
+                placeholder="PIN de 4 dígitos"
+                value={pinInput}
+                onChange={e => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                onKeyDown={e => { if (e.key === 'Enter') enterPin(); }}
+              />
+            )}
             {pinError && <p className="text-sm text-danger text-center">{pinError}</p>}
-            <Button className="w-full" onClick={enterPin}>Entrar</Button>
-            <Button variant="outline" className="w-full"
-              onClick={() => { setRole('cashier'); setPinInput(''); setPinError(null); }}>
-              Entrar como cajera
-            </Button>
+            {(picked || people.length === 0) && (
+              <Button className="w-full" onClick={enterPin}>Entrar</Button>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -204,7 +357,6 @@ function App() {
   }
 
   const visibleItems = role === 'cashier' ? navItems.filter(i => i.key !== 'dashboard') : navItems;
-
   return (
     <div className="flex h-screen bg-background">
       <aside className={cn('border-r border-border bg-sidebar-background flex flex-col shrink-0 shadow-sm transition-all duration-200', collapsed ? 'w-16' : 'w-64')}>
@@ -271,23 +423,31 @@ function App() {
             <span className="size-2 rounded-full bg-success" />
             {!collapsed && (
               <>
-                <span className="text-xs text-sidebar-foreground">Local</span>
+                {/* F68: se ve QUIÉN está en la caja (antes no se sabía quién estaba usando la app). */}
+                <span className="text-xs text-sidebar-foreground truncate" title={who ? `${who.name} · ${who.role === 'master' ? 'Master' : 'Caja'}` : 'Local'}>
+                  {who ? who.name : 'Local'}
+                </span>
                 <span className="text-xs text-sidebar-foreground/50">{appVersion || 'v0.1.1'}</span>
               </>
             )}
           </div>
           {/* El dueño puede DEJAR LA SESIÓN BLOQUEADA al levantarse: sin esto la sesión de dueño
-              quedaba abierta todo el día (o hasta 12 h) y la cajera podía tocar el catálogo. */}
-          {role === 'owner' && (
+              quedaba abierta todo el día (o hasta 12 h) y la cajera podía tocar el catálogo.
+              F68: ahora lo puede hacer CUALQUIER persona (la caja también se bloquea al irse). */}
+          {(role === 'owner' || role === 'cashier') && (
             <button
+              data-action="bloquear-sesion"
               onClick={async () => {
                 await api.lockOwner().catch(() => {});
                 setRole('loading');
+                setWho(null);
+                setPicked(null);
                 setPinInput('');
                 setPinError(null);
+                api.getUsers(true).then(setPeople).catch(() => {});
               }}
               className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground transition-colors"
-              title="Bloquear la sesión de dueño (vuelve a pedir el PIN)"
+              title="Bloquear la sesión (vuelve a la pantalla de acceso)"
             >
               <Lock className="size-3.5 shrink-0" />
               {!collapsed && <span>Bloquear sesión</span>}
@@ -307,10 +467,10 @@ function App() {
         <div className="max-w-7xl mx-auto px-10 py-8">
           <Suspense fallback={<div className="flex items-center justify-center py-24 text-sm text-muted-foreground">Cargando…</div>}>
             {tab === 'dashboard' && <Dashboard />}
-            {tab === 'ventas' && <Sales />}
-            {tab === 'servicios' && <Services />}
+            {tab === 'ventas' && <Sales role={role === 'cashier' ? 'cashier' : 'owner'} />}
+            {tab === 'servicios' && <Services role={role === 'cashier' ? 'cashier' : 'owner'} />}
             {tab === 'inventario' && <Inventory role={role} />}
-            {tab === 'pedidos' && <Pedidos />}
+            {tab === 'pedidos' && <Pedidos role={role === 'cashier' ? 'cashier' : 'owner'} />}
             {tab === 'clientes' && <Clients />}
             {tab === 'libro' && <DailyLedger role={role} />}
             {tab === 'ayuda' && <Help />}

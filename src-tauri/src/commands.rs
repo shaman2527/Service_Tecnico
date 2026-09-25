@@ -89,22 +89,62 @@ pub fn delete_product(db: State<Database>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_products(db: State<Database>, search: String, category_id: Option<i64>) -> Result<Vec<crate::db::Product>, String> {
-    db.get_products(&search, category_id).map_err(|e| e.to_string())
+    let mut items = db.get_products(&search, category_id).map_err(|e| e.to_string())?;
+    sin_costo_para_caja(&db, &mut items);
+    Ok(items)
 }
 
 #[tauri::command]
 pub fn get_low_stock_products(db: State<Database>) -> Result<Vec<crate::db::Product>, String> {
-    db.get_low_stock_products().map_err(|e| e.to_string())
+    let mut items = db.get_low_stock_products().map_err(|e| e.to_string())?;
+    sin_costo_para_caja(&db, &mut items);
+    Ok(items)
 }
 
 #[tauri::command]
 pub fn get_reorder_suggestions(db: State<Database>) -> Result<Vec<crate::db::Product>, String> {
-    db.get_reorder_suggestions().map_err(|e| e.to_string())
+    let mut items = db.get_reorder_suggestions().map_err(|e| e.to_string())?;
+    sin_costo_para_caja(&db, &mut items);
+    Ok(items)
 }
 
 #[tauri::command]
 pub fn suggest_products(db: State<Database>, query: String, limit: i64) -> Result<Vec<crate::db::Product>, String> {
-    db.suggest_products(&query, limit).map_err(|e| e.to_string())
+    let mut items = db.suggest_products(&query, limit).map_err(|e| e.to_string())?;
+    sin_costo_para_caja(&db, &mut items);
+    Ok(items)
+}
+
+/// F69 — EL COSTO ES DEL DUEÑO. La pantalla ya escondía la columna «Costo» y el KPI «Capital a
+/// costo» para la caja (`verCosto`), pero el número VIAJABA igual hasta el navegador: cualquiera
+/// podía leerlo con un invoke directo o mirando la respuesta. Acá se borra en el origen, en el
+/// único lugar por donde salen los productos. El precio de VENTA no se toca: la caja lo necesita
+/// para cobrar.
+///
+/// F69 (revisión adversarial) — FAIL-CLOSED con la sesión vencida: `current_is_cashier()` es false
+/// cuando la sesión venció (12 h) o cuando no hay ninguna, así que el costo VOLVÍA a viajar mientras
+/// la pantalla seguía en modo caja. En una instalación con más de una persona, sin sesión válida se
+/// asume el perfil más restrictivo (caja); en la instalación de un solo dueño no hay a quién
+/// esconderle nada.
+fn sin_costo_para_caja(db: &Database, items: &mut [crate::db::Product]) {
+    let hay_sesion = db.current_user().is_some();
+    let ocultar = db.current_is_cashier() || (!hay_sesion && db.has_multiple_people());
+    if ocultar {
+        for p in items.iter_mut() {
+            p.price_cost = 0.0;
+        }
+    }
+}
+
+/// F69 (revisión adversarial) — el mismo criterio para las pantallas/repuestos compatibles: son
+/// productos completos (con `price_cost`) y la pantalla de la cajera los pide al recibir un equipo.
+fn sin_costo_candidatos(db: &Database, items: &mut [crate::db::ScreenCandidate]) {
+    let hay_sesion = db.current_user().is_some();
+    if db.current_is_cashier() || (!hay_sesion && db.has_multiple_people()) {
+        for c in items.iter_mut() {
+            c.product.price_cost = 0.0;
+        }
+    }
 }
 
 // --- Sales ---
@@ -113,8 +153,12 @@ pub fn suggest_products(db: State<Database>, query: String, limit: i64) -> Resul
 pub fn add_sale(db: State<Database>, product_id: Option<i64>, product_name: String, quantity: i64,
                 unit_price: f64, total: f64, payment_method: String, client_name: String,
                 client_id: Option<i64>, notes: String,
-                bank_fee_percent: f64, zelle_reference: String, currency: String, discount_amount: f64) -> Result<(), String> {
-    db.add_sale(product_id, &product_name, quantity, unit_price, total, &payment_method, &client_name, client_id, &notes, bank_fee_percent, &zelle_reference, &currency, discount_amount)
+                bank_fee_percent: f64, zelle_reference: String, currency: String, discount_amount: f64,
+                // F74 — el IVA con el que se cargó ESTA venta (0/'' = sin IVA). Opcionales: los
+                // llamadores viejos siguen funcionando y una venta sin IVA nace en 0/''.
+                iva_rate: Option<f64>, iva_mode: Option<String>) -> Result<(), String> {
+    db.add_sale_tax(product_id, &product_name, quantity, unit_price, total, &payment_method, &client_name, client_id, &notes, bank_fee_percent, &zelle_reference, &currency, discount_amount,
+                    iva_rate.unwrap_or(0.0), &iva_mode.unwrap_or_default())
         .map_err(|e| e.to_string())
 }
 
@@ -123,9 +167,43 @@ pub fn get_sales(db: State<Database>, search: String, days: Option<i64>, start_d
     db.get_sales(&search, days, &start_date, &end_date).map_err(|e| e.to_string())
 }
 
+/// F70 — ANULAR UNA VENTA (con reverso de stock). Es del DUEÑO: mueve la caja del día, devuelve stock
+/// y `clients.total_spent`; la venta no se borra (queda marcada con su motivo y su contra-asiento).
+#[tauri::command]
+pub fn void_sale(db: State<Database>, id: i64, reason: String) -> Result<(), String> {
+    db.require_owner()?;
+    db.void_sale(id, &reason).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_sales_stats(db: State<Database>, days: i64) -> Result<Vec<crate::db::SaleStat>, String> {
     db.get_sales_stats(days).map_err(|e| e.to_string())
+}
+
+// --- F74: LA CONFIGURACIÓN DEL IVA ---
+
+/// La configuración del IVA (activar/desactivar, alícuota y modo). La **lectura no lleva gate**: la
+/// caja necesita saber si hay IVA para desglosar lo que cobra. La escritura es del DUEÑO (es una
+/// decisión del negocio y cambia lo que se cobra desde el próximo guardado).
+#[tauri::command]
+pub fn get_tax_config(db: State<Database>) -> Result<crate::db::TaxConfig, String> {
+    Ok(db.get_tax_config())
+}
+
+/// Guarda la configuración del IVA. Valida el BACKEND (modo whitelist, alícuota 0…100): un modo
+/// desconocido o una alícuota absurda se rechazan con un mensaje que dice qué se espera.
+#[tauri::command]
+pub fn set_tax_config(db: State<Database>, activo: bool, alicuota: f64, modo: String) -> Result<crate::db::TaxConfig, String> {
+    db.require_owner()?;
+    db.set_tax_config(activo, alicuota, &modo).map_err(|e| e.to_string())
+}
+
+/// F74 — EL LIBRO DE IVA del período (operaciones agrupadas por alícuota). Es del DUEÑO: es el número
+/// con el que se declara (la caja no ve la facturación global, misma regla que la utilidad).
+#[tauri::command]
+pub fn get_iva_groups(db: State<Database>, start_date: String, end_date: String) -> Result<Vec<crate::db::IvaGroupRow>, String> {
+    db.require_owner()?;
+    db.get_iva_groups(&start_date, &end_date).map_err(|e| e.to_string())
 }
 
 // --- Services ---
@@ -234,8 +312,14 @@ pub fn delete_technician(db: State<Database>, id: i64) -> Result<(), String> {
     db.delete_technician(id).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — las ANALÍTICAS DEL DASHBOARD (7 días de facturación con desglose por
+/// categoría, top de modelos CON MONTOS, ingresos por método) son del DUEÑO: la pantalla Dashboard ya
+/// estaba escondida para la caja, pero el invoke directo las devolvía. Los números operativos del día
+/// que la caja SÍ usa salen por otros comandos (`get_daily_totals`, `get_service_dashboard`,
+/// `get_sales_stats`), que siguen abiertos a propósito.
 #[tauri::command]
 pub fn get_dashboard_analytics(db: State<Database>) -> Result<crate::db::DashboardAnalytics, String> {
+    db.require_owner()?;
     db.get_dashboard_analytics().map_err(|e| e.to_string())
 }
 
@@ -281,35 +365,45 @@ pub fn add_service_refund(db: State<Database>, service_id: i64, amount: f64, pay
 // Son columnas propias (in_use / code / default_product_id): comandos ANGOSTOS para que el check no
 // pueda pisar precios, stock ni compatibilidad. El check solo decide QUÉ SE OFRECE al registrar un
 // servicio; el descuento de inventario al entregar sigue por `screen_product_id` como siempre.
+//
+// F69 (revisión adversarial) — ESTAS ESCRITURAS SON DEL DUEÑO: deciden qué ve el mostrador (el
+// catálogo que se ofrece) y la pantalla de referencia del modelo. La UI ya las escondía a la caja
+// (`canEdit`); el gate del backend es el que vale.
 #[tauri::command]
 pub fn set_product_in_use(db: State<Database>, id: i64, in_use: bool) -> Result<(), String> {
+    db.require_owner()?;
     db.set_product_in_use(id, in_use).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_phone_in_use(db: State<Database>, id: i64, in_use: bool) -> Result<(), String> {
+    db.require_owner()?;
     db.set_phone_in_use(id, in_use).map_err(|e| e.to_string())
 }
 
 /// «Usar todo el modelo» / «Apagar todo el modelo»: el teléfono y sus repuestos en una transacción.
 #[tauri::command]
 pub fn set_phone_use_all(db: State<Database>, id: i64, in_use: bool) -> Result<i64, String> {
+    db.require_owner()?;
     db.set_phone_use_all(id, in_use).map_err(|e| e.to_string())
 }
 
 /// F53: la pantalla de REFERENCIA del modelo (la que el local instala). `None` = ninguna.
 #[tauri::command]
 pub fn set_phone_default_product(db: State<Database>, id: i64, product_id: Option<i64>) -> Result<(), String> {
+    db.require_owner()?;
     db.set_phone_default_product(id, product_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_product_code(db: State<Database>, id: i64, code: String) -> Result<(), String> {
+    db.require_owner()?;
     db.set_product_code(id, &code).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_phone_code(db: State<Database>, id: i64, code: String) -> Result<(), String> {
+    db.require_owner()?;
     db.set_phone_code(id, &code).map_err(|e| e.to_string())
 }
 
@@ -328,13 +422,19 @@ pub fn add_purchase_order(db: State<Database>, supplier: String, notes: String, 
     db.add_purchase_order(&supplier, &notes, &items_json).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — los PEDIDOS A PROVEEDOR traen lo que costó cada repuesto
+/// (`unit_price`/`total_cost`), así que su lectura es del DUEÑO igual que su alta. La caja SÍ puede
+/// marcar un pedido como recibido (`mark_purchase_order_received`, sin gate): es el trabajo del
+/// mostrador cuando llega el proveedor.
 #[tauri::command]
 pub fn get_purchase_orders(db: State<Database>) -> Result<Vec<crate::db::PurchaseOrder>, String> {
+    db.require_owner()?;
     db.get_purchase_orders().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_purchase_order_items(db: State<Database>, order_id: i64) -> Result<Vec<crate::db::PurchaseOrderItem>, String> {
+    db.require_owner()?;
     db.get_purchase_order_items(order_id).map_err(|e| e.to_string())
 }
 
@@ -419,8 +519,56 @@ pub fn import_price_list(db: State<Database>, items_json: String) -> Result<i64,
     db.import_price_list(&items_json).map_err(|e| e.to_string())
 }
 
+// --- F71: RESPALDO Y RESTAURACIÓN desde la app (bloqueante A2 de la auditoría de entrega) ---
+
+/// «Respaldar ahora»: copia consistente de la base (VACUUM INTO, se lleva lo que está en el WAL) a la
+/// carpeta elegida (o `respaldos/` al lado de la base). Es del DUEÑO: la copia tiene todo el negocio.
+#[tauri::command]
+pub fn backup_now(db: State<Database>, dir: Option<String>) -> Result<crate::backups::BackupInfo, String> {
+    db.require_owner()?;
+    let info = crate::backups::backup_now(&db.db_path, dir.as_deref(), false);
+    match &info {
+        Ok(i) => { let _ = db.set_setting("last_backup_at", &i.created_at); let _ = db.set_setting("last_backup_error", ""); }
+        Err(e) => { let _ = db.set_setting("last_backup_error", e); }
+    }
+    info
+}
+
+/// Los respaldos de la carpeta (del más nuevo al más viejo) — para la lista de la pantalla.
+#[tauri::command]
+pub fn list_backups(db: State<Database>, dir: Option<String>) -> Result<Vec<crate::backups::BackupInfo>, String> {
+    let d = match dir.as_deref().map(str::trim) {
+        Some(x) if !x.is_empty() => std::path::PathBuf::from(x),
+        _ => crate::backups::default_dir(&db.db_path),
+    };
+    Ok(crate::backups::listar(&d))
+}
+
+/// Estado del respaldo (carpeta, último, error) para mostrarlo en Ayuda.
+#[tauri::command]
+pub fn backup_status(db: State<Database>, dir: Option<String>) -> Result<crate::backups::BackupStatus, String> {
+    let error = db.get_setting("last_backup_error").ok().flatten().filter(|e| !e.trim().is_empty());
+    Ok(crate::backups::status(&db.db_path, dir.as_deref(), error))
+}
+
+/// «Restaurar desde un respaldo»: valida el archivo, guarda una copia de la base ACTUAL y deja la
+/// restauración pendiente para el próximo arranque (con la conexión abierta no se pisa el archivo).
+/// Del DUEÑO. Después de esto, el frontend reinicia la app.
+#[tauri::command]
+pub fn request_restore(db: State<Database>, path: String) -> Result<crate::backups::RestorePlan, String> {
+    db.require_owner()?;
+    crate::backups::request_restore(&db.db_path, &path)
+}
+
+/// ¿Hay una restauración pendiente de aplicar en el próximo arranque? (la pantalla lo avisa)
+#[tauri::command]
+pub fn restore_pending(db: State<Database>) -> Result<bool, String> {
+    Ok(crate::backups::marker_path(&db.db_path).exists())
+}
+
 #[tauri::command]
 pub fn export_data(db: State<Database>) -> Result<String, String> {
+    db.require_owner()?;
     db.export_data().map_err(|e| e.to_string())
 }
 
@@ -450,14 +598,30 @@ pub fn get_day_summary(db: State<Database>, date: String) -> Result<crate::db::D
 
 // --- Salud del negocio: LECTURAS abiertas; anotar/borrar un GASTO es del dueño ---
 
+/// F69 — `method` = DE DÓNDE SALIÓ LA PLATA ('' = sin declarar). Un gasto pagado DEL CAJÓN
+/// (`Divisas (USD Cash)` / `Efectivo Bs`) baja el efectivo esperado al cerrar el día.
 #[tauri::command]
-pub fn add_expense(db: State<Database>, expense_date: String, category: String, amount: f64, currency: String, notes: String) -> Result<i64, String> {
+pub fn add_expense(db: State<Database>, expense_date: String, category: String, amount: f64, currency: String,
+                   notes: String, method: Option<String>) -> Result<i64, String> {
     db.require_owner()?;
-    db.add_expense(&expense_date, &category, amount, &currency, &notes).map_err(|e| e.to_string())
+    db.add_expense(&expense_date, &category, amount, &currency, &notes, method.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())
 }
 
+/// F69 — lo que ajusta el arqueo del cajón ese día (fondo, gastos y devoluciones pagados del cajón),
+/// para que el operario VEA de dónde sale el número antes de contar la plata.
+#[tauri::command]
+pub fn get_drawer_adjustments(db: State<Database>, date: String) -> Result<crate::db::DrawerAdjust, String> {
+    db.drawer_adjustments(&date).map_err(|e| e.to_string())
+}
+
+/// F69 (revisión adversarial) — los GASTOS DEL NEGOCIO (alquiler, sueldos, retiros del dueño) son del
+/// dueño: la pestaña Gastos y la de Salud ya eran suyas, pero el listado se podía pedir por IPC desde
+/// una sesión de caja. Lo que la caja necesita para su arqueo es el **agregado del cajón**
+/// (`get_drawer_adjustments`: fondo y gastos pagados del cajón), no el detalle de en qué se gastó.
 #[tauri::command]
 pub fn get_expenses(db: State<Database>, start_date: String, end_date: String) -> Result<Vec<crate::db::Expense>, String> {
+    db.require_owner()?;
     db.get_expenses(&start_date, &end_date).map_err(|e| e.to_string())
 }
 
@@ -467,8 +631,12 @@ pub fn delete_expense(db: State<Database>, id: i64) -> Result<(), String> {
     db.delete_expense(id).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — la UTILIDAD y los márgenes del negocio son del DUEÑO: es
+/// exactamente el número que la caja no debe ver («no vea cuánto factura la master»). La cajera
+/// sigue cerrando su día con los totales de caja (`get_daily_totals`), que no traen costo.
 #[tauri::command]
 pub fn get_profit_summary(db: State<Database>, start_date: String, end_date: String) -> Result<crate::db::ProfitSummary, String> {
+    db.require_owner()?;
     db.get_profit_summary(&start_date, &end_date).map_err(|e| e.to_string())
 }
 
@@ -477,8 +645,12 @@ pub fn get_receivables(db: State<Database>) -> Result<crate::db::ReceivablesSumm
     db.get_receivables().map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — el CAPITAL del inventario (a costo) es del DUEÑO: la caja cobra,
+/// no negocia el capital del negocio. El KPI «Capital a costo» ya estaba escondido en pantalla;
+/// esto cierra el camino del invoke directo.
 #[tauri::command]
 pub fn get_inventory_value(db: State<Database>) -> Result<crate::db::InventoryValue, String> {
+    db.require_owner()?;
     db.get_inventory_value().map_err(|e| e.to_string())
 }
 
@@ -559,6 +731,97 @@ pub fn lock_owner(db: State<Database>) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// F68 — SESIONES DE CAJA (Master / Caja): quién entra, con SU PIN, y quién hizo cada movimiento
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Las personas que pueden entrar a la app (sin el hash del PIN). Cualquiera puede LEER la lista:
+/// la pantalla de acceso la necesita para mostrar a quién entrar.
+#[tauri::command]
+pub fn get_users(db: State<Database>, only_active: Option<bool>) -> Result<Vec<crate::db::UserOut>, String> {
+    db.get_users(only_active.unwrap_or(true)).map_err(|e| e.to_string())
+}
+
+/// Quién está usando la app AHORA (`None` = sesión cerrada). La UI decide qué mostrar con esto.
+#[tauri::command]
+pub fn get_current_user(db: State<Database>) -> Result<Option<crate::db::SessionUser>, String> {
+    Ok(db.current_user())
+}
+
+/// F68 — entrar como una persona con SU PIN. Abre la sesión (12 h) y devuelve quién entró.
+/// Un PIN vacío en la fila = esa persona no tiene PIN (entra directo).
+#[tauri::command]
+pub fn verify_user_pin(db: State<Database>, user_id: i64, pin: String) -> Result<Option<crate::db::SessionUser>, String> {
+    db.verify_user_pin(user_id, &pin).map_err(|e| e.to_string())
+}
+
+/// Crear una persona es del DUEÑO (crear accesos no puede ser una acción de la caja).
+#[tauri::command]
+pub fn add_user(db: State<Database>, name: String, role: String, pin: String, color: String) -> Result<i64, String> {
+    db.require_owner()?;
+    db.add_user(&name, &role, &pin, &color).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_user(db: State<Database>, id: i64, name: String, color: String, active: bool) -> Result<(), String> {
+    db.require_owner()?;
+    db.update_user(id, &name, &color, active).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_user_pin(db: State<Database>, id: i64, pin: String) -> Result<(), String> {
+    db.require_owner()?;
+    db.set_user_pin(id, &pin).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_user(db: State<Database>, id: i64) -> Result<(), String> {
+    db.require_owner()?;
+    db.delete_user(id).map_err(|e| e.to_string())
+}
+
+/// F68/F40 — el LIBRO DE PLATA. La sesión de CAJA sólo ve SUS movimientos (el backend lo impone
+/// con su propio id, no el frontend): es lo que pidió el dueño — «que vea su día de caja pero no
+/// cuánto factura la master».
+/// F69 (revisión adversarial, fail-closed): si NO hay sesión y la instalación tiene más de una
+/// persona, NO se muestra nada de nadie — antes el filtro vacío se convertía en «mostrame todo»,
+/// así que una sesión vencida (o un invoke directo) abría el libro completo a la caja.
+#[tauri::command]
+pub fn get_cash_movements(db: State<Database>, start_date: String, end_date: String, limit: Option<i64>)
+    -> Result<Vec<crate::db::CashMovement>, String> {
+    let filtro = match db.current_user() {
+        Some(u) if u.role == "caja" => Some(u.id),
+        Some(_) => None,
+        None => {
+            if db.has_multiple_people() {
+                return Err("Entrá con tu PIN para ver el libro de caja.".to_string());
+            }
+            None
+        }
+    };
+    db.get_cash_movements(&start_date, &end_date, filtro, limit.unwrap_or(300))
+        .map_err(|e| e.to_string())
+}
+
+/// F68 — resumen del libro por persona. Es del DUEÑO: la caja no ve cuánto movió la master.
+#[tauri::command]
+pub fn get_cash_movements_by_user(db: State<Database>, start_date: String, end_date: String)
+    -> Result<Vec<CashMovementByUser>, String> {
+    db.require_owner()?;
+    let filas = db.get_cash_movements_by_user(&start_date, &end_date).map_err(|e| e.to_string())?;
+    Ok(filas.into_iter()
+        .map(|(name, count, usd, bs)| CashMovementByUser { name, count, usd, bs })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct CashMovementByUser {
+    pub name: String,
+    pub count: i64,
+    pub usd: f64,
+    pub bs: f64,
+}
+
 // --- Impresora térmica: IMPRIMIR es de la cajera (es su trabajo del mostrador);
 //     CONFIGURARLA (puerto, ancho, nombre del negocio, logo) es del dueño ---
 
@@ -621,7 +884,8 @@ pub fn get_work_types_extra(db: State<Database>) -> Result<String, String> {
 }
 
 /// Agrega una categoría y devuelve la lista COMPLETA resultante (JSON array).
-/// No exige día abierto: es una preferencia del local, no plata.
+/// No exige día abierto: es una preferencia del local, no plata. **Es del MOSTRADOR a propósito**:
+/// recibir un equipo con un trabajo que no está en la lista es parte del trabajo de la caja.
 #[tauri::command]
 pub fn add_work_type_extra(db: State<Database>, name: String) -> Result<String, String> {
     db.add_work_type_extra(&name).map_err(|e| e.to_string())
@@ -629,8 +893,11 @@ pub fn add_work_type_extra(db: State<Database>, name: String) -> Result<String, 
 
 /// Quita una categoría del local (para deshacer un error de tipeo). NO toca las órdenes ya
 /// registradas: la etiqueta vive dentro de cada orden.
+/// F69 (revisión adversarial) — QUITAR es del DUEÑO: saca la categoría para TODOS (el mostrador
+/// perdería un trabajo que ya usa), mientras que agregar es la necesidad real de la caja.
 #[tauri::command]
 pub fn remove_work_type_extra(db: State<Database>, name: String) -> Result<String, String> {
+    db.require_owner()?;
     db.remove_work_type_extra(&name).map_err(|e| e.to_string())
 }
 
@@ -647,8 +914,16 @@ pub struct UpdateBackup {
     pub watchdog: bool,
 }
 
+/// F69 (revisión adversarial, BLOQUEANTE) — INSTALAR/REVERTIR una versión es del DUEÑO. Sin gate,
+/// desde la consola del WebView se podía pedir `rollback_update` y volver a la build ANTERIOR a F68
+/// (donde no había sesiones por persona ni gate de caja: el control de acceso desaparecía sin PIN), y
+/// `backup_before_update` lanza el vigilante que a los 90 s restaura el exe previo y relanza.
+/// `mark_update_ok`/`mark_update_failed`/`run_health_check`/`get_update_state` NO se gatean a
+/// propósito: los usa el arranque ANTES de que alguien entre (gatearlos dejaría el estado «pending»
+/// colgado y dispararía un rollback solo).
 #[tauri::command]
 pub fn backup_before_update(db: State<Database>, new_version: String, previous_version: String) -> Result<UpdateBackup, String> {
+    db.require_owner()?;
     // Checkpoint WAL para que la copia de la DB quede consistente antes de copiarla
     {
         let conn = db.conn.lock().unwrap();
@@ -690,7 +965,8 @@ pub fn get_update_state() -> Result<Option<crate::updates::UpdateState>, String>
 }
 
 #[tauri::command]
-pub fn rollback_update() -> Result<(), String> {
+pub fn rollback_update(db: State<Database>) -> Result<(), String> {
+    db.require_owner()?;
     crate::updates::rollback_update(&crate::updates::install_dir())
 }
 
@@ -706,26 +982,36 @@ pub fn get_pago_movil_detail(db: State<Database>, date: String) -> Result<Vec<cr
     db.get_pago_movil_detail(&date).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — LOS REPORTES DEL DÍA son del DUEÑO: vuelcan ventas con cliente,
+/// abonos con referencia, los totales y el CIERRE (arqueos y diferencia) de todo el rango. El botón
+/// «Exportar Excel» del Libro Diario ya era suyo; el invoke directo quedaba abierto.
 #[tauri::command]
 pub fn export_daily_report(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
+    db.require_owner()?;
     db.export_daily_report(&start_date, &end_date).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn export_daily_report_xlsx(db: State<Database>, start_date: String, end_date: String) -> Result<String, String> {
+    db.require_owner()?;
     db.export_daily_report_xlsx(&start_date, &end_date).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — el buscador de PAGOS y su detalle por día son de la pestaña «Pagos»
+/// del Libro Diario, que es del dueño (lista los cobros de TODAS las sesiones, con cliente y
+/// referencia): la caja ya tiene su propio libro (`get_cash_movements`, filtrado por el backend).
 #[tauri::command]
 pub fn search_payments(db: State<Database>, start_date: Option<String>, end_date: Option<String>,
                        method: Option<String>, client: Option<String>,
                        reference: Option<String>, currency: Option<String>) -> Result<Vec<crate::db::PaymentSearchResult>, String> {
+    db.require_owner()?;
     db.search_payments(start_date.as_deref(), end_date.as_deref(), method.as_deref(), client.as_deref(), reference.as_deref(), currency.as_deref())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_payment_daily_detail(db: State<Database>, date: String, method: Option<String>) -> Result<Vec<crate::db::PaymentSearchResult>, String> {
+    db.require_owner()?;
     db.get_payment_daily_detail(&date, method.as_deref()).map_err(|e| e.to_string())
 }
 
@@ -752,9 +1038,11 @@ pub fn get_products_page(db: State<Database>, search: String, category_id: Optio
                          brand: Option<String>, stock_filter: Option<String>,
                          variant_family: Option<String>, sort: Option<String>,
                          limit: i64, offset: i64) -> Result<crate::db::ProductPage, String> {
-    db.get_products_page(&search, category_id, brand.as_deref(), stock_filter.as_deref(),
+    let mut page = db.get_products_page(&search, category_id, brand.as_deref(), stock_filter.as_deref(),
                          variant_family.as_deref(), sort.as_deref(), limit, offset)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    sin_costo_para_caja(&db, &mut page.items);
+    Ok(page)
 }
 
 /// F52 — las familias de variante del catálogo (INCELL / OLED / ORIGINAL / sin variante) con su
@@ -790,7 +1078,13 @@ pub fn apply_phone_split(db: State<Database>) -> Result<crate::db::PhoneSplitPre
 
 #[tauri::command]
 pub fn get_inventory_stats(db: State<Database>) -> Result<crate::db::InventoryStats, String> {
-    db.get_inventory_stats().map_err(|e| e.to_string())
+    let mut stats = db.get_inventory_stats().map_err(|e| e.to_string())?;
+    // F69: el KPI «Capital a costo» es del dueño (los demás KPIs —cuántos productos, cuánto
+    // valdría la venta, cuántos sin precio— los necesita la caja para trabajar).
+    if db.current_is_cashier() || (db.current_user().is_none() && db.has_multiple_people()) {
+        stats.value_cost = 0.0;
+    }
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -802,14 +1096,18 @@ pub fn get_phone_models(db: State<Database>, search: String, limit: i64)
 #[tauri::command]
 pub fn find_compatible_screens(db: State<Database>, model: String, limit: i64)
     -> Result<Vec<crate::db::ScreenCandidate>, String> {
-    db.find_compatible_screens(&model, limit).map_err(|e| e.to_string())
+    let mut items = db.find_compatible_screens(&model, limit).map_err(|e| e.to_string())?;
+    sin_costo_candidatos(&db, &mut items);
+    Ok(items)
 }
 
 /// Repuestos compatibles con un modelo (cualquier categoría si `category_id` es None).
 #[tauri::command]
 pub fn find_compatible_products(db: State<Database>, model: String, category_id: Option<i64>, limit: i64)
     -> Result<Vec<crate::db::ScreenCandidate>, String> {
-    db.find_compatible_products(&model, category_id, limit).map_err(|e| e.to_string())
+    let mut items = db.find_compatible_products(&model, category_id, limit).map_err(|e| e.to_string())?;
+    sin_costo_candidatos(&db, &mut items);
+    Ok(items)
 }
 
 #[tauri::command]
@@ -851,9 +1149,23 @@ pub fn get_phones(db: State<Database>, brand: Option<String>, search: String,
                        only_review, &sort, &dir, limit, offset).map_err(|e| e.to_string())
 }
 
+/// F69 (revisión adversarial) — la FICHA DEL TELÉFONO también trae los repuestos compatibles, o sea
+/// `price_cost` de cada uno: se borra para una sesión de caja (es el mismo dato que la vista «Por
+/// modelo» muestra y el que la caja NO debe ver). El precio de venta y el stock siguen intactos.
 #[tauri::command]
 pub fn get_phone_detail(db: State<Database>, phone_id: i64) -> Result<Option<crate::phones::PhoneDetail>, String> {
-    db.get_phone_detail(phone_id).map_err(|e| e.to_string())
+    let ocultar = db.current_is_cashier() || (db.current_user().is_none() && db.has_multiple_people());
+    let mut detalle = db.get_phone_detail(phone_id).map_err(|e| e.to_string())?;
+    if ocultar {
+        if let Some(d) = detalle.as_mut() {
+            for b in d.blocks.iter_mut() {
+                for p in b.items.iter_mut() {
+                    p.price_cost = 0.0;
+                }
+            }
+        }
+    }
+    Ok(detalle)
 }
 
 /// Puede esta sesion ESCRIBIR la lista de modelos? (la UI esconde los botones si no)
@@ -1066,12 +1378,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Guardia anti-regresión del bloqueante B3: TODO comando de ESCRITURA que no es de la
-    /// cajera tiene el gate, y los de mostrador NO lo tienen (para no trabar la venta).
-    /// Lee este mismo archivo: si alguien agrega un comando de escritura y se olvida el
-    /// gate, el test falla con el nombre del comando.
+    /// Guardia anti-regresión del bloqueante B3: los comandos SENSIBLES que ya se clasificaron a mano
+    /// tienen el gate, y los del mostrador NO lo tienen (para no trabar la venta ni la recepción).
+    ///
+    /// F69 (revisión adversarial, límite conocido y anotado): esto NO es un escaneo exhaustivo. Las
+    /// dos listas son curadas a mano, así que un comando de escritura NUEVO que no se agregue acá pasa
+    /// inadvertido (pasó con `set_product_in_use`, `set_phone_code`, `set_product_code` y
+    /// `export_daily_report`, todos gateados en F69 justamente al leer estas listas). Derivar la lista
+    /// de los `generate_handler!` de `lib.rs` y exigir que cada comando esté clasificado es trabajo
+    /// pendiente (anotado para F71).
     #[test]
-    fn test_b3_todos_los_comandos_de_escritura_tienen_el_gate() {
+    fn test_b3_los_comandos_clasificados_tienen_el_gate_que_corresponde() {
         let src = &include_str!("commands.rs")[..include_str!("commands.rs")
             .find("\n#[cfg(test)]").expect("marca del módulo de tests")];
         let cuerpo = |nombre: &str| -> &str {
@@ -1096,6 +1413,22 @@ mod tests {
             "set_pin", "remove_pin", "set_printer_settings",
             "rename_phone", "add_phone", "merge_phones",
             "add_category", "rename_category", "delete_category",
+            // F69: lecturas que son del DUEÑO (utilidad/márgenes, capital del inventario y el
+            // volcado completo de la base). La caja cierra su día con `get_daily_totals`.
+            "export_data", "get_profit_summary", "get_inventory_value",
+            // F69: los gastos del negocio y el buscador de pagos de TODAS las sesiones también.
+            "get_expenses", "search_payments", "get_payment_daily_detail",
+            // F69: definir QUÉ SE OFRECE (el check «lo que uso») y los códigos del catálogo.
+            "set_product_in_use", "set_phone_in_use", "set_phone_use_all",
+            "set_phone_default_product", "set_product_code", "set_phone_code",
+            // F69: los reportes del día (traen los arqueos) y las compras a proveedor (traen costos).
+            "export_daily_report", "export_daily_report_xlsx",
+            "get_purchase_orders", "get_purchase_order_items",
+            // F69: las analíticas del Dashboard y los comandos de INSTALACIÓN (revertir la versión
+            // volvería a una build sin roles).
+            "get_dashboard_analytics", "rollback_update", "backup_before_update",
+            // F69: quitar una categoría de trabajo del local la saca para todos.
+            "remove_work_type_extra",
         ] {
             assert!(cuerpo(cmd).contains("require_owner()"),
                     "B3: al comando «{cmd}» le falta el gate de rol (db.require_owner()?)");
@@ -1107,9 +1440,12 @@ mod tests {
             "add_service_payment", "add_service_refund", "add_client", "add_or_find_client", "save_client",
             "open_day", "mark_purchase_order_received",
             "get_products", "get_services", "get_sales", "get_daily_totals",
-            "export_data", "export_daily_report", "export_daily_report_xlsx",
             "print_receipt", "print_to_windows_printer",
             "get_pin_status", "verify_pin", "lock_owner",
+            // F69: del MOSTRADOR a propósito — anotar un trabajo que no está en la lista es parte de
+            // recibir un equipo (y `set_service_policy` anota la foto/el acuerdo de pago). NO definen
+            // precios ni stock: si se agregaran al gate, la caja no podría recibir un equipo raro.
+            "set_service_policy", "add_work_type_extra",
         ] {
             assert!(!cuerpo(cmd).contains("require_owner()"),
                     "B3: «{cmd}» lo usa la cajera y NO debe pedir el PIN del dueño");

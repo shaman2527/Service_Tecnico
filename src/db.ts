@@ -9,8 +9,13 @@ import type {
   CatalogReport, PriceRestoreReport, DuplicateGroup, TechnicianProfile, PhoneSplitPreview,
   PhoneDuplicateGroup,
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
-  LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup
+  LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup,
+  AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, TaxConfig
 } from './types';
+import type {
+  Respaldo, EstadoRespaldo
+} from './lib/backup';
+import type { GrupoIva } from './lib/iva';
 import { DEFAULT_PRINTER_SETTINGS } from './types';
 
 export const isTauri = typeof window !== 'undefined' &&
@@ -247,14 +252,31 @@ export const api = {
   addSale: (productId: number | null, productName: string, quantity: number,
     unitPrice: number, total: number, paymentMethod: string, clientName: string,
     clientId: number | null, notes: string,
-    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD', discountAmount: number = 0) =>
+    bankFeePercent: number = 0, zelleReference: string = '', currency: string = 'USD', discountAmount: number = 0,
+    // F74 — el IVA con el que se cargó la venta (0/'' = sin IVA). `total` sigue siendo lo que pagó
+    // el cliente: la caja y el arqueo no cambian de significado.
+    ivaRate: number = 0, ivaMode: string = '') =>
     tauriInvoke<void>('add_sale', {
       productId, productName, quantity, unitPrice, total, paymentMethod, clientName, clientId, notes,
-      bankFeePercent, zelleReference, currency, discountAmount
+      bankFeePercent, zelleReference, currency, discountAmount, ivaRate, ivaMode
     }),
+
+  /** F74 — la configuración del IVA (activar/desactivar, alícuota y modo). La lectura es abierta
+   *  (la caja necesita saber si hay IVA) y la escritura la valida el backend y pide dueño. */
+  getTaxConfig: () => tauriInvoke<TaxConfig>('get_tax_config'),
+  setTaxConfig: (activo: boolean, alicuota: number, modo: string) =>
+    tauriInvoke<TaxConfig>('set_tax_config', { activo, alicuota, modo }),
+  /** F74 — el libro de IVA del período: operaciones agrupadas por alícuota (dueño). El desglose
+   *  base/IVA lo hace la regla pura del frontend: el backend sólo agrupa. */
+  getIvaGroups: (startDate: string, endDate: string) =>
+    tauriInvoke<GrupoIva[]>('get_iva_groups', { startDate, endDate }),
 
   getSales: (search: string = '', days: number | null = null, startDate: string = '', endDate: string = '') =>
     tauriInvoke<Sale[]>('get_sales', { search, days, startDate, endDate }),
+
+  /** F70 — anular una venta (del dueño): devuelve el stock, baja `clients.total_spent` y deja el
+   *  contra-asiento en el libro con el motivo. La venta NO se borra. */
+  voidSale: (id: number, reason: string) => tauriInvoke<void>('void_sale', { id, reason }),
 
   getSalesStats: (days: number) => tauriInvoke<SaleStat[]>('get_sales_stats', { days }),
 
@@ -383,8 +405,23 @@ export const api = {
         payments_usd: 0, payments_bs: 0, sales_usd: 0, sales_bs: 0,
       })),
 
-  addExpense: (expenseDate: string, category: string, amount: number, currency: string, notes: string) =>
-    tauriInvoke<number>('add_expense', { expenseDate, category, amount, currency, notes }),
+  /** F69 — `method` = DE DÓNDE SALIÓ LA PLATA ('' = sin declarar). Un gasto pagado del cajón
+   *  (`Divisas (USD Cash)` / `Efectivo Bs`) baja el efectivo esperado al cerrar el día. */
+  addExpense: (expenseDate: string, category: string, amount: number, currency: string, notes: string, method = '') =>
+    tauriInvoke<number>('add_expense', { expenseDate, category, amount, currency, notes, method }),
+
+  /** F69 — lo que ajusta el arqueo del cajón ese día (fondo de caja + gastos y devoluciones pagados
+   *  del cajón), leído del libro de plata: el cierre muestra de dónde sale el número.
+   *  F69 (revisión adversarial): el error NO se traga en Tauri — devolver ceros en silencio hacía que
+   *  el cierre mostrara el esperado SIN fondo ni gastos (el bug A1 otra vez) mientras `close_day`
+   *  comparaba contra el número correcto. */
+  getDrawerAdjustments: (date: string) =>
+    tauriInvoke<DrawerAdjust>('get_drawer_adjustments', { date }).catch(e => {
+      if (isTauri) throw e;
+      return mock<DrawerAdjust>({
+        fondo_usd: 0, gastos_usd: 0, gastos_bs: 0, devoluciones_usd: 0, devoluciones_bs: 0, sin_metodo: 0,
+      });
+    }),
 
   getExpenses: (startDate: string, endDate: string) =>
     tauriInvoke<Expense[]>('get_expenses', { startDate, endDate }).catch(() => mock<Expense[]>([])),
@@ -407,6 +444,19 @@ export const api = {
   getInventoryValue: () =>
     tauriInvoke<InventoryValue>('get_inventory_value').catch(() =>
       mock<InventoryValue>({ units: 0, cost_usd: 0, sale_usd: 0, categories: [] })),
+
+  // ─── F71 — RESPALDO Y RESTAURACIÓN (bloqueante A2 de la auditoría de entrega) ────────────────
+  /** Copia consistente de la base (VACUUM INTO: se lleva lo que está en el WAL). Del dueño. */
+  backupNow: (dir?: string) => tauriInvoke<Respaldo>('backup_now', { dir: dir ?? null }),
+  listBackups: (dir?: string) =>
+    tauriInvoke<Respaldo[]>('list_backups', { dir: dir ?? null }).catch(() => mock<Respaldo[]>([])),
+  backupStatus: (dir?: string) =>
+    tauriInvoke<EstadoRespaldo>('backup_status', { dir: dir ?? null }).catch(() =>
+      mock<EstadoRespaldo>({ dir: '', total: 0, ultimo: null, error: null, retencion: 14 })),
+  /** Deja la restauración pedida (valida + copia de seguridad de lo actual). Se aplica al reiniciar. */
+  requestRestore: (path: string) =>
+    tauriInvoke<{ copia_seguridad: string; candidato: string; resumen: string }>('request_restore', { path }),
+  restorePending: () => tauriInvoke<boolean>('restore_pending', {}).catch(() => false),
 
   getClients: (search: string = '') =>
     tauriInvoke<ClientSummary[]>('get_clients', { search }),
@@ -528,6 +578,54 @@ export const api = {
    *  catálogo/precios/configuración vuelven a pedir el PIN. La cajera sigue trabajando igual. */
   lockOwner: () =>
     tauriInvoke<null>('lock_owner', {}).catch(() => mock<null>(null)),
+
+  // ─── F68 — SESIONES DE CAJA (Master / Caja) ───────────────────────────────────────────────────
+
+  /**
+   * Las personas que pueden entrar (sin el PIN). La pantalla de acceso las muestra.
+   *
+   * F69 (revisión adversarial) — EN TAURI EL ERROR NO SE TRAGA: con `.catch(() => [])` un fallo de
+   * lectura devolvía una lista vacía, indistinguible de «no hay personas», y `App.tsx` podía abrir la
+   * app como DUEÑO sin sesión (el fail-closed que F69 dice haber puesto era código inalcanzable). Sólo
+   * el modo navegador (sin backend) devuelve el mock, igual que `getCategoriesWithUsage`.
+   */
+  getUsers: (onlyActive = true) =>
+    tauriInvoke<AppUser[]>('get_users', { onlyActive }).catch(e => {
+      if (isTauri) throw e;
+      return mock<AppUser[]>([]);
+    }),
+
+  /** Quién está usando la app ahora (`null` = sesión cerrada). */
+  getCurrentUser: () =>
+    tauriInvoke<SessionUser | null>('get_current_user', {}).catch(() => mock<SessionUser | null>(null)),
+
+  /** Entrar como una persona con SU PIN (abre la sesión de 12 h en el backend). */
+  verifyUserPin: (userId: number, pin: string) =>
+    tauriInvoke<SessionUser | null>('verify_user_pin', { userId, pin }).catch(() =>
+      mock<SessionUser | null>(null)),
+
+  addUser: (name: string, role: 'master' | 'caja', pin: string, color: string) =>
+    tauriInvoke<number>('add_user', { name, role, pin, color }),
+
+  updateUser: (id: number, name: string, color: string, active: boolean) =>
+    tauriInvoke<void>('update_user', { id, name, color, active }),
+
+  setUserPin: (id: number, pin: string) =>
+    tauriInvoke<void>('set_user_pin', { id, pin }),
+
+  deleteUser: (id: number) =>
+    tauriInvoke<void>('delete_user', { id }),
+
+  /** F68/F40 — el LIBRO DE PLATA. La sesión de caja sólo recibe SUS movimientos (lo impone el
+   *  backend con su propio id): es lo que pidió el dueño. */
+  getCashMovements: (startDate: string, endDate: string, limit = 300) =>
+    tauriInvoke<CashMovement[]>('get_cash_movements', { startDate, endDate, limit }).catch(() =>
+      mock<CashMovement[]>([])),
+
+  /** Resumen del libro por persona (sólo el Master: la caja no ve lo que movió el dueño). */
+  getCashMovementsByUser: (startDate: string, endDate: string) =>
+    tauriInvoke<CashMovementByUser[]>('get_cash_movements_by_user', { startDate, endDate }).catch(() =>
+      mock<CashMovementByUser[]>([])),
 
   getPagoMovilDetail: (date: string) =>
     tauriInvoke<PagoMovilDetail[]>('get_pago_movil_detail', { date }).catch(() =>

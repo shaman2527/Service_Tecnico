@@ -1,4 +1,5 @@
 pub mod bcv;
+pub mod backups;
 pub mod cache;
 pub mod catalog;
 pub mod db;
@@ -14,6 +15,13 @@ use std::path::PathBuf;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db_path = get_db_path();
+
+    // F71 — RESTAURACIÓN PENDIENTE: si el dueño pidió restaurar un respaldo desde la app, se aplica
+    // ACÁ, antes de abrir la base (pisar el archivo con la conexión abierta corrompe el WAL). Si el
+    // archivo ya no está o no valida, se descarta el pedido y se sigue con la base actual.
+    if let Some(aplicado) = backups::apply_pending_restore(&db_path) {
+        eprintln!("[registro] base restaurada desde el respaldo {aplicado}");
+    }
 
     let database = db::Database::new(&db_path).expect("Failed to initialize database");
 
@@ -46,7 +54,12 @@ pub fn run() {
             commands::suggest_products,
             commands::add_sale,
             commands::get_sales,
+            commands::void_sale,
 commands::get_sales_stats,
+            // F74 — la configuración del IVA (lectura abierta, escritura del dueño)
+            commands::get_tax_config,
+            commands::set_tax_config,
+            commands::get_iva_groups,
             commands::add_service,
             commands::add_service_order,
             commands::update_service,
@@ -85,6 +98,12 @@ commands::get_sales_stats,
             commands::get_inventory_movements,
             commands::import_price_list,
             commands::export_data,
+            // F71 — respaldo y restauración desde la app
+            commands::backup_now,
+            commands::list_backups,
+            commands::backup_status,
+            commands::request_restore,
+            commands::restore_pending,
             commands::import_data,
             commands::get_daily_totals,
             commands::get_day_summary,
@@ -106,6 +125,19 @@ commands::get_sales_stats,
             commands::verify_pin,
             commands::remove_pin,
             commands::lock_owner,
+            // F68 — sesiones de caja (Master / Caja): quién entra con SU PIN y quién hizo cada
+            // movimiento de plata (el libro). La sesión de caja ve sólo lo suyo.
+            commands::get_users,
+            commands::get_current_user,
+            commands::verify_user_pin,
+            commands::add_user,
+            commands::update_user,
+            commands::set_user_pin,
+            commands::delete_user,
+            commands::get_cash_movements,
+            commands::get_cash_movements_by_user,
+            // F69 — el arqueo del cajón cuenta los gastos/retiros y el fondo de caja
+            commands::get_drawer_adjustments,
             commands::get_pago_movil_detail,
             commands::export_daily_report,
             commands::export_daily_report_xlsx,

@@ -115,9 +115,13 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
             <Button variant="outline" onClick={() => openByModel('')}>
               <Layers data-icon="inline-start" /> Buscar por modelo
             </Button>
-            <Button onClick={() => { setEditing(null); setShowForm(true); }}>
-              <Package data-icon="inline-start" /> Nuevo producto
-            </Button>
+            {/* F69 — crear/editar un producto abre el formulario con el COSTO y los precios, y
+                `add_product`/`update_product` son del dueño en el backend: la caja no ve el botón. */}
+            {role === 'owner' && (
+              <Button onClick={() => { setEditing(null); setShowForm(true); }} data-action="nuevo-producto">
+                <Package data-icon="inline-start" /> Nuevo producto
+              </Button>
+            )}
           </div>
         </div>
 
@@ -139,6 +143,9 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
               onReviewDuplicates={() => setShowDuplicates(true)}
               onByModel={openByModel}
               onCategoryFilter={setCatFiltro}
+              /* F68/F69: el precio de COSTO (y editar la ficha) es del dueño («no tenga tanto acceso» la caja) */
+              verCosto={role === 'owner'}
+              canEdit={role === 'owner'}
             />
           </TabsContent>
 
@@ -147,7 +154,8 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
           </TabsContent>
 
           <TabsContent value="modelo">
-            <ByModelTab refreshKey={refreshKey} initialModel={modelQuery} onEdit={p => { setEditing(p); setShowForm(true); }} />
+            <ByModelTab refreshKey={refreshKey} initialModel={modelQuery} canEdit={role === 'owner'}
+              onEdit={p => { setEditing(p); setShowForm(true); }} />
           </TabsContent>
 
           <TabsContent value="movimientos">

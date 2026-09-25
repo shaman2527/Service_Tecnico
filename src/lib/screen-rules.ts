@@ -1,5 +1,3 @@
-import { normPhoneModel } from './utils.ts';
-import type { PhoneModelEntry } from './utils.ts';
 import type { ScreenCandidate } from '../types';
 
 // Reglas PURAS de la pantalla que se instala (sin React): las comparten el formulario de
@@ -9,12 +7,10 @@ import type { ScreenCandidate } from '../types';
 export const onlyScreens = (candidates: ScreenCandidate[]) =>
   candidates.filter(c => c.product.category_id === 1);
 
-/** Adaptador a la forma que usa applyModelPrice (precio sugerido del modelo). */
-export const asPhoneEntry = (label: string, candidates: ScreenCandidate[]): PhoneModelEntry => ({
-  label,
-  norm: normPhoneModel(label),
-  products: candidates.map(c => c.product),
-});
+// (F67: acá vivía `asPhoneEntry`, que solo existía para armarle el «grupo de repuestos» a
+// `applyModelPrice`. Ese camino se borró — el precio es UNA regla y vive en `lib/screen-price.ts` —
+// así que la función quedó sin llamadores y se fue con él: código muerto que invitaba a un segundo
+// camino de precio.)
 
 /**
  * La pantalla es obligatoria SOLO si el trabajo incluye "Cambio pantalla" Y hay opciones en el

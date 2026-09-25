@@ -5,6 +5,9 @@ import type { Product, Service, ServicePayment } from '../types'
 // abono y ahora también el recibo — el papel no puede decir algo distinto de la pantalla).
 import { orderBalance } from './order-balance.ts'
 import { grossOf } from './discount.ts'
+// F74 — el IVA de la orden: el recibo lo desglosa con la MISMA regla pura que la pantalla (la alícuota
+// con la que se cargó la orden, no la de hoy: un recibo reimpreso dice lo mismo que el original).
+import { desgloseGuardado, alicuotaLabel } from './iva.ts'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -455,7 +458,18 @@ export function buildServiceReceiptParts(
     for (const l of kv('PRECIO', fmtUsd(precioLista), w)) lines.push(l);
     for (const l of kv('DESCUENTO', `-${fmtUsd(descuentoUsd)}`, w)) lines.push(l);
   }
+  // F74 — EL IVA: si la orden se cargó con IVA, el recibo lo desglosa ANTES del total (base imponible
+  // + IVA = total). Sale de la alícuota anotada en la orden, así que una reimpresión dice lo mismo que
+  // el original aunque hoy la alícuota sea otra. Con el IVA apagado estas líneas no existen.
+  const ivaRecibo = desgloseGuardado(totalUsd, service.iva_rate ?? 0, { tasa });
+  if (ivaRecibo.activo) {
+    for (const l of kv('BASE', fmtUsd(ivaRecibo.base), w)) lines.push(l);
+    for (const l of kv(`IVA ${alicuotaLabel(ivaRecibo.alicuota)}`, fmtUsd(ivaRecibo.iva), w)) lines.push(l);
+  }
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) lines.push(l);
+  if (ivaRecibo.activo && ivaRecibo.bs) {
+    for (const l of kv('IVA Bs.', fmtMoney(ivaRecibo.bs.iva, 'VES'), w)) lines.push(l);
+  }
   if (finalized) {
     lines.push(center(service.status === 'Devuelto' ? 'DEVUELTO' : 'CANCELADO', w));
   } else {
@@ -524,6 +538,12 @@ export function buildServiceReceiptParts(
   if (descuentoUsd > 0.005) {
     for (const l of kv('PRECIO', fmtUsd(precioLista), w)) stub.push(l);
     for (const l of kv('DESCUENTO', `-${fmtUsd(descuentoUsd)}`, w)) stub.push(l);
+  }
+  // F74 — el talón también desglosa el IVA (es la copia que queda en el taller y la que el cliente
+  // mira al retirar): base + IVA antes del total.
+  if (ivaRecibo.activo) {
+    for (const l of kv('BASE', fmtUsd(ivaRecibo.base), w)) stub.push(l);
+    for (const l of kv(`IVA ${alicuotaLabel(ivaRecibo.alicuota)}`, fmtUsd(ivaRecibo.iva), w)) stub.push(l);
   }
   for (const l of kv('TOTAL', fmtUsd(totalUsd), w)) stub.push(l);
   if (finalized) {

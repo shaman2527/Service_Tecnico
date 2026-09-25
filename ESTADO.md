@@ -1,8 +1,18 @@
-# 📋 Registro — Estado del Proyecto (2026-09-21)
+# 📋 Registro — Estado del Proyecto (2026-09-23)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
 > y [AGENTS.md](AGENTS.md) (harness + registro de problemas).
+>
+> 🚚 **SPRINT A ENTREGADO (2026-09-23):** los **3 bloqueantes de la auditoría de entrega** quedaron cerrados,
+> con tests Rust, reglas puras y **verificación en vivo**: **F68** sesiones de caja (Master / Caja N con PIN
+> propio, autor en cada movimiento de plata y visibilidad restringida), **F69** cada caja cuadra su día
+> (desglose del cajón con fondo y gastos, conteo obligatorio y verificación de los digitales), **F70** anular
+> una venta con reverso de stock (y fin del botón mudo sin precio) y **F71** respaldo/restauración desde la
+> app (con copia automática al cerrar el día y Ayuda veraz). **Lo que hay que saber para entregar está en
+> [ENTREGA_SPRINT_A.md](ENTREGA_SPRINT_A.md)**; el estado de cada hueco auditado, en
+> [AUDITORIA_ENTREGA.md](AUDITORIA_ENTREGA.md) (§0). Lo único que falta para el cliente final es **publicar la
+> release** (la PC del local sigue con la 0.4.4): el `release_gate` ya da LISTO.
 >
 > 🚚 **VERIFICACIÓN DE ENTREGA (2026-09-21):** se compiló y probó el **instalador local 0.4.2**
 > (F44–F55) **contra una copia de la base real del taller**. El inventario descuenta bien al

@@ -422,6 +422,14 @@ export interface Sale {  id: number;
   client_ci: string | null;
   /** Rebaja por pago en efectivo: total = cobrado real, precio de lista = total + discount_amount */
   discount_amount: number;
+  /** F70 — ANULACIÓN: fecha/hora en que se anuló (null = la venta vale) y por qué. La venta nunca se
+   *  borra: queda en la lista tachada, con su contra-asiento en el libro. */
+  voided_at?: string | null;
+  void_reason?: string | null;
+  /** F74 — EL IVA de esta venta: alícuota (0 = sin IVA) y modo (`'agregado'` | `'incluido'` | `''`).
+   *  `total` es SIEMPRE lo que pagó el cliente; base e IVA se despejan con la alícuota de la fila. */
+  iva_rate?: number;
+  iva_mode?: string | null;
 }
 
 export interface Service {
@@ -465,6 +473,10 @@ export interface Service {
   photo_out_at: string | null;
   /** Acuerdo de pago con el cliente: 'ahora' | 'al_retirar' | null (no se preguntó) */
   pay_intent: string | null;
+  /** F74 — EL IVA de esta orden: alícuota (0 = sin IVA) y modo (`'agregado'` | `'incluido'` | `''`).
+   *  `amount` es lo que paga el cliente (con IVA si el modo es «agregado»). */
+  iva_rate: number;
+  iva_mode: string;
 }
 
 export interface ServiceDeviceInput {
@@ -484,6 +496,19 @@ export interface ServiceDeviceInput {
   discount_amount: number;
   /** F32: estado con el que NACE la orden (el wizard manda 'Recibido' por defecto) */
   status: string;
+  /** F74 — IVA del equipo: alícuota (0 = sin IVA) y modo. `amount` es lo que paga el cliente. */
+  iva_rate: number;
+  iva_mode: string;
+}
+
+/** F74 — LA CONFIGURACIÓN DEL IVA tal como la devuelve/guarda el backend (`tax_config` en
+ *  `settings`). `activo` la prende y la apaga; con el switch apagado no cambia ningún precio. */
+export interface TaxConfig {
+  activo: boolean;
+  /** Alícuota en porcentaje (16 = 16%). */
+  alicuota: number;
+  /** `'incluido'` = el precio ya lo trae · `'agregado'` = se suma al cobrar. */
+  modo: string;
 }
 
 export interface Technician {
@@ -618,6 +643,10 @@ export interface DailyClosing {
   /** Desglose del día en moneda real (migración 2026-08-02) */
   total_usd: number;
   total_bs: number;
+  /** F69 — ajuste del cajón usado al cerrar: fondo de caja − gastos pagados del cajón (USD) y
+   *  − gastos pagados del cajón (Bs). Los cierres viejos vienen en 0 y se leen igual. */
+  drawer_adjust_usd: number;
+  drawer_adjust_bs: number;
 }
 
 export interface BCVRate {
@@ -719,6 +748,19 @@ export interface Expense {
   amount: number;
   currency: string;
   notes: string | null;
+  /** F69 — de dónde salió la plata (`''` = sin declarar). Los métodos de cajón ajustan el arqueo. */
+  method?: string | null;
+}
+
+/** F69 — lo que ajusta el arqueo del cajón ese día (lo lee `get_drawer_adjustments`). */
+export interface DrawerAdjust {
+  fondo_usd: number;
+  gastos_usd: number;
+  gastos_bs: number;
+  /** Ya está restado en lo cobrado: se informa, no se resta otra vez. */
+  devoluciones_usd: number;
+  devoluciones_bs: number;
+  sin_metodo: number;
 }
 
 export interface ProfitSummary {
@@ -860,4 +902,52 @@ export interface TechnicianProfile {
   start: string; end: string; days: TechDayRow[]; types: TechTypeRow[];
   services: number; delivered: number; active: number; finalized: number;
   income_usd: number; pending_usd: number; avg_per_day: number; items: TechServiceRow[];
+}
+// ─── F68 — SESIONES DE CAJA (Master / Caja) ─────────────────────────────────────────────────────
+
+/** Una persona que puede entrar a la app (el PIN nunca viaja al frontend). */
+export interface AppUser {
+  id: number;
+  name: string;
+  role: 'master' | 'caja';
+  color: string;
+  active: boolean;
+  has_pin: boolean;
+}
+
+/** Quién está usando la app ahora (lo devuelve el backend tras verificar SU PIN). */
+export interface SessionUser {
+  id: number;
+  name: string;
+  role: 'master' | 'caja';
+}
+
+/** Un movimiento del LIBRO DE PLATA (F68/F40): todo lo que entra o sale, con su AUTOR. */
+export interface CashMovement {
+  id: number;
+  date: string;
+  day: string;
+  /** venta | abono | abono_anulado | devolucion | gasto | gasto_anulado | apertura | cierre | reapertura */
+  type: string;
+  method: string;
+  currency: string;
+  amount: number;
+  /** +1 entra a la caja · −1 sale · 0 informativo (cierre/reapertura) */
+  sign: number;
+  reference: string;
+  sale_id: number | null;
+  service_id: number | null;
+  payment_id: number | null;
+  expense_id: number | null;
+  user_id: number | null;
+  user_name: string;
+  note: string;
+}
+
+/** Resumen del libro por persona (sólo el Master). */
+export interface CashMovementByUser {
+  name: string;
+  count: number;
+  usd: number;
+  bs: number;
 }

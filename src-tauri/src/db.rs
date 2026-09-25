@@ -139,6 +139,16 @@ pub struct Sale {
     pub currency: Option<String>,
     pub client_ci: Option<String>,
     pub discount_amount: f64,
+    /// F70 — ANULACIÓN: cuándo se anuló (NULL = la venta vale) y por qué. La fila NUNCA se borra: la
+    /// venta queda en la lista tachada y el libro guarda su contra-asiento. Se APENDAN al final del
+    /// orden físico (regla InvalidColumnType: listas explícitas, nunca `SELECT *` posicional).
+    pub voided_at: Option<String>,
+    pub void_reason: Option<String>,
+    /// F74 — EL IVA DE ESTA VENTA: la alícuota (0 = sin IVA) y el modo con que se cargó
+    /// ('agregado' | 'incluido' | ''). `total` es SIEMPRE lo que pagó el cliente; de ahí se despeja
+    /// base e IVA (`src/lib/iva.ts`). Apendadas al final (regla InvalidColumnType).
+    pub iva_rate: f64,
+    pub iva_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -148,6 +158,35 @@ pub struct SaleStat {
     pub qty: i64,
     pub total: f64,
     pub count: i64,
+}
+
+/// F74 — LA CONFIGURACIÓN DEL IVA (tabla `settings`, clave `tax_config`).
+/// `activo` la prende y la apaga; con el switch apagado NADA cambia en los precios. `alicuota` es el
+/// porcentaje (16 = 16%) y `modo` dice si el IVA ya viene en el precio (`incluido`) o se suma al
+/// cobrar (`agregado`). La lee todo el mundo (la caja necesita saber si hay IVA para desglosar) y la
+/// escribe sólo el DUEÑO.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TaxConfig {
+    pub activo: bool,
+    pub alicuota: f64,
+    pub modo: String,
+}
+
+impl Default for TaxConfig {
+    /// De fábrica el IVA está **APAGADO** (los precios del local quedan como están) y listo con 16%,
+    /// la alícuota general de Venezuela.
+    fn default() -> Self {
+        Self { activo: false, alicuota: 16.0, modo: "incluido".to_string() }
+    }
+}
+
+/// F74 — una fila del LIBRO DE IVA del período: las operaciones agrupadas por alícuota. El desglose
+/// base/IVA se calcula en el frontend con la regla pura (`src/lib/iva.ts`), no acá.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IvaGroupRow {
+    pub iva_rate: f64,
+    pub total: f64,
+    pub operaciones: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -192,6 +231,11 @@ pub struct Service {
     pub photo_out_at: Option<String>,
     /// Acuerdo de pago con el cliente: 'ahora' | 'al_retirar' | NULL (no se preguntó)
     pub pay_intent: Option<String>,
+    /// F74 — EL IVA DE ESTA ORDEN: alícuota (0 = sin IVA) y modo ('agregado' | 'incluido' | '').
+    /// `amount` sigue siendo lo que paga el cliente (con IVA si el modo es «agregado»); base e IVA se
+    /// despejan de ese monto con la alícuota de la fila. Apendadas al FINAL del orden físico.
+    pub iva_rate: f64,
+    pub iva_mode: String,
 }
 
 // Un equipo dentro de una orden multi-equipo (add_service_order)
@@ -215,6 +259,13 @@ pub struct ServiceDeviceInput {
     /// Se apenda al FINAL: el INSERT lo toma por nombre de columna, no por posición.
     #[serde(default)]
     pub status: String,
+    /// F74 — IVA del equipo: alícuota (0 = sin IVA) y modo ('agregado' | 'incluido' | '').
+    /// `amount` es lo que paga el cliente. `#[serde(default)]`: los llamadores viejos siguen
+    /// funcionando y una orden sin IVA nace en 0/''.
+    #[serde(default)]
+    pub iva_rate: f64,
+    #[serde(default)]
+    pub iva_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -610,6 +661,31 @@ pub struct Expense {
     pub amount: f64,
     pub currency: String,
     pub notes: Option<String>,
+    /// F69 — DE DÓNDE SALIÓ LA PLATA. Es lo que decide si el gasto baja el ESPERADO DEL CAJÓN
+    /// ('Divisas (USD Cash)' / 'Efectivo Bs') o si salió por banco/otros (no toca el cajón).
+    /// Vacío = sin declarar: NO se descuenta del cajón y el arqueo lo avisa.
+    pub method: String,
+}
+
+/// F69 — LO QUE AJUSTA EL ARQUEO, leído del LIBRO DE PLATA del día (una sola fuente):
+/// los gastos y las devoluciones pagados DEL CAJÓN bajan el efectivo esperado; los que salieron por
+/// banco/otros no lo tocan. Es la respuesta al hallazgo principal de la auditoría de entrega: pagar
+/// un gasto del cajón hacía que la caja «faltara» en un día perfecto.
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct DrawerAdjust {
+    /// Gastos pagados del cajón, en USD (columna «Divisas contadas»)
+    pub gastos_usd: f64,
+    /// Gastos pagados del cajón, en Bs.
+    pub gastos_bs: f64,
+    /// Devoluciones pagadas del cajón, en USD
+    pub devoluciones_usd: f64,
+    /// Devoluciones pagadas del cajón, en Bs.
+    pub devoluciones_bs: f64,
+    /// Gastos del día SIN método declarado (no se descuentan: el arqueo los AVISA)
+    pub sin_metodo: i64,
+    /// Fondo de caja declarado al abrir el día (entra al esperado del cajón, en las dos monedas)
+    pub fondo_usd: f64,
+    pub fondo_bs: f64,
 }
 
 // Utilidad bruta del período: ingresos (ventas + servicios cobrados) − costo de mercancía.
@@ -721,6 +797,13 @@ pub struct DailyClosing {
     /// Desglose del día en moneda real (migración 2026-08-02)
     pub total_usd: f64,
     pub total_bs: f64,
+    /// F69 — AJUSTE DEL CAJÓN que se usó al cerrar: `fondo − gastos pagados del cajón` (USD) y
+    /// `− gastos pagados del cajón` (Bs). Sin esto, la lista de Cierres comparaba el efectivo contado
+    /// contra un esperado sin el fondo ni los gastos y mostraba un descuadre inventado en cualquier día
+    /// que hubiera tenido fondo de caja o un gasto pagado del cajón. Se APENDA al final del orden
+    /// físico (regla InvalidColumnType: listas explícitas, nunca `SELECT *` posicional).
+    pub drawer_adjust_usd: f64,
+    pub drawer_adjust_bs: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -811,15 +894,15 @@ pub struct Database {
     pub cache: Mutex<crate::cache::CatalogCache>,
     /// Ruta del archivo .db (para respaldos antes de operaciones masivas)
     pub db_path: PathBuf,
-    /// Sesión de DUEÑO desbloqueada: la activa `verify_pin` con el PIN correcto y la
-    /// usan TODOS los comandos de ESCRITURA que no son de la cajera (catálogo, precios,
-    /// inventario masivo, gastos, cierres, PIN, configuración) vía `require_owner`.
-    /// Una sesión de cajera (o un invoke directo sin PIN) no puede tocarlos. Si no hay
-    /// PIN configurado, la instalación es de un solo usuario y se permite (ver `owner_gate`).
-    owner_unlocked: std::sync::atomic::AtomicBool,
-    /// Hora (epoch, segundos) en que arrancó la sesión de dueño; 0 = sin fecha.
-    /// La sesión VENCE a las `OWNER_SESSION_HOURS` (ver `owner_session_active`).
-    owner_since: std::sync::atomic::AtomicU64,
+    /// F68 — SESIÓN ACTUAL: QUIÉN está usando la app (id, nombre y rol) y desde cuándo.
+    /// `None` = sesión cerrada (la app pide el PIN de nuevo). Antes de F68 esto era un booleano
+    /// «dueño desbloqueado»; ahora es la persona, porque el libro de plata anota el AUTOR de cada
+    /// movimiento y la sesión de caja ve sólo lo suyo. El rol `master` es lo que habilita las
+    /// escrituras sensibles (`require_owner`).
+    session: Mutex<Option<SessionUser>>,
+    /// Hora (epoch, segundos) en que arrancó la sesión actual; 0 = sin fecha.
+    /// La sesión VENCE a las `OWNER_SESSION_HOURS` (ver `session_active_for`).
+    session_since: std::sync::atomic::AtomicU64,
     /// La última sesión se cerró por VENCIMIENTO: el gate da un mensaje distinto
     /// («venció») para que el operario sepa que solo tiene que volver a poner el PIN.
     owner_expired: std::sync::atomic::AtomicBool,
@@ -829,6 +912,67 @@ pub struct Database {
     pin_locked_until: Mutex<Option<std::time::Instant>>,
 }
 
+/// F68 — quién está usando la app. `role` = 'master' (dueño) | 'caja' (operario de caja).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SessionUser {
+    pub id: i64,
+    pub name: String,
+    pub role: String,
+}
+
+/// F68 — una persona de la app, tal como la ve la UI (sin el hash del PIN).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct UserOut {
+    pub id: i64,
+    pub name: String,
+    pub role: String,
+    pub color: String,
+    pub active: bool,
+    pub has_pin: bool,
+}
+
+/// F68 — un movimiento del libro de plata.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CashMovement {
+    pub id: i64,
+    pub date: String,
+    pub day: String,
+    pub r#type: String,
+    pub method: String,
+    pub currency: String,
+    pub amount: f64,
+    pub sign: i64,
+    pub reference: String,
+    pub sale_id: Option<i64>,
+    pub service_id: Option<i64>,
+    pub payment_id: Option<i64>,
+    pub expense_id: Option<i64>,
+    pub user_id: Option<i64>,
+    pub user_name: String,
+    pub note: String,
+}
+
+/// F68 — datos mínimos para anotar un movimiento en el libro (el resto lo pone el helper).
+pub struct NewCashMovement<'a> {
+    pub r#type: &'a str,
+    pub method: &'a str,
+    pub currency: &'a str,
+    pub amount: f64,
+    /// +1 entra a la caja, -1 sale.
+    pub sign: i64,
+    pub reference: &'a str,
+    pub sale_id: Option<i64>,
+    pub service_id: Option<i64>,
+    pub payment_id: Option<i64>,
+    pub expense_id: Option<i64>,
+    pub note: &'a str,
+    /// F69 — FECHA REAL del movimiento cuando se conoce (`payment_date` del abono, `expense_date` del
+    /// gasto, la fecha del día al abrir/cerrar). `None` = ahora. Sin esto, un abono o un gasto
+    /// retroactivo quedaba anotado en el día en que se tipeó y el arqueo de ese día no lo veía.
+    pub when: Option<&'a str>,
+}
+
+
 impl Database {
     pub fn new(db_path: &PathBuf) -> SqlResult<Self> {
         let conn = Connection::open(db_path)?;
@@ -837,8 +981,8 @@ impl Database {
             conn: Mutex::new(conn),
             cache: Mutex::new(crate::cache::CatalogCache::default()),
             db_path: db_path.clone(),
-            owner_unlocked: std::sync::atomic::AtomicBool::new(false),
-            owner_since: std::sync::atomic::AtomicU64::new(0),
+            session: Mutex::new(None),
+            session_since: std::sync::atomic::AtomicU64::new(0),
             owner_expired: std::sync::atomic::AtomicBool::new(false),
             pin_failures: std::sync::atomic::AtomicU32::new(0),
             pin_locked_until: Mutex::new(None),
@@ -866,12 +1010,19 @@ impl Database {
     }
 
     /// Implementación única del gate de rol.
+    ///
+    /// F68 (revisión adversarial, BLOQUEANTE): antes alcanazaba con que `settings.pin` estuviera vacío
+    /// para que el gate se abriera — y con F68 hay TRES caminos a ese estado (una instalación nueva sin
+    /// PIN, el botón «Quitar PIN» y ponerle PIN vacío al Master desde «Personas»). Con el gate abierto,
+    /// una sesión de CAJA podía borrar productos, cerrar/reabrir el día, importar precios, crear
+    /// personas y **ponerse su propio PIN de dueño**. Ahora la instalación es «de un solo usuario»
+    /// **sólo si no existe ninguna otra persona y el Master no tiene PIN**: en cualquier otro caso se
+    /// exige una sesión de Master de verdad.
     fn owner_gate(&self) -> Result<(), String> {
         match self.get_pin_status() {
-            // instalación sin PIN: un solo usuario (el dueño) → no hay rol que validar
-            Ok(false) => Ok(()),
-            Ok(true) => {
-                if self.owner_session_active() {
+            Ok(false) if self.single_user_install() => Ok(()),
+            Ok(_) => {
+                if self.master_session_active() {
                     Ok(())
                 } else {
                     Err(self.owner_gate_error())
@@ -883,20 +1034,74 @@ impl Database {
         }
     }
 
-    /// Sesión de dueño VIGENTE: desbloqueada con el PIN y dentro de `OWNER_SESSION_HOURS`.
-    /// Al vencer se cierra sola (el próximo PIN correcto abre una sesión nueva).
-    fn owner_session_active(&self) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        if !self.owner_unlocked.load(Relaxed) {
-            // sesión cerrada (o PIN incorrecto): se olvida la fecha para que el próximo
-            // PIN correcto empiece a contar de cero.
-            self.owner_since.store(0, Relaxed);
+    /// ¿La instalación es de UN SOLO USUARIO? (sin ninguna persona de caja y sin PIN en el Master).
+    /// Es la única situación en la que el gate se abre sin sesión: la app del local que sólo tiene al
+    /// dueño y nunca puso PIN. Fail-closed: si no se puede leer, NO es de un solo usuario.
+    fn single_user_install(&self) -> bool {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // F69 (revisión adversarial): se cuentan sólo las personas ACTIVAS — la MISMA definición que
+        // `has_multiple_people`. Antes esta contaba todas las filas y la otra sólo las activas: con la
+        // única caja apagada, el dueño sin PIN se quedaba con el gate cerrado («entrá con el PIN del
+        // dueño», y no había ningún PIN que entrar) mientras el libro sí se abría sin sesión.
+        let otras: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users WHERE role <> 'master' AND active=1", [], |r| r.get(0))
+            .unwrap_or(1);
+        if otras > 0 {
             return false;
         }
-        let since = self.owner_since.load(Relaxed);
+        let master_con_pin: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE role='master' AND COALESCE(pin_hash,'') <> ''",
+                [], |r| r.get(0),
+            )
+            .unwrap_or(1);
+        master_con_pin == 0
+    }
+
+    /// ¿Hay más de una persona activa? (la usa el filtro del libro de plata: sin sesión NO se puede
+    /// mostrar todo si hay varias personas — fail-closed).
+    pub fn has_multiple_people(&self) -> bool {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return true,
+        };
+        conn.query_row("SELECT COUNT(*) FROM users WHERE active=1", [], |r| r.get::<_, i64>(0))
+            .map(|n| n > 1)
+            .unwrap_or(true)
+    }
+
+    /// F68 — la sesión de MASTER (dueño) vigente: alguien con rol `master` desbloqueado y dentro de
+    /// `OWNER_SESSION_HOURS`. Es lo que habilita las escrituras sensibles.
+    fn master_session_active(&self) -> bool {
+        self.session_active_for(Some("master"))
+    }
+
+    /// F68 — ¿hay una sesión vigente (de cualquier rol)? `role`: `Some("master")` / `Some("caja")`
+    /// para exigir el rol, `None` para cualquiera.
+    fn session_active_for(&self, role: Option<&str>) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let who = match self.session.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => None,
+        };
+        let Some(who) = who else {
+            // sesión cerrada (o PIN incorrecto): se olvida la fecha para que el próximo PIN
+            // correcto empiece a contar de cero.
+            self.session_since.store(0, Relaxed);
+            return false;
+        };
+        if let Some(r) = role {
+            if who.role != r {
+                return false;
+            }
+        }
+        let since = self.session_since.load(Relaxed);
         if since == 0 {
-            // desbloqueada sin fecha (solo si `verify_pin` no llegó a sellarla): se fecha acá
-            self.owner_session_set(true);
+            // desbloqueada sin fecha: se fecha acá
+            self.session_since.store(now_secs(), Relaxed);
             return true;
         }
         if now_secs().saturating_sub(since) >= OWNER_SESSION_HOURS * 3600 {
@@ -905,6 +1110,20 @@ impl Database {
             return false;
         }
         true
+    }
+
+    /// F68 — la persona de la sesión actual (para anotar el AUTOR de cada movimiento).
+    pub fn current_user(&self) -> Option<SessionUser> {
+        if !self.session_active_for(None) {
+            return None;
+        }
+        self.session.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// F68 — ¿la sesión actual es de caja (operario)? La UI lo usa para esconder los números del
+    /// dueño. Sin usuarios ni PIN, la instalación es de un solo usuario → NO es caja.
+    pub fn current_is_cashier(&self) -> bool {
+        matches!(self.current_user().map(|u| u.role), Some(r) if r == "caja")
     }
 
     /// Mensaje en español para el operario, con lo que tiene que hacer.
@@ -919,23 +1138,43 @@ impl Database {
         }
     }
 
-    /// La llama `verify_pin`: PIN correcto = arranca la sesión de dueño (sellada AHORA);
-    /// PIN incorrecto = la apaga y olvida la fecha. También permite testear el vencimiento.
-    pub fn owner_session_set(&self, unlocked: bool) {
+    /// F68 — abre la sesión de `user` (sellada AHORA) o la cierra si es `None`.
+    /// La usan `verify_pin` (compatibilidad), `verify_user_pin` y el botón «Bloquear sesión».
+    pub fn session_set(&self, user: Option<SessionUser>) {
         use std::sync::atomic::Ordering::Relaxed;
-        self.owner_unlocked.store(unlocked, Relaxed);
-        self.owner_since.store(if unlocked { now_secs() } else { 0 }, Relaxed);
-        if unlocked {
+        if let Ok(mut g) = self.session.lock() {
+            *g = user;
+        }
+        let abierta = self.session.lock().map(|g| g.is_some()).unwrap_or(false);
+        self.session_since.store(if abierta { now_secs() } else { 0 }, Relaxed);
+        if abierta {
             self.owner_expired.store(false, Relaxed);
         }
     }
 
-    /// Cierra la sesión de dueño: la llama el botón «Bloquear sesión» de la UI y el
-    /// vencimiento de `owner_session_active`.
+    /// Compatibilidad (F68): el resto del código y los tests hablaban de «sesión de dueño
+    /// desbloqueada». `true` abre la sesión del MASTER; `false` la cierra.
+    pub fn owner_session_set(&self, unlocked: bool) {
+        if unlocked {
+            let master = self.master_user().ok().flatten().map(|u| SessionUser {
+                id: u.id,
+                name: u.name,
+                role: u.role,
+            });
+            match master {
+                Some(m) => self.session_set(Some(m)),
+                // instalación sin usuarios: sesión de dueño sin persona (compatibilidad)
+                None => self.session_set(Some(SessionUser { id: 0, name: "Dueño".to_string(), role: "master".to_string() })),
+            }
+        } else {
+            self.session_set(None);
+        }
+    }
+
+    /// Cierra la sesión actual: la llama el botón «Bloquear sesión» de la UI y el
+    /// vencimiento de `session_active_for`.
     pub fn lock_owner(&self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.owner_unlocked.store(false, Relaxed);
-        self.owner_since.store(0, Relaxed);
+        self.session_set(None);
     }
 
     /// SOLO para verificación: mueve hacia atrás la fecha de arranque de la sesión de dueño
@@ -943,10 +1182,463 @@ impl Database {
     /// (adelantar el arranque solo hace que la sesión venza ANTES).
     #[doc(hidden)]
     pub fn owner_session_backdate(&self, secs_ago: u64) {
-        self.owner_since.store(
+        self.session_since.store(
             now_secs().saturating_sub(secs_ago),
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // F68 — USUARIOS (Master / Caja) Y LIBRO DE PLATA
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+
+    /// La fila del MASTER, que nace con el PIN que ya tenía la instalación (`settings.pin`).
+    /// Idempotente: se llama en cada arranque y sólo crea la fila si no existe ninguna master.
+    /// Así, una instalación vieja (un solo PIN) sigue entrando con SU PIN y una nueva arranca
+    /// sin PIN (un solo usuario, sin pantalla de acceso).
+    fn ensure_master_user(&self, conn: &Connection) -> SqlResult<()> {
+        let hay_master: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role='master'",
+            [],
+            |r| r.get(0),
+        )?;
+        if hay_master > 0 {
+            return Ok(());
+        }
+        let pin_hash: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key='pin'", [], |r| r.get(0))
+            .optional()?
+            .flatten();
+        // F69 — el nombre `users.name` es UNIQUE: si ya hay una persona llamada «Master», el INSERT
+        // fallaba y con él TODO el arranque (la app no abría). Se busca un nombre libre.
+        let mut nombre = "Master".to_string();
+        let mut n = 2;
+        while conn
+            .query_row("SELECT 1 FROM users WHERE name=?1", params![nombre], |r| r.get::<_, i64>(0))
+            .optional()?
+            .is_some()
+        {
+            nombre = format!("Master {n}");
+            n += 1;
+        }
+        conn.execute(
+            "INSERT INTO users (name, role, pin_hash, color) VALUES (?2, 'master', ?1, '#0ea5e9')",
+            params![pin_hash.unwrap_or_default(), nombre],
+        )?;
+        Ok(())
+    }
+
+    /// F68 — el usuario MASTER (el dueño). `None` sólo en instalaciones sin usuarios.
+    pub fn master_user(&self) -> SqlResult<Option<UserOut>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, role, color, active, CASE WHEN COALESCE(pin_hash,'')<>'' THEN 1 ELSE 0 END
+             FROM users WHERE role='master' ORDER BY id LIMIT 1",
+            [],
+            |r| {
+                Ok(UserOut {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    role: r.get(2)?,
+                    color: r.get(3)?,
+                    active: r.get::<_, i64>(4)? != 0,
+                    has_pin: r.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// F68 — las personas que pueden entrar a la app (sin el hash del PIN).
+    pub fn get_users(&self, only_active: bool) -> SqlResult<Vec<UserOut>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if only_active {
+            "SELECT id, name, role, color, active, CASE WHEN COALESCE(pin_hash,'')<>'' THEN 1 ELSE 0 END
+             FROM users WHERE active=1 ORDER BY CASE role WHEN 'master' THEN 0 ELSE 1 END, name"
+        } else {
+            "SELECT id, name, role, color, active, CASE WHEN COALESCE(pin_hash,'')<>'' THEN 1 ELSE 0 END
+             FROM users ORDER BY CASE role WHEN 'master' THEN 0 ELSE 1 END, name"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UserOut {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                role: r.get(2)?,
+                color: r.get(3)?,
+                active: r.get::<_, i64>(4)? != 0,
+                has_pin: r.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// F68 — crea una persona. `role` sólo puede ser `master` o `caja` (fail-closed: cualquier
+    /// otra cosa es error, no un default silencioso). El nombre no puede repetirse.
+    pub fn add_user(&self, name: &str, role: &str, pin: &str, color: &str) -> SqlResult<i64> {
+        let nombre = name.trim();
+        if nombre.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "El nombre de la persona no puede estar vacío.".to_string(),
+            ));
+        }
+        if role != "master" && role != "caja" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "El rol tiene que ser 'master' (dueño) o 'caja' (operario de caja).".to_string(),
+            ));
+        }
+        let hash = if pin.trim().is_empty() { String::new() } else { hash_pin(pin)? };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO users (name, role, pin_hash, color) VALUES (?1, ?2, ?3, ?4)",
+            params![nombre, role, hash, color],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// F68 — corrige nombre/color/activo de una persona (el PIN va por `set_user_pin`).
+    /// No se puede desactivar al último master activo (dejaría la app sin dueño).
+    pub fn update_user(&self, id: i64, name: &str, color: &str, active: bool) -> SqlResult<()> {
+        let nombre = name.trim();
+        if nombre.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "El nombre de la persona no puede estar vacío.".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        let role: Option<String> = conn
+            .query_row("SELECT role FROM users WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?;
+        let Some(role) = role else {
+            return Err(rusqlite::Error::InvalidParameterName("Esa persona no existe.".to_string()));
+        };
+        if !active && role == "master" {
+            let otros: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='master' AND active=1 AND id<>?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if otros == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "No se puede apagar al único dueño activo: la app quedaría sin Master.".to_string(),
+                ));
+            }
+        }
+        conn.execute(
+            "UPDATE users SET name=?2, color=?3, active=?4 WHERE id=?1",
+            params![id, nombre, color, if active { 1 } else { 0 }],
+        )?;
+        // El PIN del master también vive en settings.pin (compatibilidad): si se renombra la
+        // persona, la pantalla vieja de PIN sigue funcionando igual.
+        Ok(())
+    }
+
+    /// F68 — PIN propio de una persona (vacío = esa persona entra sin PIN).
+    /// F69 (revisión): el PIN vacío es una facilidad para la instalación de UN solo usuario. Con
+    /// más gente NO se acepta dejar a un `master` sin PIN: cualquier operario podría quedarse con
+    /// el rol de dueño (los permisos del dueño ven todo el dinero) y además el master no podría
+    /// entrar por la pantalla nueva. Tampoco se permite vaciar el PIN del master de la sesión si
+    /// eso dejaría la instalación sin ningún dueño con PIN.
+    pub fn set_user_pin(&self, id: i64, pin: &str) -> SqlResult<()> {
+        let vacio = pin.trim().is_empty();
+        // F69 (revisión adversarial): el PIN de una persona tiene la MISMA forma que el del dueño
+        // (4 dígitos). Sin esto, un invoke directo podía dejar un PIN de 1 o de 12 caracteres que la
+        // pantalla de acceso no puede teclear (el campo corta en 4).
+        if !vacio && (pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit())) {
+            return Err(day_shift_error("El PIN debe tener exactamente 4 dígitos."));
+        }
+        {
+            let conn = self.conn.lock().unwrap();
+            let role: Option<String> = conn
+                .query_row("SELECT role FROM users WHERE id=?1", params![id], |r| r.get(0))
+                .optional()?;
+            let Some(role) = role else {
+                return Err(rusqlite::Error::InvalidParameterName("Esa persona no existe.".to_string()));
+            };
+            if vacio && role == "master" {
+                let otras: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM users WHERE id<>?1 AND active=1",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if otras > 0 {
+                    return Err(day_shift_error(
+                        "El dueño no puede quedar sin PIN en una instalación con más de una persona: \
+                         cualquiera podría entrar como dueño. Poné un PIN de 4 dígitos.",
+                    ));
+                }
+            }
+        }
+        let hash = if vacio { String::new() } else { hash_pin(pin)? };
+        // ¿Es el master «de la casa»? `settings.pin` (la pantalla vieja de PIN y `verify_pin`) es de
+        // ESE master — el de menor id, el mismo que usa `master_user()`. Sincronizar a cualquiera
+        // otro master le pondría su PIN a un dueño distinto.
+        let de_la_casa: bool = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT role='master' AND id=(SELECT id FROM users WHERE role='master' ORDER BY id LIMIT 1) FROM users WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+        };
+        let conn = self.conn.lock().unwrap();
+        let cambiados = conn.execute("UPDATE users SET pin_hash=?2 WHERE id=?1", params![id, hash])?;
+        if cambiados == 0 {
+            return Err(rusqlite::Error::InvalidParameterName("Esa persona no existe.".to_string()));
+        }
+        if de_la_casa {
+            // compatibilidad con la pantalla/PIN viejo y con `get_pin_status`
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('pin', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=?1",
+                params![hash],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// F68 — borra una persona. No se puede borrar al último master (la app quedaría sin dueño)
+    /// y el histórico NO se pierde: el libro de plata guarda el nombre del autor copiado.
+    pub fn delete_user(&self, id: i64) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let role: Option<String> = conn
+            .query_row("SELECT role FROM users WHERE id=?1", params![id], |r| r.get(0))
+            .optional()?;
+        let Some(role) = role else {
+            return Err(rusqlite::Error::InvalidParameterName("Esa persona no existe.".to_string()));
+        };
+        if role == "master" {
+            let otros: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='master' AND id<>?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if otros == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "No se puede borrar al único Master: la app quedaría sin dueño.".to_string(),
+                ));
+            }
+        }
+        conn.execute("DELETE FROM users WHERE id=?1", params![id])?;
+        // F69 (revisión adversarial, MAYOR) — `settings.pin` es la copia de compatibilidad del PIN del
+        // master «de la casa» (el de menor id), y `verify_pin` compara contra ESA copia. Al borrar a ese
+        // master, la copia quedaba apuntando a un PIN que ya no existe: `verify_pin` seguía aceptando el
+        // PIN del borrado y abría sesión como el master vigente. Se resincroniza con el master que queda
+        // (y si no queda ninguno con PIN, se vacía: la instalación vuelve a estar «sin PIN»).
+        if role == "master" {
+            let nuevo: Option<String> = conn
+                .query_row(
+                    "SELECT COALESCE(pin_hash,'') FROM users WHERE role='master' ORDER BY id LIMIT 1",
+                    [], |r| r.get(0),
+                )
+                .optional()?;
+            match nuevo {
+                Some(hash) if !hash.is_empty() => {
+                    conn.execute(
+                        "INSERT INTO settings (key, value) VALUES ('pin', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value=?1",
+                        params![hash],
+                    )?;
+                }
+                _ => {
+                    conn.execute("DELETE FROM settings WHERE key='pin'", [])?;
+                }
+            }
+            // El bloqueo por intentos también se limpia: era del PIN que ya no existe.
+            conn.execute("DELETE FROM settings WHERE key IN ('pin_failures','pin_locked_until')", [])?;
+        }
+        Ok(())
+    }
+
+    /// F68 — entra como `user_id` con SU PIN. Abre la sesión (12 h) y devuelve quién entró.
+    /// PIN vacío en la fila = esa persona entra sin PIN, **pero sólo en una instalación de un solo
+    /// usuario**: si hay más gente, un Master sin PIN no puede entrar sin PIN (sería la puerta para
+    /// quedarse con el rol de dueño) — hallazgo MENOR/tronco del BLOQUEANTE de la revisión.
+    /// F69: reusa el MISMO bloqueo por intentos que el PIN viejo (`pin_failures`/`PIN_MAX_ATTEMPTS`).
+    pub fn verify_user_pin(&self, user_id: i64, pin: &str) -> SqlResult<Option<SessionUser>> {
+        let faltan = self.pin_lock_seconds();
+        if faltan > 0 {
+            return Err(day_shift_error(&format!(
+                "Demasiados intentos fallidos. Probá de nuevo en {faltan} segundo(s)."
+            )));
+        }
+        let fila: Option<(String, String, String, i64)> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT name, role, COALESCE(pin_hash,''), active FROM users WHERE id=?1",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+        };
+        let Some((name, role, hash, active)) = fila else {
+            return Ok(None);
+        };
+        if active == 0 {
+            return Ok(None);
+        }
+        let ok = if hash.is_empty() {
+            if self.single_user_install() {
+                true
+            } else {
+                // Con más gente, la única forma de entrar es con PIN: se dice qué hacer (y que lo
+                // haga OTRO dueño, porque esta persona tampoco puede entrar a Personas y accesos).
+                self.pin_failure();
+                return Err(day_shift_error(&format!(
+                    "«{}» no tiene PIN y esta instalación tiene más de una persona: que otro dueño le ponga \
+                     un PIN de 4 dígitos desde Libro Diario → Personas y accesos.",
+                    name
+                )));
+            }
+        } else {
+            check_pin(pin, &hash).is_some()
+        };
+        if !ok {
+            self.pin_failure();
+            return Ok(None);
+        }
+        self.pin_success();
+        let user = SessionUser { id: user_id, name, role };
+        self.session_set(Some(user.clone()));
+        Ok(Some(user))
+    }
+
+    /// F68/F40 — anota un movimiento en el LIBRO DE PLATA con el AUTOR de la sesión actual.
+    /// La llaman los write-points de dinero DENTRO de su misma transacción (recibe la conexión).
+    /// Si no hay sesión (instalación de un solo usuario), el autor queda vacío = «sin asignar».
+    ///
+    /// F69 (revisión adversarial, MAYOR): `when` es la FECHA REAL del movimiento cuando se conoce
+    /// (`payment_date` de un abono retroactivo, `expense_date` de un gasto, la fecha del día al abrir/
+    /// cerrar). Antes SIEMPRE se usaba el default `datetime('now')`, así que un abono del 14 anotado el
+    /// 17 quedaba en el libro del 17 (y el arqueo del 14 no lo veía). `None` = ahora.
+    fn book_movement(&self, conn: &Connection, mv: &NewCashMovement) -> SqlResult<()> {
+        let who = self.current_user();
+        let (uid, uname) = match who {
+            Some(u) => (Some(u.id), u.name),
+            None => (None, String::new()),
+        };
+        conn.execute(
+            "INSERT INTO cash_movements
+                (type, method, currency, amount, sign, reference, sale_id, service_id, payment_id, expense_id, user_id, user_name, note, date, day)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     COALESCE(?14, datetime('now','localtime')),
+                     COALESCE(date(?14), date('now','localtime')))",
+            params![
+                mv.r#type, mv.method, mv.currency, mv.amount, mv.sign, mv.reference,
+                mv.sale_id, mv.service_id, mv.payment_id, mv.expense_id, uid, uname, mv.note,
+                mv.when.filter(|w| !w.trim().is_empty())
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// F69 (revisión adversarial, MAYOR) — CONTRA-ASIENTO ESPEJO: busca en el libro el movimiento
+    /// original de un cobro o de un gasto y escribe su opuesto (mismo monto —el NETO que se anotó—,
+    /// mismo método, misma moneda y signo invertido). Así el par suma CERO y el arqueo no inventa
+    /// plata: antes el borrado de un cobro iba con el BRUTO y sin método (borrar un cobro en efectivo
+    /// no bajaba el esperado del cajón) y el de un gasto perdía el método declarado.
+    fn reverse_book_entry(&self, conn: &Connection, por_pago: Option<i64>, por_gasto: Option<i64>, note: &str) -> SqlResult<()> {
+        let original: Option<(String, String, String, f64, i64, String, String)> = conn
+            .query_row(
+                "SELECT type, method, currency, amount, sign, date, day FROM cash_movements
+                 WHERE (?1 IS NOT NULL AND payment_id = ?1) OR (?2 IS NOT NULL AND expense_id = ?2)
+                 ORDER BY id DESC LIMIT 1",
+                params![por_pago, por_gasto],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+            .optional()?;
+        let Some((tipo, metodo, moneda, monto, signo, fecha_original, _dia_original)) = original else {
+            return Ok(()); // sin movimiento en el libro (dato viejo o borrado dos veces): nada que espejar
+        };
+        let tipo_anulado = format!("{}_anulado", tipo.trim_end_matches("_anulado"));
+        self.book_movement(conn, &NewCashMovement {
+            r#type: &tipo_anulado,
+            method: &metodo,
+            currency: &moneda,
+            amount: monto,
+            sign: -signo,
+            reference: "",
+            sale_id: None,
+            service_id: None,
+            payment_id: por_pago,
+            expense_id: por_gasto,
+            note,
+            // F69 (bug cazado en la 2ª corrida en vivo): el contra-asiento va al DÍA DEL MOVIMIENTO
+            // ORIGINAL, no al de hoy. Si el gasto era del 21 y se borra el 23, el asiento espejo caía
+            // en el 23: el 21 seguía descontando ese gasto del cajón para siempre y el 23 se llevaba
+            // un «+20» de un gasto que nunca tuvo. Se copia la fecha original tal cual.
+            when: Some(&fecha_original),
+        })
+    }
+
+    /// F68 — el libro de plata, filtrado. `user_id` = sólo lo de esa persona (la sesión de caja
+    /// usa SU id para ver sólo su día, y también las filas del NEGOCIO sin autor — historia vieja
+    /// o movimientos que no son de nadie en particular: si no, el día de la cajera saldría
+    /// incompleto); `None` = todo (el Master).
+    pub fn get_cash_movements(&self, start_date: &str, end_date: &str, user_id: Option<i64>, limit: i64)
+        -> SqlResult<Vec<CashMovement>> {
+        let conn = self.conn.lock().unwrap();
+        let desde = if start_date.is_empty() { "0000-01-01" } else { start_date };
+        let hasta = if end_date.is_empty() { "9999-12-31" } else { end_date };
+        let mut stmt = conn.prepare(
+            "SELECT id, date, day, type, method, currency, amount, sign, reference,
+                    sale_id, service_id, payment_id, expense_id, user_id, user_name, note
+             FROM cash_movements
+             WHERE day >= ?1 AND day <= ?2 AND (?3 IS NULL OR user_id = ?3 OR user_id IS NULL)
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![desde, hasta, user_id, limit.clamp(1, 2000)], |r| {
+            Ok(CashMovement {
+                id: r.get(0)?,
+                date: r.get(1)?,
+                day: r.get(2)?,
+                r#type: r.get(3)?,
+                method: r.get(4)?,
+                currency: r.get(5)?,
+                amount: r.get(6)?,
+                sign: r.get(7)?,
+                reference: r.get(8)?,
+                sale_id: r.get(9)?,
+                service_id: r.get(10)?,
+                payment_id: r.get(11)?,
+                expense_id: r.get(12)?,
+                user_id: r.get(13)?,
+                user_name: r.get(14)?,
+                note: r.get(15)?,
+            })
+        })?;
+        // F69 (revisión adversarial): una fila que no se puede leer NO se descarta en silencio — el
+        // libro del día saldría incompleto sin ningún aviso y el arqueo se explicaría con menos
+        // movimientos de los que hay. Se avisa por consola (el llamador igual recibe el resto).
+        let mut salida = Vec::new();
+        for r in rows {
+            match r {
+                Ok(m) => salida.push(m),
+                Err(e) => eprintln!("[registro] movimiento del libro ilegible (se omite): {e}"),
+            }
+        }
+        Ok(salida)
+    }
+
+    /// F68 — resumen del libro por persona en un rango (para la pantalla del Master):
+    /// cuántos movimientos y cuánto neto por moneda. Es informativo y NO recalcula la caja.
+    pub fn get_cash_movements_by_user(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<(String, i64, f64, f64)>> {
+        let conn = self.conn.lock().unwrap();
+        let desde = if start_date.is_empty() { "0000-01-01" } else { start_date };
+        let hasta = if end_date.is_empty() { "9999-12-31" } else { end_date };
+        let mut stmt = conn.prepare(
+            "SELECT CASE WHEN COALESCE(user_name,'')='' THEN '(sin asignar)' ELSE user_name END AS quien,
+                    COUNT(*) n,
+                    COALESCE(SUM(CASE WHEN currency='USD' THEN amount*sign ELSE 0 END),0) usd,
+                    COALESCE(SUM(CASE WHEN currency<>'USD' THEN amount*sign ELSE 0 END),0) bs
+             FROM cash_movements WHERE day >= ?1 AND day <= ?2
+             GROUP BY quien ORDER BY quien",
+        )?;
+        let rows = stmt.query_map(params![desde, hasta], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     fn init(&self) -> SqlResult<()> {
@@ -1100,7 +1792,54 @@ impl Database {
                 notes TEXT,
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            -- F68 — SESIONES DE CAJA: una fila por PERSONA que usa la app (Master = dueño,
+            -- caja = operario de caja). El PIN de cada una es su propia llave (hash PBKDF2, igual
+            -- que settings.pin); `key_legacy` del dueño sigue viviendo en settings.pin para no
+            -- romper las instalaciones viejas (al migrar se copia a la fila Master).
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'caja' CHECK(role IN ('master','caja')),
+                pin_hash TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            -- F68/F40 — LIBRO ÚNICO DE MOVIMIENTOS DE PLATA: cada movimiento de dinero de la app
+            -- (venta, abono, devolución, gasto, apertura, cierre…) se anota ACÁ con su AUTOR.
+            -- Es la base de «quién hizo qué» y, en F69, del esperado de la caja (una sola fuente en
+            -- vez de ir sumando tablas). `user_name` va desnormalizado a propósito: el histórico no
+            -- puede depender de que el usuario siga existiendo.
+            CREATE TABLE IF NOT EXISTS cash_movements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                day TEXT NOT NULL DEFAULT (date('now','localtime')),
+                type TEXT NOT NULL,
+                method TEXT NOT NULL DEFAULT '',
+                currency TEXT NOT NULL DEFAULT 'USD',
+                amount REAL NOT NULL DEFAULT 0,
+                sign INTEGER NOT NULL DEFAULT 1,
+                reference TEXT NOT NULL DEFAULT '',
+                sale_id INTEGER,
+                service_id INTEGER,
+                payment_id INTEGER,
+                expense_id INTEGER,
+                user_id INTEGER,
+                user_name TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_cash_movements_day ON cash_movements(day);
+            CREATE INDEX IF NOT EXISTS idx_cash_movements_user ON cash_movements(user_id);
         ")?;
+
+        // F68 — la fila Master nace con el PIN que ya tenía la instalación (si había): el dueño
+        // sigue entrando con SU PIN y las instalaciones nuevas arrancan sin PIN (un solo usuario).
+        // F69: si esto fallara, la app tiene que ABRIR igual (el padrón de personas es una comodidad,
+        // no un requisito para vender): se avisa por consola y se sigue.
+        if let Err(e) = self.ensure_master_user(&conn) {
+            eprintln!("[registro] no se pudo preparar la fila Master del padrón: {e}");
+        }
 
         // Migration: add client_id to sales if missing
         let has_client_id: bool = conn
@@ -1188,6 +1927,23 @@ impl Database {
                 ALTER TABLE services ADD COLUMN client_ci TEXT;
                 ALTER TABLE services ADD COLUMN client_address TEXT;
                 ALTER TABLE services ADD COLUMN device_checklist TEXT;
+            ");
+        }
+        // F69 — DE DÓNDE SALIÓ LA PLATA de un gasto (`Divisas (USD Cash)` / `Efectivo Bs` = del cajón;
+        // el resto = banco/otros; vacío = sin declarar). Es lo que permite que el arqueo descuente los
+        // gastos pagados del cajón en vez de decir «faltan Bs. X» en un día perfecto.
+        // AL FINAL del orden físico (regla de siempre: mover una columna rompe el mapping posicional).
+        let has_expense_method: bool = conn.prepare("SELECT method FROM expenses LIMIT 1").is_ok();
+        if !has_expense_method {
+            let _ = conn.execute_batch("ALTER TABLE expenses ADD COLUMN method TEXT DEFAULT '';");
+        }
+        // F69 — el AJUSTE DEL CAJÓN que se usó al cerrar (fondo + gastos/retiros del cajón), guardado
+        // para que un cierre viejo siga explicándose solo (invariante: un cierre guardado no se recalcula).
+        let has_drawer_adjust: bool = conn.prepare("SELECT drawer_adjust_usd FROM daily_closings LIMIT 1").is_ok();
+        if !has_drawer_adjust {
+            let _ = conn.execute_batch("
+                ALTER TABLE daily_closings ADD COLUMN drawer_adjust_usd REAL DEFAULT 0;
+                ALTER TABLE daily_closings ADD COLUMN drawer_adjust_bs REAL DEFAULT 0;
             ");
         }
         // Migration: add ci + address to clients
@@ -1291,6 +2047,19 @@ impl Database {
         if !has_sale_discount {
             let _ = conn.execute_batch("ALTER TABLE sales ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;");
         }
+        // F70 — ANULACIÓN DE UNA VENTA (`void_sale`): la venta no se borra, se marca. Las dos columnas
+        // se APENDAN al final del orden físico (misma regla que `discount_amount`/`photo_in_at`: los
+        // SELECTs son listas explícitas y una columna movida rompe el mapping posicional).
+        {
+            let has_voided_at: bool = conn.prepare("SELECT voided_at FROM sales LIMIT 1").is_ok();
+            if !has_voided_at {
+                let _ = conn.execute_batch("ALTER TABLE sales ADD COLUMN voided_at TEXT;");
+            }
+            let has_void_reason: bool = conn.prepare("SELECT void_reason FROM sales LIMIT 1").is_ok();
+            if !has_void_reason {
+                let _ = conn.execute_batch("ALTER TABLE sales ADD COLUMN void_reason TEXT;");
+            }
+        }
         // Migration: SEÑALES DE POLÍTICA del taller (F32) — foto de ENTRADA, foto de SALIDA y
         // acuerdo de pago (paga ahora o al retirar). Son ANOTACIONES informativas de los
         // recordatorios del operario: NO afectan montos, stock ni cierres y las escribe
@@ -1309,6 +2078,30 @@ impl Database {
             let has_pay_intent: bool = conn.prepare("SELECT pay_intent FROM services LIMIT 1").is_ok();
             if !has_pay_intent {
                 let _ = conn.execute_batch("ALTER TABLE services ADD COLUMN pay_intent TEXT;");
+            }
+        }
+        // Migration: EL IVA POR FILA (F74, 2026-09-25). Cada venta y cada orden guarda con qué
+        // ALÍCUOTA y en qué MODO se cargó (`agregado` = se sumó al cobrar · `incluido` = ya venía en
+        // el precio · '' = sin IVA). El monto (`sales.total` / `services.amount`) sigue siendo LO QUE
+        // PAGA EL CLIENTE, así que la caja, el arqueo y los saldos no cambian de significado: la base
+        // y el IVA se despejan de ese total con la alícuota de la fila (`src/lib/iva.ts`), y cambiar
+        // la alícuota hoy NO reescribe el IVA de una operación vieja.
+        // Las 4 columnas se APENDAN al FINAL del orden físico (regla InvalidColumnType: los SELECT
+        // son listas explícitas y una columna movida rompe el mapping posicional).
+        {
+            let has_sale_iva: bool = conn.prepare("SELECT iva_rate FROM sales LIMIT 1").is_ok();
+            if !has_sale_iva {
+                let _ = conn.execute_batch(
+                    "ALTER TABLE sales ADD COLUMN iva_rate REAL NOT NULL DEFAULT 0;
+                     ALTER TABLE sales ADD COLUMN iva_mode TEXT NOT NULL DEFAULT '';",
+                );
+            }
+            let has_svc_iva: bool = conn.prepare("SELECT iva_rate FROM services LIMIT 1").is_ok();
+            if !has_svc_iva {
+                let _ = conn.execute_batch(
+                    "ALTER TABLE services ADD COLUMN iva_rate REAL NOT NULL DEFAULT 0;
+                     ALTER TABLE services ADD COLUMN iva_mode TEXT NOT NULL DEFAULT '';",
+                );
             }
         }
         // Migration: TEXTO DE BÚSQUEDA normalizado (2026-09-15).
@@ -1598,8 +2391,13 @@ impl Database {
         let normalize_column = |conn: &rusqlite::Connection, table: &str, column: &str| -> SqlResult<()> {
             let sql = format!("SELECT id, {} FROM {}", column, table);
             let mut stmt = conn.prepare(&sql)?;
+            // F75 (hallazgo medido): leer el nombre con `String` a secas REVENTABA el arranque de la
+            // app si la base traía una fila con NULL (una importación, un Excel migrado o una fila
+            // escrita a mano): `Failed to initialize database: InvalidColumnType(1, "client_name",
+            // Null)` y la app quedaba INSERVIBLE (no abría). El nombre es un snapshot opcional: se lee
+            // defensivo y NULL se trata como vacío (nada que normalizar).
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default()))
             })?;
             let mut updates: Vec<(String, i64)> = Vec::new();
             for row in rows {
@@ -2861,9 +3659,22 @@ impl Database {
     }
 
     // --- Sales ---
+    /// F74 — la venta CON IVA: `total` es lo que pagó el cliente (con IVA si el modo es «agregado») y
+    /// la alícuota/modo quedan anotados en la fila. `add_sale` (13 parámetros, compatibilidad con los
+    /// llamadores de siempre) delega acá con 0/'' = sin IVA: así ninguna llamada vieja cambia.
     pub fn add_sale(&self, product_id: Option<i64>, product_name: &str, quantity: i64, unit_price: f64,
                     total: f64, payment_method: &str, client_name: &str, client_id: Option<i64>, notes: &str,
                     bank_fee_percent: f64, zelle_reference: &str, currency: &str, discount_amount: f64) -> SqlResult<()> {
+        self.add_sale_tax(product_id, product_name, quantity, unit_price, total, payment_method, client_name,
+                          client_id, notes, bank_fee_percent, zelle_reference, currency, discount_amount, 0.0, "")
+    }
+
+    pub fn add_sale_tax(&self, product_id: Option<i64>, product_name: &str, quantity: i64, unit_price: f64,
+                    total: f64, payment_method: &str, client_name: &str, client_id: Option<i64>, notes: &str,
+                    bank_fee_percent: f64, zelle_reference: &str, currency: &str, discount_amount: f64,
+                    // F74 — el IVA con el que se cargó ESTA venta (0/'' = sin IVA). `total` es lo que
+                    // pagó el cliente (con IVA si el modo es «agregado»).
+                    iva_rate: f64, iva_mode: &str) -> SqlResult<()> {
         if quantity <= 0 || unit_price < 0.0 || total < 0.0 {
             return Err(day_shift_error("Cantidad y montos deben ser positivos."));
         }
@@ -2874,8 +3685,8 @@ impl Database {
         self.require_open_day(&conn)?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-            params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, discount_amount],
+            "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount, iva_rate, iva_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, discount_amount, if iva_rate > 0.0 { iva_rate } else { 0.0 }, if iva_rate > 0.0 { iva_mode } else { "" }],
         )?;
         let sale_id = tx.last_insert_rowid();
         if let Some(pid) = product_id {
@@ -2892,13 +3703,137 @@ impl Database {
                 params![total, cid],
             )?;
         }
+        // F68/F40: la venta queda en el LIBRO DE PLATA con su AUTOR (quién la cobró). El monto va
+        // en la moneda del método (lo que realmente entró a la caja o al banco) y neto de comisión.
+        self.book_movement(&tx, &NewCashMovement {
+            r#type: "venta",
+            method: payment_method,
+            currency,
+            amount: net_amount,
+            sign: 1,
+            reference: zelle_reference,
+            sale_id: Some(sale_id),
+            service_id: None,
+            payment_id: None,
+            expense_id: None,
+            note: "",
+            when: None,
+        })?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// F70 — ANULAR UNA VENTA (con reverso de stock). El bloqueante A3 de la auditoría de entrega: una
+    /// venta mal tecleada quedaba en la caja de ese día **para siempre** (no existía `update_sale` ni
+    /// `delete_sale`) y una pantalla vendida y devuelta **no volvía al stock**.
+    ///
+    /// Reglas (todas probadas en `test_void_sale_*`):
+    ///   · **La venta NO se borra**: se marca (`voided_at` + `void_reason`) y sigue en la lista tachada.
+    ///   · **Día de la venta ABIERTO**: un cierre guardado no se recalcula. Si ya se cerró, el error dice
+    ///     el camino real (↺ → anular → volver a cerrar), igual que F35 con la fecha de un pago.
+    ///   · **Reverso de stock** (`stock + quantity`) con su movimiento de inventario de ENTRADA.
+    ///   · **`clients.total_spent`** baja por el total (si la venta era de un cliente del padrón).
+    ///   · **Contra-asiento en el libro** (tipo `venta_anulada`, MISMO método/moneda/monto neto, signo
+    ///     −1) con el autor de la sesión, el motivo y **el día de la venta** (no el de hoy).
+    ///   · Doble anulación rechazada; el dueño es el único que puede (lo pide el comando).
+    pub fn void_sale(&self, id: i64, reason: &str) -> SqlResult<()> {
+        let motivo = reason.trim();
+        if motivo.is_empty() {
+            return Err(day_shift_error("Hay que decir por qué se anula la venta."));
+        }
+        let conn = self.conn.lock().unwrap();
+        let fila: Option<(Option<i64>, i64, f64, f64, String, Option<String>, Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT product_id, quantity, total, COALESCE(net_amount, total), COALESCE(payment_method,''),
+                        currency, client_id, voided_at
+                 FROM sales WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+            )
+            .optional()?;
+        let Some((product_id, cantidad, total, neto, metodo, moneda, client_id, ya_anulada)) = fila else {
+            return Err(day_shift_error("Esa venta no existe."));
+        };
+        if ya_anulada.is_some() {
+            return Err(day_shift_error("Esa venta ya está anulada."));
+        }
+        // El día de la VENTA (no el de hoy): la anulación pertenece a la caja de ese día.
+        let dia_venta: String = conn.query_row(
+            "SELECT date(date) FROM sales WHERE id=?1", params![id], |r| r.get(0),
+        )?;
+        let dia_abierto: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=0",
+                params![dia_venta], |r| r.get(0),
+            )
+            .optional()?;
+        if dia_abierto.is_none() {
+            let cerrado: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=1",
+                    params![dia_venta], |r| r.get(0),
+                )
+                .optional()?;
+            return Err(day_shift_error(&if cerrado.is_some() {
+                format!(
+                    "El día {} ya está CERRADO con su arqueo: el dueño lo reabre (Libro Diario → Cierres → ↺), \
+                     anula la venta y vuelve a cerrarlo.", dia_venta)
+            } else {
+                format!("El día {} de esa venta no tiene turno abierto: no se puede anular.", dia_venta)
+            }));
+        }
+        let tx = conn.unchecked_transaction()?;
+        let cambiadas = tx.execute(
+            "UPDATE sales SET voided_at=datetime('now','localtime'), void_reason=?2 WHERE id=?1 AND voided_at IS NULL",
+            params![id, motivo],
+        )?;
+        if cambiadas == 0 {
+            return Err(day_shift_error("Esa venta ya está anulada."));
+        }
+        // Reverso de STOCK + movimiento de inventario (la historia del movimiento se conserva).
+        if let Some(pid) = product_id {
+            tx.execute("UPDATE products SET stock = stock + ?1 WHERE id=?2", params![cantidad, pid])?;
+            tx.execute(
+                "INSERT INTO inventory_movements (product_id, type, quantity, reason, reference) VALUES (?1, 'entrada', ?2, 'Anulación de venta', ?3)",
+                params![pid, cantidad, format!("Venta #{}", id)],
+            )?;
+        }
+        if let Some(cid) = client_id {
+            tx.execute(
+                "UPDATE clients SET total_spent = MAX(0, total_spent - ?1) WHERE id=?2",
+                params![total, cid],
+            )?;
+        }
+        // Contra-asiento: mismo método/moneda/monto NETO, signo invertido, autor y motivo. El `day` es
+        // el de la venta (`date` del movimiento original) para que el arqueo de ESE día deje de contarla.
+        let original: Option<(String, String)> = tx
+            .query_row(
+                "SELECT date, day FROM cash_movements WHERE sale_id=?1 AND type='venta' ORDER BY id LIMIT 1",
+                params![id], |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (fecha_original, _) = original.unwrap_or_else(|| (dia_venta.clone(), dia_venta.clone()));
+        self.book_movement(&tx, &NewCashMovement {
+            r#type: "venta_anulada",
+            method: &metodo,
+            currency: moneda.as_deref().unwrap_or("USD"),
+            amount: neto,
+            sign: -1,
+            reference: "",
+            sale_id: Some(id),
+            service_id: None,
+            payment_id: None,
+            expense_id: None,
+            note: motivo,
+            when: Some(&fecha_original),
+        })?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn get_sales(&self, search: &str, days: Option<i64>, start_date: &str, end_date: &str) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount, s.voided_at, s.void_reason, s.iva_rate, s.iva_mode FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -2936,6 +3871,10 @@ impl Database {
                 currency: r.get(15).unwrap_or(Some("USD".into())),
                 client_ci: r.get(16).unwrap_or(None),
                 discount_amount: r.get(17).unwrap_or(0.0),
+                voided_at: r.get(18).unwrap_or(None),
+                void_reason: r.get(19).unwrap_or(None),
+                iva_rate: r.get(20).unwrap_or(0.0),
+                iva_mode: r.get(21).unwrap_or_default(),
             })
         })?;
         let mut sales = Vec::new();
@@ -2947,7 +3886,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT s.product_name, s.product_id, SUM(s.quantity) as qty, SUM(s.total) as total, COUNT(*) as count
-             FROM sales s WHERE date(s.date) >= date('now','localtime', ?1)
+             FROM sales s WHERE date(s.date) >= date('now','localtime', ?1) AND s.voided_at IS NULL
              GROUP BY s.product_name ORDER BY total DESC"
         )?;
         let rows = stmt.query_map(params![format!("-{} days", days)], |r| {
@@ -2971,7 +3910,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         // F32: `add_service` (compatibilidad) no elige estado → histórico 'Por entregar'.
-        Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id, color, screen_product_id, discount_amount, "")
+        Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id, color, screen_product_id, discount_amount, "", 0.0, "")
     }
 
     // Insert transaccional conn-level (sin lock: lo comparte add_service y add_service_order).
@@ -2987,14 +3926,18 @@ impl Database {
                           client_ci: &str, client_address: &str, device_checklist: &str,
                           client_id: Option<i64>, technician: &str, technician_id: Option<i64>,
                           color: &str, screen_product_id: Option<i64>, discount_amount: f64,
-                          status: &str) -> SqlResult<i64> {
+                          status: &str,
+                          // F74 — IVA del equipo (0/'' = sin IVA). `amount` es lo que paga el cliente.
+                          iva_rate: f64, iva_mode: &str) -> SqlResult<i64> {
         let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
         let net_amount = amount - bank_fee_amount;
         let client = title_case(client.trim());
         let status_val: &str = if status.trim().is_empty() { "Por entregar" } else { status.trim() };
+        let iva_rate_val = if iva_rate > 0.0 { iva_rate } else { 0.0 };
+        let iva_mode_val: &str = if iva_rate_val > 0.0 { iva_mode } else { "" };
         conn.execute(
-            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id, color, screen_product_id, discount_amount, status) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22,?23,?24,?25,?26)",
-            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id, discount_amount, status_val],
+            "INSERT INTO services (order_num, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, paid_amount, technician, technician_id, group_id, color, screen_product_id, discount_amount, status, iva_rate, iva_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
+            params![order_num, client, phone, model, fault, service_type, if service_types.trim().is_empty() { None } else { Some(service_types) }, amount, payment_method, observations, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, if client_ci.is_empty() { None } else { Some(client_ci) }, if client_address.is_empty() { None } else { Some(client_address) }, if device_checklist.is_empty() { None } else { Some(device_checklist) }, client_id, if technician.trim().is_empty() { None } else { Some(technician) }, technician_id, group_id, if color.trim().is_empty() { None } else { Some(color) }, screen_product_id, discount_amount, status_val, iva_rate_val, iva_mode_val],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -3042,7 +3985,7 @@ impl Database {
                                      d.bank_fee_percent, &d.zelle_reference, &d.currency,
                                      client_ci, client_address, &d.device_checklist,
                                      client_id, technician, technician_id, &d.color, d.screen_product_id, d.discount_amount,
-                                     &d.status)?;
+                                     &d.status, d.iva_rate, &d.iva_mode)?;
         }
         tx.commit()?;
         Ok(base)
@@ -3259,6 +4202,18 @@ impl Database {
                 self.apply_service_stock(&conn, &model, screen_pid, &s_types, &s_type, &order_num, 1)?;
             }
         }
+        // F69 (revisión adversarial, MAYOR): antes de borrar los cobros de la orden hay que dejar su
+        // CONTRA-ASIENTO en el libro. Sin esto el libro seguía mostrando abonos que ya no existen (los
+        // totales del día sí los perdían): el dueño veía plata que no entró y el libro quedaba
+        // descuadrado para siempre, sólo arreglable con SQL a mano.
+        let pagos: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM service_payments WHERE service_id=?1")?;
+            let rows = stmt.query_map(params![id], |r| r.get::<_, i64>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for pid in pagos {
+            self.reverse_book_entry(&conn, Some(pid), None, "Orden borrada")?;
+        }
         conn.execute("DELETE FROM service_payments WHERE service_id=?", params![id])?;
         conn.execute("DELETE FROM services WHERE id=?", params![id])?;
         Ok(())
@@ -3457,6 +4412,23 @@ impl Database {
         )?;
         let pid = conn.last_insert_rowid();
         self.recalc_paid_amount(&conn, service_id)?;
+        // F68/F40: el abono queda en el LIBRO DE PLATA con su AUTOR. La fecha del libro es la del
+        // PAGO (no la de hoy): un abono retroactivo pertenece a la caja de ese día.
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "abono",
+            method: payment_method,
+            currency: &currency,
+            amount: net_amount,
+            sign: 1,
+            reference: zelle_reference,
+            sale_id: None,
+            service_id: Some(service_id),
+            payment_id: Some(pid),
+            expense_id: None,
+            note: if notes.is_empty() { "" } else { notes },
+            // F69: la fecha del libro es la DEL PAGO (puede ser retroactiva), no la de hoy.
+            when: Some(&stamp),
+        })?;
         Ok(pid)
     }
 
@@ -3469,6 +4441,22 @@ impl Database {
             "SELECT service_id, currency, date(payment_date) FROM service_payments WHERE id = ?1",
             params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).optional()?.ok_or_else(|| day_shift_error("El pago no existe."))?;
+        // F69 (revisión adversarial, MAYOR): mover la fecha de un pago AJENO mueve plata entre dos
+        // cajas y descuadra dos arqueos. F35 decidió que la cajera pueda corregir la fecha (está en el
+        // mostrador cuando pasa), pero eso era sobre SUS cobros: si el movimiento del libro está a
+        // nombre de otra persona, hace falta la sesión del dueño.
+        let autor: Option<i64> = conn.query_row(
+            "SELECT user_id FROM cash_movements WHERE payment_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![id], |r| r.get(0),
+        ).optional()?.flatten();
+        if let Some(autor_id) = autor {
+            let propio = self.current_user().map(|u| u.id == autor_id).unwrap_or(false);
+            if !propio && !self.master_session_active() {
+                return Err(day_shift_error(
+                    "Ese cobro lo anotó otra persona: para cambiarle la fecha entrá con el PIN del dueño.",
+                ));
+            }
+        }
         let hacia = self.payment_date_ok(&conn, payment_date)?;
         let desde = desde.unwrap_or_default();
         self.payment_date_movable(&conn, &desde, &hacia)?;
@@ -3493,6 +4481,15 @@ impl Database {
             params![id, stamp],
         )?;
         self.recalc_paid_amount(&conn, service_id)?;
+        // F69 (revisión adversarial, MAYOR): mover la fecha de un pago MUEVE PLATA ENTRE CAJAS, así que
+        // el libro tiene que moverse con él. Antes era el único write-point de dinero sin `book_movement`:
+        // la caja que lo cobró seguía mostrando plata que se fue y el día destino no la veía.
+        // Se actualiza el `date`/`day` del movimiento del pago (es el MISMO movimiento, no otro asiento).
+        conn.execute(
+            "UPDATE cash_movements SET date=?2, day=date(?2), note = COALESCE(NULLIF(note,''),'') || ' · fecha corregida' 
+             WHERE payment_id = ?1",
+            params![id, stamp],
+        )?;
         Ok(())
     }
 
@@ -3512,6 +4509,11 @@ impl Database {
         }
         conn.execute("DELETE FROM service_payments WHERE id=?", params![id])?;
         self.recalc_paid_amount(&conn, service_id)?;
+        // F68/F40 — F69 (revisión adversarial, MAYOR): el contra-asiento es el ESPEJO del movimiento
+        // original (mismo NETO que se anotó, mismo método y moneda, signo invertido). Antes iba con el
+        // BRUTO y sin método: un cobro por Punto con comisión inventaba −comisión, y borrar un cobro
+        // EN EFECTIVO no bajaba el esperado del cajón (la caja «sobraba» lo borrado).
+        self.reverse_book_entry(&conn, Some(id), None, "Cobro borrado")?;
         Ok(())
     }
 
@@ -3608,6 +4610,22 @@ impl Database {
         )?;
         let pid = conn.last_insert_rowid();
         self.recalc_paid_amount(&conn, service_id)?;
+        // F68/F40: la devolución es plata que SALE (signo −1) y queda en el libro con su autor.
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "devolucion",
+            method: payment_method,
+            currency: &currency,
+            amount,
+            sign: -1,
+            reference: zelle_reference,
+            sale_id: None,
+            service_id: Some(service_id),
+            payment_id: Some(pid),
+            expense_id: None,
+            note: if notes.trim().is_empty() { "Devolución" } else { notes },
+            // F69: la devolución pertenece a la caja del turno abierto (su fecha), no a la de hoy.
+            when: Some(&stamp_devolucion),
+        })?;
         Ok(pid)
     }
 
@@ -3806,7 +4824,7 @@ impl Database {
     pub fn get_services(&self, search: &str, status: &str, start_date: &str, end_date: &str, date_field: &str) -> SqlResult<Vec<Service>> {
         let conn = self.conn.lock().unwrap();
         let date_col = if date_field == "out" { "s.date_out" } else { "s.date_in" };
-        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent FROM services s WHERE 1=1");
+        let mut sql = String::from("SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent, s.iva_rate, s.iva_mode FROM services s WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if !search.is_empty() {
@@ -3864,6 +4882,8 @@ impl Database {
                 photo_in_at: r.get(31).unwrap_or(None),
                 photo_out_at: r.get(32).unwrap_or(None),
                 pay_intent: r.get(33).unwrap_or(None),
+                iva_rate: r.get(34).unwrap_or(0.0),
+                iva_mode: r.get(35).unwrap_or_default(),
             })
         })?;
         let mut services = Vec::new();
@@ -3874,7 +4894,7 @@ impl Database {
     pub fn get_service_by_id(&self, id: i64) -> SqlResult<Option<Service>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent FROM services s WHERE s.id=?1",
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent, s.iva_rate, s.iva_mode FROM services s WHERE s.id=?1",
             params![id],
             |r| Ok(Service {
                 id: r.get(0)?, order_num: r.get(1)?, date_in: r.get(2)?,
@@ -3903,6 +4923,8 @@ impl Database {
                 photo_in_at: r.get(31).unwrap_or(None),
                 photo_out_at: r.get(32).unwrap_or(None),
                 pay_intent: r.get(33).unwrap_or(None),
+                iva_rate: r.get(34).unwrap_or(0.0),
+                iva_mode: r.get(35).unwrap_or_default(),
             }),
         ).optional()?;
         Ok(row)
@@ -4043,13 +5065,13 @@ impl Database {
             Ok(row)
         };
 
-        let (today_usd, today_bs) = sum_sales("date(date) = date('now','localtime')")?;
-        let (week_usd, week_bs) = sum_sales("date(date) >= date('now','localtime','-6 days')")?;
+        let (today_usd, today_bs) = sum_sales("date(date) = date('now','localtime') AND voided_at IS NULL")?;
+        let (week_usd, week_bs) = sum_sales("date(date) >= date('now','localtime','-6 days') AND voided_at IS NULL")?;
         let week_units: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(quantity),0) FROM sales WHERE date(date) >= date('now','localtime','-6 days')", [], |r| r.get(0),
+            "SELECT COALESCE(SUM(quantity),0) FROM sales WHERE date(date) >= date('now','localtime','-6 days') AND voided_at IS NULL", [], |r| r.get(0),
         )?;
         let week_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sales WHERE date(date) >= date('now','localtime','-6 days')", [], |r| r.get(0),
+            "SELECT COUNT(*) FROM sales WHERE date(date) >= date('now','localtime','-6 days') AND voided_at IS NULL", [], |r| r.get(0),
         )?;
 
         let mut stmt = conn.prepare(
@@ -4060,7 +5082,7 @@ impl Database {
              FROM sales s
              LEFT JOIN products p ON s.product_id = p.id
              LEFT JOIN categories c ON p.category_id = c.id
-             WHERE date(s.date) >= date('now','localtime','-6 days')
+             WHERE date(s.date) >= date('now','localtime','-6 days') AND s.voided_at IS NULL
              GROUP BY c.name
              ORDER BY 3 + 4 DESC"
         )?;
@@ -4078,7 +5100,7 @@ impl Database {
                     COALESCE(SUM(CASE WHEN COALESCE(s.currency,'USD') != 'USD' THEN s.total ELSE 0 END),0)
              FROM sales s
              LEFT JOIN products p ON s.product_id = p.id
-             WHERE date(s.date) >= date('now','localtime','-6 days')
+             WHERE date(s.date) >= date('now','localtime','-6 days') AND s.voided_at IS NULL
              GROUP BY s.product_name, p.model, p.brand
              ORDER BY 5 + 6 DESC
              LIMIT 6"
@@ -4176,7 +5198,7 @@ impl Database {
             let row = conn.query_row(
                 "SELECT COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')='USD' THEN total ELSE 0 END),0),
                         COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')!='USD' THEN total ELSE 0 END),0)
-                 FROM sales WHERE date(date)=?1",
+                 FROM sales WHERE date(date)=?1 AND voided_at IS NULL",
                 params![date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
             )?;
             row
@@ -4212,9 +5234,76 @@ impl Database {
         ).optional().ok().flatten().unwrap_or(0.0)
     }
 
+    /// F69 — LO QUE AJUSTA EL ARQUEO DEL CAJÓN de un día, leído del **LIBRO DE PLATA** (una sola
+    /// fuente: si el movimiento no está en el libro, no existe para la caja):
+    ///
+    ///   · los **gastos pagados DEL CAJÓN** (método `Divisas (USD Cash)` / `Efectivo Bs`) RESTAN del
+    ///     efectivo esperado — es el hallazgo principal de la auditoría de entrega (pagar al mensajero
+    ///     del cajón hacía que la caja «faltara» en un día perfecto);
+    ///   · las **devoluciones pagadas del cajón** también restan (la plata salió del cajón);
+    ///   · el **fondo de caja** declarado al abrir el día SUMA (si no, la caja «sobra» todos los días);
+    ///   · los gastos **sin método declarado** NO se descuentan y se cuentan aparte para avisarlos
+    ///     (nunca se inventa de qué cajón salieron).
+    ///
+    /// Los gastos pagados por banco/otros métodos (Pago Móvil, Transferencia, Zelle, Punto) NO tocan el
+    /// cajón: se concilian por banco, igual que los cobros digitales.
+    pub fn drawer_adjustments(&self, date: &str) -> SqlResult<DrawerAdjust> {
+        let conn = self.conn.lock().unwrap();
+        self.drawer_adjustments_conn(&conn, date)
+    }
+
+    /// Implementación a nivel conexión (la usa también `close_day` con su lock ya tomado).
+    fn drawer_adjustments_conn(&self, conn: &Connection, date: &str) -> SqlResult<DrawerAdjust> {
+        let mut adj = DrawerAdjust::default();
+        // Los gastos sin método declarado se AVISAN (no se descuentan).
+        adj.sin_metodo = conn.query_row(
+            "SELECT COUNT(*) FROM expenses WHERE date(expense_date)=?1 AND COALESCE(method,'')=''",
+            params![date], |r| r.get(0),
+        ).unwrap_or(0);
+        // Fondo de caja declarado al abrir el día (USD; el Bs. no se declara hoy).
+        adj.fondo_usd = conn.query_row(
+            "SELECT COALESCE(initial_cash_usd,0) FROM daily_closings WHERE close_date=?1",
+            params![date], |r| r.get(0),
+        ).optional()?.unwrap_or(0.0);
+        let mut stmt = conn.prepare(
+            "SELECT type, method, currency, COALESCE(SUM(amount*sign),0)
+             FROM cash_movements
+             WHERE day = ?1
+               AND type IN ('gasto','gasto_anulado','devolucion','abono_anulado')
+             GROUP BY type, method, currency",
+        )?;
+        let filas = stmt.query_map(params![date], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?))
+        })?;
+        for f in filas {
+            let (tipo, metodo, moneda, neto) = f?;
+            let es_cajon = metodo == "Divisas (USD Cash)" || metodo == "Efectivo Bs";
+            if !es_cajon {
+                continue; // banco/otros: no toca el cajón (se concilia por banco)
+            }
+            // `neto` ya viene con el signo del libro: gasto = −monto, gasto borrado = +monto.
+            // Lo que resta al cajón es el valor ABSOLUTO de lo que quedó saliendo.
+            let sale = -neto; // positivo = plata que salió del cajón
+            let es_usd = moneda != "VES";
+            let es_gasto = tipo.starts_with("gasto");
+            match (es_usd, es_gasto) {
+                (true, true) => adj.gastos_usd += sale,
+                (false, true) => adj.gastos_bs += sale,
+                (true, false) => adj.devoluciones_usd += sale,
+                (false, false) => adj.devoluciones_bs += sale,
+            }
+        }
+        Ok(adj)
+    }
+
     /// Registra un gasto del negocio. NO requiere día abierto (los gastos se anotan
     /// cuando ocurren; la caja física es independiente del registro).
-    pub fn add_expense(&self, expense_date: &str, category: &str, amount: f64, currency: &str, notes: &str) -> SqlResult<i64> {
+    ///
+    /// F69: `method` dice DE DÓNDE SALIÓ LA PLATA — es lo que decide si el gasto baja el **esperado
+    /// del cajón** al cerrar (`Divisas (USD Cash)` / `Efectivo Bs`) o si salió por banco/otros (no lo
+    /// toca). Vacío = sin declarar: no se descuenta y el arqueo lo avisa.
+    pub fn add_expense(&self, expense_date: &str, category: &str, amount: f64, currency: &str, notes: &str,
+                       method: &str) -> SqlResult<i64> {
         if amount <= 0.0 {
             return Err(day_shift_error("El monto del gasto debe ser mayor que 0."));
         }
@@ -4222,24 +5311,56 @@ impl Database {
         if expense_date.len() != 10 {
             return Err(day_shift_error("Fecha inválida (use AAAA-MM-DD)."));
         }
+        let metodo = method.trim();
+        if !metodo.is_empty() {
+            // Un método declarado tiene que ser uno de los del sistema: si no, la moneda del gasto
+            // podría no coincidir con el cajón que se descuenta (misma regla que los cobros).
+            let conocido: bool = self.conn.lock().unwrap()
+                .query_row("SELECT EXISTS(SELECT 1 FROM payment_methods WHERE name=?1)", params![metodo], |r| r.get(0))
+                .unwrap_or(false);
+            if !conocido {
+                return Err(day_shift_error(&format!(
+                    "«{}» no es un método de pago del sistema. Elegí de dónde salió la plata (o dejalo sin declarar).",
+                    metodo
+                )));
+            }
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO expenses (expense_date, category, amount, currency, notes) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![expense_date, category, amount, cur, notes],
+            "INSERT INTO expenses (expense_date, category, amount, currency, notes, method) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![expense_date, category, amount, cur, notes, metodo],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        // F68/F40: el gasto es plata que SALE de la caja → queda en el LIBRO con su autor y con el
+        // método declarado (F69 lee de ahí el ajuste del cajón: una sola fuente).
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "gasto",
+            method: metodo,
+            currency: cur,
+            amount,
+            sign: -1,
+            reference: category,
+            sale_id: None,
+            service_id: None,
+            payment_id: None,
+            expense_id: Some(id),
+            note: notes,
+            // F69: el gasto pertenece al día que se declara (puede ser retroactivo), no al de hoy.
+            when: Some(expense_date),
+        })?;
+        Ok(id)
     }
 
     pub fn get_expenses(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<Expense>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, expense_date, category, amount, currency, notes FROM expenses
+            "SELECT id, expense_date, category, amount, currency, notes, COALESCE(method,'') FROM expenses
              WHERE date(expense_date) >= ?1 AND date(expense_date) <= ?2 ORDER BY expense_date DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![start_date, end_date], |r| {
             Ok(Expense {
                 id: r.get(0)?, expense_date: r.get(1)?, category: r.get(2)?,
-                amount: r.get(3)?, currency: r.get(4)?, notes: r.get(5)?,
+                amount: r.get(3)?, currency: r.get(4)?, notes: r.get(5)?, method: r.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4247,10 +5368,17 @@ impl Database {
 
     pub fn delete_expense(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
-        let n = conn.execute("DELETE FROM expenses WHERE id=?1", params![id])?;
-        if n == 0 {
+        let existe: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM expenses WHERE id=?1)", params![id], |r| r.get(0))
+            .unwrap_or(false);
+        if !existe {
             return Err(day_shift_error("El gasto ya no existe."));
         }
+        conn.execute("DELETE FROM expenses WHERE id=?1", params![id])?;
+        // F68/F40 — F69 (revisión adversarial, MAYOR): el contra-asiento es el ESPEJO del movimiento
+        // original, así que conserva el MÉTODO declarado. Antes iba con método vacío: un gasto pagado
+        // del cajón seguía restando del esperado después de borrarlo (el cajón «faltaba» para siempre).
+        self.reverse_book_entry(&conn, None, Some(id), "Gasto borrado")?;
         Ok(())
     }
 
@@ -4275,14 +5403,16 @@ impl Database {
         let (sales_income_usd, sales_income_bs) = conn.query_row(
             "SELECT COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')='USD' THEN CAST(COALESCE(net_amount,total) AS REAL) ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN COALESCE(currency,'USD')!='USD' THEN CAST(COALESCE(net_amount,total) AS REAL) ELSE 0 END),0)
-             FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2",
+             FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2 AND voided_at IS NULL",
             params![start_date, end_date], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
         )?;
-        // Costo de la mercancía vendida (ventas con producto referenciado; sin producto → 0)
+        // Costo de la mercancía vendida (ventas con producto referenciado; sin producto → 0).
+        // F70: una venta ANULADA no aporta ingreso NI costo (si no, la utilidad quedaría con el costo
+        // de una pantalla que volvió al stock).
         let sales_cost: f64 = conn.query_row(
             "SELECT COALESCE(SUM(COALESCE(p.price_cost,0) * s.quantity),0) FROM sales s
              LEFT JOIN products p ON p.id = s.product_id
-             WHERE date(s.date) >= ?1 AND date(s.date) <= ?2",
+             WHERE date(s.date) >= ?1 AND date(s.date) <= ?2 AND s.voided_at IS NULL",
             params![start_date, end_date], |r| r.get(0),
         )?;
         // Costo de pantallas: se reconoce en el MISMO período que su ingreso (regla del libro).
@@ -4386,10 +5516,10 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut sql = String::from(
             "SELECT c.id, c.name, c.phone,
-                    COALESCE((SELECT SUM(s.total) FROM sales s WHERE s.client_id = c.id), 0) +
+                    COALESCE((SELECT SUM(s.total) FROM sales s WHERE s.client_id = c.id AND s.voided_at IS NULL), 0) +
                     COALESCE((SELECT SUM(sv.amount) FROM services sv WHERE (sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)) AND sv.status = 'Entregado'), 0) as total_spent,
                     (SELECT COUNT(*) FROM services sv WHERE sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)) as service_count,
-                    (SELECT COUNT(*) FROM sales s WHERE s.client_id = c.id) as sale_count,
+                    (SELECT COUNT(*) FROM sales s WHERE s.client_id = c.id AND s.voided_at IS NULL) as sale_count,
                     COALESCE(
                         (SELECT MAX(sv.date_out) FROM services sv WHERE sv.client_id = c.id OR (sv.client_id IS NULL AND sv.client = c.name)),
                         (SELECT MAX(s.date) FROM sales s WHERE s.client_id = c.id),
@@ -4595,7 +5725,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Try by client_id first, fallback to name match
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
+            "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent, s.iva_rate, s.iva_mode FROM services s WHERE s.client_id = ?1 ORDER BY s.id DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Service {
@@ -4625,6 +5755,8 @@ impl Database {
                 photo_in_at: r.get(31).unwrap_or(None),
                 photo_out_at: r.get(32).unwrap_or(None),
                 pay_intent: r.get(33).unwrap_or(None),
+                iva_rate: r.get(34).unwrap_or(0.0),
+                iva_mode: r.get(35).unwrap_or_default(),
             })
         })?;
         let mut services = Vec::new();
@@ -4638,7 +5770,7 @@ impl Database {
         ).ok();
         if let Some(ref name) = client_name {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
+                "SELECT s.id, s.order_num, s.date_in, s.client, s.phone, s.model, s.fault, s.service_type, s.amount, s.payment_method, s.date_out, s.status, s.observations, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, s.client_ci, s.client_address, s.device_checklist, s.service_types, s.client_id, s.paid_amount, s.technician_id, s.technician, s.group_id, s.color, s.printed, s.screen_product_id, s.discount_amount, s.photo_in_at, s.photo_out_at, s.pay_intent, s.iva_rate, s.iva_mode FROM services s WHERE s.client = ?1 ORDER BY s.id DESC"
             )?;
             let rows = stmt.query_map(params![name], |r| {
                 Ok(Service {
@@ -4668,6 +5800,8 @@ impl Database {
                 photo_in_at: r.get(31).unwrap_or(None),
                 photo_out_at: r.get(32).unwrap_or(None),
                 pay_intent: r.get(33).unwrap_or(None),
+                iva_rate: r.get(34).unwrap_or(0.0),
+                iva_mode: r.get(35).unwrap_or_default(),
             })
         })?;
             let mut services = Vec::new();
@@ -4680,7 +5814,7 @@ impl Database {
     pub fn get_client_sales(&self, client_id: i64) -> SqlResult<Vec<Sale>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE s.client_id = ?1 ORDER BY s.date DESC"
+            "SELECT s.id, s.date, s.product_id, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method, s.client_name, s.notes, s.client_id, s.bank_fee_percent, s.bank_fee_amount, s.net_amount, s.zelle_reference, s.currency, c.ci AS client_ci, s.discount_amount, s.voided_at, s.void_reason, s.iva_rate, s.iva_mode FROM sales s LEFT JOIN clients c ON s.client_id = c.id WHERE s.client_id = ?1 ORDER BY s.date DESC"
         )?;
         let rows = stmt.query_map(params![client_id], |r| {
             Ok(Sale {
@@ -4695,6 +5829,10 @@ impl Database {
                 currency: r.get(15).unwrap_or(Some("USD".into())),
                 client_ci: r.get(16).unwrap_or(None),
                 discount_amount: r.get(17).unwrap_or(0.0),
+                voided_at: r.get(18).unwrap_or(None),
+                void_reason: r.get(19).unwrap_or(None),
+                iva_rate: r.get(20).unwrap_or(0.0),
+                iva_mode: r.get(21).unwrap_or_default(),
             })
         })?;
         let mut sales = Vec::new();
@@ -5071,7 +6209,7 @@ impl Database {
                 SELECT date(date) as d, payment_method, total, bank_fee_amount,
                        CAST(COALESCE(net_amount, total) AS REAL) as net_amount, COALESCE(currency,'USD') as currency,
                        0 as presume
-                FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2
+                FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2 AND voided_at IS NULL
                 UNION ALL
                 SELECT date(payment_date) as d, payment_method, amount, bank_fee_amount,
                        CAST(COALESCE(net_amount, amount) AS REAL) as net_amount, COALESCE(currency,'USD') as currency,
@@ -5216,8 +6354,12 @@ impl Database {
     // aleatoria por PIN) en el formato `pbkdf2$<iteraciones>$<sal_hex>$<hash_hex>`.
     // Una base vieja con el PIN en texto plano (4 dígitos) SIGUE FUNCIONANDO y se actualiza al
     // hash sola la primera vez que se verifica bien: una actualización nunca deja al dueño afuera.
-    // Además: 5 intentos fallidos bloquean la entrada 60 segundos (en memoria; reiniciar la app
-    // lo limpia, aceptable en un equipo del local y documentado).
+    //
+    // F69 (revisión adversarial) — EL BLOQUEO POR INTENTOS AHORA SE PERSISTE (`settings.pin_failures`
+    // y `settings.pin_locked_until`): antes vivía sólo en memoria, así que reiniciar la app borraba el
+    // castigo y quedaban «5 intentos por arranque» contra un PIN de 4 dígitos (cualquiera puede
+    // reiniciar el exe desde el escritorio). Los contadores en memoria siguen existiendo para las
+    // lecturas rápidas del reloj, pero la fuente es la base.
     pub fn set_pin(&self, pin: &str) -> SqlResult<()> {
         if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
             return Err(day_shift_error("El PIN debe tener exactamente 4 dígitos."));
@@ -5233,11 +6375,41 @@ impl Database {
             ));
         }
         let stored = hash_pin(pin)?;
+        // F69 (revisión adversarial): este PIN es el del DUEÑO QUE ESTÁ EN SESIÓN, no el de
+        // TODOS los masters. Antes `WHERE role='master'` le pisaba el PIN a cualquier otro
+        // dueño del padrón (y con él, su forma de entrar). Si no hay sesión de dueño (primera
+        // vez, instalación de un solo usuario) se toma el master de menor id.
+        let en_sesion: Option<i64> = if self.session_active_for(Some("master")) {
+            self.current_user().map(|u| u.id)
+        } else {
+            None
+        };
+        let objetivo: Option<i64> = match en_sesion {
+            Some(id) => Some(id),
+            None => {
+                let conn = self.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT id FROM users WHERE role='master' ORDER BY id LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+            }
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
             params![stored],
         )?;
+        // F68: el PIN del dueño vive también en SU fila de `users` (la pantalla de acceso nueva
+        // entra por `verify_user_pin`). Si no se sincronizara, el dueño quedaría con dos PIN
+        // distintos según por dónde entre.
+        if let Some(id) = objetivo {
+            conn.execute(
+                "UPDATE users SET pin_hash=?1 WHERE id=?2",
+                params![stored, id],
+            )?;
+        }
         Ok(())
     }
 
@@ -5250,7 +6422,21 @@ impl Database {
     }
 
     /// Segundos que faltan para poder volver a probar el PIN (0 = se puede probar ya).
+    /// F69: la fuente es la BASE (`settings.pin_locked_until`), no sólo la memoria: reiniciar la app
+    /// ya no borra el castigo. Si la base no se puede leer, cae al contador en memoria (fail-safe: el
+    /// bloqueo en memoria sigue valiendo).
     pub fn pin_lock_seconds(&self) -> u64 {
+        let desde_base: Option<i64> = self
+            .get_setting("pin_locked_until")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+        if let Some(hasta) = desde_base {
+            let ahora = now_secs() as i64;
+            if hasta > ahora {
+                return (hasta - ahora) as u64 + 1;
+            }
+        }
         let guard = self.pin_locked_until.lock().unwrap();
         match *guard {
             Some(until) if until > std::time::Instant::now() => {
@@ -5258,6 +6444,39 @@ impl Database {
             }
             _ => 0,
         }
+    }
+
+    /// F69 — un PIN/entrada fallida cuenta para el MISMO bloqueo por intentos que el PIN viejo:
+    /// si no, la pantalla nueva de personas sería un camino sin límite para probar PINes.
+    /// El contador y la hora del bloqueo se guardan en `settings` (sobreviven al reinicio).
+    fn pin_failure(&self) {
+        let n = self.pin_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = self.set_setting("pin_failures", &n.to_string());
+        if n >= PIN_MAX_ATTEMPTS {
+            let hasta = now_secs() + PIN_LOCK_SECS;
+            *self.pin_locked_until.lock().unwrap() =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(PIN_LOCK_SECS));
+            self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+            let _ = self.set_setting("pin_failures", "0");
+            let _ = self.set_setting("pin_locked_until", &hasta.to_string());
+        }
+    }
+
+    fn pin_success(&self) {
+        self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        *self.pin_locked_until.lock().unwrap() = None;
+        let _ = self.set_setting("pin_failures", "0");
+        let _ = self.set_setting("pin_locked_until", "0");
+    }
+
+    /// Lee el contador de intentos de la base (0 si nunca falló). Lo usa `pin_lock_seconds` y lo
+    /// pueden comprobar las pruebas: el bloqueo ya no vive sólo en memoria.
+    pub fn pin_failures_persisted(&self) -> i64 {
+        self.get_setting("pin_failures")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
     }
 
     pub fn verify_pin(&self, pin: &str) -> SqlResult<bool> {
@@ -5288,15 +6507,9 @@ impl Database {
                     params![hashed],
                 );
             }
-            self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
-            *self.pin_locked_until.lock().unwrap() = None;
+            self.pin_success();
         } else {
-            let n = self.pin_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n >= PIN_MAX_ATTEMPTS {
-                *self.pin_locked_until.lock().unwrap() =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(PIN_LOCK_SECS));
-                self.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
-            }
+            self.pin_failure();
         }
         // el PIN correcto = sesión de DUEÑO desbloqueada y SELLADA AHORA (vence a las
         // OWNER_SESSION_HOURS; la usa el gate de escritura `require_owner`). Un PIN
@@ -5305,12 +6518,36 @@ impl Database {
         Ok(ok)
     }
 
+    /// F68 — borra el PIN del dueño. Deja la instalación **sin PIN**, o sea que cualquiera entra y
+    /// el gate de dueño se abre solo (es la decisión del dueño para su equipo de un solo usuario).
+    /// Por eso: (a) exige el PIN actual, (b) NO se permite si hay más de una persona activa — ahí
+    /// la instalación necesita PIN para saber quién es quién, y un Master sin PIN no podría ni
+    /// entrar por la pantalla nueva, y (c) borra también `users.pin_hash` del master: si quedara,
+    /// el PIN viejo seguiría sirviendo para entrar (`verify_user_pin`).
     pub fn remove_pin(&self, pin: &str) -> SqlResult<bool> {
         if !self.verify_pin(pin)? {
             return Err(day_shift_error("PIN incorrecto."));
         }
+        if self.has_multiple_people() {
+            return Err(day_shift_error(
+                "No se puede quitar el PIN: esta instalación tiene más de una persona (Personas y accesos). \
+                 Cambiale el PIN al dueño en vez de quitarlo.",
+            ));
+        }
+        let objetivo: Option<i64> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE role='master' ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM settings WHERE key='pin'", [])?;
+        if let Some(id) = objetivo {
+            conn.execute("UPDATE users SET pin_hash='' WHERE id=?1", params![id])?;
+        }
         Ok(true)
     }
 
@@ -5330,6 +6567,74 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // --- F74: LA CONFIGURACIÓN DEL IVA ---
+    /// La clave de la tabla `settings` donde vive la configuración del IVA.
+    pub const TAX_CONFIG_KEY: &'static str = "tax_config";
+
+    /// La configuración del IVA guardada. **Fail-closed**: si no hay nada guardado o el JSON está
+    /// roto, devuelve la de fábrica — que tiene el IVA **APAGADO** (nunca se le inventa un impuesto al
+    /// dueño) — y sanea el modo (cualquier cosa que no sea «agregado» se lee como «incluido», que es
+    /// el que NO cambia lo que paga el cliente).
+    pub fn get_tax_config(&self) -> TaxConfig {
+        let crudo = self.get_setting(Self::TAX_CONFIG_KEY).ok().flatten().unwrap_or_default();
+        let mut cfg: TaxConfig = serde_json::from_str(&crudo).unwrap_or_default();
+        cfg.modo = if cfg.modo == "agregado" { "agregado".to_string() } else { "incluido".to_string() };
+        if !cfg.alicuota.is_finite() || cfg.alicuota < 0.0 || cfg.alicuota > 100.0 {
+            cfg.alicuota = TaxConfig::default().alicuota;
+        }
+        cfg
+    }
+
+    /// Guarda la configuración del IVA VALIDADA (fail-closed): el modo tiene que ser uno de los dos y
+    /// la alícuota un número entre 0 y 100. Devuelve lo que quedó guardado.
+    pub fn set_tax_config(&self, activo: bool, alicuota: f64, modo: &str) -> SqlResult<TaxConfig> {
+        let modo = modo.trim().to_lowercase();
+        if modo != "incluido" && modo != "agregado" {
+            return Err(day_shift_error(
+                "El modo del IVA tiene que ser «incluido» (ya viene en el precio) o «agregado» (se suma al cobrar).",
+            ));
+        }
+        if !alicuota.is_finite() || alicuota < 0.0 || alicuota > 100.0 {
+            return Err(day_shift_error("La alícuota del IVA tiene que ser un número entre 0 y 100 (por ejemplo 16)."));
+        }
+        let cfg = TaxConfig { activo, alicuota, modo };
+        self.set_setting(Self::TAX_CONFIG_KEY, &serde_json::to_string(&cfg).unwrap_or_default())?;
+        Ok(cfg)
+    }
+
+    // --- F74: EL LIBRO DE IVA DEL PERÍODO ---
+    /// Las operaciones del período AGRUPADAS por alícuota (ventas vigentes + órdenes de servicio), que
+    /// es lo que hace falta para declarar el IVA. Se agrupa acá (SQL) y el desglose base/IVA se calcula
+    /// con la regla pura del frontend (`src/lib/iva.ts`): UNA sola implementación de la matemática.
+    ///
+    /// Criterios (los mismos del libro del día): las ventas **anuladas no cuentan** (F70) y de las
+    /// órdenes se toma su `amount` (lo que paga el cliente) por fecha de RECIBIDO. Las filas sin IVA
+    /// entran igual (alícuota 0) para que el total del libro cuadre con la facturación del período.
+    pub fn get_iva_groups(&self, start_date: &str, end_date: &str) -> SqlResult<Vec<IvaGroupRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT iva_rate, SUM(total) AS total, COUNT(*) AS operaciones FROM (
+                 SELECT COALESCE(iva_rate, 0) AS iva_rate, total AS total
+                   FROM sales
+                  WHERE date(date) BETWEEN date(?1) AND date(?2) AND voided_at IS NULL
+                 UNION ALL
+                 SELECT COALESCE(iva_rate, 0) AS iva_rate, amount AS total
+                   FROM services
+                  WHERE date(date_in) BETWEEN date(?1) AND date(?2) AND amount > 0
+             ) GROUP BY iva_rate ORDER BY iva_rate DESC",
+        )?;
+        let rows = stmt.query_map(params![start_date, end_date], |r| {
+            Ok(IvaGroupRow {
+                iva_rate: r.get(0).unwrap_or(0.0),
+                total: r.get(1).unwrap_or(0.0),
+                operaciones: r.get(2).unwrap_or(0),
+            })
+        })?;
+        let mut grupos = Vec::new();
+        for g in rows { grupos.push(g?); }
+        Ok(grupos)
     }
 
     // --- F62: CATEGORÍAS DE TRABAJO QUE AGREGA EL LOCAL ---
@@ -5433,6 +6738,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
                    WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) = ?1
+                     AND voided_at IS NULL
                    UNION ALL
                    SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
                    FROM service_payments sp
@@ -5473,11 +6779,13 @@ impl Database {
 
         let conn = self.conn.lock().unwrap();
 
-        // Ventas del rango
-        let mut sales_rows: Vec<(Option<String>, Option<String>, i64, f64, f64, Option<String>, Option<String>, Option<String>)> = Vec::new();
+        // Ventas del rango (F70: se incluye la marca de anulada para que el reporte no cuente una
+        // venta anulada como buena — la fila queda, con su motivo, pero se ve que no vale)
+        let mut sales_rows: Vec<(Option<String>, Option<String>, i64, f64, f64, Option<String>, Option<String>, Option<String>, Option<String>)> = Vec::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT date, product_name, quantity, unit_price, total, payment_method, zelle_reference, client_name
+                "SELECT date, product_name, quantity, unit_price, total, payment_method, zelle_reference, client_name,
+                        CASE WHEN voided_at IS NULL THEN '' ELSE 'ANULADA: ' || COALESCE(void_reason,'') END
                  FROM sales WHERE date(date) >= ?1 AND date(date) <= ?2 ORDER BY date ASC"
             )?;
             let rows = stmt.query_map(params![start_date, end_date], |r| {
@@ -5485,7 +6793,7 @@ impl Database {
                     r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
                     r.get::<_, i64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
                     r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
-                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?,
                 ))
             })?;
             for row in rows { sales_rows.push(row?); }
@@ -5515,6 +6823,7 @@ impl Database {
         {
             let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
                        WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) >= ?1 AND date(date) <= ?2
+                         AND voided_at IS NULL
                        UNION ALL
                        SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
                        FROM service_payments sp
@@ -5554,11 +6863,11 @@ impl Database {
 
             // VENTAS del día
             csv.push_str("VENTAS\n");
-            csv.push_str("Fecha;Producto;Cant;Precio Unit;Total;Metodo;Referencia;Cliente\n");
-            for (d, name, qty, unit, total, method, ref_, client) in &sales_rows {
+            csv.push_str("Fecha;Producto;Cant;Precio Unit;Total;Metodo;Referencia;Cliente;Estado\n");
+            for (d, name, qty, unit, total, method, ref_, client, estado) in &sales_rows {
                 if d.as_deref().map(|x| &x[..10]) != Some(day.as_str()) { continue; }
                 csv.push_str(&format!(
-                    "{};{};{};{};{};{};{};{}\n",
+                    "{};{};{};{};{};{};{};{};{}\n",
                     csv_field(d.as_deref().unwrap_or("")),
                     csv_field(name.as_deref().unwrap_or("")),
                     qty,
@@ -5567,6 +6876,7 @@ impl Database {
                     csv_field(method.as_deref().unwrap_or("")),
                     csv_field(ref_.as_deref().unwrap_or("")),
                     csv_field(client.as_deref().unwrap_or("")),
+                    csv_field(estado.as_deref().unwrap_or("")),
                 ));
             }
 
@@ -5694,8 +7004,11 @@ impl Database {
             // Ventas del rango (con cédula del cliente)
             sales_rows = {
                 let mut stmt = conn.prepare(
-                    "SELECT s.date, s.product_name, s.quantity, s.unit_price, s.total, s.payment_method,
-                            s.zelle_reference, s.client_name, s.currency, COALESCE(c.ci, '')
+                    // F70: una venta anulada se exporta MARCADA (no se esconde ni se cuenta como buena)
+                    "SELECT s.date, CASE WHEN s.voided_at IS NULL THEN s.product_name
+                                         ELSE '(ANULADA) ' || COALESCE(s.product_name,'') END,
+                            s.quantity, s.unit_price, s.total, s.payment_method,
+                            s.zelle_reference, s.client_name, s.currency, COALESCE(c.ci, ''), COALESCE(s.iva_rate, 0)
                      FROM sales s LEFT JOIN clients c ON c.id = s.client_id
                      WHERE date(s.date) >= ?1 AND date(s.date) <= ?2 ORDER BY s.date ASC"
                 )?;
@@ -5705,7 +7018,7 @@ impl Database {
                         r.get::<_, i64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
                         r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
                         r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?,
-                        r.get::<_, Option<String>>(9)?,
+                        r.get::<_, Option<String>>(9)?, r.get::<_, f64>(10).unwrap_or(0.0),
                     ))
                 })?;
                 let mut v = Vec::new();
@@ -5739,6 +7052,7 @@ impl Database {
             pm_rows = {
                 let sql = "SELECT zelle_reference, total, 'Venta' as source, date FROM sales
                            WHERE (payment_method LIKE '%Móvil%' OR payment_method LIKE '%Movil%') AND date(date) >= ?1 AND date(date) <= ?2
+                             AND voided_at IS NULL
                            UNION ALL
                            SELECT sp.zelle_reference, sp.amount, 'Abono ' || COALESCE(s.order_num, ''), sp.payment_date
                            FROM service_payments sp
@@ -5764,7 +7078,7 @@ impl Database {
                 let mut stmt = conn.prepare(
                     "SELECT s.date_in, s.order_num, s.client, COALESCE(s.client_ci, ''), s.model,
                             COALESCE(s.service_types, s.service_type), COALESCE(s.technician, ''),
-                            s.amount, s.paid_amount, s.status, COALESCE(s.date_out, ''), COALESCE(p.name, '')
+                            s.amount, s.paid_amount, s.status, COALESCE(s.date_out, ''), COALESCE(p.name, ''), COALESCE(s.iva_rate, 0)
                      FROM services s LEFT JOIN products p ON p.id = s.screen_product_id
                      WHERE date(s.date_in) >= ?1 AND date(s.date_in) <= ?2 ORDER BY s.date_in ASC"
                 )?;
@@ -5776,6 +7090,7 @@ impl Database {
                         r.get::<_, Option<String>>(6)?, r.get::<_, f64>(7)?,
                         r.get::<_, f64>(8)?, r.get::<_, Option<String>>(9)?,
                         r.get::<_, Option<String>>(10)?, r.get::<_, Option<String>>(11)?,
+                        r.get::<_, f64>(12).unwrap_or(0.0),
                     ))
                 })?;
                 let mut v = Vec::new();
@@ -5849,7 +7164,7 @@ impl Database {
                     "ci": r.9.clone().unwrap_or_default(), "product": r.1.clone().unwrap_or_default(),
                     "qty": r.2, "unit": r.3, "total": r.4,
                     "method": r.5.clone().unwrap_or_default(), "ref": r.6.clone().unwrap_or_default(),
-                    "currency": r.8.clone().unwrap_or_default(),
+                    "currency": r.8.clone().unwrap_or_default(), "iva_rate": r.10,
                 })).collect::<Vec<_>>(),
                 "payments": payments_day.iter().map(|r| serde_json::json!({
                     "date": r.0.clone().unwrap_or_default(), "order": r.1.clone().unwrap_or_default(),
@@ -5890,6 +7205,9 @@ impl Database {
             "technician": r.6.clone().unwrap_or_default(), "amount": r.7, "paid": r.8,
             "status": r.9.clone().unwrap_or_default(), "date_out": r.10.clone().unwrap_or_default(),
             "screen": r.11.clone().unwrap_or_default(),
+            // F75: la alícuota del IVA con la que se cargó la orden (0 = sin IVA). El Excel la usa para
+            // desglosar base/IVA por fila sin recalcular con la alícuota de hoy.
+            "iva_rate": r.12,
         })).collect::<Vec<_>>();
 
         let movements = movement_rows.iter().map(|r| serde_json::json!({
@@ -5903,8 +7221,12 @@ impl Database {
         })).collect::<Vec<_>>();
 
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+        // F75: el nombre del negocio (el que ya se imprime en el recibo) para el encabezado del Excel.
+        let negocio = self.get_printer_settings().map(|p| p.business_name).unwrap_or_default();
+        let linea = self.get_printer_settings().map(|p| p.business_line).unwrap_or_default();
         let data = serde_json::json!({
             "start": start_date, "end": end_date, "generado": now,
+            "negocio": negocio, "linea": linea,
             "days": days, "services": services, "movements": movements, "expenses": expenses,
         });
 
@@ -5956,7 +7278,7 @@ impl Database {
 
     pub fn get_daily_closings(&self) -> SqlResult<Vec<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs FROM daily_closings ORDER BY close_date DESC";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs, drawer_adjust_usd, drawer_adjust_bs FROM daily_closings ORDER BY close_date DESC";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -5984,6 +7306,8 @@ impl Database {
                 total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
                 total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
                 pos_settled_bs: r.get::<_, Option<f64>>(30)?.unwrap_or(0.0),
+                drawer_adjust_usd: r.get::<_, Option<f64>>(31)?.unwrap_or(0.0),
+                drawer_adjust_bs: r.get::<_, Option<f64>>(32)?.unwrap_or(0.0),
             })
         })?;
         let mut closings = Vec::new();
@@ -5993,7 +7317,7 @@ impl Database {
 
     pub fn get_active_day(&self) -> SqlResult<Option<DailyClosing>> {
         let conn = self.conn.lock().unwrap();
-        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
+        let sql = "SELECT id, close_date, pos_charged, pos_fees, pos_net, pos_settled, cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total, grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs, pos_settled_bs, drawer_adjust_usd, drawer_adjust_bs FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1";
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query_map([], |r| {
             Ok(DailyClosing {
@@ -6021,6 +7345,8 @@ impl Database {
                 total_usd: r.get::<_, Option<f64>>(28)?.unwrap_or(0.0),
                 total_bs: r.get::<_, Option<f64>>(29)?.unwrap_or(0.0),
                 pos_settled_bs: r.get::<_, Option<f64>>(30)?.unwrap_or(0.0),
+                drawer_adjust_usd: r.get::<_, Option<f64>>(31)?.unwrap_or(0.0),
+                drawer_adjust_bs: r.get::<_, Option<f64>>(32)?.unwrap_or(0.0),
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -6029,6 +7355,25 @@ impl Database {
     pub fn open_day(&self, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        // F69 (revisión adversarial, BLOQUEANTE) — ABRIR EL DÍA NO PUEDE REABRIR UN DÍA YA CERRADO.
+        // Antes, si el día de HOY ya estaba cerrado, el `INSERT ... ON CONFLICT DO UPDATE SET
+        // is_closed=0` lo volvía a abrir con el fondo y la tasa que mandara quien llamara (y borraba
+        // y re-anotaba la apertura del libro): `require_open_day` volvía a pasar, así que se podían
+        // anotar ventas y abonos en un día cuyo arqueo ya estaba firmado — y un cierre guardado no se
+        // recalcula. La UI además le daba el botón «Abrir Día» a los dos roles.
+        // Reabrir un día es del DUEÑO y tiene su camino explícito: Libro Diario → Cierres → ↺.
+        let hoy_cerrado: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=1",
+                params![today], |r| r.get(0),
+            )
+            .optional()?;
+        if hoy_cerrado.is_some() {
+            return Err(day_shift_error(&format!(
+                "El día de hoy ({today}) ya está CERRADO con su arqueo. Si hay que anotar algo de ese día, \
+                 el dueño lo reabre desde Libro Diario → Cierres (botón ↺), se anota y se vuelve a cerrar."
+            )));
+        }
         let open_date: Option<String> = conn.query_row(
             "SELECT close_date FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1",
             [], |r| r.get(0),
@@ -6044,8 +7389,28 @@ impl Database {
                 params![initial_cash_usd, tasa_bcv, tasa_eur, today],
             )?;
             let id: i64 = conn.query_row("SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=0", params![today], |r| r.get(0))?;
+            // F68/F40 → F69: la apertura (fondo de caja) queda en el libro con su autor, y entra en el
+            // ESPERADO del cajón al cerrar. Se REEMPLAZA la del día (no se acumula): «Actualizar día»
+            // vuelve a llamar `open_day`, y antes cada llamada dejaba otra apertura (el fondo quedaba
+            // dos veces y un fantasma viejo si se corregía a 0) — hallazgo MAYOR de la revisión.
+            conn.execute("DELETE FROM cash_movements WHERE day=?1 AND type='apertura'", params![today])?;
+            self.book_movement(&conn, &NewCashMovement {
+                r#type: "apertura",
+                method: "Divisas (USD Cash)",
+                currency: "USD",
+                amount: initial_cash_usd,
+                sign: 1,
+                reference: &today,
+                sale_id: None,
+                service_id: None,
+                payment_id: None,
+                expense_id: None,
+                note: "Apertura del día (fondo de caja)",
+                when: Some(&today),
+            })?;
             return Ok(id);
         }
+        // (El día de hoy ya cerrado se rechazó arriba: acá sólo se llega con un día nuevo o sin turno.)
         conn.execute(
             "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
              VALUES (?1,?2,?3,?4,datetime('now','localtime'),0)
@@ -6054,8 +7419,23 @@ impl Database {
                 tasa_eur=excluded.tasa_eur, opened_at=excluded.opened_at, is_closed=0",
             params![today, initial_cash_usd, tasa_bcv, tasa_eur],
         )?;
-        // Reabrir un día de hoy previamente cerrado conserva la fila (sin OR REPLACE destructivo)
         let id: i64 = conn.query_row("SELECT id FROM daily_closings WHERE close_date=?1", params![today], |r| r.get(0))?;
+        // F69: una sola apertura por día (ver arriba: «Actualizar día» reemplaza, no acumula).
+        conn.execute("DELETE FROM cash_movements WHERE day=?1 AND type='apertura'", params![today])?;
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "apertura",
+            method: "Divisas (USD Cash)",
+            currency: "USD",
+            amount: initial_cash_usd,
+            sign: 1,
+            reference: &today,
+            sale_id: None,
+            service_id: None,
+            payment_id: None,
+            expense_id: None,
+            note: "Apertura del día (fondo de caja)",
+                when: Some(&today),
+        })?;
         Ok(id)
     }
 
@@ -6183,9 +7563,31 @@ impl Database {
         // Expected vs actual difference per currency group
         // USD group: cash_usd + zelle + usd_cash vs actual_cash_usd + actual_zelle
         // Bs group: cash_bs + pago_movil + transfer_bs vs actual_cash_bs + actual_pago_movil + actual_transfer_bs
-        let expected_usd = t.cash_usd + t.zelle_total + t.usd_cash_total;
+        //
+        // F69 — EL CAJÓN CUENTA LA PLATA REAL: al esperado del efectivo se le SUMA el fondo de caja
+        // declarado al abrir y se le RESTAN los **gastos pagados del cajón** (leídos del libro de
+        // plata). Antes nada de eso entraba: pagar un gasto del cajón hacía que la caja «faltara» en un
+        // día perfecto y el fondo la hacía «sobrar» todos los días. Los métodos digitales (Zelle, Pago
+        // Móvil, Transferencia) NO se tocan: se concilian por banco.
+        //
+        // OJO con las DEVOLUCIONES (bug que cazó `test_refund_ledger_full`): NO se restan acá. Una
+        // devolución se guarda como un `service_payments` NEGATIVO con el método por el que salió la
+        // plata, así que `t.cash_usd`/`t.cash_bs` YA vienen netos — restarla otra vez descontaba la
+        // misma plata dos veces (una orden de $50 devuelta entera daba un «faltante» de $50 con el
+        // cajón cuadrado). `adj.devoluciones_*` queda para MOSTRAR cuánto se devolvió del cajón.
+        let adj = self.drawer_adjustments_conn(&conn, close_date)?;
+        // F69 (revisión adversarial) — EL FONDO DE CAJA ES EL DE LA FILA DEL DÍA, no el parámetro.
+        // `initial_cash_usd` se declara al ABRIR (`open_day`/«Actualizar día»); `close_day` calculaba
+        // el esperado con el guardado pero PERSISTÍA el del parámetro: un llamador que mandara 0
+        // dejaba el cierre con `initial_cash_usd=0` y un `drawer_adjust_usd` que decía +30 — al
+        // reabrirlo (↺, el camino del remedio) el fondo desaparecía y el recierre mostraba «sobran
+        // $50». Ahora el fondo tiene UNA fuente (la fila del turno) y se guarda el mismo que se usó.
+        let fondo_usd = adj.fondo_usd;
+        let cash_usd_esperado = t.cash_usd + t.usd_cash_total + fondo_usd - adj.gastos_usd;
+        let cash_bs_esperado = t.cash_bs - adj.gastos_bs;
+        let expected_usd = cash_usd_esperado + t.zelle_total;
         let actual_usd = actual_cash_usd + actual_zelle;
-        let expected_bs = t.cash_bs + t.pago_movil_total + t.transfer_bs_total;
+        let expected_bs = cash_bs_esperado + t.pago_movil_total + t.transfer_bs_total;
         let actual_bs = actual_cash_bs + actual_pago_movil + actual_transfer_bs;
         let diff_usd = actual_usd - expected_usd;
         let diff_bs = actual_bs - expected_bs;
@@ -6203,13 +7605,21 @@ impl Database {
         let grand_total = t.grand_usd + if effective_tasa > 0.0 { t.grand_bs / effective_tasa } else { 0.0 };
 
         let changes = conn.execute(
-            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25, pos_settled=?26, pos_settled_bs=?27
+            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25, pos_settled=?26, pos_settled_bs=?27, drawer_adjust_usd=?28, drawer_adjust_bs=?29
              WHERE close_date=?1 AND is_closed=0",
             params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
                     t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, grand_total, notes,
-                    effective_tasa, tasa_eur, initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
+                    // F69: se guarda el fondo que se USÓ (`fondo_usd`, el de la fila del turno) y no el
+                    // parámetro: un recierre después de reabrir (↺) tiene que volver a dar lo mismo.
+                    effective_tasa, tasa_eur, if fondo_usd > 0.0 { fondo_usd } else { initial_cash_usd },
+                    actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
                     actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs,
-                    pos_settled, pos_settled_bs],
+                    pos_settled, pos_settled_bs,
+                    // F69: el ajuste del cajón que se usó (fondo + gastos), guardado para que
+                    // este cierre se siga explicando solo aunque después cambie algo. Las
+                    // devoluciones NO van acá: ya están dentro de `cash_*` (vienen netas).
+                    fondo_usd - adj.gastos_usd,
+                    -adj.gastos_bs],
         )?;
         if changes == 0 {
             return Err(day_shift_error("No hay un día abierto con esa fecha para cerrar."));
@@ -6217,12 +7627,69 @@ impl Database {
         let id: i64 = conn.query_row(
             "SELECT id FROM daily_closings WHERE close_date=?1", params![close_date], |r| r.get(0),
         )?;
+        // F68/F40: el cierre queda en el LIBRO con su autor y con la diferencia del arqueo en la
+        // nota (es el acto que congela el día; hasta F68 no quedaba rastro de QUIÉN lo hizo).
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "cierre",
+            method: "",
+            currency: "USD",
+            amount: difference,
+            sign: 0,
+            reference: close_date,
+            sale_id: None,
+            service_id: None,
+            payment_id: None,
+            expense_id: None,
+            note: "Cierre del día (diferencia del arqueo)",
+            when: Some(close_date),
+        })?;
+        drop(conn);
+        // F71: el cierre deja una COPIA AUTOMÁTICA de la base (no rompe el cierre si falla).
+        let _ = self.auto_backup();
         Ok(id)
+    }
+
+    /// F71 — COPIA AUTOMÁTICA AL CERRAR EL DÍA (bloqueante A2 de la auditoría): el cierre es el momento
+    /// en que la caja queda cuadrada, o sea el mejor punto del día para guardar el respaldo. NO rompe el
+    /// cierre si falla: se anota el error en `settings` para que la pantalla de respaldos lo muestre
+    /// (un disco lleno no puede impedir que el local cierre su caja).
+    ///
+    /// Se llama desde `close_day` (después del commit) y también la puede llamar el arranque.
+    pub fn auto_backup(&self) -> SqlResult<Option<crate::backups::BackupInfo>> {
+        // (el lock de la conexión NO se toma acá: `backup_now` abre su propia conexión y `set_setting`
+        //  toma el suyo — pedirlo dos veces en el mismo hilo sería un deadlock)
+        match crate::backups::backup_now(&self.db_path, None, true) {
+            Ok(info) => {
+                let _ = self.set_setting("last_backup_at", &info.created_at);
+                let _ = self.set_setting("last_backup_error", "");
+                Ok(Some(info))
+            }
+            Err(e) => {
+                let _ = self.set_setting("last_backup_error", &e);
+                Ok(None)
+            }
+        }
     }
 
     pub fn reopen_day(&self, close_date: &str) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("UPDATE daily_closings SET is_closed=0, closed_at=NULL WHERE close_date=?1", params![close_date])?;
+        // F68/F40: reabrir un día es un acto sobre la CAJA (y hasta F68 se llevaba `closed_at`, la
+        // única evidencia de que estaba cerrado). Queda anotado quién lo hizo.
+        self.book_movement(&conn, &NewCashMovement {
+            r#type: "reapertura",
+            method: "",
+            currency: "USD",
+            amount: 0.0,
+            sign: 0,
+            reference: close_date,
+            sale_id: None,
+            service_id: None,
+            payment_id: None,
+            expense_id: None,
+            note: "Día reabierto",
+            when: Some(close_date),
+        })?;
         Ok(())
     }
 
@@ -6233,6 +7700,12 @@ impl Database {
     }
 
     // --- Export/Import ---
+    //
+    // F69 (revisión adversarial) — EL RESPALDO NO LLEVA EL HASH DEL PIN. `settings.pin` guardaba el
+    // hash PBKDF2 de un PIN de 4 dígitos: con 10.000 combinaciones se revierte offline en segundos, y
+    // el archivo de respaldo es justo el que el dueño comparte o deja en un pendrive. Se exporta el
+    // resto de `settings` (nombre del negocio, impresora, categorías de trabajo) con `pin` en blanco,
+    // y la restauración tampoco lo pisa (el PIN de la instalación no viaja en un archivo).
     pub fn export_data(&self) -> SqlResult<String> {
         let conn = self.conn.lock().unwrap();
         let tables = ["categories", "payment_methods", "service_statuses", "products", "clients", "sales", "services", "service_payments", "inventory_movements", "purchase_orders", "purchase_order_items", "daily_closings", "technicians", "settings", "expenses"];
@@ -6255,6 +7728,15 @@ impl Database {
                 }
                 Ok(serde_json::Value::Object(obj))
             })?.collect::<Result<Vec<_>, _>>()?;
+            // Los secretos de `settings` (el hash del PIN y el estado del bloqueo) NO se exportan:
+            // ni la clave ni el valor. Lo demás de `settings` (negocio, impresora, trabajos) sí.
+            let rows: Vec<serde_json::Value> = if *table == "settings" {
+                rows.into_iter()
+                    .filter(|r| !es_secreto_de_settings(r.get("key").and_then(|v| v.as_str()).unwrap_or("")))
+                    .collect()
+            } else {
+                rows
+            };
             map.insert(table.to_string(), serde_json::Value::Array(rows));
         }
         serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -6447,6 +7929,14 @@ fn es_estado_de_taller(status: &str) -> bool {
 const PIN_ITERATIONS: u32 = 60_000;
 /// Intentos fallidos seguidos antes de bloquear la entrada del PIN.
 const PIN_MAX_ATTEMPTS: u32 = 5;
+
+/// F69 — claves de `settings` que NO salen de la app en un respaldo (`export_data`): el hash del PIN
+/// y el estado del bloqueo por intentos. Un PIN de 4 dígitos tiene 10.000 combinaciones: su hash se
+/// revierte offline en segundos, y el respaldo es el archivo que se comparte.
+fn es_secreto_de_settings(key: &str) -> bool {
+    matches!(key, "pin" | "pin_failures" | "pin_locked_until")
+}
+
 /// Segundos de bloqueo tras agotar los intentos.
 const PIN_LOCK_SECS: u64 = 60;
 
@@ -6630,9 +8120,163 @@ mod tests {
     /// PIN: hash + gate de dueño + límite de intentos (B4 de la validación pre-producción).
     /// Lo CRÍTICO es no dejar al dueño afuera: una base vieja con el PIN en texto plano tiene
     /// que seguir funcionando (y actualizarse al hash sola) después de una actualización.
+    // ─── F68 — SESIONES DE CAJA (Master / Caja) Y LIBRO DE PLATA ────────────────────────────────
+
+    /// F68 — El Master nace con el PIN que ya tenía la instalación; cada persona entra con SU PIN,
+    /// y el rol decide si puede hacer las escrituras del dueño.
     #[test]
-    fn test_pin_hash_owner_gate_and_lockout() {
-        let test_path = PathBuf::from("test_registro_pin.db");
+    fn test_sesiones_master_y_caja() {
+        let test_path = PathBuf::from("test_registro_f68.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // 1) Instalación VIEJA: un PIN suelto en settings → al migrar nace la fila Master con ESE PIN
+        db.set_pin("1234").unwrap();
+        let master = db.master_user().unwrap().expect("tiene que existir el Master");
+        assert_eq!(master.role, "master");
+        assert!(master.has_pin, "el Master hereda el PIN de la instalación");
+        assert!(db.verify_user_pin(master.id, "1234").unwrap().is_some(), "el dueño entra con su PIN de siempre");
+        assert_eq!(db.current_user().unwrap().role, "master");
+        assert!(db.owner_can_edit(), "con sesión de Master se puede escribir");
+
+        // PIN equivocado: NO abre sesión
+        db.lock_owner();
+        assert!(db.verify_user_pin(master.id, "0000").unwrap().is_none());
+        assert!(!db.owner_can_edit(), "sin PIN correcto no hay sesión");
+
+        // 2) Se crea la CAJA 1 con su propio PIN
+        let caja_id = db.add_user("Caja 1", "caja", "2468", "#22c55e").unwrap();
+        assert!(db.verify_user_pin(master.id, "1234").unwrap().is_some(), "el Master vuelve a entrar");
+        let caja = db.verify_user_pin(caja_id, "2468").unwrap().expect("la caja entra con SU PIN");
+        assert_eq!(caja.role, "caja");
+        assert_eq!(db.current_user().unwrap().name, "Caja 1");
+        assert!(db.current_is_cashier(), "la sesión es de caja");
+        // La caja NO puede hacer lo del dueño (el gate real del backend)
+        assert!(!db.owner_can_edit(), "la caja no puede tocar catálogo/precios/cierres");
+        assert!(db.require_owner().is_err(), "y el error se lo dice");
+        assert!(db.set_pin("9999").is_err(), "la caja tampoco cambia el PIN del dueño");
+        // El PIN de la caja no sirve para el Master (ni al revés)
+        assert!(db.verify_user_pin(master.id, "2468").unwrap().is_none(), "PINes separados por persona");
+        assert!(db.verify_user_pin(caja_id, "1234").unwrap().is_none());
+
+        // 3) Reglas fail-closed de las personas
+        assert!(db.add_user("Caja 1", "caja", "1111", "").is_err(), "no se repiten nombres");
+        assert!(db.add_user("Admin", "admin", "1111", "").is_err(), "un rol fuera de master/caja se rechaza");
+        assert!(db.add_user("   ", "caja", "1111", "").is_err(), "sin nombre no se crea");
+        assert!(db.delete_user(master.id).is_err(), "no se borra al único Master");
+        assert!(db.update_user(master.id, "Master", "#000", false).is_err(), "no se apaga al único Master");
+        // F69 — con más de una persona, NADIE entra sin PIN: una fila sin PIN es la puerta para
+        // quedarse con el rol que esa persona tenga (el dueño ve todo el dinero).
+        let aux = db.add_user("Ayudante", "caja", "", "").unwrap();
+        let err = db.verify_user_pin(aux, "").unwrap_err().to_string();
+        assert!(err.contains("no tiene PIN"), "sin PIN no se entra con más gente: {err}");
+        // …pero SÍ entra con el PIN que se le ponga, y una persona apagada no entra ni con PIN
+        db.set_user_pin(aux, "1111").unwrap();
+        assert!(db.set_user_pin(aux, "12").is_err(), "un PIN de 2 dígitos se rechaza (misma forma que el del dueño)");
+        assert!(db.set_user_pin(aux, "12a4").is_err(), "y uno con letras también");
+        assert!(db.verify_user_pin(aux, "1111").unwrap().is_some(), "con PIN sí entra");
+        db.update_user(aux, "Ayudante", "", false).unwrap();
+        assert!(db.verify_user_pin(aux, "1111").unwrap().is_none(), "una persona apagada no entra");
+        // Un MASTER no puede quedar sin PIN si hay más gente (cualquiera entraría como dueño)…
+        db.owner_session_set(true);
+        let err = db.set_user_pin(master.id, "").unwrap_err().to_string();
+        assert!(err.contains("no puede quedar sin PIN"), "el dueño no queda sin PIN: {err}");
+        // …y en la instalación de UN solo usuario (sin nadie más) el PIN vacío sí se acepta.
+        assert!(!db.single_user_install(), "acá hay más de una persona");
+        let solo = {
+            let p = PathBuf::from("test_registro_f68_solo.db");
+            let _ = std::fs::remove_file(&p);
+            let d = Database::new(&p).expect("DB de un solo usuario");
+            let m = d.master_user().unwrap().unwrap();
+            (d, m.id, p)
+        };
+        assert!(solo.0.set_user_pin(solo.1, "").is_ok(), "un solo usuario: el dueño puede quedar sin PIN");
+        assert!(solo.0.verify_user_pin(solo.1, "").unwrap().is_some(), "y entra directo");
+        drop(solo.0);
+        let _ = std::fs::remove_file(&solo.2);
+
+        // 4) El PIN del dueño se sincroniza en las DOS tablas (pantalla vieja y nueva)
+        db.owner_session_set(true);
+        db.set_pin("5678").unwrap();
+        assert_eq!(db.master_user().unwrap().unwrap().has_pin, true);
+        db.lock_owner();
+        assert!(db.verify_user_pin(master.id, "5678").unwrap().is_some(), "el PIN nuevo sirve por la pantalla nueva");
+        db.lock_owner();
+        assert!(db.verify_pin("5678").unwrap(), "y también por la pantalla vieja");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F68/F40 — El LIBRO DE PLATA anota el AUTOR de cada movimiento, y la sesión de CAJA sólo ve
+    /// los suyos (es lo que pidió el dueño: «que vea su día de caja pero no cuánto factura la master»).
+    #[test]
+    fn test_libro_de_plata_con_autor() {
+        let test_path = PathBuf::from("test_registro_f68_book.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        db.set_pin("1234").unwrap();
+        let master = db.master_user().unwrap().unwrap();
+        db.verify_user_pin(master.id, "1234").unwrap();
+        let caja_id = db.add_user("Caja 1", "caja", "2468", "#22c55e").unwrap();
+
+        // El dueño abre el día con fondo de caja: la apertura queda en el libro con SU nombre
+        db.open_day(50.0, 100.0, 0.0).unwrap();
+        let hoy = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT date('now','localtime')", [], |r| r.get::<_, String>(0)).unwrap()
+        };
+        let libro = db.get_cash_movements(&hoy, &hoy, None, 100).unwrap();
+        let apertura = libro.iter().find(|m| m.r#type == "apertura").expect("la apertura queda en el libro");
+        assert_eq!(apertura.user_name, "Master", "el autor de la apertura es quien abrió el día");
+        assert_eq!(apertura.amount, 50.0);
+
+        // La CAJA vende (queda con SU nombre) y el dueño vende (queda con el suyo)
+        let p1 = db.add_product("Pantalla Prueba F68", Some(1), "Tecno", "Spark 10", "", "[\"Spark 10\"]",
+                                5.0, 12.0, 10, 0, 0.0).unwrap();
+        assert!(db.verify_user_pin(caja_id, "2468").unwrap().is_some(), "entra la caja");
+        db.add_sale(Some(p1), "Pantalla Prueba F68", 1, 12.0, 12.0, "Divisas (USD Cash)", "", None, "", 0.0, "", "USD", 0.0).unwrap();
+        assert!(db.verify_user_pin(master.id, "1234").unwrap().is_some(), "entra el dueño");
+        db.add_sale(Some(p1), "Pantalla Prueba F68", 2, 12.0, 24.0, "Divisas (USD Cash)", "", None, "", 0.0, "", "USD", 0.0).unwrap();
+
+        let todas = db.get_cash_movements(&hoy, &hoy, None, 100).unwrap();
+        let ventas: Vec<_> = todas.iter().filter(|m| m.r#type == "venta").collect();
+        assert_eq!(ventas.len(), 2, "las dos ventas están en el libro");
+        assert!(ventas.iter().any(|m| m.user_name == "Caja 1"), "la venta de la caja lleva su nombre");
+        assert!(ventas.iter().any(|m| m.user_name == "Master"), "la del dueño lleva el suyo");
+
+        // LA CLAVE DEL PEDIDO: la caja NO ve lo del dueño, el dueño ve todo
+        let solo_caja = db.get_cash_movements(&hoy, &hoy, Some(caja_id), 100).unwrap();
+        assert!(solo_caja.iter().all(|m| m.user_name == "Caja 1"),
+            "la sesión de caja sólo recibe SUS movimientos: {:?}", solo_caja.iter().map(|m| &m.user_name).collect::<Vec<_>>());
+        assert_eq!(solo_caja.iter().filter(|m| m.r#type == "venta").count(), 1);
+        assert!(db.get_cash_movements(&hoy, &hoy, None, 100).unwrap().len() > solo_caja.len(),
+            "el Master ve más que la caja");
+
+        // Resumen por persona (pantalla del dueño)
+        let resumen = db.get_cash_movements_by_user(&hoy, &hoy).unwrap();
+        assert!(resumen.iter().any(|(n, _, _, _)| n == "Caja 1"), "la caja aparece en el resumen");
+        assert!(resumen.iter().any(|(n, _, _, _)| n == "Master"), "el Master también");
+
+        // Borrar un cobro deja el CONTRA-ASIENTO (el libro sigue siendo la verdad)
+        let svc_id = db.add_service("DEV-F68", "Cliente F68", "", "Spark 10", "", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 30.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "V-1", "", "", None, "", None, "Negro", None, 0.0).unwrap();
+        let pay_id = db.add_service_payment(svc_id, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "", "").unwrap();
+        assert!(db.get_cash_movements(&hoy, &hoy, None, 100).unwrap().iter().any(|m| m.r#type == "abono" && m.payment_id == Some(pay_id)));
+        db.delete_service_payment(pay_id).unwrap();
+        let borrado = db.get_cash_movements(&hoy, &hoy, None, 100).unwrap()
+            .into_iter().find(|m| m.r#type == "abono_anulado").expect("queda el contra-asiento");
+        assert_eq!(borrado.sign, -1, "el contra-asiento sale de la caja");
+        assert_eq!(borrado.amount, 10.0);
+        assert_eq!(borrado.user_name, "Master", "y dice quién lo borró");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_pin_hash_owner_gate_and_lockout() {        let test_path = PathBuf::from("test_registro_pin.db");
         let _ = std::fs::remove_file(&test_path);
         let db = Database::new(&test_path).expect("Failed to create test DB");
 
@@ -6679,10 +8323,40 @@ mod tests {
         assert!(err.contains("Demasiados intentos"), "error: {err}");
         // el PIN correcto tampoco pasa mientras está bloqueado (no se puede sondear)
         assert!(db.verify_pin("5678").is_err());
-        // (el vencimiento por tiempo se prueba sin esperar 60 s: se limpia el bloqueo a mano)
+        // (el vencimiento por tiempo se prueba sin esperar 60 s: se limpia el bloqueo a mano — ahora
+        //  el bloqueo vive en `settings`, así que se limpian las DOS fuentes, como haría el reloj)
         *db.pin_locked_until.lock().unwrap() = None;
         db.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute("DELETE FROM settings WHERE key IN ('pin_failures','pin_locked_until')", []).unwrap();
+        }
+        assert_eq!(db.pin_lock_seconds(), 0, "sin bloqueo ni en memoria ni en la base");
         assert!(db.verify_pin("5678").unwrap());
+
+        // 6b) F69: el bloqueo por intentos SE PERSISTE (reiniciar la app ya no borra el castigo)
+        for _ in 0..PIN_MAX_ATTEMPTS {
+            let _ = db.verify_pin("0000");
+        }
+        assert!(db.pin_failures_persisted() == 0 || db.pin_lock_seconds() > 0);
+        let bloqueado_en_base: i64 = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT COUNT(*) FROM settings WHERE key='pin_locked_until' AND CAST(value AS INTEGER) > 0",
+                        [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(bloqueado_en_base, 1, "la hora del bloqueo queda guardada en la base");
+        // Una instancia NUEVA de la app (mismo archivo) sigue bloqueada: no se puede reiniciar para probar
+        {
+            let db2 = Database::new(&test_path).expect("reabrir la misma base");
+            assert!(db2.pin_lock_seconds() > 0, "el bloqueo sobrevive al reinicio de la app");
+            assert!(db2.verify_pin("5678").is_err(), "y no se puede sondear el PIN tras reiniciar");
+        }
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute("DELETE FROM settings WHERE key IN ('pin_failures','pin_locked_until')", []).unwrap();
+        }
+        *db.pin_locked_until.lock().unwrap() = None;
+        db.pin_failures.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // 7) base VIEJA con el PIN en texto plano: sigue funcionando y se actualiza al hash
         {
@@ -6997,11 +8671,19 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM daily_closings WHERE is_closed=0", [], |r| r.get(0)).unwrap();
         assert_eq!(open_rows, 1, "sigue habiendo UN solo día abierto");
 
-        // Cerrar y reabrir el mismo día conserva la fila (comportamiento legacy)
+        // Cerrar y querer «abrir el día» otra vez: F69 (revisión adversarial) RECHAZA el atajo —
+        // antes el `ON CONFLICT ... is_closed=0` volvía a abrir un día ya auditado y reescribía su
+        // fondo/tasa. Reabrir es del DUEÑO y tiene su camino explícito (↺ → `reopen_day`)…
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         db.close_day(&today, "", 15.0, 748.79, 900.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
-        let id3 = db.open_day(20.0, 750.0, 901.0).unwrap();
-        assert_eq!(id3, id2, "reabrir el mismo día conserva la fila");
+        let err = db.open_day(20.0, 750.0, 901.0).unwrap_err().to_string();
+        assert!(err.contains("ya está CERRADO"), "abrir un día cerrado se rechaza: {err}");
+        assert!(db.get_active_day().unwrap().is_none(), "y el día sigue cerrado");
+
+        // …y con ese camino la fila se conserva (el id no cambia).
+        db.reopen_day(&today).unwrap();
+        let reabierto = db.get_active_day().unwrap().unwrap();
+        assert_eq!(reabierto.id, id2, "reabrir el mismo día conserva la fila");
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
@@ -7190,7 +8872,13 @@ mod tests {
                 net_amount REAL,
                 zelle_reference TEXT,
                 currency TEXT,
-                discount_amount REAL DEFAULT 0
+                discount_amount REAL DEFAULT 0,
+                voided_at TEXT,
+                void_reason TEXT,
+                -- F74: el IVA de la venta (una base vieja sin estas columnas se migra sola en init(),
+                -- pero este fixture arma la tabla a mano y tiene que reflejar el orden físico real).
+                iva_rate REAL NOT NULL DEFAULT 0,
+                iva_mode TEXT NOT NULL DEFAULT ''
             )",
             [],
         ).unwrap();
@@ -7205,6 +8893,8 @@ mod tests {
         assert_eq!(sales[0].client_id, Some(cid));
         assert_eq!(sales[0].notes.as_deref(), Some("nota de prueba"));
         assert_eq!(sales[0].zelle_reference.as_deref(), Some("REF-99"));
+        // F70: una DB legacy (sin las columnas de anulación) se lee con `voided_at = None` → la venta vale
+        assert!(sales[0].voided_at.is_none(), "sin columna de anulación la venta está vigente");
 
         let client_sales = db.get_client_sales(cid).unwrap();
         assert_eq!(client_sales.len(), 1, "get_client_sales con orden físico legacy");
@@ -7619,7 +9309,8 @@ mod tests {
                         cash_usd, cash_bs, zelle_total, pago_movil_total, transfer_bs_total, usd_cash_total,
                         grand_total, is_closed, closed_at, notes, tasa_bcv, tasa_eur, opened_at,
                         initial_cash_usd, actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
-                        actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs
+                        actual_zelle, actual_pago_movil, actual_transfer_bs, difference, total_usd, total_bs,
+                        drawer_adjust_usd, drawer_adjust_bs
                  FROM daily_closings WHERE id=?1",
                 params![close_id],
                 |r| Ok(crate::db::DailyClosing {
@@ -7633,6 +9324,7 @@ mod tests {
                     actual_punto_usd: r.get(23)?, actual_punto_bs: r.get(24)?, actual_zelle: r.get(25)?,
                     actual_pago_movil: r.get(26)?, actual_transfer_bs: r.get(27)?, difference: r.get(28)?,
                     total_usd: r.get(29)?, total_bs: r.get(30)?,
+                    drawer_adjust_usd: r.get(31)?, drawer_adjust_bs: r.get(32)?,
                 })).unwrap();
         assert_eq!(closing.total_usd, 0.0, "total_usd del cierre refleja las devoluciones");
         assert_eq!(closing.total_bs, 0.0, "total_bs del cierre refleja las devoluciones");
@@ -7722,6 +9414,285 @@ mod tests {
         assert_eq!(c.total_usd, 30.0, "cierre total_usd = ventas sin apertura");
         assert_eq!(c.usd_cash_total, 30.0, "cierre divisas sin apertura");
 
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_void_sale_returns_stock_and_book() {
+        // F70 (bloqueante A3 de la auditoría de entrega): una venta mal tecleada quedaba en la caja de
+        // ese día PARA SIEMPRE (no existía update_sale/delete_sale) y una pantalla vendida y devuelta
+        // no volvía al stock. Ahora se ANULA: la fila queda marcada, el stock vuelve, el cliente deja de
+        // deber su compra y el libro guarda el contra-asiento con autor y motivo.
+        let test_path = PathBuf::from("test_void_sale.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.set_pin("1234").unwrap();
+        db.verify_pin("1234").unwrap();   // sesión de dueño (el gate del comando lo exige)
+        db.open_day(0.0, 40.0, 45.0).unwrap();
+
+        let pid = db.add_product("Pantalla Anulable", Some(1), "Tecno", "Spark 20", "", "[\"Spark 20\"]",
+                                 10.0, 25.0, 5, 0, 0.0).unwrap();
+        let cid = db.add_client("Cliente Anula", "0412-0000000", "", "").unwrap();
+        db.add_sale(Some(pid), "Pantalla Anulable", 1, 25.0, 25.0, "Divisas (USD Cash)", "Cliente Anula",
+                    Some(cid), "venta de prueba", 0.0, "", "USD", 0.0).unwrap();
+        let venta: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT id FROM sales WHERE notes='venta de prueba'", [], |r| r.get(0)).unwrap();
+
+        let stock_antes: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(stock_antes, 4, "la venta descontó 1 del stock");
+        let t_antes = db.get_daily_totals(&today, &today).unwrap();
+        assert!((t_antes[0].usd_cash_total - 25.0).abs() < 1e-9, "la venta entra en el arqueo del día");
+
+        // ANULAR (con motivo)
+        db.void_sale(venta, "precio mal tecleado").unwrap();
+
+        let stock_despues: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT stock FROM products WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(stock_despues, 5, "anular DEVUELVE la unidad al stock");
+        let mov: (String, i64, String) = db.conn.lock().unwrap()
+            .query_row("SELECT type, quantity, reason FROM inventory_movements WHERE reference=?1 ORDER BY id DESC LIMIT 1",
+                       params![format!("Venta #{}", venta)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(mov.0, "entrada", "el movimiento de inventario es de ENTRADA");
+        assert_eq!(mov.1, 1);
+        assert_eq!(mov.2, "Anulación de venta");
+
+        // La fila NO se borra: queda marcada con su motivo
+        let fila: (Option<String>, Option<String>) = db.conn.lock().unwrap()
+            .query_row("SELECT voided_at, void_reason FROM sales WHERE id=?1", params![venta],
+                       |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!(fila.0.is_some(), "la venta queda marcada con su fecha de anulación");
+        assert_eq!(fila.1.as_deref(), Some("precio mal tecleado"), "y con su motivo");
+        let listadas = db.get_sales("", None, "", "").unwrap();
+        assert!(listadas.iter().any(|s| s.id == venta && s.voided_at.is_some()), "sigue en la lista (tachada)");
+
+        // El contra-asiento del libro: mismo método/moneda/monto, signo invertido, con autor y motivo
+        let contra = db.get_cash_movements(&today, &today, None, 100).unwrap()
+            .into_iter().find(|m| m.r#type == "venta_anulada").expect("queda el contra-asiento");
+        assert_eq!(contra.method, "Divisas (USD Cash)");
+        assert_eq!(contra.amount, 25.0);
+        assert_eq!(contra.sign, -1);
+        assert_eq!(contra.user_name, "Master", "con el AUTOR de quien anuló");
+        assert_eq!(contra.note, "precio mal tecleado");
+
+        // La caja y el cliente dejan de contarla (el día se queda sin movimientos → no hay fila de totales)
+        let t_despues = db.get_daily_totals(&today, &today).unwrap();
+        assert_eq!(t_despues.first().map(|t| t.usd_cash_total).unwrap_or(0.0), 0.0,
+            "el arqueo del día ya NO la cuenta");
+        let total_cliente: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT total_spent FROM clients WHERE id=?1", params![cid], |r| r.get(0)).unwrap();
+        assert_eq!(total_cliente, 0.0, "el cliente tampoco la debe");
+        let stats = db.get_sales_stats(30).unwrap();
+        assert!(!stats.iter().any(|s| s.product_name.as_deref() == Some("Pantalla Anulable")),
+            "el top de productos no la cuenta");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_void_sale_reglas() {
+        // Las guardas de F70: motivo obligatorio, venta inexistente, doble anulación, día cerrado (con
+        // el camino del remedio) y día sin turno abierto. Y el día del contra-asiento es el DE LA VENTA.
+        let test_path = PathBuf::from("test_void_sale_reglas.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let ayer = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        db.set_pin("1234").unwrap();
+        db.verify_pin("1234").unwrap();
+        db.open_day(0.0, 40.0, 45.0).unwrap();
+        db.add_sale(None, "Forro", 1, 5.0, 5.0, "Divisas (USD Cash)", "", None, "", 0.0, "", "USD", 0.0).unwrap();
+        let venta: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT MAX(id) FROM sales", [], |r| r.get(0)).unwrap();
+
+        // Motivo obligatorio
+        let err = db.void_sale(venta, "   ").unwrap_err().to_string();
+        assert!(err.contains("por qué"), "sin motivo no se anula: {err}");
+        // Venta inexistente
+        assert!(db.void_sale(999999, "no existe").unwrap_err().to_string().contains("no existe"));
+        // Anular una vez: bien; la segunda se rechaza
+        db.void_sale(venta, "mal tecleada").unwrap();
+        let err2 = db.void_sale(venta, "otra vez").unwrap_err().to_string();
+        assert!(err2.contains("ya está anulada"), "no se anula dos veces: {err2}");
+
+        // Día CERRADO: se rechaza y el mensaje dice el camino real (↺ → anular → volver a cerrar)
+        db.add_sale(None, "Cable", 1, 3.0, 3.0, "Divisas (USD Cash)", "", None, "segunda", 0.0, "", "USD", 0.0).unwrap();
+        let venta2: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT id FROM sales WHERE notes='segunda'", [], |r| r.get(0)).unwrap();
+        db.close_day(&today, "", 0.0, 40.0, 45.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let err3 = db.void_sale(venta2, "mal").unwrap_err().to_string();
+        assert!(err3.contains("ya está CERRADO"), "un día cerrado no se anula a ciegas: {err3}");
+        assert!(err3.contains("↺"), "y el mensaje dice el remedio: {err3}");
+
+        // El día del contra-asiento es el DE LA VENTA (no el de hoy): se retrodata la venta COMO LO
+        // HARÍA EL SISTEMA (la fila y su movimiento del libro) y se abre un turno de ese día.
+        {
+            let c = db.conn.lock().unwrap();
+            c.execute("UPDATE sales SET date=?1 WHERE id=?2", params![format!("{} 10:00:00", ayer), venta2]).unwrap();
+            c.execute("UPDATE cash_movements SET date=?1, day=?2 WHERE sale_id=?3 AND type='venta'",
+                      params![format!("{} 10:00:00", ayer), ayer, venta2]).unwrap();
+            c.execute("INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, is_closed) VALUES (?1, 0, 40.0, 0)",
+                      params![ayer]).unwrap();
+        }
+        db.void_sale(venta2, "de ayer").unwrap();
+        let libro_ayer = db.get_cash_movements(&ayer, &ayer, None, 50).unwrap();
+        assert!(libro_ayer.iter().any(|m| m.r#type == "venta_anulada" && m.sale_id == Some(venta2)),
+            "el contra-asiento de esa venta cae en el día de la venta, no en el de hoy: {:?}",
+            libro_ayer.iter().map(|m| (&m.r#type, &m.day, m.sale_id)).collect::<Vec<_>>());
+        let libro_hoy = db.get_cash_movements(&today, &today, None, 50).unwrap();
+        assert!(!libro_hoy.iter().any(|m| m.r#type == "venta_anulada" && m.sale_id == Some(venta2)),
+            "y no en el de hoy (descuadraría un día que no la vendió)");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_open_day_no_reabre_un_dia_cerrado() {
+        // F69 (revisión adversarial, BLOQUEANTE): `open_day` volvía a abrir el día de HOY si ya estaba
+        // cerrado (el `ON CONFLICT ... SET is_closed=0`), reescribiendo el fondo y la tasa y borrando
+        // la apertura del libro. Con el día reabierto, `require_open_day` dejaba anotar ventas y abonos
+        // en un arqueo YA FIRMADO (y un cierre guardado no se recalcula).
+        let test_path = PathBuf::from("test_open_day_cerrado.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        db.open_day(50.0, 40.0, 45.0).unwrap();
+        db.add_sale(None, "Forro", 1, 10.0, 10.0, "Divisas (USD Cash)", "C", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.close_day(&today, "cierre", 0.0, 40.0, 45.0, 60.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let fondo_cerrado: f64 = db.get_daily_closings().unwrap()[0].initial_cash_usd;
+
+        // Intentar «abrir el día» otra vez: se RECHAZA y el cierre queda intacto
+        let err = db.open_day(99999.0, 1.0, 0.0).unwrap_err().to_string();
+        assert!(err.contains("ya está CERRADO"), "el mensaje dice que está cerrado y el camino: {err}");
+        assert!(err.contains("↺"), "y nombra el botón del remedio: {err}");
+        assert!(db.get_active_day().unwrap().is_none(), "el día sigue CERRADO (no hay turno abierto)");
+        assert_eq!(db.get_daily_closings().unwrap()[0].initial_cash_usd, fondo_cerrado,
+            "el fondo del día auditado no se reescribe");
+        // Y el mostrador no puede anotar nada de ese día (el gate real)
+        let err2 = db.add_sale(None, "Forro", 1, 5.0, 5.0, "Divisas (USD Cash)", "C", None, "", 0.0, "", "USD", 0.0)
+            .unwrap_err().to_string();
+        assert!(err2.contains("Debe abrir el día"), "sin turno abierto no se vende: {err2}");
+
+        // El camino del dueño SÍ funciona: ↺ (reopen_day) y volver a cerrar
+        db.reopen_day(&today).unwrap();
+        assert!(db.get_active_day().unwrap().is_some(), "reabrir con ↺ deja el turno abierto");
+        db.add_sale(None, "Forro", 1, 5.0, 5.0, "Divisas (USD Cash)", "C", None, "", 0.0, "", "USD", 0.0).unwrap();
+        assert!(db.close_day(&today, "recierre", 0.0, 40.0, 45.0, 65.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).is_ok());
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_contra_asiento_va_al_dia_del_movimiento() {
+        // F69 — BUG CAZADO EN LA 2ª CORRIDA EN VIVO: `reverse_book_entry` escribía el asiento espejo
+        // con la fecha de HOY. Con un gasto de un día anterior, el día original seguía descontando ese
+        // gasto del cajón PARA SIEMPRE y el día de hoy se llevaba un «+monto» de un gasto que nunca
+        // tuvo (el arqueo de los dos días mentía). El espejo tiene que caer en el día del original.
+        let test_path = PathBuf::from("test_contra_asiento_dia.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let hoy = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let ayer = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+
+        // Un gasto de AYER pagado del cajón (el operario lo anota retroactivo)
+        let id = db.add_expense(&ayer, "Otro", 15.0, "USD", "de ayer", "Divisas (USD Cash)").unwrap();
+        assert_eq!(db.drawer_adjustments(&ayer).unwrap().gastos_usd, 15.0, "el gasto de ayer baja el cajón de AYER");
+        assert_eq!(db.drawer_adjustments(&hoy).unwrap().gastos_usd, 0.0, "y NO toca el cajón de hoy");
+
+        // Se borra HOY: el espejo tiene que caer en AYER para que el ajuste de ayer vuelva a 0…
+        db.delete_expense(id).unwrap();
+        assert_eq!(db.drawer_adjustments(&ayer).unwrap().gastos_usd, 0.0,
+            "el asiento espejo del gasto de ayer cae en AYER (si no, ayer descuenta para siempre)");
+        assert_eq!(db.drawer_adjustments(&hoy).unwrap().gastos_usd, 0.0,
+            "y hoy no recibe un gasto que nunca tuvo (antes quedaba un «+15» inventado)");
+        let espejo = db.get_cash_movements(&ayer, &ayer, None, 50).unwrap()
+            .into_iter().find(|m| m.r#type == "gasto_anulado").expect("queda el contra-asiento");
+        assert_eq!(espejo.amount, 15.0);
+        assert_eq!(espejo.method, "Divisas (USD Cash)", "y conserva el método declarado");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_arqueo_del_cajon_con_fondo_y_gastos() {
+        // F69 — HALLAZGO A1 DE LA AUDITORÍA DE ENTREGA: el cierre pedía contar el cajón contra un
+        // esperado que NO incluía el fondo de caja ni los gastos pagados del cajón. Un día perfecto
+        // «faltaba» exactamente lo que se pagó del cajón y «sobraba» el fondo declarado al abrir.
+        // Acá se fija la regla completa: esperado = efectivo cobrado (ya neto) + fondo − gastos del cajón.
+        let test_path = PathBuf::from("test_arqueo_f69.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // Fondo de caja de $50 al abrir + tasa
+        db.open_day(50.0, 40.0, 45.0).unwrap();
+        // Cobros del día: $100 en divisas y Bs. 4.000 en efectivo
+        db.add_sale(None, "Pantalla A", 1, 100.0, 100.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(None, "Pantalla B", 1, 100.0, 4000.0, "Efectivo Bs", "C2", None, "", 0.0, "", "VES", 0.0).unwrap();
+        // Gastos pagados DEL cajón: $20 de divisas y Bs. 500
+        db.add_expense(&today, "Compra de repuestos", 20.0, "USD", "mensajero", "Divisas (USD Cash)").unwrap();
+        db.add_expense(&today, "Otro", 500.0, "VES", "flete", "Efectivo Bs").unwrap();
+        // …y uno pagado por banco, que NO puede tocar el cajón
+        db.add_expense(&today, "Servicios", 999.0, "USD", "por Zelle", "Transferencia Zelle").unwrap();
+        // …y uno sin declarar de dónde salió: tampoco se descuenta (se avisa)
+        db.add_expense(&today, "Otro", 77.0, "USD", "sin método", "").unwrap();
+
+        let adj = db.drawer_adjustments(&today).unwrap();
+        assert_eq!(adj.fondo_usd, 50.0, "el fondo declarado al abrir");
+        assert_eq!(adj.gastos_usd, 20.0, "sólo el gasto pagado DEL cajón en divisas");
+        assert_eq!(adj.gastos_bs, 500.0, "y el pagado del cajón en bolívares");
+        assert_eq!(adj.sin_metodo, 1, "el gasto sin método se cuenta aparte para avisarlo");
+
+        // El operario cuenta exactamente lo que debe haber: 100 + 50 − 20 = $130 y 4.000 − 500 = Bs. 3.500
+        let close_id = db.close_day(&today, "arqueo con fondo y gastos", 0.0, 40.0, 45.0,
+            130.0, 3500.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let c = db.get_daily_closings().unwrap().into_iter().find(|x| x.id == close_id).unwrap();
+        assert!(c.difference.abs() < 1e-9,
+            "un día perfecto con fondo y gastos del cajón cuadra: diferencia={}", c.difference);
+        assert_eq!(c.cash_usd, 0.0, "las columnas crudas del día NO se maquillan");
+        assert_eq!(c.usd_cash_total, 100.0);
+        assert_eq!(c.cash_bs, 4000.0);
+        assert_eq!(c.initial_cash_usd, 50.0, "el fondo queda guardado tal como se usó (una sola fuente)");
+        assert_eq!(c.drawer_adjust_usd, 30.0, "fondo 50 − gastos 20 = el ajuste que se usó");
+        assert_eq!(c.drawer_adjust_bs, -500.0, "los gastos en Bs. del cajón, en negativo");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_arqueo_no_resta_la_devolucion_dos_veces() {
+        // La devolución se guarda como un cobro NEGATIVO con el método por el que salió la plata, así
+        // que el neto por método YA viene con ella: restarla otra vez en el esperado del cajón
+        // descontaba la misma plata dos veces (lo cazó `test_refund_ledger_full` en F69).
+        let test_path = PathBuf::from("test_arqueo_dev_f69.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 40.0, 45.0).unwrap();
+
+        let sid = db.add_service("ORD-ARQ-1", "Ana", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "", "").unwrap();
+        db.add_service_refund(sid, 50.0, "Divisas (USD Cash)", "", "USD", "se devolvió todo").unwrap();
+
+        let adj = db.drawer_adjustments(&today).unwrap();
+        assert_eq!(adj.devoluciones_usd, 50.0, "el libro dice cuánto se devolvió del cajón");
+
+        // El cajón quedó vacío: cobró 50 y devolvió 50 → 0 esperado, 0 contado, cuadra.
+        let close_id = db.close_day(&today, "devolución total", 0.0, 40.0, 45.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let c = db.get_daily_closings().unwrap().into_iter().find(|x| x.id == close_id).unwrap();
+        assert!(c.difference.abs() < 1e-9,
+            "una orden devuelta entera no puede dejar «faltante» en el cajón: diferencia={}", c.difference);
+        assert_eq!(c.usd_cash_total, 0.0, "el neto por método ya trae la devolución");
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }
@@ -8438,6 +10409,7 @@ mod tests {
             screen_product_id: screen,
 discount_amount: 0.0,
             status: "Recibido".into(),
+            iva_rate: 0.0, iva_mode: String::new(),
         };
         db.add_service_order("Cliente", "0412", "", "", None, "", None,
             &[dev("Samsung A15", Some(p_a15)), dev("Tecno SPARK 10", Some(p_spark))]).unwrap();
@@ -8554,6 +10526,7 @@ discount_amount: 0.0,
             screen_product_id: None,
 discount_amount: 0.0,
             status: "Recibido".into(),
+            iva_rate: 0.0, iva_mode: String::new(),
         };
         let base = db.add_service_order("Cliente 1", "0412-1", "V-1", "Dir", None, "", None,
             &[dev("Samsung A15", "Pantalla rota", 50.0), dev("Tecno SPARK 10", "No carga", 30.0), dev("Apple 11 PRO", "Sin señal", 40.0)]).unwrap();
@@ -8628,6 +10601,7 @@ discount_amount: 0.0,
             screen_product_id: None,
 discount_amount: 0.0,
             status: "Recibido".into(),
+            iva_rate: 0.0, iva_mode: String::new(),
         };
         let base = db.add_service_order("Cliente", "0412", "", "", None, "", None, &[d]).unwrap();
         assert_eq!(base, "DEV-0001");
@@ -8653,6 +10627,7 @@ discount_amount: 0.0,
             screen_product_id: None,
 discount_amount: 0.0,
             status: "Recibido".into(),
+            iva_rate: 0.0, iva_mode: String::new(),
         };
         // Sin día abierto → error de negocio (gate require_open_day)
         let err = db.add_service_order("C", "1", "", "", None, "", None, &[d.clone()]).unwrap_err();
@@ -8868,11 +10843,15 @@ discount_amount: 0.0,
         let _ = std::fs::remove_file(&test_path);
         let db = Database::new(&test_path).expect("Failed to create test DB");
         // Sin día abierto: los gastos NO requieren día (decisión de diseño)
-        let e1 = db.add_expense("2026-08-19", "Alquiler", 100.0, "USD", "Local").unwrap();
-        let _e2 = db.add_expense("2026-08-19", "Servicios", 2500.0, "VES", "Luz").unwrap();
-        let e3 = db.add_expense("2026-08-18", "Retiro del dueño", 20.0, "USD", "").unwrap();
-        let err = db.add_expense("2026-08-19", "Otro", 0.0, "USD", "").unwrap_err();
+        let e1 = db.add_expense("2026-08-19", "Alquiler", 100.0, "USD", "Local", "Divisas (USD Cash)").unwrap();
+        let _e2 = db.add_expense("2026-08-19", "Servicios", 2500.0, "VES", "Luz", "").unwrap();
+        let e3 = db.add_expense("2026-08-18", "Retiro del dueño", 20.0, "USD", "", "Divisas (USD Cash)").unwrap();
+        let err = db.add_expense("2026-08-19", "Otro", 0.0, "USD", "", "").unwrap_err();
         assert!(err.to_string().contains("mayor que 0"), "monto 0 rechazado");
+        // F69: un método declarado que NO existe en el sistema se rechaza (la moneda del cajón que
+        // se descuenta tiene que ser una de verdad).
+        let err = db.add_expense("2026-08-19", "Otro", 1.0, "USD", "", "De la gaveta").unwrap_err();
+        assert!(err.to_string().contains("no es un método de pago"), "método inventado rechazado: {}", err);
 
         let todos = db.get_expenses("2026-08-01", "2026-08-31").unwrap();
         assert_eq!(todos.len(), 3);
@@ -9744,6 +11723,7 @@ discount_amount: 0.0,
             observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
             currency: "USD".into(), device_checklist: String::new(), color: "Negro".into(),
             screen_product_id: None, discount_amount: 0.0, status: status.into(),
+            iva_rate: 0.0, iva_mode: String::new(),
         };
         let base = db.add_service_order(client, "0412-0000000", "V-1", "", None, "", None, &[d]).unwrap();
         let all = db.get_services("", "", "", "", "").unwrap();
@@ -9940,6 +11920,152 @@ discount_amount: 0.0,
         let _ = std::fs::remove_file(&test_path);
     }
 
+    /// F74 — EL IVA: la configuración (fail-closed) y las columnas por fila de ventas y servicios.
+    /// Lo que fija: apagado no cambia nada, una alícuota/modo inválidos se rechazan, la alícuota viaja
+    /// con la operación (y sobrevive a una edición de la orden), y una base vieja sin las columnas se
+    /// migra sola al abrir (leyendo 0 = sin IVA).
+    #[test]
+    fn test_tax_config_and_iva_columns() {
+        let test_path = PathBuf::from("test_f74_iva.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        db.open_day(0.0, 40.5, 45.0).unwrap();
+
+        // De fábrica el IVA está APAGADO y con 16% listo: los precios del local no cambian solos.
+        let base = db.get_tax_config();
+        assert!(!base.activo, "de fábrica el IVA está apagado");
+        assert_eq!(base.alicuota, 16.0);
+        assert_eq!(base.modo, "incluido");
+
+        // Se prende con una alícuota y un modo: queda guardado tal cual (y se relee del JSON).
+        let guardada = db.set_tax_config(true, 16.0, "agregado").unwrap();
+        assert!(guardada.activo && guardada.alicuota == 16.0 && guardada.modo == "agregado");
+        let leida = db.get_tax_config();
+        assert!(leida.activo && leida.modo == "agregado", "la configuración se relee: {:?}", leida);
+
+        // Validación fail-closed: modo fuera de la whitelist y alícuota absurda.
+        assert!(db.set_tax_config(true, 16.0, "lo-que-sea").is_err(), "un modo raro se rechaza");
+        assert!(db.set_tax_config(true, 999.0, "incluido").is_err(), "una alícuota > 100 se rechaza");
+        assert!(db.set_tax_config(true, -1.0, "incluido").is_err(), "una alícuota negativa se rechaza");
+        // …y la configuración guardada NO se pisó con el intento fallido.
+        assert_eq!(db.get_tax_config().modo, "agregado");
+
+        // Una VENTA con IVA 16% «agregado»: 34,80 cobrados, con su alícuota anotada en la fila.
+        db.add_sale_tax(None, "Pantalla A15", 1, 34.8, 34.8, "Divisas (USD Cash)", "", None, "", 0.0, "", "USD", 0.0, 16.0, "agregado").unwrap();
+        let ventas = db.get_sales("", None, "", "").unwrap();
+        assert_eq!(ventas.len(), 1);
+        assert_eq!(ventas[0].iva_rate, 16.0, "la venta guarda su alícuota");
+        assert_eq!(ventas[0].iva_mode, "agregado", "y el modo con el que se cargó");
+        assert_eq!(ventas[0].total, 34.8, "el total sigue siendo lo que pagó el cliente");
+        // Una venta sin IVA (el caso de hoy, con el switch apagado) nace en 0/''.
+        db.add_sale_tax(None, "Cable", 1, 5.0, 5.0, "Divisas (USD Cash)", "", None, "", 0.0, "", "USD", 0.0, 0.0, "").unwrap();
+        let todas = db.get_sales("", None, "", "").unwrap();
+        let sin = todas.iter().find(|s| s.iva_rate < 0.001).expect("hay una venta sin IVA");
+        assert_eq!(sin.iva_mode, "", "sin IVA el modo queda vacío");
+
+        // Una ORDEN con IVA: se guarda con su alícuota y EDITARLA no la pierde, porque
+        // update_service no toca esas columnas (comando angosto, patrón F32).
+        let id = f74_order(&db, 34.8, 16.0, "agregado");
+        let s = db.get_service_by_id(id).unwrap().unwrap();
+        assert_eq!(s.iva_rate, 16.0);
+        assert_eq!(s.iva_mode, "agregado");
+        db.update_service(id, "Ana", "0412", "Samsung A15", "Pantalla", "Cambio pantalla", "[\"Cambio pantalla\"]",
+                          40.0, "Divisas (USD Cash)", "", "Recibido", "", 0.0, "", "USD", "", "", "", "", None, "", None, 0.0)
+            .unwrap();
+        let editada = db.get_service_by_id(id).unwrap().unwrap();
+        assert_eq!(editada.amount, 40.0, "el monto se editó");
+        assert_eq!(editada.iva_rate, 16.0, "editar la orden NO borra la alícuota con la que se cargó");
+
+        // El LIBRO DE IVA agrupa por alícuota (ventas vigentes + órdenes). OJO: la orden se editó
+        // arriba a $40, así que el grupo del 16% suma 34,80 (venta) + 40,00 (orden) = 74,80.
+        let grupos = db.get_iva_groups("2000-01-01", "2100-01-01").unwrap();
+        let g16 = grupos.iter().find(|g| (g.iva_rate - 16.0).abs() < 0.001).expect("hay filas al 16%");
+        assert!((g16.total - 74.8).abs() < 0.001, "el libro suma las dos operaciones al 16%: {}", g16.total);
+        assert!(g16.operaciones >= 2, "y cuenta las operaciones");
+        let g0 = grupos.iter().find(|g| g.iva_rate.abs() < 0.001).expect("y las que no llevan IVA");
+        assert!((g0.total - 5.0).abs() < 0.001, "la venta de $5 sin IVA entra al grupo 0: {}", g0.total);
+
+        // UNA BASE VIEJA (sin las columnas del IVA) se migra sola al abrir y lee 0 = sin IVA.
+        drop(db);
+        {
+            let conn = Connection::open(&test_path).unwrap();
+            conn.execute_batch("ALTER TABLE sales DROP COLUMN iva_rate; ALTER TABLE sales DROP COLUMN iva_mode;").unwrap();
+            drop(conn);
+            let viejo = Database::new(&test_path).expect("init sobre una base sin IVA");
+            let v = viejo.get_sales("", None, "", "").unwrap();
+            assert!(!v.is_empty(), "las ventas viejas se siguen leyendo");
+            assert!(v.iter().all(|s| s.iva_rate == 0.0 && s.iva_mode.is_empty()),
+                    "sin columnas, todo lee 0/'' (sin IVA) y nada explota");
+            drop(viejo);
+        }
+
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// Una orden de servicio con IVA (helper del test de F74).
+    fn f74_order(db: &Database, amount: f64, iva_rate: f64, iva_mode: &str) -> i64 {
+        let d = ServiceDeviceInput {
+            model: "Samsung A15".into(), fault: "Pantalla".into(),
+            service_type: "Cambio pantalla".into(), service_types: "[\"Cambio pantalla\"]".into(),
+            amount, payment_method: "Divisas (USD Cash)".into(), observations: String::new(),
+            bank_fee_percent: 0.0, zelle_reference: String::new(), currency: "USD".into(),
+            device_checklist: String::new(), color: String::new(), screen_product_id: None,
+            discount_amount: 0.0, status: "Recibido".into(), iva_rate, iva_mode: iva_mode.into(),
+        };
+        db.add_service_order("Ana", "0412-1234567", "", "", None, "", None, &[d]).unwrap();
+        db.get_services("", "", "", "", "in").unwrap()
+            .into_iter().max_by_key(|s| s.id).expect("la orden se guardó").id
+    }
+
+    /// F75 (hallazgo medido en vivo) — UNA BASE CON NULL EN LOS NOMBRES NO PUEDE IMPEDIR ARRANCAR.
+    /// La migración de Title Case leía el nombre con `String` a secas y una fila con NULL
+    /// (`client_name`, `services.client` o `clients.name`, típico de una importación o de una base
+    /// tocada a mano) hacía fallar `init()`: la app NO ABRÍA ("Failed to initialize database:
+    /// InvalidColumnType(1, \"client_name\", Null)"). Ahora se lee defensivo y la base abre igual.
+    #[test]
+    fn test_null_names_do_not_break_startup() {
+        let test_path = PathBuf::from("test_f75_null_names.db");
+        let _ = std::fs::remove_file(&test_path);
+
+        {
+            let db = Database::new(&test_path).expect("base nueva");
+            db.open_day(0.0, 40.5, 45.0).unwrap();
+            drop(db);
+        }
+        // Se ensucian con NULL las columnas de nombres que LO PERMITEN (clients.name es NOT NULL, así
+        // que ahí no puede pasar): son las que deja una importación o un Excel migrado.
+        {
+            let conn = Connection::open(&test_path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO sales (product_name, quantity, unit_price, total, payment_method, client_name, currency)
+                   VALUES ('Pantalla NULL', 1, 10, 10, 'Divisas (USD Cash)', NULL, 'USD');
+                 INSERT INTO services (order_num, client, model, amount, payment_method, status)
+                   VALUES ('NULL-1', NULL, 'Samsung A15', 20, 'Divisas (USD Cash)', 'Recibido');
+",
+            )
+            .unwrap();
+            drop(conn);
+        }
+
+        // Lo que importa: la app ABRE (init corre la migración sin reventar) y las filas se leen.
+        let db = Database::new(&test_path).expect("una base con NULL tiene que abrir igual");
+        let ventas = db.get_sales("", None, "", "").unwrap();
+        let con_null = ventas.iter().find(|s| s.product_name.as_deref() == Some("Pantalla NULL"))
+            .expect("la venta con NULL está");
+        assert!(con_null.client_name.is_none() || con_null.client_name.as_deref() == Some(""),
+                "el nombre NULL se lee vacío: {:?}", con_null.client_name);
+        let servicios = db.get_services("", "", "", "", "").unwrap();
+        assert!(servicios.iter().any(|s| s.order_num.as_deref() == Some("NULL-1")),
+                "la orden con NULL se lee");
+
+        // Y una segunda apertura (migración idempotente) tampoco revienta.
+        drop(db);
+        let otra_vez = Database::new(&test_path).expect("segunda apertura");
+        assert!(!otra_vez.get_sales("", None, "", "").unwrap().is_empty());
+        drop(otra_vez);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
     /// (a) Las tres señales de política: la hora la estampa el backend, se pueden limpiar,
     /// la clave sale de una whitelist y una orden inexistente se rechaza.
     #[test]
@@ -10118,6 +12244,7 @@ discount_amount: 0.0,
                 observations: String::new(), bank_fee_percent: 0.0, zelle_reference: String::new(),
                 currency: "USD".into(), device_checklist: String::new(), color: "Negro".into(),
                 screen_product_id: None, discount_amount: 0.0, status: finalizado.into(),
+                iva_rate: 0.0, iva_mode: String::new(),
             };
             let err = db.add_service_order("Nace final", "0412", "", "", None, "", None, &[d]).unwrap_err();
             assert!(err.to_string().contains("estado de taller"),

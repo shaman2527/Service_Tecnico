@@ -71,7 +71,8 @@ const STOCK_FILTERS = [
   { value: 'sin_uso', label: 'Lo que NO uso (apagado)' },
 ];
 
-export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDuplicates, onByModel, onCategoryFilter }: {  categories: Category[];
+export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDuplicates, onByModel, onCategoryFilter, verCosto = true, canEdit = true }: {
+  categories: Category[];
   onEdit: (p: Product) => void;
   stats: InventoryStats | null;
   onReviewDuplicates: () => void;
@@ -83,6 +84,17 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
    * que un producto NUEVO nazca en la categoría que el operario está mirando.
    */
   onCategoryFilter?: (categoryId: number | null) => void;
+  /**
+   * F68 — ¿esta sesión ve el precio de COSTO? El costo (y el capital a costo) son números del dueño:
+   * la sesión de caja ve el catálogo —lo necesita para vender— sin los costos.
+   */
+  verCosto?: boolean;
+  /**
+   * F69 — ¿esta sesión puede EDITAR la ficha del producto? Editar abre el formulario con el costo y
+   * los precios, y `update_product` es del dueño en el backend: acá se esconde el botón para que la
+   * caja no llegue a un formulario que le va a rebotar al guardar.
+   */
+  canEdit?: boolean;
 }) {
   // `searchInput` es lo que se escribe y `search` lo que se consulta: el rebote es SÓLO para
   // escribir (feature 41). Antes la pestaña esperaba 200 ms antes de la PRIMERA consulta (y en
@@ -228,8 +240,17 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           <Kpi label="Agotados" value={stats.out_of_stock} tone={stats.out_of_stock > 0 ? 'warning' : undefined} />
           {stats.negative > 0 && <Kpi label="Faltantes" value={stats.negative} tone="danger" />}
           {stats.low_stock > 0 && <Kpi label="Bajo mínimo" value={stats.low_stock} tone="warning" />}
-          {stats.no_price > 0 && <Kpi label="Sin precio" value={stats.no_price} tone="warning" />}
-          <Kpi label="Capital a costo" value={`$${stats.value_cost.toFixed(2)}`} hint={`venta $${stats.value_sale.toFixed(2)}`} />
+          {/* F70: el KPI «Sin precio» es un ACCESO DIRECTO — el dueño tiene que poder LISTAR las fichas
+              que no se pueden cobrar (antes el número estaba y no había forma de llegar a ellas). */}
+          {stats.no_price > 0 && (
+            <button type="button" data-kpi="sin-precio" onClick={() => { setStockFilter('sin_precio'); setPage(0); }}
+              className="text-left transition-opacity hover:opacity-80"
+              title="Ver las fichas con stock y sin precio (no se pueden cobrar)">
+              <Kpi label="Sin precio" value={stats.no_price} tone="warning" hint="clic para verlas" />
+            </button>
+          )}
+          {/* F68: el capital a costo es un número del dueño (la caja no ve costos) */}
+          {verCosto && <Kpi label="Capital a costo" value={`$${stats.value_cost.toFixed(2)}`} hint={`venta $${stats.value_sale.toFixed(2)}`} />}
         </KpiStrip>
       )}
 
@@ -276,7 +297,8 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
       </div>
 
       {vista === 'modelo' ? (
-        <ProductsByModel refreshKey={refreshKey + usoBump} initialSearch={search} onEdit={onEdit} />
+        <ProductsByModel refreshKey={refreshKey + usoBump} initialSearch={search} onEdit={onEdit}
+          verCosto={verCosto} canEdit={canEdit} />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-2">
@@ -362,7 +384,8 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
                   title="INCELL / OLED / ORIGINAL y sus marcos. Clic para ordenar por variante" />
                 <TableHead>Modelos compatibles</TableHead>
                 <SortHead col="precio" label="Precio" className="w-32 justify-end" estado={estadoOrden('precio')} onClick={ordenarPor} />
-                <SortHead col="costo" label="Costo" className="w-28 justify-end" estado={estadoOrden('costo')} onClick={ordenarPor} />
+                {/* F68: la columna de COSTO es del dueño (la caja vende, no administra el margen) */}
+                {verCosto && <SortHead col="costo" label="Costo" className="w-28 justify-end" estado={estadoOrden('costo')} onClick={ordenarPor} />}
                 <SortHead col="stock" label="Stock" className="w-24 justify-center" estado={estadoOrden('stock')} onClick={ordenarPor} />
                 <SortHead col="minimo" label="Mín" className="w-16 justify-end" estado={estadoOrden('minimo')} onClick={ordenarPor} />
                 <TableHead className="w-28"></TableHead>
@@ -448,7 +471,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
                       : <Badge variant="outline" className="text-[10px] text-warning border-warning/50">sin precio</Badge>}
                   </TableCell>
                   <TableCell className="text-right tabular-nums text-[11px] text-muted-foreground" data-field="costo">
-                    {p.price_cost > 0 ? `$${p.price_cost.toFixed(2)}` : '—'}
+                    {verCosto ? (p.price_cost > 0 ? `$${p.price_cost.toFixed(2)}` : '—') : <span className="text-muted-foreground/50">—</span>}
                   </TableCell>
                   <TableCell className="text-center">
                     <StockBadge stock={p.stock} minStock={p.min_stock} />
@@ -462,9 +485,11 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
                           <Layers data-icon="inline-start" />
                         </Button>
                       )}
-                      <Button variant="outline" size="sm" onClick={() => onEdit(p)}>
-                        <Pencil data-icon="inline-start" /> Editar
-                      </Button>
+                      {canEdit && (
+                        <Button variant="outline" size="sm" onClick={() => onEdit(p)}>
+                          <Pencil data-icon="inline-start" /> Editar
+                        </Button>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>

@@ -41,11 +41,15 @@ const PAGE_SIZE = 50;
 // precios, movimientos ni compatibilidad (comandos angostos).
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 
-export function ProductsByModel({ refreshKey, initialSearch = '', onEdit }: {
+export function ProductsByModel({ refreshKey, initialSearch = '', onEdit, verCosto = true, canEdit = true }: {
   refreshKey: number;
   /** lo que se escribió en el buscador de Productos: acá se busca el MODELO, no la ficha */
   initialSearch?: string;
   onEdit: (p: Product) => void;
+  /** F69 — el COSTO es del dueño (la caja cobra, no negocia el capital del negocio). */
+  verCosto?: boolean;
+  /** F69 — editar la ficha del producto (precios/costo) también es del dueño. */
+  canEdit?: boolean;
 }) {
   const [searchInput, setSearchInput] = useState(initialSearch);
   const [search, setSearch] = useState(initialSearch);
@@ -300,7 +304,7 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit }: {
                                     <TableHead>Repuesto</TableHead>
                                     <TableHead className="w-28">Variante</TableHead>
                                     <TableHead className="w-24 text-right">Venta</TableHead>
-                                    <TableHead className="w-24 text-right">Costo</TableHead>
+                                    {verCosto && <TableHead className="w-24 text-right">Costo</TableHead>}
                                     <TableHead className="w-20 text-center">Stock</TableHead>
                                     <TableHead className="w-24 text-center">En uso</TableHead>
                                     <TableHead className="w-40"></TableHead>
@@ -323,9 +327,11 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit }: {
                                       <TableCell className="text-right tabular-nums text-sm">
                                         {r.price_sale > 0 ? `$${r.price_sale.toFixed(2)}` : <span className="text-xs text-muted-foreground">sin precio</span>}
                                       </TableCell>
-                                      <TableCell className="text-right text-xs tabular-nums text-muted-foreground">
-                                        {r.price_cost > 0 ? `$${r.price_cost.toFixed(2)}` : '—'}
-                                      </TableCell>
+                                      {verCosto && (
+                                        <TableCell className="text-right text-xs tabular-nums text-muted-foreground">
+                                          {r.price_cost > 0 ? `$${r.price_cost.toFixed(2)}` : '—'}
+                                        </TableCell>
+                                      )}
                                       <TableCell className="text-center"><StockBadge stock={r.stock} minStock={r.min_stock} /></TableCell>
                                       <TableCell className="text-center">
                                         <span className={cn('text-[11px] font-semibold',
@@ -357,9 +363,11 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit }: {
                                               </span>
                                             </TooltipContent>
                                           </Tooltip>
-                                          <Button variant="outline" size="sm" onClick={e => { e.stopPropagation(); onEdit(r); }}>
-                                            <Pencil data-icon="inline-start" /> Editar
-                                          </Button>
+                                          {canEdit && (
+                                            <Button variant="outline" size="sm" onClick={e => { e.stopPropagation(); onEdit(r); }}>
+                                              <Pencil data-icon="inline-start" /> Editar
+                                            </Button>
+                                          )}
                                         </div>
                                       </TableCell>
                                     </TableRow>

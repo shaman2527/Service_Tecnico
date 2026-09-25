@@ -23,10 +23,12 @@ const QUALITY_LABEL: Record<ScreenCandidate['match_quality'], string> = {
 // "¿Qué repuesto le sirve a este teléfono?" — el buscador que antes era la
 // pantalla "Pantallas" (una tabla más del mismo inventario). Ahora es una
 // herramienta de consulta con stock primero y enlace a la ficha del producto.
-export function ByModelTab({ refreshKey, initialModel, onEdit }: {
+export function ByModelTab({ refreshKey, initialModel, onEdit, canEdit = true }: {
   refreshKey: number;
   initialModel: string;
   onEdit: (p: Product) => void;
+  /** F69 — editar la ficha (precios/costo) es del dueño: la caja ve el repuesto, no lo edita. */
+  canEdit?: boolean;
 }) {
   const [model, setModel] = useState(initialModel);
   const [rows, setRows] = useState<ScreenCandidate[]>([]);
@@ -145,9 +147,11 @@ export function ByModelTab({ refreshKey, initialModel, onEdit }: {
                       <CompatChips compatibility={p.compatibility} max={2} />
                     </TableCell>
                     <TableCell>
-                      <Button variant="outline" size="sm" onClick={() => onEdit(p)}>
-                        <Pencil data-icon="inline-start" /> Editar
-                      </Button>
+                      {canEdit && (
+                        <Button variant="outline" size="sm" onClick={() => onEdit(p)}>
+                          <Pencil data-icon="inline-start" /> Editar
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

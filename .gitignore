@@ -49,3 +49,11 @@ dev_registro.db
 dev_registro.db-shm
 dev_registro.db-wal
 src-tauri/test_*.db
+
+# Respaldos de la app en desarrollo (bases con datos: NUNCA al repo publico)
+src-tauri/respaldos/
+src-tauri/backup/
+
+# Cache de Python
+__pycache__/
+*.pyc

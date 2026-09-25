@@ -356,16 +356,13 @@ let ventaPrueba = null;
 
   // El DÍA es requisito de backend para registrar ventas (`require_open_day`). Se avisa con
   // evidencia en vez de escribir en el Libro Diario (el script NO abre/cierra el día).
-  // OJO: el botón arranca DESHABILITADO porque todavía no hay producto («Guardar Venta ($0.00)»)
-  // — eso es lo correcto. Que se habilite con la venta completa se comprueba más abajo.
+  // F70: el botón ya NO queda APAGADO EN SILENCIO sin producto/precio — se puede apretar y el
+  // formulario DICE qué falta (antes estaba `disabled` y el operario apretaba sin saber por qué).
   const diaAbierto = await evalx(`/Día abierto/.test(document.querySelector('main').innerText)`);
-  const guardarHabilitado = await evalx(`(() => {
-    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => (x.innerText || '').includes('Guardar Venta'));
-    return b ? !b.disabled : null;
-  })()`);
-  check('el día está ABIERTO y sin producto «Guardar Venta ($0.00)» queda bloqueado',
-    diaAbierto && guardarHabilitado === false,
-    `banner día abierto: ${diaAbierto} · botón habilitado: ${guardarHabilitado}`);
+  const avisoVenta = String(await evalx(`document.querySelector('[data-field="aviso-venta"]')?.innerText ?? ''`));
+  check('el día está ABIERTO y sin producto el formulario DICE qué falta (el botón ya no está mudo)',
+    diaAbierto && /Elegí el producto/i.test(avisoVenta),
+    `banner día abierto: ${diaAbierto} · aviso: «${avisoVenta}»`);
 
   // Los 3 accesos directos (chips) + el desplegable «Otros métodos…». El TEXTO exacto importa:
   // el chip de Punto de Venta no debe repetir el símbolo («PUNTO Bs Bs.» ya se escapó una vez).
@@ -1264,8 +1261,12 @@ const clickCardButton = async (orderNum, label) => {
   check('no quedó ningún servicio de prueba (la cantidad volvió a la inicial)',
     DESPUES.services === ANTES.services && DESPUES.maxServiceId === ANTES.maxServiceId,
     `servicios ${ANTES.services} → ${DESPUES.services} · max id ${ANTES.maxServiceId} → ${DESPUES.maxServiceId}`);
+  // La VENTA de prueba no se puede borrar (el backend no tiene comando de borrado de ventas: es el
+  // hueco que cierra F70) y su id NO tiene por qué ser `max + 1`: en una copia reusada, corridas
+  // anteriores borraron filas y el AUTOINCREMENT siguió. Lo que importa es que se escribió UNA venta
+  // más y que la nueva es la de id más alto.
   check('la única fila que queda escrita es la VENTA de prueba (no borrable por diseño)',
-    DESPUES.sales === ANTES.sales + 1 && DESPUES.maxSaleId === ANTES.maxSaleId + 1,
+    DESPUES.sales === ANTES.sales + 1 && DESPUES.maxSaleId > ANTES.maxSaleId,
     `ventas ${ANTES.sales} → ${DESPUES.sales} · max id ${ANTES.maxSaleId} → ${DESPUES.maxSaleId}`);
   check('el script no dejó diálogos abiertos', (await dialogsOpen().catch(() => 0)) === 0, `${await dialogsOpen().catch(() => 0)} diálogo(s)`);
 

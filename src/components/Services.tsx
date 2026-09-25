@@ -24,6 +24,10 @@ import PrinterSettingsDialog from './PrinterSettingsDialog';
 import { ModelCombobox } from './ModelCombobox';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
+// F74 — el IVA: la configuración (prender/apagar, alícuota, modo) y la línea de desglose que se ve
+// mientras se carga el monto. La cuenta vive en la regla pura src/lib/iva.ts.
+import { parseIvaConfig, ivaActivo, totalACobrar, IVA_DEFAULT, type IvaConfig } from '@/lib/iva';
+import IvaDesglose from './IvaDesglose';
 // F32: recordatorios de política (foto / pago) y panel de los teléfonos entregados hoy. Las reglas
 // viven en módulos puros con pruebas (lib/service-guide, lib/reminders): acá solo se conectan.
 // F33: el asistente de recepción es la FICHA DE INGRESO (dentro del formulario, compacta) — se
@@ -40,7 +44,15 @@ import { deliverReminders, receiveReminders, payIntentLabel, isDelivered } from 
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
 import { FormStepper } from './FormStepper';
 import { ScreenSelect, useCompatibleProducts } from './ScreenPicker';
-import { asPhoneEntry, autoScreen, onlyScreens, screenOk } from '@/lib/screen-rules';
+import { autoScreen, onlyScreens, screenOk } from '@/lib/screen-rules';
+// F69: qué puede tocar cada sesión (una sola regla, probada en `tools/session_test.ts`)
+import { abilities } from '@/lib/session';
+// F67: EL PRECIO DEL REPUESTO. Pedido del dueño: «cuando yo seleccione una pantalla [que] pueda tomar
+// el precio de venta de ese producto, o se puede seguir usando también el que tengo al lado de
+// modelos». Las dos ofertas salen de UNA regla pura (`lib/screen-price.ts`, probada sin navegador):
+// la pantalla elegida manda y el grupo de repuestos del modelo es el respaldo.
+import { amountTypedPatch, groupPriceFields, priceFields, pricePatch, priceSource, sameMoney } from '@/lib/screen-price';
+import type { PriceFields, PriceSource } from '@/lib/screen-price';
 import { updateOrderKeepingFields } from '@/lib/service-update';
 // F38: el saldo se dice en la moneda en que se cobró (+ equivalencia del día). Regla pura con test node.
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
@@ -78,7 +90,6 @@ const agregarTrabajoDeOtro = (arr: string[], texto: string): void => {
 };
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
 import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate } from '../types';
-import type { PhoneModelEntry } from '@/lib/utils';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
 const TECH_COLORS = ['bg-purple-500', 'bg-blue-500', 'bg-green-600', 'bg-amber-500', 'bg-pink-500', 'bg-cyan-500', 'bg-red-500', 'bg-orange-500'];
@@ -336,7 +347,11 @@ function ResumenTile({ id, titulo, valor, sub, tono, onClick, kpi, cargando = fa
   );
 }
 
-export default function Services() {
+export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+  // F69 — QUÉ PUEDE TOCAR ESTA SESIÓN (regla pura `src/lib/session.ts`): la caja recibe equipos,
+  // cobra y entrega; la impresora, el padrón de técnicos y la lista de trabajos del local son del
+  // dueño (el backend los rechaza con `require_owner`), así que la pantalla no los ofrece.
+  const ab = abilities(role === 'owner' ? 'master' : 'caja');
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
   const [search, setSearch] = useState('');
@@ -1061,9 +1076,11 @@ export default function Services() {
           <Button variant="outline" onClick={() => setShowQueue(true)} title="Cerrar una entrega (F4) — busca la orden y cobra en un paso">
             <Zap className="size-4" /> Cerrar entrega
           </Button>
-          <Button variant="outline" onClick={() => setShowPrinterSettings(true)} title="Configurar impresora de tickets">
-            <Printer className="size-4" /> Impresora
-          </Button>
+          {ab.manageSettings && (
+            <Button variant="outline" onClick={() => setShowPrinterSettings(true)} title="Configurar impresora de tickets">
+              <Printer className="size-4" /> Impresora
+            </Button>
+          )}
           <Button onClick={() => { setEditing(null); setShowForm(true); }} title="Nuevo Servicio (N o F2)">
             <Plus className="size-4" /> Nuevo Servicio
           </Button>
@@ -1418,7 +1435,10 @@ export default function Services() {
           dayOpen={dayOpen}
           tiposExtra={tiposExtra}
           onNuevaCategoria={agregarCategoria}
-          onQuitarCategoria={quitarCategoria}
+          /* F69: quitar una categoría del LOCAL la saca para todos → la ofrece el dueño
+             (`remove_work_type_extra` pide su sesión). Agregar una nueva sí es del mostrador. */
+          onQuitarCategoria={ab.manageCatalog ? quitarCategoria : undefined}
+          canManageTecnicos={ab.manageCatalog}
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSaved={() => { setShowForm(false); setEditing(null); refrescar(); }}
         />
@@ -1612,36 +1632,11 @@ function emptyDevice(): FormDevice {
   };
 }
 
-// Auto-precio al elegir un modelo del catálogo (compartido por DeviceFields y ServiceForm):
-// - En efectivo (Divisas USD Cash): monto = price_usd (si existe) y descuento = price_sale - price_usd.
-// - En cualquier otro método: monto = price_sale (si todos los repuestos coinciden y > 0).
-// NUNCA pisa un monto/descuento que el usuario ya tocó (refs amountTouched/discountTouched).
-function applyModelPrice(sugg: PhoneModelEntry, isDivisas: boolean, amountTouched: boolean, discountTouched: boolean): Partial<FormDevice> {
-  const patch: Partial<FormDevice> = {};
-  const prices = new Set(sugg.products.map(p => p.price_sale));
-  if (!amountTouched) {
-    if (isDivisas) {
-      const withUsd = sugg.products.filter(p => p.price_usd > 0);
-      if (withUsd.length > 0) {
-        // El MISMO repuesto que da el precio de contado da el precio de lista: el descuento
-        // sugerido (que se guarda en la orden) tiene que salir de esa ficha y no de la primera
-        // de la lista — el backend ordena por marca y «primera» cambió con el gate de marca.
-        const base0 = withUsd.reduce((a, b) => (b.price_usd < a.price_usd ? b : a));
-        patch.amount = base0.price_usd;
-        if (!discountTouched) {
-          const base = prices.size === 1 ? [...prices][0] : base0.price_sale;
-          patch.discount = Math.max(0, base - base0.price_usd);
-        }
-        return patch;
-      }
-    }
-    if (prices.size === 1) {
-      const only = [...prices][0];
-      if (only > 0) patch.amount = only;
-    }
-  }
-  return patch;
-}
+// Auto-precio al elegir un modelo del catálogo: lo resuelve la regla pura `lib/screen-price.ts`
+// (`groupPriceFields` sobre los candidatos YA CARGADOS del modelo, `priceFields` para la pantalla
+// elegida). Antes esta cuenta vivía acá (`applyModelPrice`) y tenía dos defectos medidos en F67:
+// leía la lista de candidatos del MODELO ANTERIOR y, en efectivo, dejaba el Total en
+// 2·contado − lista. Los dos caminos de precio (pantalla y modelo) comparten ahora una sola regla.
 // Colores predefinidos del equipo — selección rápida sin escribir.
 // F46: se agregaron «Lila» y «Marrón» (pedido del dueño: «en los colores de servicios agregar un
 // color más lila y marrón»). El color del equipo se guarda por NOMBRE en la orden, así que sumar
@@ -1692,6 +1687,83 @@ function colorDot(color: string): string {
     'Dorado': 'bg-amber-500', 'Marrón': 'bg-amber-800', 'Plateado': 'bg-slate-300',
   };
   return map[color] || 'bg-neutral-400';
+}
+
+/**
+ * F67 — EL PRECIO DEL REPUESTO, en una sola pieza para los DOS formularios (alta por equipos y
+ * edición). Dice de dónde salió el monto que está en el campo y ofrece los otros precios a un toque:
+ *
+ *  - `Precio de «Pantalla Xiaomi Redmi 10C»: $12.50` → el monto se tomó solo de la ficha ELEGIDA.
+ *  - `Precio del modelo: $12.50` → el monto salió del grupo de repuestos del modelo (el respaldo que
+ *    ya existía, «el que tengo al lado de modelos»).
+ *  - Botón **«Usar precio de la pantalla $P»** cuando el monto es otro (el operario ya lo escribió, o
+ *    es el precio que traía la orden): un toque y queda el de la ficha elegida. NUNCA se pisa solo.
+ *  - Botón **«Precio del modelo $M»** para volver al del modelo.
+ *  - Si la ficha elegida **no tiene precio cargado**, se dice con todas las letras en vez de dejar el
+ *    monto vacío sin explicación (hay fichas de inventario sin precio: el taller cobra a mano).
+ *
+ * Es solo presentación: la cuenta la hace `lib/screen-price.ts` (regla pura probada sin navegador).
+ */
+function PrecioRepuesto({ fuente, monto, ofertaPantalla, ofertaModelo, elegida, sinPrecio, avisoSinOferta = false, onUsar }: {
+  fuente: PriceSource;
+  /** El monto que hay HOY en el campo (para no ofrecer el que ya está escrito). */
+  monto: number;
+  ofertaPantalla: PriceFields | null;
+  ofertaModelo: PriceFields | null;
+  /** Nombre de la pantalla elegida (para poder decir de qué ficha salió el precio). */
+  elegida: string | null;
+  /** Hay una pantalla elegida y esa ficha no tiene precio en el catálogo. */
+  sinPrecio: boolean;
+  /** El monto tiene un número que ya no respalda ninguna oferta (el sistema no lo escribió ahora). */
+  avisoSinOferta?: boolean;
+  onUsar: (f: PriceFields) => void;
+}) {
+  const chip = 'inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground';
+  const pantalla = ofertaPantalla?.amount ?? null;
+  const modelo = ofertaModelo?.amount ?? null;
+  const usaPantalla = pantalla != null && sameMoney(monto, pantalla);
+  const usaModelo = modelo != null && sameMoney(monto, modelo);
+  const rotulo = fuente === 'pantalla'
+    ? `Precio de «${elegida ?? 'la pantalla elegida'}»: $${monto.toFixed(2)}`
+    : fuente === 'modelo' ? `Precio del modelo: $${monto.toFixed(2)}` : '';
+  const hayAlgo = !!rotulo || sinPrecio || avisoSinOferta || (pantalla != null && !usaPantalla) || (modelo != null && !usaModelo);
+  if (!hayAlgo) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" data-precio-repuesto data-precio-fuente={fuente}>
+      {rotulo && (
+        <span className="text-xs text-muted-foreground" data-precio-rotulo>
+          {rotulo}
+          {ofertaPantalla && ofertaPantalla.discount > 0 && (
+            <span className="ml-1 text-[11px]">(contado ${(ofertaPantalla.amount - ofertaPantalla.discount).toFixed(2)})</span>
+          )}
+        </span>
+      )}
+      {pantalla != null && !usaPantalla && (
+        <button type="button" className={chip} data-usar-precio-pantalla={pantalla}
+          onClick={() => onUsar(ofertaPantalla!)}
+          title={`Escribir en el monto el precio de venta de «${elegida ?? 'la pantalla elegida'}»`}>
+          Usar precio de la pantalla ${pantalla.toFixed(2)}
+        </button>
+      )}
+      {modelo != null && !usaModelo && (
+        <button type="button" className={chip} data-usar-precio-modelo={modelo}
+          onClick={() => onUsar(ofertaModelo!)}
+          title="Escribir el precio que sale de los repuestos compatibles del modelo">
+          {pantalla != null ? `Precio del modelo $${modelo.toFixed(2)}` : `Usar precio del modelo $${modelo.toFixed(2)}`}
+        </button>
+      )}
+      {sinPrecio && (
+        <span className="text-[11px] text-amber-600" data-pantalla-sin-precio>
+          «{elegida}» no tiene precio cargado en el catálogo: escribí el monto{modelo != null ? ' o usá el del modelo' : ''}.
+        </span>
+      )}
+      {avisoSinOferta && (
+        <span className="text-[11px] text-muted-foreground" data-precio-sin-oferta>
+          Revisá el monto: este modelo no tiene un precio único en el catálogo. Elegí la pantalla para tomar su precio.
+        </span>
+      )}
+    </div>
+  );
 }
 
 // Un equipo dentro de una orden multi-equipo (solo modo crear):
@@ -1783,7 +1855,7 @@ function NuevaCategoriaChip({ onAgregar, onCancelar, existentes, locales = [], o
     </span>
   );
 }
-function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false, tiposExtra = [], onNuevaCategoria, onQuitarCategoria }: {
+function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, iva = IVA_DEFAULT, tasa = 0 }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
   methods: { id: number; name: string }[];
@@ -1799,6 +1871,9 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   tiposExtra?: string[];
   /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
   onNuevaCategoria?: (nombre: string) => Promise<string | null>;
+  /** F74 — la configuración del IVA y la tasa del turno (para el desglose del monto) */
+  iva?: IvaConfig;
+  tasa?: number;
   /** F62: quita una categoría del local */
   onQuitarCategoria?: (nombre: string) => Promise<boolean>;
 }) {
@@ -1812,7 +1887,7 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   const deviceNet = Math.max(0, device.amount - device.discount);
 
   // Compatibilidad resuelta por el backend para el modelo escrito
-  const { candidates, loading: compatLoading } = useCompatibleProducts(device.model);
+  const { candidates, loading: compatLoading, alDia: compatAlDia } = useCompatibleProducts(device.model);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   // F65c: si el operario buscó OTRA pantalla (que no está en la compatibilidad del modelo), se suma
   // a las opciones para que figure como ELEGIDA y con sus avisos (stock / otra marca). El gate
@@ -1876,32 +1951,89 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   }, [device.model]);
 
   const selectModel = (label: string) => {
+    // F67: acá SOLO se elige el modelo. El precio (de la pantalla elegida o del grupo del modelo) lo
+    // escribe el efecto de abajo, cuando los candidatos de ESTE modelo ya están cargados: antes se
+    // aplicaba en esta misma pasada con `candidates` — la lista del modelo ANTERIOR.
     onChange({ model: label, modelPicked: true });
-    const entry = asPhoneEntry(label, candidates);
-    if (entry.products.length > 0) {
-      onChange(applyModelPrice(entry, isDivisas, device.amountTouched, device.discountTouched));
-    }
   };
 
-  const divHints = useMemo(() => {
-    if (!isDivisas || !device.model.trim() || candidates.length === 0) return null;
-    const products = candidates.map(c => c.product);
-    const withUsd = products.filter(p => p.price_usd > 0);
-    if (withUsd.length === 0) return null;
-    const usdPrice = Math.min(...withUsd.map(p => p.price_usd));
-    const saleSet = [...new Set(products.map(p => p.price_sale))];
-    const base = saleSet.length === 1 ? saleSet[0] : withUsd[0].price_sale;
-    return { base, usdPrice, suggested: Math.max(0, base - usdPrice) };
-  }, [isDivisas, device.model, candidates]);
+  // ── F67 — EL PRECIO DEL REPUESTO ─────────────────────────────────────────────────────────────
+  // La pantalla ELEGIDA es el dato exacto (es la ficha que se instala): su precio de venta manda. El
+  // precio del grupo de repuestos del MODELO («el que tengo al lado de modelos») queda de respaldo
+  // —se usa cuando la pantalla no tiene precio cargado— y siempre disponible como botón para volver.
+  //
+  // Las DOS ofertas se calculan solo con `compatAlDia` (los candidatos cargados son de ESTE modelo):
+  // durante el rebote de la consulta, `candidates` todavía es la lista del modelo anterior y de ahí no
+  // se saca plata (`useCompatibleProducts` lo declara con `alDia`).
+  const pantallaElegida = useMemo(
+    () => (compatAlDia ? screenOptionsTodas.find(o => o.product.id === device.screenProductId) ?? null : null),
+    [compatAlDia, screenOptionsTodas, device.screenProductId],
+  );
+  // La pantalla solo aporta precio si el trabajo incluye «Cambio pantalla»: con otro trabajo (batería,
+  // software…) el bloque de pantalla es SOLO de referencia (F63) y su precio no puede mover el monto.
+  const ofertaPantalla = useMemo(
+    () => (isScreenJob && pantallaElegida ? priceFields(pantallaElegida.product, isDivisas) : null),
+    [isScreenJob, pantallaElegida, isDivisas],
+  );
+  const ofertaModelo = useMemo(
+    () => (compatAlDia ? groupPriceFields(candidates.map(c => c.product), isDivisas) : null),
+    [compatAlDia, candidates, isDivisas],
+  );
+  // Qué se escribe SOLO (sin que nadie lo pida) cuando el monto todavía es de la regla:
+  //  · con «Cambio pantalla» → el precio de la ficha elegida y, si esa ficha no tiene precio, el del modelo;
+  //  · con otro trabajo → el precio del modelo (la pantalla es de referencia), y **nunca** si la ficha
+  //    elegida SÍ tiene precio: ese precio ya se había escrito y destildar el trabajo no puede rebajar
+  //    (ni subir) el monto en silencio.
+  const precioPantallaElegida = useMemo(
+    () => (pantallaElegida ? priceFields(pantallaElegida.product, isDivisas) : null),
+    [pantallaElegida, isDivisas],
+  );
+  const ofertaAuto = isScreenJob
+    ? (precioPantallaElegida ?? ofertaModelo)
+    : (precioPantallaElegida ? null : ofertaModelo);
+  const fuente = priceSource(device.amount, ofertaPantalla?.amount ?? null, ofertaModelo?.amount ?? null);
+
+  // Se escribe solo mientras el operario no haya tocado el monto (`pricePatch`): lo que él escribió
+  // NUNCA se pisa, y el descuento CALCULADO viaja con el monto sugerido (no se le rebaja a un precio
+  // que escribió él).
+  const aplicarPrecio = useMemo(
+    () => pricePatch(ofertaAuto, { amount: device.amountTouched, discount: device.discountTouched }),
+    [ofertaAuto, device.amountTouched, device.discountTouched],
+  );
+  useEffect(() => {
+    const cambios: Partial<FormDevice> = {};
+    if (aplicarPrecio.amount !== undefined && !sameMoney(aplicarPrecio.amount, device.amount)) cambios.amount = aplicarPrecio.amount;
+    if (aplicarPrecio.discount !== undefined && !sameMoney(aplicarPrecio.discount, device.discount)) cambios.discount = aplicarPrecio.discount;
+    if (Object.keys(cambios).length > 0) onChange(cambios);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aplicarPrecio, device.amount, device.discount]);
+
+  /** Un toque del operario: se escribe la oferta y queda como SU elección (no se vuelve a tocar). */
+  const usarPrecio = (f: PriceFields) =>
+    onChange({ amount: f.amount, discount: f.discount, amountTouched: true, discountTouched: true });
+
+  /**
+   * El monto a mano: se limpia el descuento CALCULADO (el que puso la regla, que él no escribió) — el
+   * precio que se cobra es el que él escribió. Un descuento suyo (`discountTouched`) se conserva.
+   */
+  const teclearMonto = (v: number) =>
+    onChange({ ...amountTypedPatch(v, device.discountTouched), amountTouched: true });
 
   // Catálogo sin precios para este modelo: el descuento se escribe a mano
+  // F67 (revisión adversarial): el aviso se decide con la MISMA regla de precio, no con `price_sale`
+  // crudo — una ficha con venta 0 y precio contado cargado SÍ se cobra (el contado), así que decir
+  // «sin precios en el catálogo» al lado de un monto que la regla acaba de escribir sería mentir.
   const noCatalogPrice = useMemo(
-    () => candidates.length > 0 && candidates.every(c => c.product.price_sale <= 0),
-    [candidates],
+    () => candidates.length > 0 && candidates.every(c => priceFields(c.product, isDivisas) == null),
+    [candidates, isDivisas],
   );
+  // El monto quedó con un número que ya no respalda ninguna oferta (típico: se cambió el modelo y el
+  // nuevo no tiene un precio único): se dice, porque el monto «sin tocar» parece escrito a mano.
+  const avisoSinOferta = !device.amountTouched && device.amount > 0 && !ofertaAuto && !compatLoading
+    && !ofertaPantalla && !ofertaModelo && device.model.trim().length >= 3;
 
   return (
-    <div className="rounded-xl border border-border/70 p-4 flex flex-col gap-3">
+    <div className="rounded-xl border border-border/70 p-4 flex flex-col gap-3" data-device={index}>
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm font-semibold flex items-center gap-2">
           <Smartphone className="size-4 text-primary" /> Equipo {index + 1}
@@ -1936,7 +2068,7 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           <div className="flex items-center gap-2">
             <Input type="number" step={0.01} min={0} value={device.amount}
               aria-label="Monto ($) del servicio"
-              onChange={e => onChange({ amount: Number(e.target.value), amountTouched: true })} />
+              onChange={e => teclearMonto(Number(e.target.value))} />
             <span className="shrink-0 text-xs text-muted-foreground" aria-hidden>−</span>
             <Input type="number" step={0.01} min={0} value={device.discount || ''} placeholder="Desc."
               aria-label="Descuento ($) del servicio" data-field="descuento-servicio"
@@ -1944,11 +2076,21 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
               className="w-24 shrink-0"
               onChange={e => onChange({ discount: Math.max(0, Number(e.target.value)), discountTouched: true })} />
           </div>
-          {isDivisas && divHints && (
-            <p className="text-xs text-muted-foreground">
-              Precio lista ${divHints.base.toFixed(2)} · Efectivo sugerido ${divHints.usdPrice.toFixed(2)}
-            </p>
-          )}
+          {/* F74 — EL IVA de este equipo (con el IVA apagado no se dibuja nada): dice la misma cuenta
+              que se va a guardar y a imprimir, con la tasa del turno. */}
+          <IvaDesglose importe={Math.max(0, device.amount - device.discount)} cfg={iva} tasa={tasa}
+            campo={`iva-desglose-equipo-${index + 1}`} />
+          {/* F67 — el precio del repuesto: de dónde salió el monto y los otros precios a un toque.
+              (La línea «Precio lista … · Efectivo sugerido …» se quitó: era una SEGUNDA cuenta del
+              mismo precio y podía contradecir al rótulo de acá abajo — el rótulo dice la verdad de lo
+              que se escribió, contado incluido.) */}
+          <PrecioRepuesto
+            fuente={fuente} monto={device.amount}
+            ofertaPantalla={ofertaPantalla} ofertaModelo={ofertaModelo}
+            elegida={pantallaElegida ? partLabel(pantallaElegida.product) : null}
+            sinPrecio={isScreenJob && !!pantallaElegida && !ofertaPantalla}
+            avisoSinOferta={avisoSinOferta}
+            onUsar={usarPrecio} />
           {device.discount > 0.005 ? (
             <p className="text-xs font-semibold text-emerald-700" data-total-descuento>
               ${device.amount.toFixed(2)} − ${device.discount.toFixed(2)} = <span className="text-sm">Total ${deviceNet.toFixed(2)}</span>
@@ -1995,6 +2137,7 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           confirmed={device.screenConfirm}
           descuenta={isScreenJob}
           permiteBuscar
+          efectivo={isDivisas}
           onPickOtra={c => onChange({ screenExtra: c })}
           onChange={id => onChange({ screenProductId: id })}
           onConfirm={v => onChange({ screenConfirm: v })}
@@ -2234,7 +2377,7 @@ function PolicyFields({ payIntent, onPayIntent, photoOut, onPhotoOut, showPhotoO
   );
 }
 
-function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra = [], onNuevaCategoria, onQuitarCategoria }: {
+function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true }: {
   service: Service | null;
   statuses: ServiceStatus[];
   dayOpen: boolean | null;
@@ -2246,8 +2389,21 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   onNuevaCategoria?: (nombre: string) => Promise<string | null>;
   /** F62: quita una categoría del local */
   onQuitarCategoria?: (nombre: string) => Promise<boolean>;
+  /** F69: el padrón de técnicos es del dueño (`add/update/delete_technician` piden su sesión) */
+  canManageTecnicos?: boolean;
 }) {
   const [orderNum, setOrderNum] = useState('');
+  // F74 — LA CONFIGURACIÓN DEL IVA (y la tasa del turno abierto). La lee cualquiera: la caja necesita
+  // saber si hay IVA para desglosar lo que cobra. El desglose que se ve en el formulario sale de la
+  // MISMA regla pura que el guardado, la factura y el libro del período (`src/lib/iva.ts`).
+  const [iva, setIva] = useState<IvaConfig>(IVA_DEFAULT);
+  const [tasaIva, setTasaIva] = useState(0);
+  useEffect(() => {
+    let vivo = true;
+    api.getTaxConfig().then(g => { if (vivo) setIva(parseIvaConfig(g)); }).catch(() => {});
+    api.getActiveDay().then(d => { if (vivo) setTasaIva(d?.tasa_bcv ?? 0); }).catch(() => {});
+    return () => { vivo = false; };
+  }, []);
   const [client, setClient] = useState('');
   const [phone, setPhone] = useState('');
   const [clientCi, setClientCi] = useState('');
@@ -2316,6 +2472,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   const isPos = payment.includes('Punto');
   const isZelle = payment.includes('Zelle');
   const isPagoMovil = payment.includes('Móvil') || payment.includes('Movil');
+  // F67: en efectivo el precio que se cobra es el de contado (`price_usd`) — la regla del precio lo
+  // necesita igual que en el alta (antes esto se preguntaba dentro de `applyModelPrice`).
+  const isDivisasEdit = payment === 'Divisas (USD Cash)';
 
   const currentTech = technicians.find(t => t.id === Number(techSel));
 
@@ -2415,7 +2574,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   };
 
   // Compatibilidad del modelo (backend) para el modo edición de UNA orden
-  const { candidates, loading: compatLoading } = useCompatibleProducts(model);
+  const { candidates, loading: compatLoading, alDia: compatAlDia } = useCompatibleProducts(model);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   // F65c: la pantalla buscada A MANO (no estaba en la compatibilidad del modelo) se suma como opción.
   const screenOptionsTodas = useMemo(
@@ -2455,14 +2614,35 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   }, [screenOptions, isScreenJobEdit, screenProductId, refProductIdEdit]);
 
   const selectModel = (label: string) => {
+    // F67: el precio ya NO se aplica acá con `candidates` (que en esta pasada es la lista del modelo
+    // anterior). En EDICIÓN, además, no se aplica solo nunca: una orden guardada no cambia de monto
+    // por cambiar de modelo — el operario lo pide a un toque con el botón de abajo.
     modelPicked.current = true;
     setModel(label);
-    const entry = asPhoneEntry(label, candidates);
-    if (entry.products.length > 0) {
-      const patch = applyModelPrice(entry, payment === 'Divisas (USD Cash)', amountTouched.current, discountTouched.current);
-      if ('amount' in patch) setAmount(patch.amount ?? 0);
-      if ('discount' in patch) setDiscount(patch.discount ?? 0);
-    }
+  };
+
+  // ── F67 — EL PRECIO DEL REPUESTO (modo edición) ──────────────────────────────────────────────
+  // Misma regla que en el alta (`lib/screen-price.ts`), pero acá **solo se ofrece**: el monto de una
+  // orden guardada es un dato de la orden (puede llevar meses cobrado) y nadie lo cambia sin querer.
+  // Igual que en el alta, las ofertas esperan a que los candidatos sean de ESTE modelo (`alDia`).
+  const pantallaElegidaEdit = useMemo(
+    () => (compatAlDia ? screenOptionsTodas.find(o => o.product.id === screenProductId) ?? null : null),
+    [compatAlDia, screenOptionsTodas, screenProductId],
+  );
+  const ofertaPantallaEdit = useMemo(
+    () => (isScreenJobEdit && pantallaElegidaEdit ? priceFields(pantallaElegidaEdit.product, isDivisasEdit) : null),
+    [isScreenJobEdit, pantallaElegidaEdit, isDivisasEdit],
+  );
+  const ofertaModeloEdit = useMemo(
+    () => (compatAlDia ? groupPriceFields(candidates.map(c => c.product), isDivisasEdit) : null),
+    [compatAlDia, candidates, isDivisasEdit],
+  );
+  const fuenteEdit = priceSource(amount, ofertaPantallaEdit?.amount ?? null, ofertaModeloEdit?.amount ?? null);
+  const usarPrecioEdit = (f: PriceFields) => {
+    amountTouched.current = true;
+    discountTouched.current = true;
+    setAmount(f.amount);
+    setDiscount(f.discount);
   };
 
   // Normaliza una cédula para buscar: quita prefijo V-/E-, espacios y guiones
@@ -2470,10 +2650,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
 
   const needCi = !service && !clientId;
 
-  // Catálogo sin precios para este modelo: el descuento se escribe a mano (hint honesto)
+  // Catálogo sin precios para este modelo: el descuento se escribe a mano (hint honesto).
+  // F67: se decide con la MISMA regla de precio (una ficha con venta 0 y contado cargado SÍ se cobra).
   const editNoCatalogPrice = useMemo(
-    () => candidates.length > 0 && candidates.every(c => c.product.price_sale <= 0),
-    [candidates],
+    () => candidates.length > 0 && candidates.every(c => priceFields(c.product, isDivisasEdit) == null),
+    [candidates, isDivisasEdit],
   );
   // F48: el color del equipo es OBLIGATORIO en los dos modos (pedido del dueño: «en los colores que
   // sea un campo requerido; si no selecciono un color lo salte de una vez a que elija un color»).
@@ -2553,9 +2734,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
             fault: d.fault,
             service_type: d.serviceTypes[0] ?? 'Cambio pantalla',
             service_types: JSON.stringify(typesArr),
-            // Monto = precio; Total a pagar (guardado) = Monto − Descuento
-            amount: Math.max(0, d.amount - d.discount),
+            // Monto = precio; Total a pagar (guardado) = Monto − Descuento (con el IVA «agregado»,
+            // el total cobrado es ese monto MÁS el IVA: `amount` es siempre lo que paga el cliente).
+            amount: totalACobrar(Math.max(0, d.amount - d.discount), iva),
             discount_amount: d.discount,
+            // F74 — la alícuota viaja con la orden: un reporte de un período cerrado no cambia
+            // porque después se mueva la alícuota (misma regla que «un cierre no se recalcula»).
+            iva_rate: ivaActivo(iva) ? iva.alicuota : 0,
+            iva_mode: ivaActivo(iva) ? iva.modo : '',
             payment_method: d.payment,
             observations: '',
             bank_fee_percent: d.bankFeePercent,
@@ -2601,8 +2787,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
 
   // Abonado total del servicio en $ (el backend convierte pagos en Bs con la tasa del día del pago)
   const abonadoUsd = svc?.paid_amount ?? 0;
-  // Saldo honesto: positivo = pendiente, negativo = excedente (se cobró de más)
-  const saldoUsd = amount - abonadoUsd;
+  // Saldo honesto: positivo = pendiente, negativo = excedente (se cobró de más).
+  // F67 (revisión adversarial): la deuda es el TOTAL (monto − descuento), no el monto lista — es lo
+  // que se guarda en la orden, lo que imprime la factura y lo que cuenta `orderBalance`. Con lista 28 y
+  // descuento 3 el pie decía «Por pagar $28.00» cuando la deuda era 25 (venía así de antes de F67, pero
+  // el botón nuevo de F67 invita a crear el descuento desde este mismo paso).
+  const totalOrden = Math.max(0, amount - discount);
+  const saldoUsd = totalOrden - abonadoUsd;
   const excedenteUsd = -Math.min(0, saldoUsd);
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
 
@@ -2991,11 +3182,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex items-end">
-              <Button variant="outline" className="w-full" onClick={() => setShowTechDialog(true)}>
-                <Users className="size-4" /> Técnicos
-              </Button>
-            </div>
+            {canManageTecnicos && (
+              <div className="flex items-end">
+                <Button variant="outline" className="w-full" onClick={() => setShowTechDialog(true)}>
+                  <Users className="size-4" /> Técnicos
+                </Button>
+              </div>
+            )}
           </div>
 
           {clientId != null && clientHistory.length === 0 && (
@@ -3055,7 +3248,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
               <div className="flex items-center gap-2">
                 <Input type="number" step={0.01} min={0} value={amount}
                   aria-label="Monto ($) del servicio"
-                  onChange={e => { amountTouched.current = true; setAmount(Number(e.target.value)); }} />
+                  onChange={e => {
+                    const patch = amountTypedPatch(Number(e.target.value), discountTouched.current);
+                    amountTouched.current = true;
+                    setAmount(patch.amount ?? 0);
+                    if (patch.discount !== undefined) setDiscount(patch.discount);
+                  }} />
                 <span className="shrink-0 text-xs text-muted-foreground" aria-hidden>−</span>
                 <Input type="number" step={0.01} min={0} value={discount || ''} placeholder="Desc."
                   aria-label="Descuento ($) del servicio" data-field="descuento-servicio"
@@ -3063,6 +3261,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                   className="w-24 shrink-0"
                   onChange={e => { discountTouched.current = true; setDiscount(Math.max(0, Number(e.target.value))); }} />
               </div>
+              {/* F67 — el precio del repuesto acá SOLO se ofrece: una orden guardada no cambia de
+                  monto sola (el monto puede estar cobrado hace meses). */}
+              <PrecioRepuesto
+                fuente={fuenteEdit} monto={amount}
+                ofertaPantalla={ofertaPantallaEdit} ofertaModelo={ofertaModeloEdit}
+                elegida={pantallaElegidaEdit ? partLabel(pantallaElegidaEdit.product) : null}
+                sinPrecio={isScreenJobEdit && !!pantallaElegidaEdit && !ofertaPantallaEdit}
+                onUsar={usarPrecioEdit} />
               {discount > 0.005 ? (
                 <p className="text-xs font-semibold text-emerald-700" data-total-descuento>
                   ${amount.toFixed(2)} − ${discount.toFixed(2)} = <span className="text-sm">Total ${Math.max(0, amount - discount).toFixed(2)}</span>
@@ -3134,6 +3340,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
               loading={compatLoading}
               confirmed={screenConfirm}
               permiteBuscar
+              efectivo={isDivisasEdit}
               onPickOtra={setScreenExtra}
               onChange={setScreenProductId}
               onConfirm={setScreenConfirm}
@@ -3152,10 +3359,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
               <SectionTitle step={2} title={`Equipos (${devices.length})`} />
               <div className="space-y-3">
                 {devices.map((d, i) => (
-                  <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)}
+                  <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)} iva={iva} tasa={tasaIva}
                     methods={methods} index={i} onScreenValid={onScreenValid} autoFocus={false}
-                    tiposExtra={tiposExtra} onNuevaCategoria={onNuevaCategoria} onQuitarCategoria={onQuitarCategoria} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */
-                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
+                    tiposExtra={tiposExtra} onNuevaCategoria={onNuevaCategoria} onQuitarCategoria={onQuitarCategoria} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
                 ))}
               </div>
               <Button type="button" variant="outline" onClick={addDevice} disabled={devices.length >= 10}>
@@ -3387,7 +3593,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                 <div className="grid grid-cols-3 gap-3 text-sm">
                   <div className="rounded-md bg-muted/60 px-3 py-2">
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Total</p>
-                    <p className="font-bold">${amount.toFixed(2)}</p>
+                    <p className="font-bold">${totalOrden.toFixed(2)}</p>
+                    {discount > 0.005 && (
+                      <p className="text-[11px] text-muted-foreground">lista ${amount.toFixed(2)} − desc. ${discount.toFixed(2)}</p>
+                    )}
                   </div>
                   <div className="rounded-md bg-muted/60 px-3 py-2">
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Abonado</p>

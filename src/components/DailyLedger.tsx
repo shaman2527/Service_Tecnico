@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Activity, BookOpen, CheckCircle2, Clock, CreditCard, Download, Landmark, Lock, Package,
   Play, Plus, PiggyBank, Receipt, RefreshCw, RotateCcw, DollarSign, TrendingUp, Smartphone,
-  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye, Undo2,
+  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye, Undo2, Users, Percent,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,17 +17,54 @@ import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, A
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult, DrawerAdjust } from '../types';
 import { EXPENSE_CATEGORIES } from '../types';
-import { localDate, addDays } from '@/lib/utils';
+import { localDate, addDays, cn } from '@/lib/utils';
+// F68: el libro de plata (quién hizo cada movimiento) y el alta de personas (Master / Caja).
+import UsuariosDialog from './UsuariosDialog';
+import type { CashMovement, CashMovementByUser } from '../types';
 // F39: el arqueo cuadra POR MONEDA (dos diferencias, dos semáforos). Regla pura con test node.
 import { closingDifference, closingLabel, sinContar, puntoDifference, TOL_USD, TOL_BS } from '@/lib/cash-closing';
+// F69: el desglose del cajón (fondo + gastos del cajón) y el conteo que NADIE da por hecho.
+// Regla pura con test node (`tools/arqueo_test.ts`).
+import {
+  desgloseCajon, lineasDelArqueo, lineasSinConfirmar, faltaConfirmar, diferenciaLinea,
+  valorParaCerrar, formatoMoneda, esDeCajon, AJUSTE_CERO,
+  type AjusteCajon, type ClaveArqueo, type LineaArqueo,
+} from '@/lib/drawer';
+// F68/F69: qué puede hacer y qué ve cada sesión (una sola regla, probada en `tools/session_test.ts`).
+import { abilities } from '@/lib/session';
+// F72: las SECCIONES del libro (agrupadas en subcategorías) y las ACCIONES del dueño. Una sola
+// definición de las dos cosas, con la visibilidad por rol, probada en `tools/ledger_nav_test.ts`.
+import {
+  ledgerNav, ledgerActions, ledgerTabGroup, ledgerTabLabel,
+  type LedgerActionId, type LedgerTab,
+} from '@/lib/ledger-nav';
+// F74 — el IVA: la configuración (prender/apagar, alícuota, modo) y el libro del período.
+import {
+  parseIvaConfig, ivaActivo, ivaDeGrupos, alicuotaLabel, IVA_DEFAULT,
+  type IvaConfig, type GrupoIva,
+} from '@/lib/iva';
+import TaxSettingsDialog from './TaxSettingsDialog';
 
 // El signo va ANTES del símbolo de la moneda («-$2.00», «-Bs. 1.000,00»), que es como se escribe un
 // descuadre en un libro: «$-2.00» se lee mal y en el arqueo la diferencia puede ser negativa.
 const fmtUsd = (n: number) => `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}`;
 const fmtBs = (n: number) => `${n < 0 ? '-' : ''}Bs.${Math.abs(n).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const money = (n: number) => n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** F68 — cómo se llama cada tipo del libro de plata en pantalla. */
+const ETIQUETA_MOVIMIENTO: Record<string, string> = {
+  venta: 'Venta',
+  abono: 'Abono',
+  abono_anulado: 'Cobro borrado',
+  devolucion: 'Devolución',
+  gasto: 'Gasto',
+  gasto_anulado: 'Gasto borrado',
+  apertura: 'Apertura',
+  cierre: 'Cierre',
+  reapertura: 'Día reabierto',
+};
 
 // Combina USD + Bs en un string, omitiendo la moneda sin movimientos: "$150.00 + Bs.34.310,00"
 const fmtMix = (usd: number, bs: number) => {
@@ -86,17 +124,100 @@ function Kpi({ icon, label, value, accent, className }: {
 
 const digits = (v: string) => v.replace(/\D/g, '').slice(0, 4);
 
+/**
+ * F69 — UN DÍA SIN MOVIMIENTOS EXISTE (y se puede cerrar).
+ * `getDailyTotals` devuelve sólo los días que tienen ventas, abonos u órdenes entregadas: un día en el
+ * que el taller únicamente RECIBIÓ equipos (o un feriado) llega como lista vacía. Eso NO es un error de
+ * lectura — es un día en cero, y `close_day` lo cierra igual (usa ceros cuando no hay movimientos).
+ */
+const diaSinMovimientos = (fecha: string, tasa: number): DailyTotals => ({
+  date: fecha, pos_charged: 0, pos_fees: 0, pos_net: 0, pos_charged_usd: 0, pos_charged_bs: 0,
+  pos_net_usd: 0, pos_net_bs: 0, cash_usd: 0, cash_bs: 0, zelle_total: 0, pago_movil_total: 0,
+  transfer_bs_total: 0, usd_cash_total: 0, grand_total: 0, grand_usd: 0, grand_bs: 0,
+  tasa_bcv: tasa, refund_usd: 0, refund_bs: 0,
+});
+
+/**
+ * F69 — UNA LÍNEA DEL ARQUEO, contada por un humano.
+ *
+ * Tres reglas que se ven en la pantalla: (1) mientras nadie la cuente dice **«Sin contar»** y NO da por
+ * bueno el número del sistema (es el hallazgo A1: los digitales entraban con el esperado y su diferencia
+ * daba 0 siempre); (2) al tocarla o pulsar «Es el esperado» queda confirmada; (3) la diferencia se juzga
+ * en la moneda de ESA línea, con su tolerancia (`diferenciaLinea`).
+ */
+function ConteoLinea({ linea, contado, confirmada, onContado, onConfirmar }: {
+  linea: LineaArqueo;
+  contado: number;
+  confirmada: boolean;
+  onContado: (v: number) => void;
+  onConfirmar: () => void;
+}) {
+  const d = diferenciaLinea(linea, confirmada ? contado : null);
+  const tono = d.estado === 'sin_contar' ? 'text-muted-foreground'
+    : d.ok ? 'text-success' : 'text-danger';
+  return (
+    <div className="flex flex-col gap-2" data-arqueo={linea.clave} data-estado={d.estado}>
+      <label className="text-sm font-medium">
+        {linea.etiqueta}
+        {!linea.enCajon && <span className="ml-1 text-xs text-muted-foreground">(se verifica en el banco)</span>}
+      </label>
+      <div className="flex items-center gap-2">
+        <MoneyInput value={contado} onChange={onContado} className="text-lg font-semibold" placeholder="0,00" />
+        {!confirmada && (
+          <Button type="button" variant="outline" size="sm" data-action="usar-esperado" onClick={onConfirmar}
+            title={`El sistema espera ${formatoMoneda(linea.monto, linea.moneda)} — confirmá que es lo que contaste/verificaste`}>
+            Es el esperado
+          </Button>
+        )}
+      </div>
+      <div className="flex items-center gap-3 text-xs">
+        <span className="text-muted-foreground">
+          Esperado: <strong className="tabular-nums">{formatoMoneda(linea.monto, linea.moneda)}</strong>
+        </span>
+        {/* `dif-linea-*` = la diferencia de ESTA línea. La del resumen del arqueo es `dif-usd`/`dif-bs`
+            (y NO se dibuja mientras falte contar: un número sin contar no es un número). */}
+        <span className={`font-bold ${tono}`} data-field={`dif-linea-${linea.clave}`} data-ok={d.ok}>
+          {d.estado === 'sin_contar' ? d.texto : `${d.ok ? '' : (d.dif > 0 ? '+' : '')}${d.texto}`}
+        </span>
+      </div>
+      <p className="text-[11px] text-muted-foreground">{linea.detalle}</p>
+    </div>
+  );
+}
+
 const PAYMENT_METHODS = [
   '', 'Pago Móvil', 'Efectivo Bs', 'Divisas (USD Cash)', 'Punto de Venta ($)',
   'Punto de Venta (Bs)', 'Transferencia Zelle', 'Transferencia Bs',
 ];
 
+// F72 — los iconos de las SECCIONES y de las ACCIONES del encabezado. Viven acá (y no en la regla
+// pura) porque son presentación: `ledger-nav.ts` define qué se ve, esto cómo se ve.
+const ICONO_TAB: Record<LedgerTab, ReactNode> = {
+  diario: <BookOpen className="size-4" />,
+  cierres: <Lock className="size-4" />,
+  pagos: <CreditCard className="size-4" />,
+  gastos: <Receipt className="size-4" />,
+  movimientos: <ArrowRightLeft className="size-4" />,
+  salud: <Activity className="size-4" />,
+};
+const ICONO_ACCION: Record<LedgerActionId, ReactNode> = {
+  exportar: <Download className="size-4" />,
+  pin: <Lock className="size-4" />,
+  iva: <Percent className="size-4" />,
+  personas: <Users className="size-4" />,
+};
+
 export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
   const isOwner = role === 'owner';
+  // F69 — LAS CAPACIDADES DE LA SESIÓN salen de la regla pura (`src/lib/session.ts`), no de un
+  // `isOwner` repartido por el archivo: es la única implementación de «qué ve y qué toca cada rol» y
+  // está probada sin navegador (`tools/session_test.ts`). El backend tiene su propio gate
+  // (`require_owner`): esto es para que la pantalla NO ofrezca lo que el backend va a rechazar.
+  const ab = abilities(isOwner ? 'master' : 'caja');
   // Fecha LOCAL del local (ver `localDate`): con toISOString() el «hoy» del Libro Diario pasaba
   // al día siguiente después de las 20:00 en Venezuela y el día aparecía sin movimientos.
   const today = localDate();
-  const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud'>('diario');
+  const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud' | 'movimientos'>('diario');
   const [startDate, setStartDate] = useState(() => addDays(today, -30));
   const [endDate, setEndDate] = useState(() => localDate());
   const [totals, setTotals] = useState<DailyTotals[]>([]);
@@ -115,6 +236,21 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
    *  sistema, no un conteo): la «Diferencia $» daba 0 SIEMPRE y el semáforo era decorativo — si faltaban
    *  dólares del cajón nadie se enteraba. Ahora se cuenta como los bolívares. */
   const [usdCounted, setUsdCounted] = useState(0);
+  /** F69 — QUÉ LÍNEA DEL ARQUEO YA CONTÓ/VERIFICÓ UN HUMANO. Es la segunda mitad del hallazgo A1: los
+   *  cobros digitales entraban al cierre con el monto del sistema, así que su diferencia daba 0 siempre.
+   *  Acá nada entra «porque el sistema lo dice»: cada línea con algo que verificar tiene que quedar
+   *  confirmada (contada a mano o verificada en el banco) antes de poder cerrar el día. */
+  const [confirmadas, setConfirmadas] = useState<Partial<Record<ClaveArqueo, boolean>>>({});
+  /** F69 — lo que ajusta el cajón ese día (fondo de caja + gastos/retiros del cajón, del libro). */
+  const [drawerAdjust, setDrawerAdjust] = useState<DrawerAdjust | null>(null);
+  /** F69 — el diálogo de cierre se abre recién cuando los datos del día están leídos. */
+  const [cargandoCierre, setCargandoCierre] = useState(false);
+  /** F69 — lo VERIFICADO en el banco para cada cobro digital. Arranca en el esperado para poder
+   *  compararlo, pero no entra al cierre hasta que el operario lo confirme (el bug era justamente que
+   *  se mandaba el esperado sin que nadie mirara el banco). */
+  const [zelleVerified, setZelleVerified] = useState(0);
+  const [pmVerified, setPmVerified] = useState(0);
+  const [transVerified, setTransVerified] = useState(0);
   const [pagoMovilList, setPagoMovilList] = useState<PagoMovilDetail[]>([]);
   const [closeNotes, setCloseNotes] = useState('');
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -132,6 +268,15 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [pinConfirm, setPinConfirm] = useState('');
   const [pinCurrent, setPinCurrent] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
+  // F68 — personas y accesos (sólo Master) y el LIBRO DE PLATA del período.
+  const [showUsuarios, setShowUsuarios] = useState(false);
+  // F74 — EL IVA: la configuración vigente (la lee cualquiera, la escribe el dueño con el diálogo) y
+  // el libro del período (operaciones agrupadas por alícuota, para declarar).
+  const [taxConfig, setTaxConfig] = useState<IvaConfig>(IVA_DEFAULT);
+  const [showTax, setShowTax] = useState(false);
+  const [ivaGrupos, setIvaGrupos] = useState<GrupoIva[]>([]);
+  const [movimientos, setMovimientos] = useState<CashMovement[]>([]);
+  const [porPersona, setPorPersona] = useState<CashMovementByUser[]>([]);
   const [lastTasa, setLastTasa] = useState(0);
   const [daySummary, setDaySummary] = useState<DaySummary | null>(null);
   // Salud del negocio: gastos, utilidad, por cobrar, inventario
@@ -146,8 +291,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [expCategory, setExpCategory] = useState<string>('Otro');
   const [expAmount, setExpAmount] = useState(0);
   const [expCurrency, setExpCurrency] = useState('USD');
+  // F69 — de dónde salió la plata del gasto ('' = sin declarar). Es lo que ajusta el arqueo del cajón.
+  const [expMethod, setExpMethod] = useState('');
   const [expNotes, setExpNotes] = useState('');
   const [expError, setExpError] = useState<string | null>(null);
+  const [expWarning, setExpWarning] = useState<string | null>(null);
   const [expenseMsg, setExpenseMsg] = useState<string | null>(null);
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
   // Pestaña Pagos: búsqueda y drill-down
@@ -162,7 +310,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [drillResults, setDrillResults] = useState<PaymentSearchResult[]>([]);
   const [drillLoading, setDrillLoading] = useState(false);
 
-  const effectiveTab = isOwner ? tab : 'diario';
+  // F68: la caja ve SU día (y SU libro de movimientos) — no los históricos ni los números del dueño.
+  const effectiveTab = isOwner ? tab : (tab === 'movimientos' ? 'movimientos' : 'diario');
   const effectiveStart = isOwner ? startDate : today;
   const effectiveEnd = isOwner ? endDate : today;
 
@@ -178,8 +327,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     try { setExpenses(await api.getExpenses(effectiveStart, effectiveEnd)); } catch { setExpenses([]); }
   };
 
+  /** Los gastos de HOY (los usa la pestaña Gastos y el aviso al registrar uno). */
   const loadTodayExpenses = async () => {
     try { setTodayExpenses(await api.getExpenses(today, today)); } catch { setTodayExpenses([]); }
+  };
+
+  /** F69 — el ajuste del cajón del día que se está cerrando (fondo + gastos/retiros del cajón). */
+  const loadDrawerAdjust = async (date: string = today) => {
+    try { setDrawerAdjust(await api.getDrawerAdjustments(date)); } catch { setDrawerAdjust(null); }
+  };
+
+  /** F69 — los gastos DEL DÍA QUE SE CIERRA (no los de hoy: con ↺ se puede cerrar un turno viejo). */
+  const loadExpensesDe = async (date: string) => {
+    try { setTodayExpenses(await api.getExpenses(date, date)); } catch { setTodayExpenses([]); }
   };
 
   const loadProfit = async () => {
@@ -201,16 +361,30 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     try { setInventoryValue(await api.getInventoryValue()); } catch { setInventoryValue(null); }
   };
 
+  /**
+   * F69 — un gasto pagado DEL CAJÓN tiene que declarar de dónde salió la plata: es lo que decide si
+   * baja el esperado del cajón al cerrar el día. Si el operario no lo declara, se guarda igual (un
+   * gasto anotado es mejor que un gasto perdido, y el backend nunca inventa de qué cajón salió) pero
+   * se AVISA que el cierre no lo va a descontar.
+   */
   const doAddExpense = async () => {
     setExpError(null);
+    setExpWarning(null);
     if (expAmount <= 0) { setExpError('El monto debe ser mayor que 0.'); return; }
     try {
-      await api.addExpense(expDate, expCategory, expAmount, expCurrency, expNotes);
+      await api.addExpense(expDate, expCategory, expAmount, expCurrency, expNotes, expMethod);
       setShowExpenseDialog(false);
-      setExpAmount(0); setExpNotes('');
-      setExpenseMsg('Gasto registrado.');
-      loadExpenses(); loadTodayExpenses();
-      setTimeout(() => setExpenseMsg(null), 4000);
+      setExpAmount(0); setExpNotes(''); setExpMethod('');
+      // F69 (revisión adversarial) — el aviso dice la VERDAD del método elegido: sólo los métodos de
+      // cajón (`Divisas (USD Cash)` / `Efectivo Bs`) bajan el efectivo esperado; los digitales se
+      // concilian por banco. Antes, cualquier método declarado decía «sale del cajón».
+      setExpenseMsg(esDeCajon(expMethod)
+        ? `Gasto registrado. Sale del cajón (${expMethod}): el cierre del ${expDate} lo va a descontar del efectivo esperado.`
+        : expMethod
+          ? `Gasto registrado con ${expMethod}: NO baja el cajón, se concilia por banco.`
+          : `Gasto registrado sin declarar de dónde salió: el cierre del día NO lo va a descontar del cajón.`);
+      loadExpenses(); loadTodayExpenses(); loadDrawerAdjust();
+      setTimeout(() => setExpenseMsg(null), 6000);
     } catch (e) {
       setExpError(e instanceof Error ? e.message : String(e));
     }
@@ -239,10 +413,48 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
     }
   };
 
+  // F74 — LA CONFIGURACIÓN DEL IVA se lee una vez al montar (y al guardarla el diálogo). La lee
+  // cualquiera: la caja necesita saber si hay IVA para desglosar lo que cobra.
+  const loadTaxConfig = async () => {
+    try { setTaxConfig(parseIvaConfig(await api.getTaxConfig())); } catch { setTaxConfig(IVA_DEFAULT); }
+  };
+  /** F74 — el libro de IVA del período: operaciones agrupadas por alícuota (sólo el dueño). */
+  const loadIva = async () => {
+    if (!isOwner) { setIvaGrupos([]); return; }
+    try { setIvaGrupos(await api.getIvaGroups(startDate, endDate)); } catch { setIvaGrupos([]); }
+  };
+
+  useEffect(() => { loadTaxConfig(); }, []);
+  useEffect(() => { if (tab === 'diario') loadIva(); }, [tab, startDate, endDate, isOwner]);
   useEffect(() => { if (tab === 'diario') loadTotals(); }, [tab, startDate, endDate, isOwner]);
   useEffect(() => { if (tab === 'cierres') loadClosings(); }, [tab]);
+  // F69: el encabezado necesita saber si HOY ya se cerró (para no ofrecer «Abrir Día» sobre un día
+  // cerrado, que el backend rechaza). Es una consulta chica y se refresca con las otras cargas.
+  useEffect(() => { loadClosings(); }, [activeDay]);
   useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate]);
   useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate]);
+
+  /**
+   * F68 — el LIBRO DE PLATA del rango. El backend ya limita lo que devuelve según la sesión: una
+   * CAJA sólo recibe SUS movimientos (es lo que pidió el dueño: «que vea su día de caja pero no
+   * cuánto factura la master»), así que esta pantalla sirve para los dos roles sin filtrar acá.
+   * El resumen por persona es del Master (la caja no ve lo que movió el dueño).
+   */
+  useEffect(() => {
+    if (tab !== 'movimientos') return;
+    let alive = true;
+    api.getCashMovements(isOwner ? startDate : today, isOwner ? endDate : today)
+      .then(m => { if (alive) setMovimientos(m); })
+      .catch(() => { if (alive) setMovimientos([]); });
+    if (isOwner) {
+      api.getCashMovementsByUser(startDate, endDate)
+        .then(p => { if (alive) setPorPersona(p); })
+        .catch(() => { if (alive) setPorPersona([]); });
+    } else {
+      setPorPersona([]);
+    }
+    return () => { alive = false; };
+  }, [tab, startDate, endDate, isOwner, today]);
 
   const loadPayments = async () => {
     setPayLoading(true);
@@ -332,32 +544,77 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const [cierreRow, setCierreRow] = useState<DailyClosing | null>(null);
 
   const abrirCierreDe = async (row: DailyClosing | null) => {
-    if (!row) return;
+    if (!row || cargandoCierre) return;
     setCierreRow(row);
-    setShowClose(true);
     setCloseNotes('');
     setCloseError(null);
     setPagoMovilList([]);
-    loadTodayExpenses();
+    // F69 — NINGUNA línea nace confirmada: el cajón se cuenta y el banco se verifica. Los campos
+    // arrancan con el número del sistema (para tener contra qué comparar y poder corregirlo) pero
+    // «sin contar» hasta que el operario los toque o pulse «Es el esperado».
+    setConfirmadas({});
+    setTodayExpenses([]);
+    // F69 — EL DIÁLOGO SE ABRE CON LOS DATOS YA LEÍDOS. Antes se abría primero y se llenaba después:
+    // durante ese instante mostraba el desglose en $0.00 (y el aviso rojo de «no se pudieron leer los
+    // totales»), o sea que el número que decide el arqueo aparecía mintiendo mientras cargaba.
+    setCargandoCierre(true);
     try {
-      const dayTotals = await api.getDailyTotals(row.close_date, row.close_date);
-      const t = dayTotals[0] ?? null;
+      const [dayTotals, pms, adj] = await Promise.all([
+        api.getDailyTotals(row.close_date, row.close_date),
+        api.getPagoMovilDetail(row.close_date).catch(() => [] as PagoMovilDetail[]),
+        api.getDrawerAdjustments(row.close_date),
+      ]);
+      // F69 (revisión adversarial, BLOQUEANTE) — UN DÍA SIN MOVIMIENTOS EXISTE. `getDailyTotals`
+      // arma los días con las VENTAS, los ABONOS y las órdenes ENTREGADAS: un día en el que el taller
+      // sólo recibió equipos (o un feriado) devuelve una lista VACÍA. Antes `dayTotals[0] ?? null`
+      // dejaba `expected = null`, así que el botón quedaba apagado con el aviso rojo de «no se
+      // pudieron leer los totales»… y el BACKEND sí sabe cerrarlo (`close_day` usa ceros cuando el día
+      // no tiene movimientos): el turno quedaba abierto para siempre y no se podía abrir el siguiente.
+      // Ceros = «no hubo movimientos», `null` = no se pudo leer (eso sí bloquea).
+      const t = dayTotals[0] ?? diaSinMovimientos(row.close_date, row.tasa_bcv);
       setExpected(t);
-      setCashCounted(t?.cash_bs ?? 0);
-      // El conteo de divisas arranca en lo que el sistema espera (para confirmar o corregir, igual que
-      // los bolívares) pero es EDITABLE: si el cajón tiene menos dólares, la diferencia se ve.
-      setUsdCounted((t?.usd_cash_total ?? 0) + (t?.cash_usd ?? 0));
+      setDrawerAdjust(adj);
+      if (!adj) {
+        // El ajuste del cajón (fondo y gastos) no se pudo leer: cerrar ahora guardaría un esperado
+        // distinto del que el operario contó (invariante: un cierre guardado no se recalcula).
+        setCloseError('No se pudo leer el fondo/gastos del cajón: reintentá abrir el cierre (no se guardó nada).');
+      }
+      // F69 (revisión adversarial) — LO CONTADO ARRANCA EN EL ESPERADO DE VERDAD. Antes se precargaba
+      // sólo lo COBRADO (`usd_cash_total + cash_usd`), sin el fondo ni los gastos del cajón: con fondo
+      // $50 y un gasto de $20 el campo decía 100,00 mientras la línea decía «Esperado: $130.00», y el
+      // operario que escribía encima guardaba un conteo equivocado. El desglose se calcula acá para
+      // que el número del campo y el del rótulo sean el mismo.
+      const desgloseInicial = desgloseCajon({
+        cash_usd: t.cash_usd ?? 0, usd_cash_total: t.usd_cash_total ?? 0, cash_bs: t.cash_bs ?? 0,
+        zelle_total: t.zelle_total ?? 0, pago_movil_total: t.pago_movil_total ?? 0,
+        transfer_bs_total: t.transfer_bs_total ?? 0, pos_charged_usd: t.pos_charged_usd ?? 0,
+        pos_charged_bs: t.pos_charged_bs ?? 0,
+      }, adj ?? AJUSTE_CERO);
+      setCashCounted(desgloseInicial.esperado_bs);
+      setUsdCounted(desgloseInicial.esperado_usd);
       // Monto impreso del Punto: prellenado con lo que el sistema espera (regla: debe dar el mismo)
-      setPosSettledUsd(t?.pos_charged_usd ?? 0);
-      setPosSettledBs(t?.pos_charged_bs ?? 0);
-      const pms = await api.getPagoMovilDetail(row.close_date);
+      setPosSettledUsd(t.pos_charged_usd ?? 0);
+      setPosSettledBs(t.pos_charged_bs ?? 0);
       setPagoMovilList(pms);
+      // Lo verificado en el banco arranca en lo que el sistema espera (para comparar), SIN confirmar.
+      setZelleVerified(t.zelle_total ?? 0);
+      setPmVerified(t.pago_movil_total ?? 0);
+      setTransVerified(t.transfer_bs_total ?? 0);
+      // Los gastos del día que se está cerrando (no los de hoy: F35 permite cerrar un turno viejo).
+      loadExpensesDe(row.close_date);
     } catch {
       setExpected(null);
+      setDrawerAdjust(null);
       setCashCounted(0);
       setUsdCounted(0);
       setPosSettledUsd(0);
       setPosSettledBs(0);
+      setZelleVerified(0);
+      setPmVerified(0);
+      setTransVerified(0);
+    } finally {
+      setCargandoCierre(false);
+      setShowClose(true);
     }
   };
 
@@ -369,22 +626,35 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
       setCloseError('No se pudieron leer los totales del día: reintentá abrir el cierre (no se guardó nada).');
       return;
     }
+    // F69 — NO SE CIERRA SIN CONTAR: cada moneda del cajón y cada cobro digital que hubo ese día tiene
+    // que estar confirmado por el operario (contado a mano o verificado en el banco). Antes el diálogo
+    // mandaba el monto del sistema para Zelle/Pago Móvil/Transferencia, así que su diferencia daba 0
+    // SIEMPRE y nadie miraba el banco (hallazgo A1 de la auditoría de entrega).
+    const faltan = lineasSinConfirmar(lineasArqueo, confirmadas);
+    if (faltan.length > 0) {
+      setCloseError(faltaConfirmar(faltan));
+      return;
+    }
     setCloseError(null);
     try {
       await api.closeDay(
         cierreRow.close_date, closeNotes,
         cierreRow.initial_cash_usd, cierreRow.tasa_bcv, cierreRow.tasa_eur,
         usdCounted, cashCounted,
-        expected?.pos_charged ?? 0, 0,
-        expected?.zelle_total ?? 0,
-        expected?.pago_movil_total ?? 0,
-        expected?.transfer_bs_total ?? 0,
+        // El Punto: el monto IMPRESO verificado (antes se mandaba el «cargado esperado» como si fuera
+        // un conteo — un número que nadie había mirado).
+        posSettledUsd, posSettledBs,
+        // Lo verificado en el banco, NO el esperado: si el operario vio otra cosa, la diferencia se ve.
+        valorParaCerrar(lineaArqueo('zelle'), confirmadas.zelle ? zelleVerified : null),
+        valorParaCerrar(lineaArqueo('pago_movil'), confirmadas.pago_movil ? pmVerified : null),
+        valorParaCerrar(lineaArqueo('trans_bs'), confirmadas.trans_bs ? transVerified : null),
         posSettledUsd, posSettledBs
       );
       setShowClose(false);
       refreshActiveDay();
       loadClosings();
       loadTotals();
+      loadDrawerAdjust();
     } catch (e) {
       setCloseError(e instanceof Error ? e.message : String(e));
     }
@@ -490,77 +760,132 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   const dash = (n: number, fmt: (x: number) => string) => (Math.abs(n) > 0.005 ? fmt(n) : '—');
   const diasConMovimientos = totals.filter(t => hay(t.grand_usd) || hay(t.grand_bs)).length;
 
-  // F39 (revisión adversarial): la diferencia del diálogo sale de la MISMA regla pura que la lista de
-  // Cierres (`closingDifference`), no de una resta propia. Lo único que aporta la UI es lo CONTADO
-  // (divisas y efectivo Bs.); los cobros digitales (Zelle, Pago Móvil, Transferencia, Punto) entran con
-  // su monto esperado porque no están en el cajón: se verifican en el banco, y el diálogo lo dice.
-  const diffCierre = closingDifference({
+  // F69 — EL DESGLOSE DEL CAJÓN Y LAS LÍNEAS A CONTAR (regla pura `src/lib/drawer.ts`).
+  // El esperado del cajón = efectivo cobrado (ya neto de devoluciones) + fondo de caja − gastos pagados
+  // del cajón. Es EXACTAMENTE el número que usa `close_day` en el backend, así que el operario cuenta
+  // contra lo que el cierre va a comparar (antes no incluía el fondo ni los gastos: un día perfecto
+  // «faltaba» lo que se pagó del cajón y «sobraba» el fondo — hallazgo A1 de la auditoría de entrega).
+  const ajuste: AjusteCajon = drawerAdjust ?? AJUSTE_CERO;
+  const esperadoDia = {
     cash_usd: expected?.cash_usd ?? 0,
-    zelle_total: expected?.zelle_total ?? 0,
     usd_cash_total: expected?.usd_cash_total ?? 0,
     cash_bs: expected?.cash_bs ?? 0,
+    zelle_total: expected?.zelle_total ?? 0,
     pago_movil_total: expected?.pago_movil_total ?? 0,
     transfer_bs_total: expected?.transfer_bs_total ?? 0,
-    actual_cash_usd: usdCounted,
-    actual_zelle: expected?.zelle_total ?? 0,
-    actual_cash_bs: cashCounted,
-    actual_pago_movil: expected?.pago_movil_total ?? 0,
-    actual_transfer_bs: expected?.transfer_bs_total ?? 0,
+    pos_charged_usd: expected?.pos_charged_usd ?? 0,
+    pos_charged_bs: expected?.pos_charged_bs ?? 0,
+  };
+  const desglose = desgloseCajon(esperadoDia, ajuste);
+  const lineasArqueo = lineasDelArqueo(esperadoDia, desglose);
+  /** La línea del arqueo por clave (si ese día no hubo nada de ese método, devuelve una vacía). */
+  const lineaArqueo = (clave: ClaveArqueo): LineaArqueo =>
+    lineasArqueo.find(l => l.clave === clave)
+    ?? { clave, etiqueta: '', detalle: '', monto: 0, moneda: clave === 'usd' || clave === 'pos_usd' || clave === 'zelle' ? 'USD' : 'VES', enCajon: clave === 'usd' || clave === 'bs' };
+  const faltanConfirmar = lineasSinConfirmar(lineasArqueo, confirmadas);
+  /** ¿El arqueo pide esta línea? (misma condición que la regla: `|monto| > 0.005`, negativos incluidos) */
+  const tieneLinea = (clave: ClaveArqueo) => lineasArqueo.some(l => l.clave === clave);
+  // Diferencias del cajón: la MISMA regla pura que la lista de Cierres. El esperado sale del desglose
+  // (con fondo y gastos), no de las columnas crudas del día.
+  const diffCierre = closingDifference({
+    cash_usd: desglose.esperado_usd,
+    zelle_total: esperadoDia.zelle_total,
+    usd_cash_total: 0,
+    cash_bs: desglose.esperado_bs,
+    pago_movil_total: esperadoDia.pago_movil_total,
+    transfer_bs_total: esperadoDia.transfer_bs_total,
+    actual_cash_usd: confirmadas.usd ? usdCounted : 0,
+    actual_zelle: confirmadas.zelle ? zelleVerified : 0,
+    actual_cash_bs: confirmadas.bs ? cashCounted : 0,
+    actual_pago_movil: confirmadas.pago_movil ? pmVerified : 0,
+    actual_transfer_bs: confirmadas.trans_bs ? transVerified : 0,
   });
   const diffBs = diffCierre.bs;
   const diffUsd = diffCierre.usd;
+  const hoyCerrado = !activeDay && closings.some(c => c.close_date === today);
   const pagoMovilTotal = pagoMovilList.reduce((a, p) => a + p.amount, 0);
   // F39: la liquidación del Punto también cuadra POR MONEDA (misma regla pura que el arqueo).
+  // (El Punto que se declara al CERRAR el día ya no tiene una resta propia: es una línea más del arqueo
+  //  con su esperado y su diferencia — `lineaArqueo('pos_usd' | 'pos_bs')`.)
   const settleDiff = puntoDifference(settleChargedUsd, settleAmount, settleChargedBs, settleAmountBs);
-  // …y el Punto que se declara al CERRAR el día usa exactamente la misma regla (no una resta aparte).
-  const puntoDiff = puntoDifference(expected?.pos_charged_usd ?? 0, posSettledUsd, expected?.pos_charged_bs ?? 0, posSettledBs);
+
+  // F74 — el libro de IVA del período (misma regla pura que usan ventas y servicios: una sola cuenta).
+  const resumenIva = useMemo(() => ivaDeGrupos(ivaGrupos), [ivaGrupos]);
+
+  // F72 — LO QUE ESTA SESIÓN VE EN EL ENCABEZADO: las subcategorías con sus pestañas y las acciones
+  // del dueño. Sale de la regla pura (`src/lib/ledger-nav.ts`) con las mismas capacidades (`ab`) que
+  // usa el resto de la pantalla: no hay una segunda lista de «quién ve qué» que se pueda desincronizar.
+  const nav = ledgerNav(ab);
+  const acciones = ledgerActions(ab);
+  const accionDe = (id: LedgerActionId) => {
+    if (id === 'exportar') { doExport(); return; }
+    if (id === 'pin') {
+      setShowPinDialog(true);
+      setPinError(null);
+      setPinNew(''); setPinConfirm(''); setPinCurrent('');
+      return;
+    }
+    if (id === 'iva') { setShowTax(true); return; }
+    setShowUsuarios(true);
+  };
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Libro Diario</h1>
-          <p className="text-sm text-muted-foreground mt-1">Control financiero y cierre diario</p>
-        </div>
-        <div className="flex gap-2">
-          {isOwner && (
-            <>
-              <Button variant="outline" onClick={doExport}>
-                <Download className="size-4" /> Exportar Excel
-              </Button>
-              <Button variant="outline" onClick={() => {
-                setShowPinDialog(true);
-                setPinError(null);
-                setPinNew(''); setPinConfirm(''); setPinCurrent('');
-              }}>
-                <Lock className="size-4" /> PIN
-              </Button>
-            </>
-          )}
-          <Button variant={effectiveTab === 'diario' ? 'default' : 'outline'} onClick={() => setTab('diario')}>
-            <BookOpen className="size-4" /> Diario
-          </Button>
-          {isOwner && (
-            <Button variant={tab === 'cierres' ? 'default' : 'outline'} onClick={() => setTab('cierres')}>
-              <Lock className="size-4" /> Cierres
-            </Button>
-          )}
-          {isOwner && (
-            <Button variant={tab === 'pagos' ? 'default' : 'outline'} onClick={() => setTab('pagos')}>
-              <CreditCard className="size-4" /> Pagos
-            </Button>
-          )}
-          {isOwner && (
-            <Button variant={tab === 'gastos' ? 'default' : 'outline'} onClick={() => setTab('gastos')}>
-              <Receipt className="size-4" /> Gastos
-            </Button>
-          )}
-          {isOwner && (
-            <Button variant={tab === 'salud' ? 'default' : 'outline'} onClick={() => setTab('salud')}>
-              <Activity className="size-4" /> Salud
-            </Button>
+      {/* F72 — EL ENCABEZADO EN DOS NIVELES (pedido del dueño: «arregla toda esta pestaña… está muy
+          larga»). Antes eran NUEVE botones iguales en una sola fila al lado del título, y no se
+          distinguía una PESTAÑA (cambia lo de abajo) de una ACCIÓN (abre un diálogo o descarga):
+            1) arriba, el título y —a su derecha— las ACCIONES del dueño (Exportar Excel · PIN ·
+               Personas), que no cambian de sección;
+            2) abajo, las SECCIONES del libro agrupadas en SUBCATEGORÍAS con su rótulo
+               (Caja del día · Plata · Control), una sola definición en `src/lib/ledger-nav.ts`.
+          La visibilidad por rol sale de esa regla: un ítem sin permiso no se dibuja, y un grupo que
+          se queda sin ítems tampoco (la caja ve «Caja del día → Diario» y «Control → Movimientos»).
+          Los rótulos son EXACTOS (`Diario`, `Cierres`, …): las verificaciones en vivo buscan los
+          botones por su texto. */}
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Libro Diario</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Control financiero y cierre diario
+              <span className="text-muted-foreground/70"> · estás en {ledgerTabGroup(effectiveTab)} → {ledgerTabLabel(effectiveTab)}</span>
+            </p>
+          </div>
+          {acciones.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2" data-actions="libro-diario">
+              {acciones.map(a => (
+                <Button key={a.id} variant="outline" size="sm" title={a.hint}
+                  data-action={a.id === 'personas' ? 'personas' : `libro-${a.id}`}
+                  onClick={() => accionDe(a.id)}>
+                  {ICONO_ACCION[a.id]}
+                  {a.label}
+                </Button>
+              ))}
+            </div>
           )}
         </div>
+
+        <nav className="flex flex-wrap items-center gap-y-2 rounded-xl border border-border bg-muted/30 p-1.5"
+          aria-label="Secciones del Libro Diario">
+          {nav.map((g, gi) => (
+            <div key={g.id} className="flex items-center gap-1" data-nav-group={g.id}>
+              {gi > 0 && <span aria-hidden className="mx-1.5 h-6 w-px bg-border" />}
+              <span className="px-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+                title={`Subcategoría: ${g.label}`}>
+                {g.label}
+              </span>
+              {g.items.map(it => (
+                <Button key={it.tab} size="sm" title={it.hint} data-tab={it.tab}
+                  variant={effectiveTab === it.tab ? 'default' : 'ghost'}
+                  aria-current={effectiveTab === it.tab ? 'page' : undefined}
+                  onClick={() => setTab(it.tab)}>
+                  {ICONO_TAB[it.tab]}
+                  {it.label}
+                </Button>
+              ))}
+            </div>
+          ))}
+        </nav>
       </div>
 
       {isOwner && exportMsg && (
@@ -588,20 +913,44 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
             <Button variant="outline" onClick={() => openOpenDialog(true)} title="Corrige la tasa BCV o la apertura sin cerrar el día (útil si se abrió sin tasa)">
               <Pencil className="size-4" /> Actualizar día
             </Button>
-            <Button variant="default" onClick={openCloseDialog}>
-              <Lock className="size-4" /> Cerrar Día
-            </Button>
+            {/* F69 — CERRAR EL DÍA ES DEL DUEÑO (`close_day` pide la sesión de dueño en el backend).
+                El botón estaba abierto para la caja y el cierre le rebotaba con un error de permiso
+                DESPUÉS de contar el cajón entero: acá se dice antes y se explica el camino. */}
+            {ab.closeDay ? (
+              <Button variant="default" onClick={openCloseDialog} data-action="cerrar-dia">
+                <Lock className="size-4" /> Cerrar Día
+              </Button>
+            ) : (
+              <span className="text-xs text-emerald-700/80 max-w-[230px] text-right" data-field="cierre-solo-dueno">
+                El cierre del día lo hace el dueño (Cambiar persona → Master): vos seguí cobrando.
+              </span>
+            )}
           </div>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
           <div className="flex items-center gap-3 text-amber-700">
             <Lock className="size-5" />
-            <p className="font-semibold">Día CERRADO — no se pueden registrar ventas ni servicios</p>
+            <div>
+              <p className="font-semibold">Día CERRADO — no se pueden registrar ventas ni servicios</p>
+              {/* F69 (revisión adversarial): si el día de HOY ya está cerrado, «Abrir Día» no puede
+                  reabrirlo (el backend lo rechaza: un cierre guardado no se recalcula) — el camino es
+                  ↺ y es del dueño. Se dice acá en vez de ofrecer un botón que va a fallar. */}
+              {hoyCerrado && (
+                <p className="text-xs text-amber-700/80" data-field="dia-cerrado-hoy">
+                  Hoy ya está cerrado con su arqueo: si hay que anotar algo de hoy, el dueño lo reabre en
+                  Libro Diario → Cierres (botón ↺), se anota y se vuelve a cerrar.
+                </p>
+              )}
+            </div>
           </div>
-          <Button variant="default" onClick={() => openOpenDialog(false)}>
-            <Play className="size-4" /> Abrir Día
-          </Button>
+          {hoyCerrado ? (
+            <span className="text-xs text-amber-700/80 max-w-[240px] text-right">Abrir el día siguiente, mañana</span>
+          ) : (
+            <Button variant="default" onClick={() => openOpenDialog(false)}>
+              <Play className="size-4" /> Abrir Día
+            </Button>
+          )}
         </div>
       )}
 
@@ -725,6 +1074,55 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               </div>
             </CardContent>
           </Card>
+
+          {/* F74 — EL LIBRO DE IVA DEL PERÍODO (lo que se declara). Se ve cuando el IVA está activo o
+              cuando el período TIENE operaciones con IVA: el desglose sale de la alícuota anotada en
+              CADA fila (no de la de hoy), así un período cerrado no cambia. Las anuladas no cuentan. */}
+          {(ivaActivo(taxConfig) || resumenIva.operaciones > 0) && (
+            <Card data-panel="iva-periodo">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                  <Percent className="size-4" /> IVA del período
+                  <Badge variant="secondary" className="text-xs">
+                    {ivaActivo(taxConfig)
+                      ? `${alicuotaLabel(taxConfig.alicuota)} · ${taxConfig.modo === 'agregado' ? 'se suma al cobrar' : 'ya viene en el precio'}`
+                      : 'IVA apagado ahora'}
+                  </Badge>
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  Base imponible + IVA de las ventas y los servicios de {startDate} a {endDate}, con la
+                  alícuota con la que se cargó cada operación.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <div className="rounded-md border bg-muted/40 p-3">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Base imponible</p>
+                    <p className="text-lg font-bold" data-field="iva-periodo-base">{fmtUsd(resumenIva.base)}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/40 p-3">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      IVA {resumenIva.alicuotaMixta ? '(alícuotas mezcladas)' : alicuotaLabel(resumenIva.alicuota)}
+                    </p>
+                    <p className="text-lg font-bold text-primary" data-field="iva-periodo-iva">{fmtUsd(resumenIva.iva)}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/40 p-3" title="Lo cobrado por las operaciones CON IVA (base + IVA)">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Cobrado con IVA</p>
+                    <p className="text-lg font-bold" data-field="iva-periodo-total">{fmtUsd(resumenIva.total)}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/40 p-3" title="Lo cobrado sin IVA (alícuota 0: lo cargado antes de prenderlo, o lo exento). No es base imponible.">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Sin IVA / exento</p>
+                    <p className="text-lg font-bold" data-field="iva-periodo-sin">{fmtUsd(resumenIva.sinIva)}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground" data-field="iva-periodo-nota">
+                  {resumenIva.operaciones > 0
+                    ? `${resumenIva.operaciones} operación(es) con IVA. La base imponible NO incluye lo cobrado sin IVA (${fmtUsd(resumenIva.sinIva)}), que se informa aparte. IVA en Bs. del período: ${fmtBs(resumenIva.iva)} (equivalente con la tasa del turno).`
+                    : 'No hay operaciones con IVA en este período.'}
+                </p>
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardContent className="p-0">
@@ -956,9 +1354,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">
-              Gastos del negocio registrados entre {startDate} y {endDate} — no afectan el arqueo de caja
+              Gastos del negocio registrados entre {startDate} y {endDate} —{' '}
+              <span className="font-medium text-foreground">los que salieron del cajón SÍ bajan el efectivo
+              esperado</span> al cerrar el día (columna «Salió de»)
             </p>
-            <Button onClick={() => { setExpDate(today); setExpCategory('Otro'); setExpAmount(0); setExpCurrency('USD'); setExpNotes(''); setExpError(null); setShowExpenseDialog(true); }}>
+            <Button onClick={() => { setExpDate(today); setExpCategory('Otro'); setExpAmount(0); setExpCurrency('USD'); setExpNotes(''); setExpMethod(''); setExpError(null); setShowExpenseDialog(true); }}>
               <Plus className="size-4" /> Registrar gasto
             </Button>
           </div>
@@ -975,6 +1375,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                     <TableHead>Fecha</TableHead>
                     <TableHead>Categoría</TableHead>
                     <TableHead className="text-right">Monto</TableHead>
+                    <TableHead>Salió de</TableHead>
                     <TableHead>Notas</TableHead>
                     <TableHead className="w-12"></TableHead>
                   </TableRow>
@@ -982,7 +1383,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <TableBody>
                   {expenses.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                         Sin gastos en este período
                       </TableCell>
                     </TableRow>
@@ -995,6 +1396,19 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                         </TableCell>
                         <TableCell className={`text-right font-semibold tabular-nums ${e.currency === 'USD' ? 'text-success' : 'text-warning'}`}>
                           {e.currency === 'USD' ? fmtUsd(e.amount) : fmtBs(e.amount)}
+                        </TableCell>
+                        {/* F69 — DE DÓNDE SALIÓ LA PLATA: es lo que decide si este gasto baja el
+                            efectivo esperado al cerrar el día (los de cajón) o se concilia por banco. */}
+                        <TableCell data-expense-method={e.method || ''}>
+                          {e.method ? (
+                            esDeCajon(e.method)
+                              ? <Badge className="bg-warning/15 text-warning border-warning/40" variant="outline">{e.method} (cajón)</Badge>
+                              : <Badge variant="secondary">{e.method}</Badge>
+                          ) : (
+                            <span className="text-xs text-warning" title="Sin declarar: el cierre del día NO lo descuenta del cajón. Corregilo reabriendo el gasto (borrar y volver a anotarlo).">
+                              Sin declarar
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="text-muted-foreground">{e.notes || '—'}</TableCell>
                         <TableCell>
@@ -1014,7 +1428,7 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                           <span className="text-warning"> + {fmtBs(expenses.filter(e => e.currency === 'VES').reduce((a, e) => a + e.amount, 0))}</span>
                         )}
                       </TableCell>
-                      <TableCell colSpan={2} />
+                      <TableCell colSpan={3} />
                     </TableRow>
                   )}
                 </TableBody>
@@ -1156,8 +1570,98 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
         </>
       )}
 
-      {effectiveTab === 'salud' && (
+      {/* ── F68 — LIBRO DE PLATA: quién hizo cada movimiento ──────────────────────────────────────
+          Lo que pidió el dueño: la CAJA ve SU día («su día de caja») y el Master ve todo, con el
+          nombre de la persona en cada línea. El backend NO devuelve a la caja los movimientos de
+          otras sesiones, así que acá no hay forma de mirar la facturación del dueño. */}
+      {/* F68 — PERSONAS Y ACCESOS (sólo Master): acá se crea la sesión «Caja 1» con SU PIN. */}
+      {isOwner && (
+        <UsuariosDialog open={showUsuarios} onClose={() => setShowUsuarios(false)} />
+      )}
+      {/* F74 — AJUSTES DEL IVA (sólo dueño): prender/apagar, alícuota y modo. Al guardar se recarga la
+          configuración y el libro del período. */}
+      {isOwner && (
+        <TaxSettingsDialog open={showTax} onClose={() => setShowTax(false)} config={taxConfig}
+          tasa={activeDay?.tasa_bcv ?? 0}
+          onSaved={cfg => { setTaxConfig(cfg); loadIva(); }} />
+      )}
+
+      {effectiveTab === 'movimientos' && (
         <>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              {isOwner
+                ? `Todos los movimientos de plata entre ${startDate} y ${endDate} — con quién los hizo.`
+                : 'Tus movimientos de hoy (vos sólo ves los tuyos).'}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => { setTab('diario'); setTimeout(() => setTab('movimientos'), 0); }}>
+              <RefreshCw className="size-3.5" /> Actualizar
+            </Button>
+          </div>
+
+          {isOwner && porPersona.length > 0 && (
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              {porPersona.map(p => (
+                <div key={p.name} className="rounded-lg border border-border p-3" data-por-persona={p.name}>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide truncate" title={p.name}>{p.name}</p>
+                  <p className="text-lg font-bold">{fmtMix(p.usd, p.bs)}</p>
+                  <p className="text-[11px] text-muted-foreground">{p.count} movimiento{p.count !== 1 ? 's' : ''}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Movimientos ({movimientos.length})</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Fecha</TableHead>
+                    <TableHead>Qué</TableHead>
+                    <TableHead>Método</TableHead>
+                    <TableHead className="text-right">Monto</TableHead>
+                    <TableHead>Quién</TableHead>
+                    <TableHead>Referencia</TableHead>
+                    <TableHead>Nota</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {movimientos.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-6">
+                        Todavía no hay movimientos de plata en este rango.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {movimientos.map(m => (
+                    <TableRow key={m.id} data-movement={m.id} data-movement-type={m.type}>
+                      <TableCell className="text-xs whitespace-nowrap">{m.date ? m.date.slice(0, 16) : '—'}</TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="text-xs">{ETIQUETA_MOVIMIENTO[m.type] ?? m.type}</Badge>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{m.method || '—'}</TableCell>
+                      <TableCell className={cn('text-right font-medium tabular-nums whitespace-nowrap',
+                        m.sign < 0 ? 'text-danger' : m.sign > 0 ? 'text-success' : 'text-muted-foreground')}>
+                        {m.sign === 0 ? '—' : `${m.sign < 0 ? '−' : '+'}${m.currency === 'VES' ? fmtBs(m.amount) : fmtUsd(m.amount)}`}
+                      </TableCell>
+                      <TableCell className="text-xs" data-movement-user={m.user_name || '(sin asignar)'}>
+                        {m.user_name || '(sin asignar)'}
+                      </TableCell>
+                      <TableCell className="max-w-[160px] truncate text-xs text-muted-foreground">{m.reference || '—'}</TableCell>
+                      <TableCell className="max-w-[160px] truncate text-xs text-muted-foreground">{m.note || '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {effectiveTab === 'salud' && (        <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Kpi icon={<Wallet className="size-3.5" />} label="Ingresos del período"
               value={profit ? fmtUsd(profit.income_usd) : '—'} accent="bg-success/10 text-success" className="text-success" />
@@ -1358,11 +1862,29 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 <Button type="button" variant={expCurrency === 'VES' ? 'default' : 'outline'} className="flex-1" onClick={() => setExpCurrency('VES')}>Bs. Bolívares</Button>
               </div>
             </div>
+            {/* F69 — ¿DE DÓNDE SALIÓ LA PLATA? Es lo que decide si el gasto baja el esperado del cajón
+                al cerrar el día. Antes no se preguntaba y el cajón «faltaba» en un día perfecto. */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium">¿De dónde salió la plata?</label>
+              <select className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+                data-field="exp-metodo" value={expMethod} onChange={e => setExpMethod(e.target.value)}>
+                <option value="">Sin declarar (no baja el cajón)</option>
+                {PAYMENT_METHODS.filter(Boolean).map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <p className="text-[11px] text-muted-foreground" data-field="exp-metodo-aviso">
+                {esDeCajon(expMethod)
+                  ? `Sale del cajón: el cierre del ${expDate} va a esperar ${expCurrency === 'VES' ? 'bolívares' : 'dólares'} de menos.`
+                  : expMethod
+                    ? `Pagado con ${expMethod}: no toca el cajón (se concilia por banco).`
+                    : 'Sin declarar: no toca el cajón y el cierre del día lo va a avisar.'}
+              </p>
+            </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Notas</label>
               <Input value={expNotes} onChange={e => setExpNotes(e.target.value)} placeholder="Detalle del gasto..." />
             </div>
             {expError && <p className="text-sm text-danger">{expError}</p>}
+            {expWarning && <p className="text-sm text-warning">{expWarning}</p>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowExpenseDialog(false)}>Cancelar</Button>
@@ -1482,10 +2004,52 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </div>
               </div>
             </div>
+            {/* F69 — DE DÓNDE SALE EL NÚMERO QUE HAY QUE CONTAR. Antes el cierre pedía contar el cajón
+                contra un esperado que no incluía el fondo ni los gastos pagados del cajón: un día
+                perfecto «faltaba» exactamente lo que se pagó del cajón y «sobraba» el fondo. */}
+            <div className="rounded-md border bg-muted/40 px-3 py-2.5" data-panel="desglose-cajon">
+              <p className="text-sm font-semibold mb-2">Lo que debe haber en el cajón</p>
+              <div className="flex flex-col gap-1">
+                {desglose.lineas.map((l, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm">
+                    <span className={l.monto < 0 ? 'text-danger' : 'text-muted-foreground'}>
+                      {i > 0 && l.monto >= 0 ? '+ ' : ''}{l.etiqueta}
+                    </span>
+                    {/* F69 — cada línea con SU moneda (antes la de Bs. salía con el formato del dólar:
+                        «Gastos pagados del cajón (Bs.) − $500.00»). */}
+                    <span className={`tabular-nums font-medium ${l.monto < 0 ? 'text-danger' : ''}`}>
+                      {l.monto < 0
+                        ? `− ${formatoMoneda(Math.abs(l.monto), l.moneda)}`
+                        : formatoMoneda(l.monto, l.moneda)}
+                    </span>
+                  </div>
+                ))}
+                <Separator className="my-1" />
+                <div className="flex items-center justify-between text-sm font-bold">
+                  <span>Esperado en el cajón (lo que hay que contar)</span>
+                  <span className="tabular-nums" data-field="esperado-cajon">
+                    {fmtUsd(desglose.esperado_usd)}
+                    {Math.abs(desglose.esperado_bs) > 0.005 && <> + {fmtBs(desglose.esperado_bs)}</>}
+                  </span>
+                </div>
+              </div>
+              {(hay(desglose.devuelto_usd) || hay(desglose.devuelto_bs)) && (
+                <p className="text-[11px] text-danger mt-2" data-field="cajon-devoluciones">
+                  Devuelto hoy del cajón: {fmtMix(desglose.devuelto_usd, desglose.devuelto_bs)} — ya está
+                  restado en lo cobrado de arriba (por eso se cobró más de lo que hay).
+                </p>
+              )}
+              {ajuste.sin_metodo > 0 && (
+                <p className="text-[11px] text-warning mt-2" data-field="cajon-sin-metodo">
+                  {ajuste.sin_metodo} gasto(s) del día sin declarar de dónde salió la plata: NO se descuentan
+                  del cajón. Anotalo al registrarlos (Gastos → ¿De dónde salió la plata?) y volvé a cerrar.
+                </p>
+              )}
+            </div>
             {todayExpenses.length > 0 && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
                 <span className="font-medium flex items-center gap-2">
-                  <Receipt className="size-4" /> Gastos del día ({todayExpenses.length})
+                  <Receipt className="size-4" /> Gastos del {cierreRow?.close_date} ({todayExpenses.length})
                 </span>
                 <span className="font-semibold tabular-nums">
                   {fmtUsd(todayExpenses.filter(e => e.currency === 'USD').reduce((a, e) => a + e.amount, 0))}
@@ -1495,99 +2059,113 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </span>
               </div>
             )}
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-semibold">Punto de Venta — monto impreso</p>
-              <p className="text-xs text-muted-foreground">
-                {((expected?.pos_charged_usd ?? 0) > 0 || (expected?.pos_charged_bs ?? 0) > 0) ? (
-                  <>
-                    El sistema cobró{' '}
-                    {(expected?.pos_charged_usd ?? 0) > 0 && <><strong>{fmtUsd(expected?.pos_charged_usd ?? 0)}</strong>{' '}</>}
-                    {(expected?.pos_charged_bs ?? 0) > 0 && <><strong>{fmtBs(expected?.pos_charged_bs ?? 0)}</strong></>}
-                    {' '}por Punto. Escribe el monto total que imprimió la máquina al cerrarla — debe dar el mismo.
-                  </>
-                ) : (
-                  'No hubo cobros por Punto de Venta hoy.'
+            {/* F69 (revisión adversarial, BLOQUEANTE) — EL PUNTO SE DIBUJA SIEMPRE QUE LA REGLA LO PIDA.
+                El bloque se mostraba sólo con `pos_charged_* > 0`, pero `lineasDelArqueo` incluye la
+                línea con `|monto| > 0.005`: un día con el Punto en NEGATIVO (una devolución anotada
+                por Punto, el caso real documentado en F42) exigía confirmar una línea que no existía en
+                pantalla → el cierre quedaba imposible («Falta contar/verificar: Punto: monto impreso»).
+                Ahora manda la MISMA condición que la regla (`tieneLinea`). */}
+            {(tieneLinea('pos_usd') || tieneLinea('pos_bs')) && (
+              <div className="flex flex-col gap-3">
+                <p className="text-sm font-semibold">Punto de Venta — monto impreso</p>
+                <p className="text-xs text-muted-foreground">
+                  {tieneLinea('pos_usd') && <>El sistema cobró <strong>{fmtUsd(lineaArqueo('pos_usd').monto)}</strong>{' '}</>}
+                  {tieneLinea('pos_bs') && <>{(lineaArqueo('pos_bs').monto < 0) ? 'El Punto quedó en ' : 'y '}<strong>{fmtBs(lineaArqueo('pos_bs').monto)}</strong></>}
+                  {' '}por Punto. Escribí el monto total que imprimió la máquina al cerrarla — debe dar el mismo.
+                  {(lineaArqueo('pos_usd').monto < 0 || lineaArqueo('pos_bs').monto < 0) && (
+                    <> Un Punto en negativo significa que por ahí salió plata (una devolución): corregí el
+                    método de esa devolución en la orden y el Punto vuelve a su lugar.</>
+                  )}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {tieneLinea('pos_usd') && (
+                    <ConteoLinea linea={lineaArqueo('pos_usd')} contado={posSettledUsd}
+                      confirmada={!!confirmadas.pos_usd}
+                      onContado={v => { setPosSettledUsd(v); setConfirmadas(c => ({ ...c, pos_usd: true })); }}
+                      onConfirmar={() => { setPosSettledUsd(lineaArqueo('pos_usd').monto); setConfirmadas(c => ({ ...c, pos_usd: true })); }} />
+                  )}
+                  {tieneLinea('pos_bs') && (
+                    <ConteoLinea linea={lineaArqueo('pos_bs')} contado={posSettledBs}
+                      confirmada={!!confirmadas.pos_bs}
+                      onContado={v => { setPosSettledBs(v); setConfirmadas(c => ({ ...c, pos_bs: true })); }}
+                      onConfirmar={() => { setPosSettledBs(lineaArqueo('pos_bs').monto); setConfirmadas(c => ({ ...c, pos_bs: true })); }} />
+                  )}
+                </div>
+              </div>
+            )}
+            {/* F69 — EL ARQUEO: cada línea tiene que quedar CONFIRMADA por el operario (contada con las
+                manos o verificada en el banco). Antes los digitales entraban con el monto del sistema y
+                su diferencia daba 0 siempre. */}
+            <div className="flex flex-col gap-3">
+              <p className="text-sm font-semibold">Arqueo — contá el cajón y verificá el banco</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {/* El CAJÓN se cuenta SIEMPRE en las dos monedas (regla en `lineasDelArqueo`): si el
+                    esperado es 0 y en el cajón hay plata, la diferencia tiene que verse. */}
+                {tieneLinea('usd') && (
+                  <ConteoLinea linea={lineaArqueo('usd')} contado={usdCounted} confirmada={!!confirmadas.usd}
+                    onContado={v => { setUsdCounted(v); setConfirmadas(c => ({ ...c, usd: true })); }}
+                    onConfirmar={() => { setUsdCounted(lineaArqueo('usd').monto); setConfirmadas(c => ({ ...c, usd: true })); }} />
                 )}
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {(expected?.pos_charged_usd ?? 0) > 0 && (
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium">Monto impreso ($)</label>
-                    <MoneyInput value={posSettledUsd} onChange={setPosSettledUsd} />
-                  </div>
+                {tieneLinea('bs') && (
+                  <ConteoLinea linea={lineaArqueo('bs')} contado={cashCounted} confirmada={!!confirmadas.bs}
+                    onContado={v => { setCashCounted(v); setConfirmadas(c => ({ ...c, bs: true })); }}
+                    onConfirmar={() => { setCashCounted(lineaArqueo('bs').monto); setConfirmadas(c => ({ ...c, bs: true })); }} />
                 )}
-                {(expected?.pos_charged_bs ?? 0) > 0 && (
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium">Monto impreso (Bs.)</label>
-                    <MoneyInput value={posSettledBs} onChange={setPosSettledBs} />
-                  </div>
+                {tieneLinea('zelle') && (
+                  <ConteoLinea linea={lineaArqueo('zelle')} contado={zelleVerified} confirmada={!!confirmadas.zelle}
+                    onContado={v => { setZelleVerified(v); setConfirmadas(c => ({ ...c, zelle: true })); }}
+                    onConfirmar={() => { setZelleVerified(lineaArqueo('zelle').monto); setConfirmadas(c => ({ ...c, zelle: true })); }} />
+                )}
+                {tieneLinea('pago_movil') && (
+                  <ConteoLinea linea={lineaArqueo('pago_movil')} contado={pmVerified} confirmada={!!confirmadas.pago_movil}
+                    onContado={v => { setPmVerified(v); setConfirmadas(c => ({ ...c, pago_movil: true })); }}
+                    onConfirmar={() => { setPmVerified(lineaArqueo('pago_movil').monto); setConfirmadas(c => ({ ...c, pago_movil: true })); }} />
+                )}
+                {tieneLinea('trans_bs') && (
+                  <ConteoLinea linea={lineaArqueo('trans_bs')} contado={transVerified} confirmada={!!confirmadas.trans_bs}
+                    onContado={v => { setTransVerified(v); setConfirmadas(c => ({ ...c, trans_bs: true })); }}
+                    onConfirmar={() => { setTransVerified(lineaArqueo('trans_bs').monto); setConfirmadas(c => ({ ...c, trans_bs: true })); }} />
                 )}
               </div>
-              {(expected?.pos_charged_usd ?? 0) > 0 && (
-                <div className="flex items-center gap-3 text-sm">
-                  <span>Diferencia ($):{' '}
-                    <span className={`font-bold ${Math.abs(puntoDiff.usd) < TOL_USD ? 'text-success' : 'text-danger'}`}>
-                      {puntoDiff.usd > 0 ? '+' : ''}{fmtUsd(puntoDiff.usd)}
-                    </span>
-                  </span>
-                  {Math.abs(puntoDiff.usd) < TOL_USD && <span className="text-success font-medium">Cuadrado ✅</span>}
-                </div>
-              )}
-              {(expected?.pos_charged_bs ?? 0) > 0 && (
-                <div className="flex items-center gap-3 text-sm">
-                  <span>Diferencia (Bs.):{' '}
-                    <span className={`font-bold ${Math.abs(puntoDiff.bs) < TOL_BS ? 'text-success' : 'text-danger'}`}>
-                      {puntoDiff.bs > 0 ? '+' : ''}{fmtBs(puntoDiff.bs)}
-                    </span>
-                  </span>
-                  {Math.abs(puntoDiff.bs) < TOL_BS && <span className="text-success font-medium">Cuadrado ✅</span>}
-                </div>
+              <p className="text-xs text-muted-foreground">
+                Las divisas y los bolívares se cuentan con las manos. Los cobros <span className="font-medium">digitales</span>
+                {' '}(Zelle, Pago Móvil, Transferencia Bs.) no están en el cajón: se verifican en la app del banco, y lo que
+                verifiques es lo que queda guardado (si no coincide con lo cobrado, la diferencia se ve y se guarda).
+              </p>
+              {faltanConfirmar.length > 0 && (
+                <p className="text-sm text-warning" data-field="faltan-confirmar">{faltaConfirmar(faltanConfirmar)}</p>
               )}
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium">Divisas contadas ($)</label>
-                <MoneyInput value={usdCounted} onChange={setUsdCounted} className="text-lg font-semibold" placeholder="0,00" />
-                <div className="flex items-center gap-3 text-sm">
-                  <span>Diferencia:{' '}
+            {/* El resumen del arqueo por moneda: la MISMA regla pura que la lista de Cierres. No se
+                muestra un «Cuadra ✅» mientras falte contar algo: un número sin contar no es un
+                número, y decir «cuadra» con los valores del sistema es exactamente el engaño que
+                tenía este diálogo (la diferencia daba 0 sin que nadie mirara el cajón ni el banco). */}
+            <div className="flex flex-wrap items-center gap-4 rounded-md border px-3 py-2 text-sm"
+              data-field="resumen-arqueo">
+              {faltanConfirmar.length > 0 ? (
+                <span className="text-warning">{faltaConfirmar(faltanConfirmar)}</span>
+              ) : (
+                <>
+                  <span>
+                    Diferencia $:{' '}
                     <span className={`font-bold ${Math.abs(diffUsd) < TOL_USD ? 'text-success' : 'text-danger'}`}
                       data-field="dif-usd" data-ok={Math.abs(diffUsd) < TOL_USD}>
                       {diffUsd > 0 ? '+' : ''}{fmtUsd(diffUsd)}
                     </span>
                   </span>
-                  {Math.abs(diffUsd) < TOL_USD && <span className="text-success font-medium">Cuadrado ✅</span>}
-                </div>
-                <p className="text-xs text-muted-foreground">Cuenta los dólares del cajón. El sistema espera {fmtUsd((expected?.usd_cash_total ?? 0) + (expected?.cash_usd ?? 0))}.</p>
-              </div>
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium">Efectivo en bolívares contado (Bs)</label>
-                <MoneyInput value={cashCounted} onChange={setCashCounted} className="text-lg font-semibold" placeholder="0,00" />
-                <div className="flex items-center gap-3 text-sm">
-                  <span>Diferencia:{' '}
+                  <span>
+                    Diferencia Bs.:{' '}
                     <span className={`font-bold ${Math.abs(diffBs) < TOL_BS ? 'text-success' : 'text-danger'}`}
                       data-field="dif-bs" data-ok={Math.abs(diffBs) < TOL_BS}>
                       {diffBs > 0 ? '+' : ''}{fmtBs(diffBs)}
                     </span>
                   </span>
-                  {Math.abs(diffBs) < TOL_BS && <span className="text-success font-medium">Cuadrado ✅</span>}
-                </div>
-                <p className="text-xs text-muted-foreground">Debe dar 0,00 para cuadrar. Si no hay efectivo, escribe 0.</p>
-              </div>
+                  {diffCierre.cuadrado
+                    ? <span className="text-success font-medium">Cuadra ✅</span>
+                    : <span className="text-danger font-medium" data-field="dif-resumen">{closingLabel(diffCierre)}</span>}
+                </>
+              )}
             </div>
-            <p className="text-xs text-muted-foreground">
-              Los cobros <span className="font-medium">digitales</span> (Zelle, Pago Móvil, Punto) no se cuentan en el cajón:
-              se verifican en la app del banco y entran por su monto esperado.
-            </p>
-            {/* F42: el cierre tiene que decir qué se DEVOLVIÓ hoy. Si no, el operario ve un esperado más
-                bajo que lo que cobró y no sabe por qué (la devolución ya está restada del método por el
-                que salió la plata). */}
-            {(hay(expected?.refund_usd ?? 0) || hay(expected?.refund_bs ?? 0)) && (
-              <div className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs" data-field="cierre-devoluciones">
-                <span className="font-medium text-danger">Devuelto hoy: {fmtMix(expected?.refund_usd ?? 0, expected?.refund_bs ?? 0)}</span>
-                {' '}— ya está restado del esperado del método por el que salió la plata (por eso el cajón o el
-                banco esperan menos de lo que se cobró).
-              </div>
-            )}
             <div className="flex flex-col gap-2">
               <p className="text-sm font-medium">Pago Móvil del día</p>
               {pagoMovilList.length === 0 ? (
@@ -1620,7 +2198,10 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
                 </div>
               )}
             </div>
-            <p className="text-xs text-muted-foreground">Zelle, Pago Móvil y Transf Bs se registran con los valores esperados del sistema.</p>
+            <p className="text-xs text-muted-foreground">
+              Lo que <span className="font-medium">verifiques en el banco</span> es lo que queda guardado en el cierre:
+              si no coincide con lo que el sistema cobró, la diferencia se ve y se guarda (no se tapa con el esperado).
+            </p>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Notas</label>
               <Input value={closeNotes} onChange={e => setCloseNotes(e.target.value)}
