@@ -1,160 +1,88 @@
 # Codebase Patterns
 
 > Auto-consolidated learnings from loop iterations.
-> Last updated: 2026-09-26T07:44:11.741Z
->
-> NOTA (2026-09-18): este archivo había llegado a 310 MB porque el consolidador DUPLICABA el
-> contenido en cada corrida (20 aprendizajes únicos, uno repetido 524.288 veces). Se deduplicó con
-> `node tools/dedupe_patterns.mjs` conservando TODOS los aprendizajes únicos. Si vuelve a crecer,
-> correr ese script otra vez y arreglar la consolidación (no borrar aprendizajes a mano).
+> Last updated: 2026-09-26T07:45:19.774Z
 
 ---
 
-### Errores Recurrentes (CRITICAL)
+### Errores Recurrentes
 
 - `[CRITICAL]` «Hoy» con new Date().toISOString().slice(0,10) es la fecha UTC: en Venezuela (UTC−4) a partir de las 20:00 devuelve el día SIGUIENTE y los listados de «hoy» (Ventas, Servicios, Libro Diario, perfil de técnico) quedan VACÍOS con las ventas ya registradas (medido 2026-09-16 22:08: la venta del día no aparecía). En el backend, date('now','-N days') sin localtime también pierde un día en las ventanas. (1)
-
 - `[CRITICAL]` Comandos angostos de actualización (updateOrderKeepingFields, update_service_payment_date) y el patrón ??  con null: en TypeScript, patch.x ?? valorViejo NO permite BORRAR un dato (null cae al valor viejo) — para campos que pueden quedar vacíos a propósito (desasignar un técnico, limpiar una pantalla) hay que usar patch.x !== undefined ? patch.x : valorViejo. Y del lado del backend, un parámetro vacío suele tener un SIGNIFICADO (en update_service, date_out = '' significa «estampá hoy» cuando el estado es Entregado): un helper de actualización angosta debe CONSERVAR el valor actual del campo que no está cambiando, nunca mandar vacío «por defecto» — mandar '' al cambiar el técnico de una orden entregada le movía la fecha de entrega a hoy y con ella el monto de la caja de ese día a la de hoy. (1)
-
 - `[CRITICAL]` Comparar dos fotos de una tabla recorriendo SOLO el lado «después» hace que las filas BORRADAS nunca se visiten: el chequeo imprime «N filas intactas» con el conteo de ANTES y miente con seguridad. Y si las tablas/columnas comparadas son un subconjunto elegido a mano, quedan afuera datos enteros (faltaban inventory_movements, compras y casi todas las columnas de products). (1)
-  - tools/verify_migracion_datos.mjs (bucle de comparación)
-  - tools/verify_migracion_negativa.mjs (borra una venta y exige FAIL)
-
 - `[CRITICAL]` Invalidar una memoria/derivado con SELECT total_changes() de SQLite NO alcanza: es un contador POR CONEXIÓN. Con dos ventanas de la app abiertas (no hay guard de instancia única) o con una herramienta de tools/ escribiendo mientras la app está abierta, la escritura ajena no mueve el contador y la memoria sirve números viejos indefinidamente (medido: con la app abierta, un INSERT de otro proceso dejaba el KPI del padrón en el valor anterior). La señal correcta es el PAR (SELECT total_changes(), PRAGMA data_version): data_version sube en cada commit AJENO y no cambia con las escrituras propias. (1)
-
 - `[CRITICAL]` PLATA: nunca proponer un método de pago sacándolo del FORMULARIO de la orden. En este proyecto services.payment_method es sólo «lo que se esperaba cobrar», NO lo que entró; proponerlo como método de una DEVOLUCIÓN metió la salida en un bucket que nunca cobró (Punto de Venta (Bs) quedó en −Bs. 1.697 — una máquina que devuelve plata no existe) y, como las filas/columnas del Libro y del cierre se dibujaban sólo con esperado > 0, la plata que salió del cajón no aparecía en NINGUNA pantalla del arqueo. Regla del local: la devolución vuelve POR DONDE ENTRÓ (el método con más ingreso neto en esa moneda); el gate va también en el backend (fail-closed), no sólo en la UI, y los métodos de cajón pueden pagar del cajón con aviso. (1)
-
-- `[CRITICAL]` RESTAURAR UNA BASE ABIERTA NO SE HACE PISANDO EL ARCHIVO: la restauración se pide (se valida el candidato, se guarda una copia de la base ACTUAL con VACUUM INTO y se deja un marcador) y se APLICA AL ARRANCAR, antes de abrir la conexión, limpiando -wal/-shm. Pisar el archivo con SQLite abierto mezcla el WAL de una base con el archivo de otra. Fail-closed: si el candidato ya no está o no valida, se descarta el pedido y se sigue con la base actual (nunca se deja la app sin base).
-
 - `[CRITICAL]` RESTAURAR UNA BASE ABIERTA NO SE HACE PISANDO EL ARCHIVO: la restauración se pide (se valida el candidato, se guarda una copia de la base ACTUAL con VACUUM INTO y se deja un marcador) y se APLICA AL ARRANCAR, antes de abrir la conexión, limpiando -wal/-shm. Pisar el archivo con SQLite abierto mezcla el WAL de una base con el archivo de otra. Fail-closed: si el candidato ya no está o no valida, se descarta el pedido y se sigue con la base actual (nunca se deja la app sin base). (1)
-  - src-tauri/src/backups.rs (request_restore, apply_pending_restore)
-  - src-tauri/src/lib.rs (apply_pending_restore antes de Database::new)
-  - tools/verify_respaldo2.mjs (7/7: la base volvió al respaldo tras reiniciar)
-
+- `[CRITICAL]` RESTAURAR UNA BASE ABIERTA NO SE HACE PISANDO EL ARCHIVO: la restauración se pide (se valida el candidato, se guarda una copia de la base ACTUAL con VACUUM INTO y se deja un marcador) y se APLICA AL ARRANCAR, antes de abrir la conexión, limpiando -wal/-shm. Pisar el archivo con SQLite abierto mezcla el WAL de una base con el archivo de otra. Fail-closed: si el candidato ya no está o no valida, se descarta el pedido y se sigue con la base actual (nunca se deja la app sin base). (1)
 - `[CRITICAL]` Riesgo de COBRO DUPLICADO en el asistente de cierre: si add_service_payment ya guardó el cobro y luego falla update_service (el cierre), el error se muestra pero el botón vuelve a habilitarse; el operario reintenta y el pago se registra OTRA VEZ sobre la misma orden. El estado busy solo protege del doble click inmediato, no del reintento tras un fallo parcial. (1)
-
 - `[CRITICAL]` Un número precargado NO es un conteo: el arqueo del cajón tiene que exigir un acto humano por línea y no puede decir «Cuadra» mientras falte confirmar. El diálogo de cierre precargaba los cobros digitales con el monto del sistema (actual_zelle = expected.zelle_total) y su diferencia daba 0 SIEMPRE; el esperado del cajón tampoco incluía el fondo ni los gastos pagados del cajón. (1)
-  - src/lib/drawer.ts
-  - src/components/DailyLedger.tsx
-  - tools/arqueo_test.ts 45/45
-
-- `[CRITICAL]` Un precio sugerido es TODO O NADA con su monto: el descuento CALCULADO (el del efectivo, lista − contado) no puede aplicarse sobre un monto que el operario escribió — quedaba Total 96 por un precio de 99. El descuento que él teclea o toma con un botón SÍ se respeta y se conserva con cualquier método de pago. Regla pura en lib/screen-price.ts (pricePatch / amountTypedPatch).
-
 - `[CRITICAL]` Un precio sugerido es TODO O NADA con su monto: el descuento CALCULADO (el del efectivo, lista − contado) no puede aplicarse sobre un monto que el operario escribió — quedaba Total 96 por un precio de 99. El descuento que él teclea o toma con un botón SÍ se respeta y se conserva con cualquier método de pago. Regla pura en lib/screen-price.ts (pricePatch / amountTypedPatch). (1)
-  - src/lib/screen-price.ts
-  - src/components/Services.tsx
-  - tools/screen_price_test.ts
-  - tools/progress/specs/F67-precio-del-repuesto.md
-
+- `[CRITICAL]` Un precio sugerido es TODO O NADA con su monto: el descuento CALCULADO (el del efectivo, lista − contado) no puede aplicarse sobre un monto que el operario escribió — quedaba Total 96 por un precio de 99. El descuento que él teclea o toma con un botón SÍ se respeta y se conserva con cualquier método de pago. Regla pura en lib/screen-price.ts (pricePatch / amountTypedPatch). (1)
 - `[CRITICAL]` Un total que se arma RECORRIENDO TABLAS se queda sin los movimientos nuevos: el arqueo esperado de la caja sumaba sales + service_payments + entregados sin pago y NUNCA incluyó expenses ni la apertura (0 menciones en compute_daily_totals), así que pagar un gasto del cajón o el fondo de caja hacían mentir el semáforo central del POS todos los días — y la UI lo admitía por escrito. Además el cierre precargaba los métodos digitales con el esperado, con lo que su diferencia era siempre 0 (un Zelle que no llegó era indetectable). Regla: la caja tiene que salir de UN libro de movimientos (feature 40), no de la suma de tablas que cada feature nueva tiene que acordarse de agregar. (1)
-  - src-tauri/src/db.rs compute_daily_totals / close_day
-  - src/components/DailyLedger.tsx:505-508,959
-  - feature_list.json#40
-  - AUDITORIA_ENTREGA.md
-
 - `[CRITICAL]` Una regla de dinero debe tener UNA sola implementación, y las MIGRACIONES DE ARRANQUE son parte de ella: en este proyecto db.rs::init() tenía su propio UPDATE de paid_amount con la fórmula vieja y, como init() corre en cada arranque, revertía la regla nueva cada vez que se abría la app (el mismo saldo valía distinto según cuál fue la última acción). Al cambiar una fórmula de dinero hay que buscar TODAS las copias de la fórmula (incluidas las migraciones y los UPDATE inline en init()), y dejar un test que simule el REINICIO (cerrar y reabrir la base) — no solo el camino de la app. Además, en un invariante de dinero («X nunca puede ser negativo») hay que enumerar los caminos que lo rompen y cubrir cada uno: borrar un movimiento después de devolver, la tolerancia de redondeo aplicada repetidamente con el saldo en 0, y un monto con signo contrario que saltea el tope. (1)
-
 - `[CRITICAL]` Una verificación que solo mira el EXIT CODE de la herramienta que muta los datos puede dar un FALSO VERDE: `cargo test -- --ignored <filtro>` sale 0 con «running 0 tests / 0 filtered out» cuando el filtro no matchea, y entonces la comparación antes/después es la copia contra sí misma y el veredicto es «los datos están intactos». Le pasó a la prueba que sostiene la condición del dueño (release 0.4.0, 2026-09-18). (1)
-  - tools/verify_migracion_datos.mjs
-  - src-tauri/src/db.rs test_manual_migrate_db
-  - tools/verify_migracion_negativa.mjs
+- `[CRITICAL]` F78 (2026-09-24) — «CELDA VACÍA = NO TOCAR» VALE PARA TODOS LOS CAMPOS, NO SÓLO PARA LOS NÚMEROS. En el aplicar del CSV los TEXTOS se tomaban como `if columna_presente { valor_de_la_fila } else { valor_actual }`: con la columna presente y la celda vacía, la marca quedaba en «Genérico», el modelo/variante en blanco y la COMPATIBILIDAD curada se BORRABA en silencio — y con la compatibilidad se pierde el vínculo del repuesto con su teléfono en el padrón de Modelos (apply_service_stock deja de encontrarlo). Los números sí usaban `unwrap_or(actual)`. Arreglo: un solo helper `texto_celda()` que conserva el valor cuando la celda viene vacía y usa el guion `-` (o «ninguno/a») como forma EXPLÍCITA de vaciar. Regla general: la regla de «vacío = no tocar» tiene que estar implementada en UN solo lugar y aplicarse a TODOS los tipos de campo, o el diff de la pantalla miente. (1)
+  - `- `- `- `src-tauri/src/csvload.rs fn finales() + fn texto_celda()````
+  - `- `- `- `src-tauri/src/csvload.rs test_celda_vacia_no_borra_los_textos````
+  - `- `- `- `tools/verify_carga_csv.mjs (columnas ausentes = solo lectura)````
+- `[HIGH]` F78 (2026-09-24) — EL FORMATO LOCAL DE LOS NÚMEROS Y LA NOTACIÓN CIENTÍFICA: filtrar «los caracteres que no son de número» convierte `1E5` en 15 y `1.5E3` en 1.53, y ese número equivocado se escribe en el precio o en el stock SIN AVISO (Excel exporta en notación científica en cuanto la celda tiene formato Scientific o el valor es grande). Regla del proyecto: «nada inventado — lo que no se entiende BLOQUEA la fila». Arreglo: leer la notación científica como el número que es y, si no se entiende, marcarlo con el número de línea y bloquear el aplicar. En la misma línea: el PAYLOAD del frontend se valida en el BACKEND (rangos + checked_add), porque las celdas son editables y `stock_hoy + i64::MAX` desborda (en release deja el stock en 0; en dev paniquea con el mutex tomado y envenena la app). (1)
+  - `- `- `src-tauri/src/csvload.rs fn leer_numero()/leer_cientifico()/leer_precio()```
+  - `- `- `src-tauri/src/csvload.rs test_numeros_absurdos_bloquean_la_fila y test_el_payload_del_frontend_se_valida_en_el_backend```
+- `[HIGH]` HARNESS (2026-09-24) — `tools/progress/patterns.md` CRECÍA SOLO hasta 49,7 MB (86.000 líneas) con 43 aprendizajes únicos. Causa: `savePatternLearning` (tools/governance/learning-injector.ts) escribía un SEGUNDO bloque «### Conventions» además de la sección del bucle; como el archivo se re-lee en cada corrida (parsePatternsFromMd), cada llamada DUPLICABA cada convención (exponencial 2^n: antes llegó a 310 MB). Arreglo: se quitó el bloque duplicado y se corrió `node tools/dedupe_patterns.mjs` → 28 KB con los 43 aprendizajes (backup del viejo en tools/backup, que está gitignoreado). Regla: cualquier archivo que se REGENERE leyéndose a sí mismo tiene que ser idempotente, y hay que mirar el tamaño de los artefactos antes de commitear. (1)
+  - `tools/governance/learning-injector.ts (savePatternLearning: el bloque «### Conventions» duplicado)`
+  - `tools/dedupe_patterns.mjs (86.157 líneas -> 43 únicos -> 28 KB)`
+  - `release_gate.mjs avisaba «2 archivo(s) grandes en el repo»`
+  - Fix: Que el escritor de un archivo consolidado sea idempotente (una sola sección por tipo) y correr tools/dedupe_patterns.mjs si el archivo vuelve a crecer; vigilar el aviso de «archivos grandes» del gate de release.
 
-### HIGH
+---
+
+### Conventions
+
+- `[CRITICAL]` F78 (2026-09-24) — CARGA MASIVA EN CSV: el STOCK SUMA (nunca pisa) y el catálogo se refresca FILA A FILA dentro de la transacción. Leer el catálogo UNA vez antes del bucle hacía que la segunda fila del mismo archivo sobre la misma ficha PISARA el stock de la primera (3+10+5 quedaba en 8 en vez de 18) mientras los movimientos y el informe decían +15: historial y stock incoherentes (bloqueante de la revisión adversarial). Regla: cuando un lote puede tocar la misma fila dos veces, el estado tiene que ser VIVO (mapa en memoria refrescado tras cada escritura) o hay que releer dentro de la transacción. Y cada UPDATE/DELETE tiene que exigir EXACTAMENTE una fila afectada. (1)
+  - `- `- `- `- `src-tauri/src/csvload.rs:1052-1136 (vivo: HashMap<i64, CsvCurrent> refrescado por fila)`````
+  - `- `- `- `- `src-tauri/src/csvload.rs test_dos_filas_de_la_misma_ficha_suman_stock`````
+  - `- `- `- `- `tools/verify_carga_csv.mjs (2 filas de la misma ficha: 3+10+6=19 y movimientos que suman 16)`````
+
+---
+
+### Anti-Patterns
+
+- `[HIGH]` F78 (2026-09-24) — PRUEBAS EN VIVO (CDP): tres trampas que hacen fallar el script con el producto perfecto. (1) El fixture tiene que reproducir el estado LEGACY con las MISMAS reglas del producto: `verify_modelos_f53` insertaba la fila con `source='manual'` y `rebuild_phones` NUNCA borra las filas manuales, así que la separación no podía quitarla y 6 comprobaciones fallaban; además `add_product` YA reconstruye el padrón, así que el fixture tiene que borrar los modelos que él mismo crea. (2) Un `confirm()` sin contestar BLOQUEA la página y todos los `evalx` mueren por timeout (hay que llamar `handleDialog(true)` DESPUÉS del clic). (3) Un clic por COORDENADAS puede no aterrizar (botón al fondo de una pestaña con tarjetas arriba): apretar con click programático (`scrollIntoView` + `el.click()`) y REINTENTAR hasta ver el resultado. Y la comparación de saldos tiene que usar la foto tomada ANTES del fixture, no después. (1)
+  - `- `tools/verify_modelos_f53.mjs (fixture con source='catalogo', clic programático, handleDialog tras el merge, antesBase)``
+  - `- `tools/verify_carga_csv.mjs (vista previa que no escribe, columnas de solo lectura, doble fila de la misma ficha)``
+
+---
+
+### Optimizaciones
 
 - `[HIGH]` Agregar un bloqueo nuevo sin buscar antes un caso legítimo que lo viole: F32 puso el «monto > 0» como gate del guardado (para que la guía no mintiera) y dejó sin poder guardar una orden de $0 (garantía/cortesía) — había una orden REAL así en la base (DEV-0006). El bloqueo se revirtió y la guía pasó a mostrarlo como AVISO. (1)
-
 - `[HIGH]` Al verificar la UI por CDP: los chips de TRABAJOS del service form (Cambio pantalla, Cambio batería…) NO son toggles de Radix — no llevan data-state ni aria-pressed; el activo se pinta con bg-primary. Los chips de MÉTODO DE PAGO sí llevan data-state="on". Confundirlos hace que la prueba «vea apagado» un chip activo y que un click lo APAGUE (el paso queda sin trabajos y el wizard no avanza). (1)
-
-- `[HIGH]` Cuando una regla se COPIA a otro lenguaje porque ese lado no puede llamarla (node no puede llamar a Rust: el split de modelos de catalog::split_model_models espejado en tools/audit_inventory.mjs), la copia tiene que venir con un FIXTURE + un TEST que falle al divergir, no con un comentario pidiendo mantenerlas iguales. El patron del proyecto ya existia (tools/canonical_brands.json + canonical_fixtures.json + test_canonical_rules_match_node_fixtures); F55 lo repitio para el split: tools/split_fixtures.json (generado con `node tools/audit_inventory.mjs --gen-split-fixtures`) + catalog::tests::test_split_model_models_match_node_fixtures.
-
 - `[HIGH]` Cuando una regla se COPIA a otro lenguaje porque ese lado no puede llamarla (node no puede llamar a Rust: el split de modelos de catalog::split_model_models espejado en tools/audit_inventory.mjs), la copia tiene que venir con un FIXTURE + un TEST que falle al divergir, no con un comentario pidiendo mantenerlas iguales. El patron del proyecto ya existia (tools/canonical_brands.json + canonical_fixtures.json + test_canonical_rules_match_node_fixtures); F55 lo repitio para el split: tools/split_fixtures.json (generado con `node tools/audit_inventory.mjs --gen-split-fixtures`) + catalog::tests::test_split_model_models_match_node_fixtures. (1)
-  - tools/audit_inventory.mjs (splitModelModels, copia a mano de la regla de Rust)
-  - src-tauri/src/catalog.rs:test_split_model_models_match_node_fixtures
-  - tools/split_fixtures.json
-  - tools/audit_inventory.mjs contaba 1267 telefonos (con split) vs 1135 del padron sin migracion aplicada: dos cifras sin saber cual manda
-
+- `[HIGH]` Cuando una regla se COPIA a otro lenguaje porque ese lado no puede llamarla (node no puede llamar a Rust: el split de modelos de catalog::split_model_models espejado en tools/audit_inventory.mjs), la copia tiene que venir con un FIXTURE + un TEST que falle al divergir, no con un comentario pidiendo mantenerlas iguales. El patron del proyecto ya existia (tools/canonical_brands.json + canonical_fixtures.json + test_canonical_rules_match_node_fixtures); F55 lo repitio para el split: tools/split_fixtures.json (generado con `node tools/audit_inventory.mjs --gen-split-fixtures`) + catalog::tests::test_split_model_models_match_node_fixtures. (1)
 - `[HIGH]` En las pruebas CDP, si el script asume que al hacer clic en el menú o en una pestaña la vista se vuelve a montar y vuelve a consultar, puede leer NÚMEROS VIEJOS que parecen un bug del producto y son del script: si la app ya estaba en esa pantalla/pestaña, el clic no cambia el estado de React, no hay remount y no hay consulta nueva. verify_models_tab.mjs reportaba «KPI Teléfonos» con el valor de la corrida anterior por esto. Arreglo: recargar la SPA al empezar (location.reload() + re-login con el PIN) y/o esperar una condición con waitFor en vez de dormir. (1)
-
 - `[HIGH]` En React los EFECTOS corren DESPUÉS del render: si un efecto decide algo a partir de un estado que se resetea en OTRO efecto del mismo commit, lee el valor VIEJO. Caso real: al abrir el diálogo de abono de otra orden, el efecto que elige la moneda del campo (F38) todavía veía el array de pagos de la orden anterior (el setPayments([]) del efecto de inicialización se aplica en el siguiente render) y pisaba la moneda correcta → una orden cobrada por Pago Móvil abría el campo en dólares y 5000 tecleados se guardaban como Bs. 3.743.950. Fix: validar la PERTENENCIA de los datos (payments[0].service_id === service.id) antes de usarlos, además de limpiarlos al cerrar. (1)
-
 - `[HIGH]` ESCONDER UNA COLUMNA NO CIERRA UNA FUGA: la pantalla ya ocultaba el precio de costo y el capital a costo para la sesión de caja, pero el número viajaba igual al frontend (get_products/get_inventory_stats) y se leía con un invoke directo desde la consola del WebView. El costo se borra EN EL ORIGEN para la sesión de caja (sin_costo_para_caja) y los agregados del dueño (utilidad, capital, export_data) quedan detrás de require_owner. La UI no es la seguridad, pero tampoco puede regalarse. (1)
-  - src-tauri/src/commands.rs (sin_costo_para_caja, get_profit_summary, get_inventory_value, export_data)
-  - tools/verify_arqueo_f69.mjs (catálogo sin costo para la caja, 956 productos)
-
 - `[HIGH]` La ventana de Tauri sirve el frontend EMBEBIDO en el binario: tras npm run build hay que recompilar (cargo build, que re-embebe dist/) y relanzar la app, si no la verificación en vivo prueba el frontend VIEJO. En F32 un script CDP falló («el talón no imprime ACORDADO») solo porque el binario tenía el bundle previo al cambio. (1)
-
 - `[HIGH]` LAS PRUEBAS EN VIVO TIENEN QUE CORRER SOBRE DOS FIXTURES DISTINTOS, y el fixture tiene que poder DIFERIR DEL RELOJ: correr verify_arqueo_f69.mjs sobre una copia con el turno abierto del MISMO día que hoy hizo que el contra-asiento fechado «hoy» coincidiera por casualidad; en la copia con el turno del 21 y el reloj en el 23 apareció el bug real (el gasto borrado seguía descontando el cajón del 21 para siempre y el 23 recibía un «+monto» inventado). Además, la verificación se mide contra una BASE RELATIVA (lo que la copia ya tenía ese día), no contra cero: una copia con historia hacía fallar aserciones correctas. (1)
-  - tools/verify_arqueo_f69.mjs (gastosBase)
-  - backup/f69_verif.db (turno 2026-09-23)
-  - backup/f69_cierre_verif.db (turno 2026-09-21)
-  - src-tauri/src/db.rs test_contra_asiento_va_al_dia_del_movimiento
-
 - `[HIGH]` Los artefactos EFÍMEROS de un modelo tienen que declarar a qué consulta corresponden. `useCompatibleProducts` dejaba la lista de candidatos del modelo ANTERIOR en memoria durante el rebote de 250 ms, y el precio se aplicaba con esa lista (el bug real: al cambiar de modelo se cobraba el precio del modelo que se acababa de dejar). Se arregló devolviendo `alDia` (¿los candidatos cargados son de ESTE texto?) y gateando con eso toda cuenta de plata. (1)
-  - src/components/ScreenPicker.tsx
-  - src/components/Services.tsx:1943-1975
-  - tools/verify_precio_pantalla.mjs
-
 - `[HIGH]` NUNCA redondear un monto antes de multiplicarlo por la tasa: el número que la pantalla muestra debe ser EXACTAMENTE el que se cobra. orderBalance calculaba bs = round(round2(saldo) * tasa) mientras el chip «Todo el saldo» usaba el saldo sin redondear → la pantalla decía Bs. 72.880,00 y el cobro era 72.879 (1 bolívar de diferencia en cada cobro, medido en vivo). Regla: el saldo se redondea SOLO para mostrarlo en su moneda; la equivalencia se calcula con el valor sin redondear, y se fija con una prueba de paridad contra la función que cobra (suggestAmount/saldoChipValue), no contra un número escrito a mano. (1)
-
 - `[HIGH]` Optimizar «a ojo» lleva a arreglar lo que no molesta: medir PRIMERO (test manual en RELEASE sobre una copia + un script CDP que mide lo que ve el operario, de la pestaña con datos) mostró que Productos ya costaba 2-5 ms y que el problema eran 4 cálculos derivados del catálogo repetidos en cada pestaña (índice de teléfonos 118 ms, totales 140 ms, KPIs 113 ms, compatibilidad parseada 240 ms). Medir en debug o mirar «cuántas consultas hace» habría llevado a optimizar lo barato. El bench queda como herramienta (test_manual_inventory_bench, tools/bench_inventory_ui.mjs) para no volver a discutir con impresiones. (1)
-
 - `[HIGH]` Prueba que CUENTA elementos en vez de verificar su TEXTO: la verificación en vivo de la cola/picker contaba «3 chips» con una regex laxa (/PUNTO Bs|PAGO MOVIL|EFECTIVO/) y por eso NO detectó que el chip del método más usado se pintaba «PUNTO Bs Bs.» (currencySymbol('VES') devuelve 'Bs. ' CON espacio final y el helper no lo recortaba). Lo cazó la revisión adversarial, no la prueba. (1)
-
 - `[HIGH]` Publicitar un atajo de teclado sin cerrar sus puertas: F31 mostró «Ctrl+Enter guarda» en el pie del wizard y el atajo llamaba a save() SIN los gates que sí tenía el botón (cédula obligatoria del cliente nuevo, día abierto, guardado en curso) → se podía guardar un cliente sin cédula (el dato que va impreso en el recibo) o con el día cerrado y sin mensaje. (1)
-
-- `[HIGH]` Puesta en marcha de las verificaciones EN VIVO (CDP) en este proyecto: el binario de dev sirve el `dist` EMBEBIDO (después de tocar el frontend hay que `npm run build` + `cargo build --no-default-features` + relanzar: recargar la página NO alcanza), y con la app INSTALADA abierta `tauri dev` no levanta el puerto 9222 porque las dos instancias comparten la carpeta de WebView2 → `WEBVIEW2_USER_DATA_FOLDER` a una carpeta FUERA del proyecto (adentro, el watcher de Vite muere con EBUSY sobre Cookies) + `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` + `REGISTRO_DB` a una copia.
-
 - `[HIGH]` Puesta en marcha de las verificaciones EN VIVO (CDP) en este proyecto: el binario de dev sirve el `dist` EMBEBIDO (después de tocar el frontend hay que `npm run build` + `cargo build --no-default-features` + relanzar: recargar la página NO alcanza), y con la app INSTALADA abierta `tauri dev` no levanta el puerto 9222 porque las dos instancias comparten la carpeta de WebView2 → `WEBVIEW2_USER_DATA_FOLDER` a una carpeta FUERA del proyecto (adentro, el watcher de Vite muere con EBUSY sobre Cookies) + `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` + `REGISTRO_DB` a una copia. (1)
-  - tools/copy_db.mjs
-  - tools/verify_precio_pantalla.mjs
-  - AGENTS.md
-
+- `[HIGH]` Puesta en marcha de las verificaciones EN VIVO (CDP) en este proyecto: el binario de dev sirve el `dist` EMBEBIDO (después de tocar el frontend hay que `npm run build` + `cargo build --no-default-features` + relanzar: recargar la página NO alcanza), y con la app INSTALADA abierta `tauri dev` no levanta el puerto 9222 porque las dos instancias comparten la carpeta de WebView2 → `WEBVIEW2_USER_DATA_FOLDER` a una carpeta FUERA del proyecto (adentro, el watcher de Vite muere con EBUSY sobre Cookies) + `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` + `REGISTRO_DB` a una copia. (1)
 - `[HIGH]` Trabajo concurrente en el mismo repo (dos sesiones de agente a la vez): antes de reescribir un archivo, mirar su LastWriteTime y si la app de dev está corriendo (Vite hace HMR y le reinicia el diálogo abierto a la sesión que está verificando en vivo). Lo que funcionó: (1) el guardado falla si el archivo cambió desde la última lectura — nunca pisar a ciegas; (2) cooperar por MÓDULOS COMPARTIDOS (lib/payment-math.ts) en vez de duplicar reglas; (3) dejar quietos los archivos calientes de la otra sesión y aportar piezas nuevas (cola F4) sin reescribir lo ajeno. (1)
-
 - `[HIGH]` Un fallo de la batería EN VIVO no es un fallo del producto hasta demostrarlo con una sonda dirigida al DOM real. En la verificación de entrega del 2026-09-21 aparecieron 4 fallos que parecían de inventario y los 4 eran la PRUEBA midiendo mal: (1) la barra lateral COLAPSADA (se recuerda en localStorage) deja los botones sin texto y toda navegación por `aside button` + innerText falla con «click target no encontrado»; (2) `typeText` de CDP manda las teclas al elemento ENFOCADO: si el clic cae mientras el diálogo de Radix se anima, el texto se pierde y la prueba falla 2-3 pasos después; (3) scripts viejos que buscan `role="option"` cuando el componente usa `data-model-option`, o que pulsan un toggle que YA viene encendido (y por lo tanto lo apagan); (4) preferencias persistidas a propósito en localStorage («Ver todos») que cambian el punto de partida de la prueba. Arreglo: helpers compartidos en tools/cdp_driver.mjs — `ensureSidebarExpanded()` (se ejecuta al importar) y `escribirEn()` (enfoca, escribe y COMPRUEBA el valor) — y que cada prueba declare su estado inicial y lo DEVUELVA como estaba. (1)
-  - tools/verify_uso_modelos.mjs (37/37 tras fijar y restaurar modelos_ver_todos)
-  - tools/verify_service_screen_stock.mjs (6/6: cliente obligatorio, data-model-option, Cambio pantalla ya activo)
-  - tools/verify_modelos_f53.mjs (fallaba por foco al avanzar el wizard)
-  - tools/cdp_driver.mjs: ensureSidebarExpanded() y escribirEn()
-  - sonda con el DOM real: [data-model-option]=60/3 y [role=option]=0
-
 - `[HIGH]` Un HUECO en los datos NUNCA se esconde: se muestra el número y se marca la duda. La primera versión de F39 ocultaba la diferencia de un cierre con el arqueo en 0 («sin arqueo») para no inventar un descuadre en datos migrados — y con eso tapaba un faltante REAL (cerrar el día con las dos casillas en 0, o abrir el diálogo cuando falla la lectura de totales, guarda un cierre que dice que el cajón está vacío). Lo correcto: mostrar SIEMPRE el cálculo y agregar una marca («sin contar») con el remedio en el title; y bloquear la acción que produce el dato malo (no cerrar el día sin haber leído los totales). (1)
-
 - `[HIGH]` Una sonda de test que COMPRUEBA un gate de permisos no puede mutar nada cuando el gate PASA: la primera versión de la verificación de F68 usaba `set_pin` como comando «del dueño» y, en la corrida donde la sesión era la del dueño, le cambió el PIN al Master — la corrida siguiente no podía entrar y el fallo parecía del producto. Las sondas tienen que ser inocuas en los dos sentidos (reopen_day con fecha inexistente, import_price_list vacío, add_user con rol inválido). (1)
-  - tools/verify_sesiones_caja.mjs
-  - src-tauri/src/db.rs test_sesiones_master_y_caja
-  - tools/progress/specs/F68-sesiones-de-caja.md
-
 - `[HIGH]` UX del wizard de recepción (F33): la guía va DENTRO del flujo, nunca flotando encima. Un aviso que aparece mientras el operario está cargando datos es indistinguible de un aviso que le tapa la pantalla y le roba el foco (el usuario lo reportó como «me siento muy invadido… no me deja ver lo que estoy registrando»). Reglas: (1) ningún aviso emergente durante la carga — los recordatorios de política solo en los 3 cierres de acción (guardar la recepción, imprimir, entregar); (2) UN dato por vez con su nombre técnico + guía corta + botón «Ir al campo»; (3) la ficha completa se CONSULTA («Ver ficha»), no se impone, y tocar un dato lleva a su paso SIN borrar el resto (el «corregir [campo]»); (4) el progreso se muestra como «X/16 datos» en una línea, no como barra que ocupe lugar; (5) al abrir un diálogo, fijar el foco explícitamente con onOpenAutoFocus (Radix enfoca el contenedor DESPUÉS del useEffect, así que el focus programático del componente se pierde). (1)
-
 - `[HIGH]` VACUUM INTO` SE NIEGA A ESCRIBIR SI EL DESTINO YA EXISTE (error «output file already exists»): hay que borrar el archivo antes de copiar, o dos operaciones en el mismo segundo (dos respaldos, o la copia de seguridad `antes_de_restaurar_<segundo>.db`) fallan. Lo cazó la verificación en vivo de F71, no los tests unitarios. (1)
-  - src-tauri/src/backups.rs (backup_now y request_restore: se borra el destino antes)
-  - tools/verify_respaldo.mjs (fallo real: «No se pudo copiar la base actual: output file already exists»)
-
-- `[HIGH]` Validar el alcance de una REUBICACIÓN contra el código real y cubrir los DOS modos: en F77b se movió el bloque del pago al paso del equipo y la doc + la prueba afirmaban «crear y editar», pero el método de pago de la edición seguía en «Finanzas», después del modelo (lo cazó la revisión adversarial con un subagente). Al mover un control de paso hay que (1) revisar los DOS formularios (alta y edición, que suelen renderizar campos por caminos distintos: DeviceFields vs JSX inline), (2) llevar los controles que DEPENDEN de otro (el tilde de la foto de salida depende del selector de ESTADO: si se separan, el tilde aparece cuando el estado todavía no se eligió) y (3) contar también los controles que el dueño NO nombró pero que el pedido implica (método + comisión + moneda + referencia viajan juntos).
-
 - `[HIGH]` Validar el alcance de una REUBICACIÓN contra el código real y cubrir los DOS modos: en F77b se movió el bloque del pago al paso del equipo y la doc + la prueba afirmaban «crear y editar», pero el método de pago de la edición seguía en «Finanzas», después del modelo (lo cazó la revisión adversarial con un subagente). Al mover un control de paso hay que (1) revisar los DOS formularios (alta y edición, que suelen renderizar campos por caminos distintos: DeviceFields vs JSX inline), (2) llevar los controles que DEPENDEN de otro (el tilde de la foto de salida depende del selector de ESTADO: si se separan, el tilde aparece cuando el estado todavía no se eligió) y (3) contar también los controles que el dueño NO nombró pero que el pedido implica (método + comisión + moneda + referencia viajan juntos). (1)
-  - src/components/Services.tsx: PaymentMethodPicker en el paso «Finanzas» de la edición tras mover el bloque del pago al paso del equipo
-  - src/components/Services.tsx: PhotoOutField extraído para no quedar desconectado del selector de estado
-  - tools/verify_imprimir_en_wizard.mjs: chequeos de posición (getBoundingClientRect().top) solo cubrían el alta
-  - Fix: Al reubicar un control: buscar TODAS sus apariciones (alta/edición/otros modos), mover también lo que depende de él, y agregar el chequeo en vivo del modo que faltaba (si no, la doc afirma algo que el código no hace).
-
-### MEDIUM
-
+- `[HIGH]` Validar el alcance de una REUBICACIÓN contra el código real y cubrir los DOS modos: en F77b se movió el bloque del pago al paso del equipo y la doc + la prueba afirmaban «crear y editar», pero el método de pago de la edición seguía en «Finanzas», después del modelo (lo cazó la revisión adversarial con un subagente). Al mover un control de paso hay que (1) revisar los DOS formularios (alta y edición, que suelen renderizar campos por caminos distintos: DeviceFields vs JSX inline), (2) llevar los controles que DEPENDEN de otro (el tilde de la foto de salida depende del selector de ESTADO: si se separan, el tilde aparece cuando el estado todavía no se eligió) y (3) contar también los controles que el dueño NO nombró pero que el pedido implica (método + comisión + moneda + referencia viajan juntos). (1)
 - `[MEDIUM]` Avisos flotantes con acciones (sonner) en este proyecto: la tarjeta va con pointer-events-none y solo sus botones con pointer-events-auto (si no, se come los clics que van a los botones del formulario/diálogo de abajo), y cada aviso se muestra con un id ESTABLE (policy-<clave>-<orden>) para que el mismo recordatorio pedido dos veces en el mismo gesto (entregar + imprimir) no se apile en dos tarjetas iguales. (1)
-
 - `[MEDIUM]` En las pruebas EN VIVO por CDP hay que ESPERAR LA CONDICIÓN, no el reloj. verify_servicio_cierre.mjs esperaba 1500 ms fijos tras abrir el asistente y fallaba 1 de cada 3 veces: la consulta de pantallas compatibles se encola detrás de las que dispara la lista de servicios (hasta 120 llamadas IPC de movimientos) y a veces tardaba más. Un helper waitFor(expr, timeout) que sondea el DOM (por ejemplo, hasta que aparezca la sección o la elección quede marcada) hizo la prueba determinista (17/17 tres veces seguidas). Corolario: una prueba que falla «a veces» no es un producto flojo, es una prueba mal escrita — y arreglarla es parte del trabajo. (1)
-
 - `[MEDIUM]` En las verificaciones CDP, un BOTÓN QUE ABRE UN DIÁLOGO NATIVO DEL SISTEMA (plugin-dialog: elegir carpeta) NO SE PUEDE MANEJAR por CDP: el script se queda esperando el campo de respaldo que nunca aparece. La verificación debe usar la carpeta POR DEFECTO (la que la pantalla ya muestra) y limitarse a comprobar que el botón existe; el camino manual (ruta escrita a mano) es el respaldo para cuando el plugin no está. (1)
-  - tools/verify_respaldo.mjs (primera corrida: «no apareció el campo» → 12/18; con la carpeta por defecto: 17/17)
-  - src/components/BackupsDialog.tsx (elegirCarpeta con @tauri-apps/plugin-dialog y fallback a ruta manual)
-
 - `[MEDIUM]` UN DIÁLOGO QUE DECIDE PLATA NO PUEDE ABRIRSE VACÍO: el diálogo de cierre del día se abría primero y se llenaba después, así que durante la carga mostraba el desglose del cajón en $0.00 (y el aviso rojo de «no se pudieron leer los totales»), o sea que el número que decide el arqueo aparecía mintiendo. Ahora se leen los datos en paralelo (totales + Pago Móvil + ajuste del cajón) y el diálogo se abre recién cuando están. Lo detectó la prueba en vivo midiendo el panel apenas aparecía. (1)
-  - src/components/DailyLedger.tsx (abrirCierreDe: Promise.all + cargandoCierre)
-  - tools/verify_arqueo_f69.mjs (espera «Fondo de caja $50.00» antes de medir)
-
-### LOW
-
 - `[LOW]` El gate «deploy readiness» de harness_close es una plantilla de proyecto web/Supabase (.env.example, supabase/migrations/*.sql, tests/e2e/*.spec.ts, RLS vía truth-result.json) y NO PUEDE pasar en este proyecto (Tauri 2 + SQLite offline: no hay .env, las migraciones viven en db.rs::init() y las verificaciones en vivo son tools/verify_*.mjs por CDP). Cerrar como done con ese FAIL es correcto cuando build/tests/truth/security y la revisión adversarial están verdes; los 66 features anteriores se cerraron igual. (1)
-  - tools/governance/feature-closer.ts:42-101
-  - harness_close F67 (deploy readiness: FAIL)
+
+---
