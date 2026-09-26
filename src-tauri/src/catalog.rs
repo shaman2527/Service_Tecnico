@@ -635,6 +635,12 @@ pub fn match_quality(target_model_norm: &str, phone_model: &str) -> Option<&'sta
     None
 }
 
+/// F78 — La compatibilidad de una ficha como LISTA de teléfonos (para el export CSV y la plantilla).
+/// Delega en `parse_compat` (misma implementación: acepta el JSON del catálogo y el texto con `/`).
+pub fn parse_compat_publica(raw: &str) -> Vec<String> {
+    parse_compat(raw)
+}
+
 fn parse_compat(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

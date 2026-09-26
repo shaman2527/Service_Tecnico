@@ -3389,6 +3389,27 @@ impl Database {
         crate::catalog::restore_prices(&conn, &content, only_zero, dry_run)
     }
 
+    // ── F78: CARGA MASIVA EN CSV ────────────────────────────────────────────────────────────────
+    // La lógica vive en `crate::csvload` (parser + cruce + aplicar, con sus pruebas); acá está el
+    // puente que necesita la MEMORIA del catálogo (`self.cache`): después de reconstruir el padrón de
+    // teléfonos hay que saber, con la MISMA fuente que la pestaña «Modelos», si un teléfono nuevo
+    // quedó «en uso». Pedir el índice acá (y no dentro del módulo) evita un segundo criterio.
+    pub fn apply_csv_load(&self, input: &crate::csvload::CsvApplyInput) -> Result<crate::csvload::CsvReport, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap();
+        crate::csvload::apply_csv(&conn, &self.db_path, &mut cache, input)
+    }
+
+    pub fn preview_csv_load(&self, text: &str) -> SqlResult<crate::csvload::CsvPreview> {
+        let conn = self.conn.lock().unwrap();
+        crate::csvload::preview_csv(&conn, text)
+    }
+
+    pub fn export_products_csv(&self, category_id: Option<i64>) -> SqlResult<String> {
+        let conn = self.conn.lock().unwrap();
+        crate::csvload::export_csv(&conn, category_id)
+    }
+
     pub fn add_product(&self, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                        variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
                        stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<i64> {
@@ -6017,7 +6038,7 @@ impl Database {
 
     /// Nombre de categoría validado (recortado, no vacío, tope 40) — el mismo criterio para crear
     /// y para renombrar, así lo que se puede escribir es exactamente lo que se puede corregir.
-    fn nombre_de_categoria(name: &str) -> SqlResult<String> {
+    pub(crate) fn nombre_de_categoria(name: &str) -> SqlResult<String> {
         let nombre = name.trim();
         if nombre.is_empty() {
             return Err(day_shift_error("El nombre de la categoría no puede estar vacío."));
@@ -6029,9 +6050,53 @@ impl Database {
     }
 
     /// Descripción opcional (vacía → NULL, nunca cadena vacía guardada).
-    fn descripcion_de_categoria(description: &str) -> Option<String> {
+    pub(crate) fn descripcion_de_categoria(description: &str) -> Option<String> {
         let d = description.trim();
         if d.is_empty() { None } else { Some(d.chars().take(200).collect()) }
+    }
+
+    /// F78 — La categoría que corresponde a un NOMBRE comparando plegado (minúsculas, sin acentos,
+    /// solo alfanumérico): `«bateria»` encuentra `«Batería»`. UNA sola implementación — la usan
+    /// `add_category` (para no crear gemelas) y la carga masiva CSV (para decidir si la categoría
+    /// de una fila ya existe o hay que crearla). Sin nombre (o solo signos) → `None`.
+    pub(crate) fn categoria_por_nombre(conn: &rusqlite::Connection, nombre: &str) -> SqlResult<Option<Category>> {
+        let clave = plegar_texto(nombre);
+        if clave.is_empty() { return Ok(None); }
+        let mut stmt = conn.prepare("SELECT id, name, description FROM categories")?;
+        let rows = stmt.query_map([], |r| Ok(Category {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            description: r.get(2)?,
+        }))?;
+        for row in rows {
+            let c = row?;
+            if plegar_texto(&c.name) == clave { return Ok(Some(c)); }
+        }
+        Ok(None)
+    }
+
+    /// F78 — Crea una categoría sobre CUALQUIER conexión (la usa `add_category` y la carga masiva
+    /// CSV, que necesita crear las categorías nuevas DENTRO de su transacción). Devuelve la que ya
+    /// existía con `created = false` (comparando plegado) en vez de crear una gemela.
+    pub(crate) fn crear_categoria_en(conn: &rusqlite::Connection, name: &str, description: &str) -> SqlResult<CategoryOutcome> {
+        let nombre = Self::nombre_de_categoria(name)?;
+        let desc = Self::descripcion_de_categoria(description);
+        if let Some(ya) = Self::categoria_por_nombre(conn, &nombre)? {
+            return Ok(CategoryOutcome { category: ya, created: false });
+        }
+        // EL ID SE ELIGE A MANO: `PHONE_CATEGORIES = [1, 18, 19]` es el padrón de teléfonos **por ID**
+        // — lo filtran `phones.rs`, `loadlist.rs` y `catalog.rs`. `AUTOINCREMENT` reparte los ids de a
+        // uno, así que sin esta reserva la 12.ª y la 13.ª categoría caían JUSTO en 18 y 19 y sus fichas
+        // entraban al padrón de Modelos (y el barrido del conteo les ponía el stock en 0).
+        let mut id_nuevo: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM categories", [], |r| r.get(0))?;
+        while crate::catalog::PHONE_CATEGORIES.contains(&id_nuevo) {
+            id_nuevo += 1;
+        }
+        conn.execute(
+            "INSERT INTO categories (id, name, description) VALUES (?1, ?2, ?3)",
+            params![id_nuevo, nombre, desc],
+        )?;
+        Ok(CategoryOutcome { category: Category { id: id_nuevo, name: nombre, description: desc }, created: true })
     }
 
     /// F65 — Las categorías del catálogo con su uso real (fichas, unidades y si son del padrón).
@@ -6067,44 +6132,11 @@ impl Database {
     /// `created = false`, para que la UI la deje elegida y avise en vez de partir el catálogo en dos.
     /// No exige día abierto: es una preferencia del local, no plata (igual que las categorías de trabajo).
     pub fn add_category(&self, name: &str, description: &str) -> SqlResult<CategoryOutcome> {
-        let nombre = Self::nombre_de_categoria(name)?;
-        let desc = Self::descripcion_de_categoria(description);
         let conn = self.conn.lock().unwrap();
-        let clave = plegar_texto(&nombre);
-        let existentes: Vec<(i64, String, Option<String>)> = {
-            let mut stmt = conn.prepare("SELECT id, name, description FROM categories")?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-            let mut v = Vec::new();
-            for row in rows { v.push(row?); }
-            v
-        };
-        if let Some((id, ya, ya_desc)) = existentes.iter().find(|(_, n, _)| plegar_texto(n) == clave) {
-            return Ok(CategoryOutcome {
-                category: Category { id: *id, name: ya.clone(), description: ya_desc.clone() },
-                created: false,
-            });
-        }
-        // EL ID SE ELIGE A MANO (2ª vuelta adversarial): `PHONE_CATEGORIES = [1, 18, 19]` es el padrón
-        // de teléfonos **por ID** — lo filtran `phones.rs`, `loadlist.rs` y `catalog.rs`, y el barrido
-        // «la lista es todo» pone en 0 el stock de esas categorías. `AUTOINCREMENT` reparte los ids de
-        // a uno, así que en una base creada por `init()` (6 categorías del arranque, sin Táctil ni
-        // Táctil Tablet) la **12.ª y la 13.ª** categoría que creaba el dueño caían JUSTO en 18 y 19: sus
-        // fichas entraban al padrón de Modelos, el barrido les ponía el stock en 0 y la categoría
-        // quedaba fija (sin poder renombrar ni borrar) sin que nadie lo hubiera pedido. Reservar esos
-        // ids es más barato —y más seguro— que cambiar el padrón.
-        //
-        // Se toma `MAX(id) + 1` (y no el `last_insert_rowid`): un id que se libere al borrar la última
-        // categoría puede volver a usarse, y eso es inocuo porque una categoría SOLO se puede borrar
-        // cuando ningún producto la usa (nada queda apuntando a ese id).
-        let mut id_nuevo: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM categories", [], |r| r.get(0))?;
-        while crate::catalog::PHONE_CATEGORIES.contains(&id_nuevo) {
-            id_nuevo += 1;
-        }
-        conn.execute(
-            "INSERT INTO categories (id, name, description) VALUES (?1, ?2, ?3)",
-            params![id_nuevo, nombre, desc],
-        )?;
-        Ok(CategoryOutcome { category: Category { id: id_nuevo, name: nombre, description: desc }, created: true })
+        // F78: las reglas (nombre validado, sin gemelas plegadas, ids del padrón reservados) viven en
+        // `crear_categoria_en`, que también usa la carga masiva CSV dentro de su transacción: UNA sola
+        // implementación, así crear una categoría a mano y crearla desde el archivo dan lo mismo.
+        Self::crear_categoria_en(&conn, name, description)
     }
 
     /// F65 — Renombra una categoría (y actualiza su descripción). NO toca ningún producto: el

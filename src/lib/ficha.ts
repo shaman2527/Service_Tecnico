@@ -231,7 +231,10 @@ export function buildFicha(i: FichaInput): Ficha {
       i.amount > 0 ? `$${i.amount.toFixed(2)}` : null, false, 1, amountWarn(i.amount, montoOk)),
     field('pay_intent', 'Pago acordado con el cliente', 'Preguntale si paga ahora o al retirar el equipo.',
       i.payIntent === 'ahora' ? 'Paga ahora' : i.payIntent === 'al_retirar' ? 'Paga al retirar' : null,
-      false, 3),
+      // F77b: la pregunta del pago se hace en el paso del EQUIPO (1), antes de cargar el modelo — con
+      // el cliente enfrente y al lado del método de pago, el monto y el repuesto. Antes vivía en el
+      // último paso (3), o sea después de cargar todo el equipo.
+      false, 1),
     field('status', 'Estado de ingreso', crear ? 'Normalmente «Recibido».' : 'Estado actual del equipo.',
       i.status.trim() || null, false, 3),
     field('technician', 'Técnico responsable', 'Quién lo va a reparar (se puede asignar después).',

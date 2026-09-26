@@ -446,16 +446,24 @@ let ventaPrueba = null;
   check('la venta de prueba se guarda (el formulario se cierra)', cerro);
 
   // --- comprobar que aparece en la lista del día (filtro «Hoy») ---
-  // El producto de la venta se lee del BACKEND (la última venta del día): no depende de que la
-  // sugerencia haya quedado escrita igual en el campo.
+  // El producto de la venta se lee del BACKEND: no depende de que la sugerencia haya quedado escrita
+  // igual en el campo. OJO (2026-09-26): hay que buscar LA VENTA DE ESTA PRUEBA (mismo producto y
+  // mismo cliente), no «la última venta de hoy»: una copia sembrada puede tener una venta de HOY con
+  // hora posterior (el seed la crea a las 11:30) y la prueba terminaba comparando la fila equivocada
+  // —el método de OTRA venta— aunque la venta de la prueba hubiera quedado perfecta.
   const ventasHoy = await invoke('get_sales', { search: '', days: null, startDate: HOY, endDate: HOY });
-  const ultimaVenta = (ventasHoy ?? [])[0] ?? null;
+  const esMia = (v) => String(v?.product_name ?? '').includes((prod?.name ?? '').replace(/^Pantalla\s+/i, ''))
+    && (!clienteUsado || String(v?.client_name ?? '') === String(clienteUsado));
+  const ventaPropia = (ventasHoy ?? []).find(esMia) ?? (ventasHoy ?? [])[0] ?? null;
   await clickCenter(`document.querySelector('input[placeholder="Buscar producto, cliente o cédula..."]')`);
-  await setValue('input[placeholder="Buscar producto, cliente o cédula..."]', ultimaVenta ? ultimaVenta.product_name : (prod ? prod.name : ''));
+  await setValue('input[placeholder="Buscar producto, cliente o cédula..."]', ventaPropia ? ventaPropia.product_name : (prod ? prod.name : ''));
   await sleep(1500);
   const filaVenta = await evalx(`(() => {
     const rows = [...document.querySelectorAll('main table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
-    const r = rows.find(c => c[2] && c[2].includes(${JSON.stringify((ultimaVenta?.product_name || prod?.name || '').replace(/^Pantalla\s+/i, ''))}));
+    const texto = ${JSON.stringify((ventaPropia?.product_name || prod?.name || '').replace(/^Pantalla\s+/i, ''))};
+    const cliente = ${JSON.stringify(String(clienteUsado ?? ''))};
+    const candidatas = rows.filter(c => c[2] && c[2].includes(texto));
+    const r = (cliente ? candidatas.find(c => (c[7] || '').includes(cliente.split(' ')[0])) : null) ?? candidatas[0];
     return r ? JSON.stringify({ id: r[0], fecha: r[1], producto: r[2], cant: r[3], total: r[5], pago: r[6], cliente: r[7] }) : null;
   })()`);
   ventaPrueba = filaVenta ? JSON.parse(filaVenta) : null;
@@ -671,6 +679,16 @@ const clickCardButton = async (orderNum, label) => {
       revisarTxt.includes(elegido.label) && /\$10\.00|\b10\b/.test(revisarTxt),
       revisarTxt.replace(/\n+/g, ' | ').slice(0, 200));
 
+    // F77: el último paso trae el check «Imprimir la orden ahora» PREMARCADO (y entonces el botón dice
+    // «Guardar e imprimir»). El smoke recorre TODA la app, así que se destilda para que no se abra el
+    // comprobante encima y el recorrido siga igual que antes (destildar es una forma legítima de usar
+    // la pantalla: la orden se guarda igual y se imprime después desde la tarjeta).
+    await evalx(`(() => {
+      const c = document.querySelector('[data-field="imprimir-al-guardar"]');
+      if (c && c.checked) c.click();
+      return c ? c.checked : null;
+    })()`);
+    await sleep(500);
     await clickDialog('Guardar Servicio');
     const guardada = await waitFor(`!document.body.innerText.includes('Nuevo Servicio Técnico')`, 12000);
     const svcNuevo = (await serviciosRaw()).filter(s => s.order_num === nextNum);
@@ -816,10 +834,18 @@ const clickCardButton = async (orderNum, label) => {
     (tablaMov?.headers || []).join(' | '));
   const mov = await invoke('get_inventory_movements_page', { productId: null, movementType: null, reason: null, fromDate: null, toDate: null, limit: 50, offset: 0 });
   const itemsMov = mov?.items ?? [];
-  const refsMov = itemsMov.filter(m => /^DEV-\d+/i.test(String(m.reference ?? '')));
-  check('las filas de movimientos traen referencia de ORDEN (DEV-XXXX)',
-    tablaMov && tablaMov.rows.length > 0 && refsMov.length > 0 && tablaMov.rows.some(r => /DEV-\d+/i.test(r[5] || '')),
-    `${tablaMov?.rows.length} filas en pantalla · ${refsMov.length}/${itemsMov.length} con referencia de orden (ej: ${refsMov.slice(0, 3).map(m => m.reference).join(', ')})`);
+  // OJO (2026-09-26): esta prueba pedía ver una referencia de ORDEN (DEV-XXXX) en pantalla, y eso
+  // depende de que la COPIA tenga movimientos de servicios (una copia recién sembrada arranca sin
+  // movimientos: `seed_dev_db` borra los datos de negocio). Lo que la prueba TIENE que garantizar en
+  // cualquier copia es que la columna «Referencia» esté CABLEADA a los datos: se compara la primera
+  // fila visible con el movimiento más nuevo del backend.
+  const primeraFila = tablaMov?.rows?.[0] ?? null;
+  const primerMov = itemsMov[0] ?? null;
+  const refPantalla = String(primeraFila?.[5] ?? '').trim();
+  const refBackend = String(primerMov?.reference ?? '').trim();
+  check('la columna «Referencia» de Movimientos muestra el dato del backend (no está vacía ni desconectada)',
+    tablaMov && tablaMov.rows.length > 0 && !!primerMov && refPantalla !== '' && refPantalla === refBackend,
+    `${tablaMov?.rows.length} filas · pantalla=«${refPantalla}» · backend=«${refBackend}» · ${itemsMov.length} movimientos`);
   check('el total del pie coincide con los movimientos del backend',
     (tablaMov?.footer || '').includes(String(mov?.total ?? -1)),
     `pie: ${tablaMov?.footer} · backend: ${mov?.total}`);

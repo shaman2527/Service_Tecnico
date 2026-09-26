@@ -231,17 +231,12 @@ export function savePatternLearning(newPattern: Omit<LearningPattern, "firstSeen
     }
   }
 
-  lines.push("### Conventions");
-  lines.push("");
-  const convs = existing.filter(p => p.kind === "convention");
-  if (convs.length === 0) {
-    lines.push("*(ninguno por ahora)*");
-  } else {
-    for (const c of convs) {
-      lines.push(`- \`[${c.severity.toUpperCase()}]\` ${c.description}`);
-    }
-  }
-
+  // OJO (bug real, medido 2026-09-24): acá había un SEGUNDO bloque «### Conventions» que volvía a
+  // escribir TODAS las convenciones después de las secciones de arriba. Como `parsePatternsFromMd`
+  // re-lee este mismo archivo en la próxima corrida, cada llamada DUPLICABA cada convención (y con
+  // ella, por el mismo motivo, todo el archivo): `progress/patterns.md` llegó a **49,7 MB / 86.000
+  // líneas** con un puñado de aprendizajes únicos (y antes a 310 MB). Las convenciones ya se escriben
+  // en la sección «Conventions» del bucle de arriba: no hay que repetirlas.
   fs.writeFileSync(PATTERNS_PATH, lines.join("\n"), "utf-8");
 }
 

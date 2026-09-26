@@ -328,11 +328,23 @@ try {
   const enRevisar = /Paso 4 de 4/.test(String(await dialogTxt()));
   check('el wizard llega al paso «Revisar» sin haber elegido técnico', enRevisar,
     (String(await dialogTxt()).match(/Paso \d+ de \d+[^\n]*/) || [''])[0]);
+  // F77: el último paso trae el check «Imprimir la orden ahora» PREMARCADO y el botón pasa a
+  // «Guardar e imprimir» (al guardar se abre el comprobante). Esta prueba es del TÉCNICO y de la ficha:
+  // se destilda para no abrir el comprobante encima —que es una forma legítima de usar la pantalla— y
+  // así el resto del flujo (el modal de política, la señal en la tarjeta) queda igual que siempre.
+  await evalx(`(() => {
+    const c = document.querySelector('[data-field="imprimir-al-guardar"]');
+    if (c && c.checked) c.click();
+    return c ? c.checked : null;
+  })()`);
+  await sleep(500);
   const guardarOk = await evalx(`(() => {
-    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Guardar Servicio/.test((x.innerText || '').trim()));
+    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Guardar (Servicio|e imprimir)/.test((x.innerText || '').trim()));
     return b ? !b.disabled : null;
   })()`);
   check('F45: «Guardar Servicio» está HABILITADO sin técnico (no bloquea el registro)', guardarOk === true, `habilitado=${guardarOk}`);
+  check('F77: destildado el check de imprimir, el botón vuelve a «Guardar Servicio»',
+    (await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(x => /^Guardar Servicio/.test((x.innerText || '').trim()))`)) === true);
   // F48: la observación del teléfono es solo eso — una observación. Con el teléfono VACÍO el guardado
   // sigue disponible (lo que bloquea es el color, que ya se eligió).
   check('F48: la observación del teléfono NO bloquea el guardado (se puede registrar igual)', guardarOk === true);
@@ -346,7 +358,7 @@ try {
   if (await evalx(`/Nuevo Servicio Técnico/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`)) {
     // El pie del diálogo también puede quedar tapado por el scroll: mismo fallback que los chips.
     await evalx(`(() => {
-      const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Guardar Servicio/.test((x.innerText || '').trim()));
+      const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Guardar (Servicio|e imprimir)/.test((x.innerText || '').trim()));
       if (b) b.click();
       return !!b;
     })()`);

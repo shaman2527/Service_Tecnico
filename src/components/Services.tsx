@@ -1446,6 +1446,8 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
           canManageTecnicos={ab.manageCatalog}
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSaved={() => { setShowForm(false); setEditing(null); refrescar(); }}
+          /* F77: el comprobante se abre por la MISMA vía que la tarjeta y el asistente de cierre. */
+          onPrint={s => setPrintFor(s)}
         />
       )}
 
@@ -2049,6 +2051,56 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
         </Button>
       </div>
 
+      {/* F77b — EL MÉTODO DE PAGO VA PRIMERO (pedido del dueño, 2026-09-25): «el método de pago, el
+          mensaje debería preguntarlo antes, en el paso 2 «Equipo», antes de colocar el modelo de
+          teléfono, así le avisa para colocar el monto o un producto en ese momento». Con el cliente
+          enfrente, primero se acuerda CÓMO paga y recién después se cargan modelo, monto y repuesto. */}
+      <div className="grid grid-cols-2 gap-4" data-device-pay={index}>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Método de Pago</label>
+          {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
+          <PaymentMethodPicker
+            methods={methods}
+            value={device.payment}
+            size="sm"
+            onChange={v => {
+              const patch: Partial<FormDevice> = { payment: v };
+              if (v.includes('Punto')) patch.bankFeePercent = DEFAULT_PUNTO_FEE;
+              onChange(patch);
+            }}
+          />
+        </div>
+        {isPos && (
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Comisión Punto (%)</label>
+            <Input type="number" step={0.1} min={0} max={100} value={device.bankFeePercent}
+              onChange={e => onChange({ bankFeePercent: Number(e.target.value) })} />
+            <p className="text-xs text-muted-foreground">
+              Comisión: ${((deviceNet * device.bankFeePercent) / 100).toFixed(2)} · Neto: ${(deviceNet - (deviceNet * device.bankFeePercent) / 100).toFixed(2)}
+            </p>
+          </div>
+        )}
+        {!isPos && (
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Moneda</label>
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
+              <span className="font-semibold">{currencySymbol(methodCurrency(device.payment))}</span>
+              <span className="text-muted-foreground text-xs">
+                {methodCurrency(device.payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {(isZelle || isPagoMovil) && (
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Referencia</label>
+          <Input value={device.zelleReference} onChange={e => onChange({ zelleReference: e.target.value })}
+            placeholder="Número de referencia (últimos 4 dígitos)..." />
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-2">
           <label className="text-sm font-medium">Modelo *</label>
@@ -2228,52 +2280,6 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           )}
         </div>
       )}
-
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <label className="text-sm font-medium">Método de Pago</label>
-          {/* F31: los 3 métodos que más se usan a un toque; el resto en «Otros métodos…» */}
-          <PaymentMethodPicker
-            methods={methods}
-            value={device.payment}
-            size="sm"
-            onChange={v => {
-              const patch: Partial<FormDevice> = { payment: v };
-              if (v.includes('Punto')) patch.bankFeePercent = DEFAULT_PUNTO_FEE;
-              onChange(patch);
-            }}
-          />
-        </div>
-        {isPos && (
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Comisión Punto (%)</label>
-            <Input type="number" step={0.1} min={0} max={100} value={device.bankFeePercent}
-              onChange={e => onChange({ bankFeePercent: Number(e.target.value) })} />
-            <p className="text-xs text-muted-foreground">
-              Comisión: ${((deviceNet * device.bankFeePercent) / 100).toFixed(2)} · Neto: ${(deviceNet - (deviceNet * device.bankFeePercent) / 100).toFixed(2)}
-            </p>
-          </div>
-        )}
-        {!isPos && (
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Moneda</label>
-            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
-              <span className="font-semibold">{currencySymbol(methodCurrency(device.payment))}</span>
-              <span className="text-muted-foreground text-xs">
-                {methodCurrency(device.payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {(isZelle || isPagoMovil) && (
-        <div className="space-y-2">
-          <label className="text-sm font-medium">Referencia</label>
-          <Input value={device.zelleReference} onChange={e => onChange({ zelleReference: e.target.value })}
-            placeholder="Número de referencia (últimos 4 dígitos)..." />
-        </div>
-      )}
     </div>
   );
 }
@@ -2360,34 +2366,101 @@ function PolicyFields({ payIntent, onPayIntent, photoOut, onPhotoOut, showPhotoO
           <ToggleGroupItem value="al_retirar" className="h-7 px-2.5 text-xs">Paga al retirar</ToggleGroupItem>
         </ToggleGroup>
       </div>
+      {/* F77b: la frase «con qué método paga se elige arriba» se fue — con la pregunta del pago al
+          principio del paso del equipo, el método puede estar DEBAJO (alta: dentro de la tarjeta del
+          equipo) o en otro paso (edición: Finanzas). Decir «arriba» era mentirle al operario. */}
       <p className="text-[11px] text-muted-foreground">
         Pregúntale al cliente y elegí una opción: queda visible en la orden y en la lista, así el saldo no
-        aparece «de la nada» cuando venga a retirar el equipo. Con qué método paga se elige arriba.
+        aparece «de la nada» cuando venga a retirar el equipo. El método con el que paga se elige en el
+        equipo (en la misma tarjeta, debajo de esta pregunta).
       </p>
-      {showPhotoOut && (
-        <label className="flex cursor-pointer items-start gap-2 rounded-md border border-success/30 bg-success/5 px-3 py-2">
-          <input type="checkbox" className="mt-0.5 size-4" checked={photoOut} data-policy="photo_out"
-            onChange={e => onPhotoOut(e.target.checked)} />
-          <span className="min-w-0">
-            <span className="flex items-center gap-1.5 text-sm font-medium">
-              <Camera className="size-3.5 text-success" /> Ya le tomé la foto de SALIDA al equipo
-            </span>
-            <span className="block text-[11px] text-muted-foreground">
-              Política de la empresa: se le toma foto al teléfono cuando se entrega{equipos > 1 ? ` (los ${equipos} equipos de la orden)` : ''}.
-            </span>
-          </span>
-        </label>
-      )}
+      {/* F77b: la foto de SALIDA se saca de acá y vive en su propio control para poder ponerla donde
+          se elige el ESTADO (paso Finanzas, edición) y no quedar desconectada del control que la
+          revela. En el alta nunca se ofrece (el equipo recién entra: entregar es un acto aparte). */}
+      {showPhotoOut && <PhotoOutField photoOut={photoOut} onPhotoOut={onPhotoOut} equipos={equipos} />}
     </div>
   );
 }
 
-function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true }: {
+/**
+ * F77b — «Ya le tomé la foto de SALIDA al equipo», en su propio control para poder ubicarlo DONDE
+ * CORRESPONDE: en EDICIÓN tiene que estar al lado del selector de ESTADO (paso «Finanzas»), que es el
+ * que decide si el equipo ya salió; antes vivía pegado al bloque del pago y, al mover ese bloque al
+ * principio del paso del equipo, el tilde quedaba apareciendo en una pantalla donde el operario todavía
+ * no había elegido el estado (hallazgo MAYOR de la revisión adversarial de F77).
+ */
+function PhotoOutField({ photoOut, onPhotoOut, equipos }: {
+  photoOut: boolean;
+  onPhotoOut: (v: boolean) => void;
+  equipos: number;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2 rounded-md border border-success/30 bg-success/5 px-3 py-2">
+      <input type="checkbox" className="mt-0.5 size-4" checked={photoOut} data-policy="photo_out"
+        onChange={e => onPhotoOut(e.target.checked)} />
+      <span className="min-w-0">
+        <span className="flex items-center gap-1.5 text-sm font-medium">
+          <Camera className="size-3.5 text-success" /> Ya le tomé la foto de SALIDA al equipo
+        </span>
+        <span className="block text-[11px] text-muted-foreground">
+          Política de la empresa: se le toma foto al teléfono cuando se entrega{equipos > 1 ? ` (los ${equipos} equipos de la orden)` : ''}.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+/**
+ * F77 — EL CHECK QUE CIERRA EL REGISTRO (pedido del dueño: «al final salga para imprimir… con un check
+ * predeterminado que pregunte si va a imprimir o después; la ayuda es aprovechar el mismo proceso de
+ * wizard para cerrar el registro completo»).
+ *
+ * Vive en el ÚLTIMO paso del wizard (en crear «Revisar y guardar», en editar «Cierre de la orden»),
+ * arranca MARCADO y lo único que hace es decidir si al guardar se abre el comprobante. No es un gate:
+ * destildado, la orden se guarda igual (y por eso el pie del paso no dice «Falta:» nunca por esto).
+ */
+function PrintOnSaveField({ value, onChange, equipos }: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+  equipos: number;
+}) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2" data-print-block="guardar">
+      <label className="flex cursor-pointer items-start gap-2">
+        <input type="checkbox" className="mt-0.5 size-4" checked={value}
+          onChange={e => onChange(e.target.checked)} data-field="imprimir-al-guardar" />
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5 text-sm font-medium">
+            <Printer className="size-3.5 text-primary" /> Imprimir la orden ahora
+          </span>
+          <span className="block text-[11px] text-muted-foreground">
+            Al guardar se abre el comprobante de esta orden (el papel sale con su botón «Imprimir»). Si lo
+            destildás, la orden se guarda igual y la imprimís después con el botón «Orden» de la tarjeta.
+          </span>
+          {equipos > 1 && (
+            <span className="mt-0.5 block text-[11px] text-amber-700">
+              Con {equipos} equipos se abre el comprobante del equipo 1; los demás se imprimen desde su tarjeta.
+            </span>
+          )}
+        </span>
+      </label>
+    </div>
+  );
+}
+
+function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true }: {
   service: Service | null;
   statuses: ServiceStatus[];
   dayOpen: boolean | null;
   onClose: () => void;
   onSaved: () => void;
+  /**
+   * F77: abrir el comprobante de la orden (vista previa + imprimir). Se usa para CERRAR EL REGISTRO
+   * dentro del propio wizard: al guardar, si el check «Imprimir la orden ahora» está marcado, se abre
+   * el comprobante de la orden recién guardada. Es la MISMA vía que usan la tarjeta, el panel de
+   * entregados y el asistente de cierre (`setPrintFor`), no una segunda forma de imprimir.
+   */
+  onPrint?: (s: Service) => void;
   /** F62: categorías de trabajo que agregó el local (van después de las canónicas) */
   tiposExtra?: string[];
   /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
@@ -2428,6 +2501,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
   const [photoOutDone, setPhotoOutDone] = useState(false);
   const [payIntentSel, setPayIntentSel] = useState<'sin' | 'ahora' | 'al_retirar'>('sin');
   const [observations, setObservations] = useState('');
+  // F77 — IMPRIMIR AL CERRAR EL REGISTRO (pedido del dueño: «al final salga para imprimir con un
+  // check predeterminado que pregunte si va a imprimir o después; la idea es aprovechar el mismo
+  // proceso del wizard para cerrar el registro completo»). Arranca MARCADO y vive en el último paso:
+  // al guardar se abre el COMPROBANTE de la orden que se acaba de crear. El comprobante es una vista
+  // previa (el papel sale con su botón «Imprimir»), así que marcarlo de fábrica no gasta papel.
+  const [imprimirAhora, setImprimirAhora] = useState(true);
   const [checklist, setChecklist] = useState<Record<string, string>>(service ? {} : checklistDefaults());
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [saving, setSaving] = useState(false);
@@ -2705,6 +2784,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
     if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
     setAvisoGuardar(null);
     setSaving(true);
+    // F77: la orden que se va a imprimir al terminar (null = no se imprime nada). Se resuelve en cada
+    // rama con la fila REALMENTE guardada, no con los datos del formulario.
+    let paraImprimir: Service | null = null;
     try {
       let cid = clientId;
       if (client && !cid) {
@@ -2728,6 +2810,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
         // F32: las señales de política que se marcaron en el formulario (si no cambió nada, no
         // se escribe nada) — nunca tumban el guardado.
         await anotarPoliticaSinRomper([service.id]);
+        // F77: se relee la orden guardada para el comprobante (así se imprime lo que quedó en la base,
+        // con el mismo número de orden y los datos ya normalizados).
+        paraImprimir = await api.getService(service.id).catch(() => null);
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
@@ -2767,6 +2852,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
         const filas = nuevas.filter(r => r.order_num === base || (r.order_num ?? '').startsWith(`${base}-`));
         const ids = filas.map(r => r.id);
         await anotarPoliticaSinRomper(ids);
+        // F77: el comprobante que se abre al terminar es el de la orden BASE (equipo 1). Con varios
+        // equipos no se abren N comprobantes: los demás se imprimen desde su tarjeta (y el bloque del
+        // último paso lo dice). Si la relectura no trajo la fila base (la consulta falló), NO se imprime
+        // nada: abrir el comprobante de una variante vieja `base-…` sería imprimir otra orden. La orden
+        // ya quedó guardada y se imprime desde su tarjeta.
+        paraImprimir = filas.find(r => r.order_num === base) ?? null;
         // Recordatorios de política de la RECEPCIÓN: foto de ENTRADA + preguntar el pago.
         // Se muestran una sola vez y solo por lo que quedó pendiente (si el operario ya lo
         // marcó en el formulario, no aparece). Nunca bloquean.
@@ -2785,6 +2876,14 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
         );
       }
       onSaved();
+      // F77 — CERRAR EL REGISTRO CON LA IMPRESIÓN: se abre el COMPROBANTE de la orden recién guardada
+      // por la MISMA vía que usa la tarjeta (`onPrint` → `setPrintFor`). Va DESPUÉS de `onSaved()`:
+      // así el wizard ya se cerró y el aviso de política que quedó encolado se puede dibujar (F54: el
+      // modal nunca se dibuja sobre un diálogo abierto). Si el operario destildó el check, o si no hay
+      // fila que imprimir, no se abre nada y la orden igual quedó guardada.
+      if (imprimirAhora && onPrint && paraImprimir) {
+        try { onPrint(paraImprimir); } catch { /* el comprobante es un extra: la orden ya está guardada */ }
+      }
     } finally {
       setSaving(false);
     }
@@ -3238,6 +3337,64 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
           {wizStep === 1 && (service ? (
             <>
           <SectionTitle step={2} title="Equipo y diagnóstico" />
+          {/* F77b: la pregunta del pago se hace ACÁ, al principio del paso del equipo — igual que en
+              el alta, con el cliente enfrente. La foto de SALIDA NO va acá: depende del ESTADO, que se
+              elige en «Finanzas», así que vive en ese paso (donde el operario pone «Entregado»). */}
+          <PolicyFields
+            payIntent={payIntentSel}
+            onPayIntent={setPayIntentSel}
+            photoOut={photoOutDone}
+            onPhotoOut={setPhotoOutDone}
+            showPhotoOut={false}
+            equipos={1}
+          />
+
+          {/* F77b: el MÉTODO DE PAGO, también ANTES del modelo (el pedido del dueño vale para el alta
+              y para la edición: las dos pasan por este paso). Antes vivía en «Finanzas», después del
+              modelo. Con Punto se autocompleta la comisión y la moneda/referencia salen del método. */}
+          <div className="grid grid-cols-2 gap-4" data-device-pay="edit">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Método de Pago</label>
+              {/* F31: acceso directo a los más usados; el resto en «Otros métodos…» */}
+              <PaymentMethodPicker
+                methods={methods}
+                value={payment}
+                size="sm"
+                onChange={v => {
+                  setPayment(v);
+                  if (v.includes('Punto')) setBankFeePercent(DEFAULT_PUNTO_FEE);
+                }}
+              />
+            </div>
+            {isPos ? (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Comisión Punto (%)</label>
+                <Input type="number" step={0.1} min={0} max={100} value={bankFeePercent}
+                  onChange={e => setBankFeePercent(Number(e.target.value))} />
+                <p className="text-xs text-muted-foreground">
+                  Comisión: ${((amount * bankFeePercent) / 100).toFixed(2)} · Neto: ${(amount - (amount * bankFeePercent) / 100).toFixed(2)}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Moneda</label>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
+                  <span className="font-semibold">{currencySymbol(methodCurrency(payment))}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {methodCurrency(payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {(isZelle || isPagoMovil) && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Referencia</label>
+              <Input value={zelleReference} onChange={e => setZelleReference(e.target.value)}
+                placeholder="Número de referencia (últimos 4 dígitos)..." data-field="referencia-edit" />
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Modelo *</label>
@@ -3362,6 +3519,24 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
           ) : (
             <>
               <SectionTitle step={2} title={`Equipos (${devices.length})`} />
+              {/* F77b — LA PREGUNTA DEL PAGO SE HACE ACÁ (pedido del dueño, 2026-09-25): «el mensaje
+                  debería preguntarlo antes, en el paso 2 «Equipo», antes de colocar el modelo de
+                  teléfono, así le avisa para colocar el monto o un producto en ese momento». Es el
+                  MISMO control de siempre (mismo estado, una sola fuente) movido al principio del
+                  paso: el operario pregunta con el cliente enfrente y recién después carga el equipo. */}
+              <PolicyFields
+                payIntent={payIntentSel}
+                onPayIntent={setPayIntentSel}
+                photoOut={photoOutDone}
+                onPhotoOut={setPhotoOutDone}
+                showPhotoOut={false}
+                equipos={devices.length}
+              />
+              <p className="rounded-md bg-amber-500/10 px-3 py-2 text-[11px] text-amber-800" data-pay-early-hint>
+                Aprovechá que el cliente está enfrente: al lado de cada equipo está el <strong>método de pago</strong>,
+                y abajo el <strong>monto</strong> y —si lleva repuesto— el <strong>producto (la pantalla)</strong> que se
+                le va a instalar. Todo eso se carga ahora, en este mismo paso.
+              </p>
               <div className="space-y-3">
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)} iva={iva} tasa={tasaIva}
@@ -3419,73 +3594,33 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
           {wizStep === 3 && (service ? (
             <>
               <SectionTitle step={4} title="Finanzas y estado" />
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Método de Pago</label>
-                  {/* F31: acceso directo a los más usados; el resto en «Otros métodos…» */}
-                  <PaymentMethodPicker
-                    methods={methods}
-                    value={payment}
-                    size="sm"
-                    onChange={v => {
-                      setPayment(v);
-                      if (v.includes('Punto')) setBankFeePercent(DEFAULT_PUNTO_FEE);
-                    }}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Estado</label>
-                  <Select value={status} onValueChange={setStatus}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {statuses.map(s => (
-                        <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              {/* F77b: el MÉTODO DE PAGO (y su comisión/moneda/referencia) se mudó al paso del
+                  EQUIPO, arriba del modelo — igual que en el alta: el pedido del dueño es preguntar
+                  cómo paga ANTES de cargar el teléfono, y la edición pasa por el mismo paso 2. Acá
+                  queda el ESTADO, que es lo que este paso decide. */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Estado</label>
+                <Select value={status} onValueChange={setStatus}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {statuses.map(s => (
+                      <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
-              {isPos && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Comisión Punto (%)</label>
-                    <Input type="number" step={0.1} min={0} max={100} value={bankFeePercent}
-                      onChange={e => setBankFeePercent(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground">
-                      Comisión: ${((amount * bankFeePercent) / 100).toFixed(2)} · Neto: ${(amount - (amount * bankFeePercent) / 100).toFixed(2)}
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Moneda</label>
-                    <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm flex items-center gap-1.5">
-                      <span className="font-semibold">{currencySymbol(methodCurrency(payment))}</span>
-                      <span className="text-muted-foreground text-xs">
-                        {methodCurrency(payment) === 'VES' ? 'Bolívares (según método)' : 'Dólares (según método)'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+              {/* F77b: el acuerdo de pago se pregunta en el paso del EQUIPO (arriba, antes del
+                  modelo) y no se repite acá; la foto de SALIDA sí queda al lado del ESTADO, que es el
+                  control que decide si el equipo ya salió (misma condición de siempre: solo con un
+                  estado de salida; si no, el tilde aparecería antes de elegir el estado). */}
+              {(isDelivered(status) || status === 'Por entregar') && (
+                <PhotoOutField
+                  photoOut={photoOutDone}
+                  onPhotoOut={setPhotoOutDone}
+                  equipos={1}
+                />
               )}
-
-              {(isZelle || isPagoMovil) && (
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Referencia</label>
-                  <Input value={zelleReference} onChange={e => setZelleReference(e.target.value)}
-                    placeholder="Número de referencia (últimos 4 dígitos)..." />
-                </div>
-              )}
-
-              {/* F32: recordatorios del taller (acuerdo de pago + foto de salida). Si el estado
-                  es de salida, la foto se puede confirmar acá mismo antes de guardar. */}
-              <PolicyFields
-                payIntent={payIntentSel}
-                onPayIntent={setPayIntentSel}
-                photoOut={photoOutDone}
-                onPhotoOut={setPhotoOutDone}
-                showPhotoOut={isDelivered(status) || status === 'Por entregar'}
-                equipos={1}
-              />
             </>
           ) : (
             <>
@@ -3514,19 +3649,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                 </p>
               </div>
 
-              <PolicyFields
-                payIntent={payIntentSel}
-                onPayIntent={setPayIntentSel}
-                photoOut={photoOutDone}
-                onPhotoOut={setPhotoOutDone}
-                // Al CREAR una recepción no se ofrece la foto de SALIDA: el equipo recién entra al
-                // taller y entregar es un acto aparte (botón «Entregar» / asistente «Cerrar», que sí
-                // lo piden). Marcarla acá estampaba una foto de la RECEPCIÓN que después, si se
-                // entregaba el mismo día, `photoOutIsCurrent` daba por válida y se callaba el aviso.
-                showPhotoOut={false}
-                equipos={devices.length}
-              />
-
+              {/* F77b: el acuerdo de pago NO se vuelve a preguntar acá — se pregunta en el paso
+                  «Equipos», antes del modelo (una sola vez y con el cliente enfrente). */}
               <div className="space-y-3">
                 <div className="rounded-lg border border-border/70 p-4 space-y-2">
                   <p className="text-sm font-semibold flex items-center gap-2">
@@ -3568,6 +3692,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                   </p>
                 </div>
               </div>
+
+              {/* F77: el registro se cierra acá — guardar y (por defecto) abrir el comprobante. */}
+              <PrintOnSaveField value={imprimirAhora} onChange={setImprimirAhora} equipos={devices.length} />
             </>
           ))}
 
@@ -3666,6 +3793,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                   </Table>
                 )}
               </div>
+
+              {/* F77: el registro se cierra acá — guardar y (por defecto) abrir el comprobante.
+                  Va en el ÚLTIMO paso (Cierre), al lado del botón que guarda, igual que en el alta. */}
+              <PrintOnSaveField value={imprimirAhora} onChange={setImprimirAhora} equipos={1} />
             </>
           )}
         </div>
@@ -3705,7 +3836,15 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, tiposExtra 
                 </Button>
               ) : (
                 <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
-                  {saving ? 'Guardando...' : (service ? 'Actualizar Servicio' : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`)}
+                  {/* F77: el botón dice lo que va a pasar — guardar y abrir el comprobante (o solo
+                      guardar si el operario destildó el check del paso). */}
+                  {saving
+                    ? 'Guardando...'
+                    : (service
+                        ? (imprimirAhora ? 'Actualizar e imprimir' : 'Actualizar Servicio')
+                        : (imprimirAhora
+                            ? `Guardar e imprimir${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`
+                            : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`))}
                 </Button>
               )}
             </div>

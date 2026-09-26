@@ -87,6 +87,122 @@ export interface Product {
   code?: string | null;
 }
 
+// --- F78: CARGA MASIVA DE INVENTARIO EN CSV ---
+
+/**
+ * Qué columnas traía el archivo. Es lo que distingue «celda vacía = no toques este campo» de
+ * «poné 0»: viaja al backend al aplicar.
+ */
+export interface CsvColumns {
+  name: boolean; category: boolean; brand: boolean; model: boolean; variant: boolean;
+  compatibility: boolean; cost: boolean; sale: boolean; cash: boolean; stock: boolean;
+  min_stock: boolean; supplier: boolean; code: boolean; in_use: boolean; id: boolean;
+}
+
+/** Los valores que la ficha del catálogo tiene HOY (para el diff de la pantalla de revisión). */
+export interface CsvCurrent {
+  id: number;
+  name: string;
+  category: string;
+  category_id: number | null;
+  brand: string;
+  model: string;
+  variant: string;
+  /** el JSON crudo de la ficha (es lo que se conserva cuando la celda viene vacía) */
+  compatibility: string;
+  /** la compatibilidad como la lee una persona: es lo que se compara en el diff de la pantalla */
+  compatibility_text: string;
+  price_cost: number;
+  price_sale: number;
+  price_usd: number;
+  stock: number;
+  min_stock: number;
+  supplier: string;
+  code: string;
+  in_use: number;
+}
+
+/** Qué se hace con una fila del archivo. */
+export type CsvAction = 'crear' | 'actualizar' | 'dejar' | 'eliminar';
+
+/** Una fila del archivo ya interpretada (es lo que el operario corrige en la vista previa). */
+export interface CsvRow {
+  line: number;
+  name: string;
+  category: string;
+  category_id: number | null;
+  category_new: boolean;
+  brand: string;
+  model: string;
+  variant: string;
+  compatibility: string;
+  price_cost: number | null;
+  price_sale: number | null;
+  price_usd: number | null;
+  stock: number | null;
+  min_stock: number | null;
+  supplier: string;
+  code: string;
+  in_use: number | null;
+  product_id: number | null;
+  current: CsvCurrent | null;
+  action: CsvAction;
+  excluded: boolean;
+  name_clash: boolean;
+  /** el código es de una ficha de OTRA categoría: bloquea hasta que el dueño decida */
+  code_clash: boolean;
+  clash_product_id: number | null;
+  create_anyway: boolean;
+  match_kind: string;
+  shared: number;
+  stock_after: number | null;
+  issues: string[];
+  notes: string[];
+}
+
+export interface CsvNewCategory {
+  name: string;
+  rows: number;
+}
+
+export interface CsvPreview {
+  rows: CsvRow[];
+  columns: CsvColumns;
+  known: string[];
+  ignored: string[];
+  separator: string;
+  total_rows: number;
+  new_count: number;
+  exists_count: number;
+  new_categories: CsvNewCategory[];
+  units_file: number;
+  units_before: number;
+  units_after: number;
+  issues: string[];
+  fatal: string | null;
+}
+
+export interface CsvApplyInput {
+  rows: CsvRow[];
+  columns: CsvColumns;
+  supplier: string;
+  file_name: string;
+  new_categories: string[];
+}
+
+export interface CsvReport {
+  created: number;
+  updated: number;
+  kept: number;
+  deleted: number;
+  categories_new: string[];
+  units_added: number;
+  movements: number;
+  suppliered: number;
+  skipped: number;
+  backup: string;
+}
+
 // --- Inventario unificado (2026-09-15) ---
 
 /** Página de productos: la tabla ya no trae las 1126 filas de golpe. */

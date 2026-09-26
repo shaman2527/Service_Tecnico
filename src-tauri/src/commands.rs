@@ -1242,6 +1242,42 @@ pub fn apply_inventory_load(db: State<Database>, rows: Vec<crate::loadlist::Load
     crate::loadlist::apply_load(&conn, &db.db_path, &rows, zero_missing, &keep_ids,
                                 supplier.as_deref().unwrap_or(""))
 }
+// --- F78: CARGA MASIVA DE INVENTARIO EN CSV ---
+// El formato con TODOS los campos del producto (nombre, categoría —incluso nuevas—, marca, modelo,
+// variante, compatibilidad, costo, venta, efectivo, stock, mínimo, proveedor, código, «lo uso»).
+// La vista previa NO escribe; el aplicar es del DUEÑO (como el conteo y el alta de productos) y hace
+// respaldo de la base. El stock se SUMA a lo que ya hay: un archivo parcial nunca baja mercancía.
+
+/// Cruce del CSV contra el catálogo: cada fila queda como NUEVO o YA EXISTE, con el diff y los avisos.
+#[tauri::command]
+pub fn preview_inventory_csv(db: State<Database>, text: String)
+    -> Result<crate::csvload::CsvPreview, String> {
+    db.preview_csv_load(&text).map_err(|e| e.to_string())
+}
+
+/// Aplica la carga (crea / actualiza / deja / elimina) con respaldo previo, en UNA transacción.
+#[tauri::command]
+pub fn apply_inventory_csv(db: State<Database>, input: crate::csvload::CsvApplyInput)
+    -> Result<crate::csvload::CsvReport, String> {
+    db.require_owner()?;
+    db.apply_csv_load(&input)
+}
+
+/// La plantilla que se descarga desde el asistente. Sale del BACKEND a propósito: es el MISMO módulo
+/// que después la lee, así no puede quedar una plantilla de mentira en el frontend (antes había dos
+/// copias y ya diferían en el ejemplo del código).
+#[tauri::command]
+pub fn plantilla_inventory_csv() -> String {
+    crate::csvload::plantilla_csv()
+}
+
+/// El catálogo en CSV (mismo formato de la plantilla): exportar → editar en Excel → reimportar.
+#[tauri::command]
+pub fn export_inventory_csv(db: State<Database>, category_id: Option<i64>) -> Result<String, String> {
+    db.require_owner()?;
+    db.export_products_csv(category_id).map_err(|e| e.to_string())
+}
+
 // --- Perfil profesional del tecnico (Dashboard) ---
 
 #[tauri::command]
@@ -1405,6 +1441,9 @@ mod tests {
             "add_product", "update_product", "delete_product", "merge_products",
             "set_product_supplier", "add_inventory_movement", "import_price_list", "import_data",
             "normalize_catalog", "restore_prices", "apply_inventory_load",
+            // F78: la carga masiva en CSV (crea productos, cambia precios y stock) y el export del
+            // catálogo (trae los COSTOS, que la caja no ve) son del DUEÑO.
+            "apply_inventory_csv", "export_inventory_csv",
             "add_expense", "delete_expense",
             "add_purchase_order", "delete_purchase_order",
             "add_technician", "update_technician", "delete_technician",

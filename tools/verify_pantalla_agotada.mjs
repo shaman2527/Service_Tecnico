@@ -195,8 +195,10 @@ try {
   check('la orden queda en estado «Entregado» en el formulario (el caso que antes bloqueaba)', eligioEstado);
 
   check('el wizard llega al paso «Cierre»', await irAPaso('Cierre'), String(await dialogTxt()).slice(0, 60));
+  // F77: el rótulo del botón del último paso ahora depende del check «Imprimir la orden ahora»
+  // («Actualizar Servicio» / «Actualizar e imprimir»): se aceptan los dos (esta prueba NO guarda).
   const guardar = await evalx(`(() => {
-    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/.test((x.innerText || '').trim()));
+    const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar (Servicio|e imprimir)$/.test((x.innerText || '').trim()));
     return b ? !b.disabled : null;
   })()`);
   check('F47: «Actualizar Servicio» está HABILITADO con la pantalla agotada (el aviso NO bloquea)',

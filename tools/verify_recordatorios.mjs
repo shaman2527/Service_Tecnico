@@ -240,13 +240,27 @@ if (hayFotoIn) {
 // paso más, así que se ESPERA la condición en vez de contar clics).
 const irAlUltimoPaso = async () => {
   for (let i = 0; i < 6; i++) {
-    if (await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar Servicio$/.test(b.innerText.trim()))`)) return true;
+    if (await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar (Servicio|e imprimir)$/.test(b.innerText.trim()))`)) return true;
     await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Siguiente$/.test(b.innerText.trim())) || null)`).catch(async () => {
       await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test(x.innerText.trim())); if (b) b.click(); return !!b; })()`);
     });
     await sleep(800);
   }
-  return await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar Servicio$/.test(b.innerText.trim()))`);
+  return await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(b => /^Actualizar (Servicio|e imprimir)$/.test(b.innerText.trim()))`);
+};
+/**
+ * F77: el último paso del wizard trae el check «Imprimir la orden ahora» PREMARCADO y entonces el
+ * botón dice «Guardar e imprimir» (al guardar se abre el comprobante). Esta verificación es de los
+ * RECORDATORIOS, y su flujo sigue igual si el comprobante no se abre: se destilda —que es una forma
+ * legítima de usar la pantalla, y de paso comprueba que destildar devuelve el rótulo de siempre.
+ */
+const destildarImprimir = async () => {
+  await evalx(`(() => {
+    const c = document.querySelector('[data-field="imprimir-al-guardar"]');
+    if (c && c.checked) c.click();
+    return c ? c.checked : null;
+  })()`);
+  await sleep(500);
 };
 await irAlUltimoPaso();
 // Con la foto marcada, la ficha ya no la pide como pendiente (se mira dentro del detalle)
@@ -260,14 +274,17 @@ const estadoFotoIn = await evalx(`(() => {
 })()`);
 check('F33: con la foto de ENTRADA marcada, la ficha muestra «Tomada»', estadoFotoIn === 'ok', `estado=${estadoFotoIn}`);
 await irAlUltimoPaso();
-const botonGuardar = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/i.test(x.innerText.trim())); return b ? !b.disabled : null; })()`);
+await destildarImprimir();   // F77: sin comprobante encima (esta prueba es de los recordatorios)
+const botonGuardar = await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar (Servicio|e imprimir)$/i.test(x.innerText.trim())); return b ? !b.disabled : null; })()`);
 check('F32: el wizard llega al paso de guardar con el botón habilitado', botonGuardar === true, `disabled=${botonGuardar === null ? 'no existe' : !botonGuardar}`);
-await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Actualizar Servicio$/i.test(b.innerText.trim())) || null)`).catch(async () => {
-  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/i.test(x.innerText.trim())); if (b) b.click(); return !!b; })()`);
+check('F77: destildado el check, el botón vuelve a «Actualizar Servicio» (no miente)',
+  (await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(x => /^Actualizar Servicio$/.test((x.innerText || '').trim()))`)) === true);
+await clickCenter(`([...document.querySelectorAll('[role="dialog"] button')].find(b => /^Actualizar (Servicio|e imprimir)$/i.test(b.innerText.trim())) || null)`).catch(async () => {
+  await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar (Servicio|e imprimir)$/i.test(x.innerText.trim())); if (b) b.click(); return !!b; })()`);
 });
 await sleep(2500);
 dlg = String(await dialogText() ?? '');
-if (/Actualizar Servicio/i.test(dlg)) { await keyNav('Escape', 'Escape', 27); await sleep(800); }
+if (/Actualizar (Servicio|e imprimir)/i.test(dlg)) { await keyNav('Escape', 'Escape', 27); await sleep(800); }
 const trasEditar = await invoke('get_service', { id });
 check('F32: el wizard GUARDA la foto de entrada y el acuerdo de pago',
   !!trasEditar?.photo_in_at && trasEditar?.pay_intent === 'al_retirar',
@@ -456,11 +473,16 @@ if (await evalx(`!!document.querySelector('[role="dialog"]')`)) { await keyNav('
       await sleep(600);
     }
     const botonGuardar = await evalx(`(() => {
-      const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar Servicio$/.test(x.innerText.trim()));
-      return b ? JSON.stringify({ texto: b.innerText.trim(), deshabilitado: b.disabled }) : null;
+      const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Actualizar (Servicio|e imprimir)$/.test(x.innerText.trim()));
+      return b ? JSON.stringify({ texto: b.innerText.trim(), deshabilitado: b.disabled, imprimir: document.querySelector('[data-field="imprimir-al-guardar"]')?.checked ?? null }) : null;
     })()`);
     check('F33: editar una orden de $0 llega al botón «Actualizar Servicio» (el monto no encierra el wizard)',
       !!botonGuardar && JSON.parse(botonGuardar).deshabilitado === false, String(botonGuardar));
+    // F77: el check de impresión nace MARCADO también al editar (y por eso el botón dice «Actualizar e
+    // imprimir» hasta que se destilda) — el rótulo viejo se recupera al destildar, no es un bloqueo.
+    check('F77: en edición el check de imprimir arranca marcado y el botón lo dice',
+      !!botonGuardar && JSON.parse(botonGuardar).imprimir === true && /^Actualizar e imprimir$/.test(JSON.parse(botonGuardar).texto),
+      String(botonGuardar));
     await keyNav('Escape', 'Escape', 27);
     await sleep(700);
   }

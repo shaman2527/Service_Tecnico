@@ -79,23 +79,110 @@ const foto = () => ({
   ventas: Number(uno('SELECT COUNT(*) AS n FROM sales').n),
   pagos: Number(uno('SELECT COUNT(*) AS n FROM service_payments').n),
 });
-const antes = foto();
-console.log(`· antes: ${antes.phones} teléfonos (${antes.pegados} con nombres pegados) · ${antes.unidades} unidades · ${antes.movimientos} movimientos · ${antes.ordenes} órdenes`);
+const antesBase = foto();
+console.log(`· antes: ${antesBase.phones} teléfonos (${antesBase.pegados} con nombres pegados) · ${antesBase.unidades} unidades · ${antesBase.movimientos} movimientos · ${antesBase.ordenes} órdenes`);
 
-// ── 1) abrir la app e ir a Inventario → Ajustes ───────────────────────────────────────────────
+// ── 0 bis) ENTRAR A LA APP (F68: el acceso es POR PERSONA: se elige Master y se pone su PIN) ────
+// Se entra ANTES de armar el fixture: `add_product` exige sesión de DUEÑO (`db.require_owner()`), y
+// con la app bloqueada el `invoke` moría con «eval error» y la prueba se caía antes de empezar.
+const irALaLista = async () => {
+  for (let i = 0; i < 5; i++) {
+    if (await evalx(`!!document.querySelector('[data-user-picker]')`)) return true;
+    await evalx(`(() => { const b = document.querySelector('[data-action="bloquear-sesion"]'); if (b) b.click(); return !!b; })()`);
+    await sleep(900);
+    await evalx(`(() => { const b = document.querySelector('[data-action="cambiar-persona"]'); if (b) b.click(); return !!b; })()`);
+    await sleep(700);
+  }
+  return await waitFor(`!!document.querySelector('[data-user-picker]')`, 8000);
+};
+const entrar = async (name, pinNum) => {
+  // si la instalación tiene UNA sola persona, la app pide el PIN directo (sin selector)
+  if (await waitFor(`!!document.querySelector('input[placeholder="PIN de 4 dígitos"]')`, 2000)) {
+    await clickCenter(`document.querySelector('input[placeholder="PIN de 4 dígitos"]')`);
+    await typeText(pinNum);
+    await keyNav('Enter', 'Enter', 13);
+    return await waitFor(`!!document.querySelector('aside')`, 15000);
+  }
+  await irALaLista();
+  const id = await evalx(`(() => {
+    const b = [...document.querySelectorAll('[data-user-option]')].find(x => (x.innerText || '').includes(${JSON.stringify(name)}));
+    return b ? Number(b.getAttribute('data-user-option')) : null;
+  })()`);
+  if (id == null) return false;
+  await clickCenter(`document.querySelector('[data-user-option="${id}"]')`);
+  await sleep(700);
+  if (!await waitFor(`!!document.querySelector('input[placeholder="PIN de 4 dígitos"]')`, 6000)) return false;
+  await clickCenter(`document.querySelector('input[placeholder="PIN de 4 dígitos"]')`);
+  await typeText(pinNum);
+  await keyNav('Enter', 'Enter', 13);
+  return await waitFor(`!!document.querySelector('aside')`, 15000);
+};
+
 await evalx(`location.reload(); 'recargando'`).catch(() => {});
 await sleep(2500);
 for (let i = 0; i < 12; i++) {
-  if (await evalx(`!!document.querySelector('aside, input[placeholder="PIN de 4 dígitos"]')`).catch(() => false)) break;
+  if (await evalx(`!!document.querySelector('aside, [data-user-picker], input[placeholder="PIN de 4 dígitos"]')`).catch(() => false)) break;
   await sleep(800);
 }
-const pin = `document.querySelector('input[placeholder="PIN de 4 dígitos"]')`;
-if (await evalx(`!!${pin}`)) { await clickCenter(pin); await typeText('1234'); await keyNav('Enter', 'Enter', 13); await sleep(2500); }
+const entro = await entrar('Master', '1234');
+const usuario = entro ? await invoke('get_current_user').catch(() => null) : null;
+check('F53 (preparación): se entró con la sesión del DUEÑO', usuario?.role === 'master', `rol=${usuario?.role ?? 'ninguno'}`);
+if (usuario?.role !== 'master') {
+  console.log('ABORTADO: sin sesión de dueño no se puede armar el fixture ni aplicar la separación.');
+  process.exit(2);
+}
 for (let i = 0; i < 4; i++) {
   if (!await evalx(`!!document.querySelector('[role="dialog"]')`)) break;
   await keyNav('Escape', 'Escape', 27);
   await sleep(600);
 }
+
+// ── 0 ter) FIXTURE PROPIO: la prueba necesita un NOMBRE PEGADO en el padrón ─────────────────────
+// «Separar modelos» es un `rebuild_phones`: compara el padrón ACTUAL contra el canónico y separa los
+// nombres compuestos. En una copia que ya está separada (el caso normal: el local corrió la
+// separación) no hay nada que separar y las 5 comprobaciones quedaban sin sentido. El estado que la
+// prueba reproduce es el LEGACY: una fila de `phones` con el nombre pegado («Samsung A90 A905») —
+// eso ya no se puede crear desde la app (el rebuild la normaliza), así que se escribe en la copia y
+// se borra al final. El producto del fixture entra con stock para que sus repuestos queden EN USO.
+//
+// DOS DETALLES MEDIDOS (si no, la prueba mide en falso):
+//  1. La fila pegada va con `source='catalogo'` y NO `'manual'`: `rebuild_phones` NUNCA borra las
+//     filas manuales (son las renombradas a mano por el taller), así que con `'manual'` la
+//     separación no podía quitarla y la vista previa decía «todo al día» con el nombre pegado ahí.
+//  2. `add_product` YA reconstruye el padrón (db.rs): al crear el repuesto del fixture aparecen solos
+//     los dos modelos separados, así que la foto previa no tendría nada que separar. Se borran esas
+//     dos filas para dejar el padrón EXACTAMENTE como estaba antes de F53 (entrada compuesta viva).
+// El par de códigos es nuevo (A90/A905 no existen en el catálogo ni en el padrón) para que la
+// separación tenga trabajo real que hacer.
+const sufijoFixture = String(Date.now()).slice(-6);
+const PEGADO = { brand: 'Samsung', modelo: 'A90 A905', key: 'samsung|a90 a905' };
+const escribirEnCopia = (sql, ...p) => {
+  const d = new DatabaseSync(dbPath);
+  try { d.prepare(sql).run(...p); } finally { d.close(); }
+};
+let idFixture = null;
+let keyFixture = null;
+if (antesBase.pegados === 0) {
+  idFixture = Number(await invoke('add_product', {
+    name: `Pantalla Prueba F53 ${sufijoFixture}`, categoryId: 1, brand: PEGADO.brand, model: PEGADO.modelo,
+    variant: '', compatibility: JSON.stringify([`${PEGADO.brand} ${PEGADO.modelo}`]),
+    priceCost: 0, priceSale: 0, stock: 1, minStock: 0, priceUsd: 0,
+  }));
+  // el padrón queda como ANTES de F53: sin los dos modelos separados y con la entrada compuesta viva
+  escribirEnCopia(`DELETE FROM phones WHERE key IN ('samsung|a90','samsung|a905')`);
+  keyFixture = PEGADO.key;
+  escribirEnCopia(
+    `INSERT INTO phones (brand, line, model, name, key, aliases, source, needs_review, in_use)
+     VALUES (?1, '', ?2, ?3, ?4, ?5, 'catalogo', 0, 1)`,
+    PEGADO.brand, PEGADO.modelo, `${PEGADO.brand} ${PEGADO.modelo}`,
+    PEGADO.key, JSON.stringify([PEGADO.modelo]),
+  );
+}
+const antes = foto();
+check('F53 (preparación): la copia tiene un nombre pegado que separar', antes.pegados > 0,
+  idFixture ? `fixture creado (producto ${idFixture}, teléfono ${keyFixture}) · ${antes.pegados} pegados` : `${antes.pegados} pegados de la copia`);
+
+// ── 1) ir a Inventario → Ajustes ─────────────────────────────────────────────────────────────
 await evalx(`(() => { const it = [...document.querySelectorAll('aside a, aside button')].find(b => (b.getAttribute('title') || '').startsWith('Inventario')); if (it) it.click(); return !!it; })()`);
 await sleep(2000);
 await evalx(`(() => { const t = [...document.querySelectorAll('[role="tab"]')].find(x => /^Ajustes/.test(x.innerText.trim())); if (t) t.click(); return !!t; })()`);
@@ -103,8 +190,15 @@ const enAjustes = await waitFor(`!!document.querySelector('[data-action="revisar
 check('F53: en Ajustes está la tarjeta «Modelos de teléfono (uno por teléfono real)»', enAjustes);
 
 // ── 2) VISTA PREVIA: dice qué cambia y NO escribe nada ───────────────────────────────────────
-await clickCenter(`document.querySelector('[data-action="revisar-modelos"]')`);
-const hayInforme = await waitFor(`!!document.querySelector('[data-split-report]')`, 25000);
+// El botón se aprieta con un click PROGRAMÁTICO y se reintenta hasta ver el informe: un click por
+// coordenadas en esta tarjeta (está al fondo de la pestaña Ajustes, con varias tarjetas arriba y los
+// avisos flotantes encima) podía no llegar y la prueba quedaba esperando un informe que la app sí
+// sabía calcular (medido 2026-09-24: `preview_phone_split` respondía bien por comando directo).
+let hayInforme = false;
+for (let i = 0; i < 6 && !hayInforme; i++) {
+  await evalx(`(() => { const b = document.querySelector('[data-action="revisar-modelos"]'); if (b) { b.scrollIntoView({block:'center'}); b.click(); } return !!b; })()`);
+  hayInforme = await waitFor(`!!document.querySelector('[data-split-report]')`, 8000);
+}
 const informe = await evalx(`(() => {
   const r = document.querySelector('[data-split-report]');
   return r ? JSON.stringify({
@@ -134,7 +228,7 @@ await handleDialog(true);   // el confirm() del diálogo de la app
 // (y parecía que la app había dejado el trabajo por la mitad). Se espera el estado FINAL:
 // sin nombres pegados, sin filas sin código y con el padrón más grande.
 let aplicado = false;
-for (let i = 0; i < 90 && !aplicado; i++) {
+for (let i = 0; i < 45 && !aplicado; i++) {
   await sleep(1000);
   if (i === 0 || i % 5 === 0) await handleDialog(true);
   const f = foto();
@@ -165,12 +259,23 @@ check('F53: los teléfonos nuevos quedan numerados (M-…) y EN USO (su repuesto
   nuevos.length > 0 && nuevos.every(p => /^M-\d+/.test(p.code)) && nuevos.some(p => p.in_use === 1),
   `${nuevos.length} nuevos · ${JSON.stringify(nuevos.slice(0, 3))}`);
 
-// el caso del dueño: un nombre pegado conocido y sus dos modelos reales, cada uno con la pantalla
-const par = filas(`SELECT id, name FROM phones WHERE name LIKE '%A70%' OR name LIKE '%A705%' ORDER BY name`);
-const parInfo = await invokeJson('get_phone_detail', { phoneId: par[0]?.id ?? 0 });
-check('F53: «Samsung A70 A705» se convirtió en DOS teléfonos reales, cada uno con sus repuestos',
-  par.length >= 2 && !!parInfo && JSON.parse(parInfo).blocks.flatMap(b => b.items).length > 0,
-  par.map(p => `${p.id}:${p.name}`).join(' · '));
+// el caso del dueño: un nombre pegado y sus dos modelos reales, cada uno con su repuesto (el fixture
+// de esta corrida: «Samsung A90 A905» → «Galaxy A90» + «Galaxy A905»; el par histórico A70/A705 ya
+// está separado en esta copia y se sigue comprobando que los dos existen con repuestos)
+const par = keyFixture
+  ? filas(`SELECT id, name FROM phones WHERE key IN ('samsung|a90','samsung|a905') ORDER BY name`)
+  : filas(`SELECT id, name FROM phones WHERE id > ?1 ORDER BY id LIMIT 2`, antes.maxId);
+const historic = filas(`SELECT id, name FROM phones WHERE key IN ('samsung|a70','samsung|a705')`);
+const detallesPar = [];
+for (const p of par) {
+  const d = JSON.parse(await invokeJson('get_phone_detail', { phoneId: p.id }) ?? 'null');
+  detallesPar.push({ id: p.id, name: p.name, repuestos: (d?.blocks ?? []).flatMap(b => b.items).length });
+}
+check('F53: el nombre pegado se convirtió en DOS teléfonos reales, cada uno con sus repuestos',
+  par.length === 2 && detallesPar.every(d => d.repuestos > 0),
+  detallesPar.map(d => `${d.id}:${d.name}(${d.repuestos})`).join(' · '));
+check('F53: el par histórico «Samsung A70 / A705» sigue siendo DOS teléfonos reales (o no existe en esta copia)',
+  historic.length === 0 || historic.length === 2, historic.map(p => `${p.id}:${p.name}`).join(' · '));
 
 // ── 4) LA PANTALLA DE REFERENCIA se auto-selecciona al registrar ─────────────────────────────
 // Se elige un modelo EN USO con varias pantallas compatibles y stock, se fija una referencia distinta
@@ -290,6 +395,10 @@ const phonesAntesMerge = Number(uno('SELECT COUNT(*) AS n FROM phones').n);
 const stockAntesMerge = Number(uno('SELECT COALESCE(SUM(stock),0) AS n FROM products').n);
 const movsAntesMerge = Number(uno('SELECT COUNT(*) AS n FROM inventory_movements').n);
 await clickCenter(`document.querySelector('[data-dup-merge="0"]')`);
+// El asistente pide un `confirm()` antes de juntar: si no se contesta, la página queda BLOQUEADA y
+// todos los `evalx` siguientes mueren por timeout (medido 2026-09-24, con el producto perfecto).
+await sleep(800);
+await handleDialog(true);
 await sleep(3000);
 const phonesTrasMerge = Number(uno('SELECT COUNT(*) AS n FROM phones').n);
 const stockTrasMerge = Number(uno('SELECT COALESCE(SUM(stock),0) AS n FROM products').n);
@@ -307,13 +416,27 @@ await sleep(800);
 if (await evalx(`!!document.querySelector('[role="dialog"]')`)) { await keyNav('Escape', 'Escape', 27); await sleep(600); }
 
 // ── 6) cierre ────────────────────────────────────────────────────────────────────────────────
+// el fixture de la prueba se borra (la copia no queda con una pantalla inventada). `delete_product`
+// reconstruye el padrón, así que los dos teléfonos que la separación creó para el fixture
+// («Galaxy A90 / A905») se van con él; igual se borran por nombre para no dejar filas colgadas.
+if (idFixture) {
+  await invoke('delete_product', { id: idFixture }).catch(() => {});
+}
+if (keyFixture) {
+  escribirEnCopia('DELETE FROM phones WHERE key = ?', keyFixture);
+}
+escribirEnCopia(`DELETE FROM phones WHERE key IN ('samsung|a90','samsung|a905')`);
 const final = foto();
 check('F53: la base quedó sana', uno('PRAGMA quick_check').quick_check === 'ok', 'quick_check');
+check('F53: la ficha de prueba se borró (no queda un producto inventado)', !idFixture ||
+  Number(uno('SELECT COUNT(*) AS n FROM products WHERE id=?1', idFixture).n) === 0, `fixture=${idFixture ?? 'no hizo falta'}`);
+// La foto del saldo se compara contra `antesBase` (ANTES del fixture): el fixture entra con stock 1 y
+// se borra al final, así que compararlo con `antes` daría un descuadre de 1 unidad del propio fixture.
 check('F53: el saldo de la prueba fue SOLO el padrón (la plata, el stock y las órdenes siguen igual)',
-  final.unidades === antes.unidades && final.aCosto === antes.aCosto && final.aVenta === antes.aVenta
-  && final.precios === antes.precios && final.ordenes === antes.ordenes && final.ventas === antes.ventas
-  && final.pagos === antes.pagos && final.movimientos === antes.movimientos,
-  `unidades ${antes.unidades}→${final.unidades} · órdenes ${antes.ordenes}→${final.ordenes} · ventas ${antes.ventas}→${final.ventas}`);
+  final.unidades === antesBase.unidades && final.aCosto === antesBase.aCosto && final.aVenta === antesBase.aVenta
+  && final.precios === antesBase.precios && final.ordenes === antesBase.ordenes && final.ventas === antesBase.ventas
+  && final.pagos === antesBase.pagos && final.movimientos === antesBase.movimientos,
+  `unidades ${antesBase.unidades}→${final.unidades} · órdenes ${antesBase.ordenes}→${final.ordenes} · ventas ${antesBase.ventas}→${final.ventas}`);
 
 const failed = out.filter(r => !r.ok);
 console.log(`\n${out.length - failed.length}/${out.length} comprobaciones OK${failed.length ? ` — FALLAN: ${failed.map(f => f.name).join('; ')}` : ''}`);

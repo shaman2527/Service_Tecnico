@@ -216,7 +216,9 @@ const claves = (f: ReturnType<typeof buildFicha>) => f.groups.flatMap(g => g.fie
   eq('modelo → paso 1', paso('model'), 1);
   eq('clave / accesorios / inspección / foto → paso 2 (Blindaje)', [paso('contrasena'), paso('accesorios'), paso('inspeccion'), paso('photo_in')], [2, 2, 2, 2]);
   eq('monto → paso 1 (donde se escribe)', paso('amount'), 1);
-  eq('pago acordado → paso 3', paso('pay_intent'), 3);
+  // F77b: el pago acordado se pregunta en el paso del EQUIPO (1), antes de cargar el modelo.
+  eq('pago acordado → paso 1 (se pregunta con el equipo, antes del modelo)', paso('pay_intent'), 1);
+  eq('el pago y el monto viven en el MISMO paso (se preguntan juntos)', paso('pay_intent'), paso('amount'));
   eq('técnico → paso 0', paso('technician'), 0);
 }
 

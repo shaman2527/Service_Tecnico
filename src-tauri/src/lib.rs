@@ -2,6 +2,7 @@ pub mod bcv;
 pub mod backups;
 pub mod cache;
 pub mod catalog;
+pub mod csvload;
 pub mod db;
 pub mod loadlist;
 pub mod phones;
@@ -195,6 +196,12 @@ commands::get_sales_stats,
             commands::preview_inventory_load,
             commands::apply_inventory_load,
             commands::search_inventory_load_targets,
+            // F78: carga masiva en CSV (vista previa de 2 pestañas, aplicar con respaldo, plantilla
+            // y export del catálogo en el mismo formato).
+            commands::preview_inventory_csv,
+            commands::apply_inventory_csv,
+            commands::plantilla_inventory_csv,
+            commands::export_inventory_csv,
             commands::set_product_supplier,
             commands::rename_phone,
             commands::add_phone,

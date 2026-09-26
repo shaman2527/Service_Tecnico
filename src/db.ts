@@ -10,6 +10,7 @@ import type {
   PhoneDuplicateGroup,
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
   LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup,
+  CsvPreview, CsvApplyInput, CsvReport,
   AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, TaxConfig
 } from './types';
 import type {
@@ -248,6 +249,20 @@ export const api = {
    *  la lista escrita a mano no siempre coinciden). */
   searchInventoryLoadTargets: (query: string, limit = 12) =>
     tauriInvoke<LoadCandidate[]>('search_inventory_load_targets', { query, limit }),
+
+  // --- F78: carga masiva de inventario en CSV ---
+  // La vista previa NO escribe (cruza el archivo contra el catálogo y dice nuevo/existente con el
+  // diff); el aplicar es del DUEÑO, hace respaldo y el stock se SUMA a lo que ya hay.
+  previewInventoryCsv: (text: string) =>
+    tauriInvoke<CsvPreview>('preview_inventory_csv', { text }),
+  applyInventoryCsv: (input: CsvApplyInput) =>
+    tauriInvoke<CsvReport>('apply_inventory_csv', { input }),
+  /** El catálogo en CSV (mismo formato de la plantilla): exportar → editar en Excel → reimportar. */
+  exportInventoryCsv: (categoryId: number | null = null) =>
+    tauriInvoke<string>('export_inventory_csv', { categoryId }),
+  /** La plantilla que se descarga: la arma el BACKEND (el mismo módulo que después la lee). */
+  plantillaInventoryCsv: () =>
+    tauriInvoke<string>('plantilla_inventory_csv'),
 
   normalizeCatalog: (dryRun: boolean = true) =>
     tauriInvoke<CatalogReport>('normalize_catalog', { dryRun }),

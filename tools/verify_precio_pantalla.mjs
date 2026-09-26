@@ -653,14 +653,23 @@ let ordenPrueba = null;
       // botón vive en el ÚLTIMO paso (5 de 5) del wizard: hay que llegar (F33: «el botón Guardar solo
       // se dibuja en el último paso»).
       for (let i = 0; i < 5; i++) {
-        const hayGuardar = await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(x => /Actualizar Servicio/i.test(x.innerText || ''))`);
+        const hayGuardar = await evalx(`[...document.querySelectorAll('[role="dialog"] button')].some(x => /Actualizar (Servicio|e imprimir)/i.test(x.innerText || ''))`);
         if (hayGuardar) break;
         await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /^Siguiente$/.test((x.innerText || '').trim())); if (b && !b.disabled) b.click(); return !!b; })()`);
         await sleep(1100);
       }
+      // F77: el último paso trae el check «Imprimir la orden ahora» PREMARCADO (y el botón pasa a
+      // «Actualizar e imprimir»). Esta prueba es del PRECIO, no de la impresión: se destilda para que
+      // no se abra el comprobante encima (y de paso se comprueba que destildar devuelve el rótulo).
+      await evalx(`(() => {
+        const c = document.querySelector('[data-field="imprimir-al-guardar"]');
+        if (c && c.checked) c.click();
+        return c ? c.checked : null;
+      })()`);
+      await sleep(500);
       const pasoFinal = String(await evalx(`(document.querySelector('[role="dialog"]')?.innerText ?? '').split('\\n').find(l => /Paso \\d+ de \\d+/.test(l)) ?? null`));
       const guardado = await evalx(`(() => {
-        const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Actualizar Servicio/i.test(x.innerText || ''));
+        const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Actualizar (Servicio|e imprimir)/i.test(x.innerText || ''));
         if (!b || b.disabled) return false;
         b.click(); return true;
       })()`);

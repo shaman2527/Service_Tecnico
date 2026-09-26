@@ -80,6 +80,17 @@ const svc = (patch: Record<string, unknown> = {}) => ({
   eq('guardar · acciones de la foto', list[1].actions.map(a => a.id), ['foto_tomada', 'ok']);
   ok('guardar · el aviso de la foto dice que es política de la empresa', /política de la empresa/i.test(list[1].message));
   ok('guardar · ningún aviso exige nada (solo acciones)', list.every(r => r.actions.length > 0));
+  // F77 — EL TÍTULO ES LA ORDEN CORTA Y GRANDE (es la línea más grande del modal, ver PolicyModal):
+  // pedido del dueño, «algo más en grande que diga *Toma la foto al teléfono*».
+  const fotoIn = list[1], pago = list[0];
+  ok('F77 · el título de la foto dice TOMA LA FOTO AL TELÉFONO', /toma la foto al teléfono/i.test(fotoIn.title), fotoIn.title);
+  ok('F77 · el título del pago dice PREGÚNTALE AL CLIENTE', /pregúntale al cliente/i.test(pago.title), pago.title);
+  // Un cartel se lee de lejos: si el título crece a un párrafo, deja de ser un cartel (y desborda la
+  // tarjeta). El detalle largo vive en el `message`.
+  ok('F77 · los títulos son cortos (cartel, no párrafo)',
+    [fotoIn, pago].every(r => r.title.length <= 28), list.map(r => `${r.title}(${r.title.length})`).join(' · '));
+  ok('F77 · el título de la foto NO repite el del pago ni el mensaje',
+    fotoIn.title !== pago.title && !/política de la empresa/i.test(fotoIn.title));
   // «PAGAR», no «cancelar»: en esta app «Cancelado» significa PAGADO, así que «¿va a cancelar?»
   // se leía como «¿va a anular la orden?».
   ok('guardar · la pregunta del pago dice PAGAR (no «cancelar»)', /pagar ahora o al retirar/i.test(list[0].message));
@@ -92,6 +103,9 @@ const svc = (patch: Record<string, unknown> = {}) => ({
   ok('3 equipos · el aviso habla de los 3 teléfonos', /los 3 teléfonos/.test(list[1].message));
   const uno = receiveReminders(svc(), { devices: 1, status: STATUS_RECIBIDO });
   ok('1 equipo · el aviso habla en singular', /al teléfono/.test(uno[1].message));
+  // F77: el título NO cambia con la cantidad (el plural vive en el mensaje): el cartel es el mismo.
+  ok('F77 · con 3 equipos el título de la foto sigue siendo el mismo',
+    list[1].title === uno[1].title && /toma la foto al teléfono/i.test(list[1].title));
 }
 
 // ── 4. Ya resuelto → NO insiste ─────────────────────────────────────────────────────────────
@@ -117,6 +131,12 @@ const svc = (patch: Record<string, unknown> = {}) => ({
   eq('imprimir entregado · pago + salida', tones(entregado), 'pago,salida');
   ok('imprimir entregado · el aviso de salida nombra la política de la empresa',
     /política de la empresa/i.test(entregado.find(r => r.tone === 'salida')!.message));
+  // F77: el cartel de la SALIDA también dice qué hacer, en corto.
+  ok('F77 · el título de la salida dice TOMA LA FOTO AL ENTREGAR',
+    /toma la foto al entregar/i.test(entregado.find(r => r.tone === 'salida')!.title),
+    entregado.find(r => r.tone === 'salida')!.title);
+  ok('F77 · los dos títulos de foto son distintos (recibir ≠ entregar)',
+    entregado.find(r => r.tone === 'salida')!.title !== enTaller.find(r => r.tone === 'entrada')!.title);
 
   const entregadoConPago = printReminders(svc({ status: STATUS_ENTREGADO, date_out: '2026-09-17', photo_in_at: '2026-09-10 09:00', pay_intent: 'al_retirar' }));
   eq('imprimir entregado con acuerdo anotado · solo la salida', tones(entregadoConPago), 'salida');

@@ -37,6 +37,15 @@ import { closePolicyModal, policyModalQueue, subscribePolicyModal, type PendingP
 //      para el frame en el que las dos cosas coincidan.
 // La respuesta de fondo no cambia: sigue siendo un modal centrado que hay que atender, y «Después»
 // (= tocar la tarjeta o la ✕) lo deja pendiente para la próxima vez.
+//
+// F77 — EL CARTEL SE LEE DE LEJOS (pedido del dueño, 2026-09-25): «si le doy clic a imprimir salga el
+// mensaje que tenemos, o algo más en grande que diga *Toma la foto al teléfono*… y el mensaje del
+// modal que pregunta si va a pagar ahora o al retirar que sea más grande». El título pasó de un rótulo
+// de 11 px a `text-xl font-black uppercase` y el mensaje de 14 px a 18 px, con la tarjeta más ancha
+// (30 rem) y los botones más altos: es un cartel de mostrador, y el operario lo lee con el cliente
+// enfrente. Los TEXTOS viven en `src/lib/reminders.ts` (el título es la orden corta: «Toma la foto al
+// teléfono» / «Toma la foto al entregar» / «Pregúntale al cliente»). NADA de la lógica cambia: la cola,
+// el dedupe, el tinte por tono, el toque que cierra y el z-40 por debajo de los diálogos quedan igual.
 
 const TONOS = {
   entrada: {
@@ -141,7 +150,9 @@ export function PolicyModalHost() {
           cerrar();
         }}
         title="Tocá el aviso para cerrarlo"
-        className={cn('relative w-[min(92vw,26rem)] cursor-pointer rounded-2xl border p-5 shadow-xl', tono.card)}
+        // F77 — EL AVISO SE LEE DE LEJOS (pedido del dueño): la tarjeta es más ancha y el texto va en
+        // cuerpo grande. Es un cartel de mostrador, no una nota al pie.
+        className={cn('relative w-[min(94vw,30rem)] cursor-pointer rounded-2xl border p-6 shadow-xl', tono.card)}
       >
         {/* ✕ visible: el «se quita con un toque» tiene que VERSE, no adivinarse */}
         <button
@@ -150,36 +161,39 @@ export function PolicyModalHost() {
           aria-label="Cerrar el aviso"
           title="Cerrar el aviso"
           onClick={cerrar}
-          className={cn('absolute right-2.5 top-2.5 rounded-full p-1 transition-colors hover:bg-black/5', tono.titulo)}
+          className={cn('absolute right-2.5 top-2.5 rounded-full p-1.5 transition-colors hover:bg-black/5', tono.titulo)}
         >
-          <X className="size-4" />
+          <X className="size-5" />
         </button>
-        <div className="flex items-start gap-3">
-          <span className={cn('flex size-11 shrink-0 items-center justify-center rounded-full', tono.circle)}>
-            <Icono className="size-5" />
+        <div className="flex items-start gap-3.5">
+          <span className={cn('flex size-14 shrink-0 items-center justify-center rounded-full', tono.circle)}>
+            <Icono className="size-7" />
           </span>
           <div className="min-w-0 flex-1">
-            <p id={`policy-title-${reminder.key}`} className={cn('text-[11px] font-bold uppercase tracking-widest', tono.titulo)}>
+            {/* F77 — la línea MÁS GRANDE es la orden («Toma la foto al teléfono» / «Pregúntale al
+                cliente»): antes era un rótulo de 11 px y el operario tenía que acercarse a leer. */}
+            <p id={`policy-title-${reminder.key}`} data-policy-title
+              className={cn('text-xl font-black uppercase leading-tight tracking-tight', tono.titulo)}>
               {reminder.title}
             </p>
-            <p className="mt-1 text-sm leading-snug text-foreground">{reminder.message}</p>
+            <p data-policy-message className="mt-1.5 text-lg font-medium leading-snug text-foreground">{reminder.message}</p>
           </div>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
-          <Button variant="ghost" size="sm" className="h-8 px-3 text-xs text-muted-foreground" onClick={cerrar} data-policy-later>
+        <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+          <Button variant="ghost" size="sm" className="h-9 px-3 text-xs text-muted-foreground" onClick={cerrar} data-policy-later>
             <Clock className="size-3.5" /> Después
           </Button>
           {resto.map(a => (
-            <Button key={a.id} variant="outline" size="sm" className="h-8 border-border bg-background/70 px-3 text-xs"
+            <Button key={a.id} variant="outline" size="sm" className="h-10 border-border bg-background/70 px-4 text-sm"
               onClick={() => { closePolicyModal(actual.id); actual.onAction(a.id); }}>
               {a.label}
             </Button>
           ))}
           <Button size="sm" autoFocus data-policy-primary
-            className={cn('h-8 gap-1.5 px-3 text-xs shadow-sm', tono.boton)}
+            className={cn('h-10 gap-1.5 px-4 text-sm shadow-sm', tono.boton)}
             onClick={() => { closePolicyModal(actual.id); actual.onAction(primera.id); }}>
-            <Check className="size-3.5" /> {primera.label}
+            <Check className="size-4" /> {primera.label}
           </Button>
         </div>
       </div>

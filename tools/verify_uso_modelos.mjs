@@ -258,6 +258,13 @@ if (objetivo.id) {
   })()`);
   const idsRep = detalle ? JSON.parse(detalle) : [];
   const enUsoAhora = () => cuenta(`SELECT COUNT(*) AS n FROM products WHERE id IN (${idsRep.join(',') || '0'}) AND COALESCE(in_use,1)=1`);
+  // FOTO del estado original de cada ficha: el botón «usar/apagar todo el modelo» deja TODO en el
+  // mismo estado (es lo que promete), así que un repuesto que estaba EN USO con su teléfono apagado
+  // queda apagado después de la vuelta — y el conteo final de la prueba cambiaba por eso. Al terminar
+  // se RESTAURA cada ficha como estaba (dos comandos angostos del dueño), así la copia no se ensucia.
+  const repOriginal = new Map(filas(`SELECT id, COALESCE(in_use,1) AS in_use FROM products WHERE id IN (${idsRep.join(',') || '0'})`)
+    .map(r => [Number(r.id), Number(r.in_use)]));
+  const ipc = (cmd, args) => evalx(`(() => window.__TAURI_INTERNALS__.invoke(${JSON.stringify(cmd)}, ${JSON.stringify(args)}))()`);
 
   await clickCenter(`document.querySelector('[data-phone-in-use="${objetivo.id}"]')`);
   await waitFor(`document.querySelector('[data-phone-in-use="${objetivo.id}"]')?.getAttribute('data-phone-in-use-state') === '1'`, 15000);
@@ -274,6 +281,14 @@ if (objetivo.id) {
   check('F50: y apagarlo deja el teléfono y sus repuestos como estaban (nada a medias)',
     trasApagar === 0 && enUsoAhora() === 0,
     `teléfono=${trasApagar} · repuestos en uso=${enUsoAhora()}/${idsRep.length}`);
+  // …y se devuelve CADA ficha a su estado original (el botón las puso todas en el mismo estado).
+  for (const [id, val] of repOriginal) await ipc('set_product_in_use', { id, inUse: val === 1 });
+  await ipc('set_phone_in_use', { id: Number(objetivo.id), inUse: Number(objetivo.in_use) === 1 });
+  await sleep(600);
+  check('F50: la prueba devolvió el modelo y sus repuestos a su estado original',
+    cuenta(`SELECT COUNT(*) AS n FROM products WHERE id IN (${idsRep.join(',') || '0'}) AND COALESCE(in_use,1)=1`) === [...repOriginal.values()].filter(v => v === 1).length
+    && Number(uno(`SELECT COALESCE(in_use,0) AS in_use FROM phones WHERE id=?1`, objetivo.id).in_use) === Number(objetivo.in_use),
+    `repuestos en uso=${cuenta(`SELECT COUNT(*) AS n FROM products WHERE id IN (${idsRep.join(',') || '0'}) AND COALESCE(in_use,1)=1`)}/${[...repOriginal.values()].filter(v => v === 1).length}`);
 }
 
 // ── 6) EL REGISTRO DE SERVICIO: solo lo que uso (y «ver todos») ───────────────────────────────

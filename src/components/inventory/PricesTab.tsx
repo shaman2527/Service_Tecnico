@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { BadgeDollarSign, Check, Loader2, PackagePlus, Smartphone, Tags, Wand2 } from 'lucide-react';
+import { BadgeDollarSign, Check, FileSpreadsheet, Loader2, PackagePlus, Smartphone, Tags, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { api } from '@/db';
-import type { CatalogReport, PhoneSplitPreview, PriceRestoreReport } from '@/types';
+import type { CatalogReport, Category, PhoneSplitPreview, PriceRestoreReport } from '@/types';
 import { toast } from 'sonner';
 import { LoadInventoryDialog } from './LoadInventoryDialog';
+import { LoadCsvDialog } from './LoadCsvDialog';
 import { CategoriesCard } from './CategoriesCard';
 
 // AJUSTES del inventario, en lenguaje de tienda (sin tecnicismos):
@@ -29,7 +30,9 @@ function Fila({ label, value }: { label: string; value: string | number }) {
  * `onRefresh` solo refresca: lo usa el asistente de carga, que tiene que quedarse abierto
  * para mostrar su resumen (antes saltaba de pestaña y el resumen nunca se veía).
  */
-export function PricesTab({ onChanged, onRefresh, refreshKey = 0 }: {
+export function PricesTab({ categories = [], onChanged, onRefresh, refreshKey = 0 }: {
+  /** F78: las categorías del catálogo (la carga CSV las usa para elegir/crear la de cada fila) */
+  categories?: Category[];
   onChanged: () => void;
   onRefresh: () => void;
   /** F65: sube cuando el inventario cambió (p. ej. al cargar la lista del local mueve el stock) */
@@ -41,6 +44,8 @@ export function PricesTab({ onChanged, onRefresh, refreshKey = 0 }: {
   const [splitCheck, setSplitCheck] = useState<PhoneSplitPreview | null>(null);
   const [busy, setBusy] = useState<'precios' | 'nombres' | 'modelos' | null>(null);
   const [showLoad, setShowLoad] = useState(false);
+  /** F78: el asistente de carga masiva por CSV (el camino principal). */
+  const [showCsv, setShowCsv] = useState(false);
 
   const revisarModelos = async () => {
     setBusy('modelos');
@@ -306,17 +311,35 @@ export function PricesTab({ onChanged, onRefresh, refreshKey = 0 }: {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <div>
-            <Button onClick={() => setShowLoad(true)}>
-              <PackagePlus data-icon="inline-start" /> Cargar la lista del local
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => setShowCsv(true)} data-action="cargar-csv">
+              <FileSpreadsheet data-icon="inline-start" /> Cargar inventario por CSV
+            </Button>
+            <Button variant="outline" onClick={() => setShowLoad(true)}>
+              <PackagePlus data-icon="inline-start" /> Cargar la lista del local (conteo físico)
             </Button>
           </div>
           <span className="text-[11px] text-muted-foreground">
-            Lo que dice la lista manda: si una pantalla no está en la lista queda en <strong>0</strong> y todo movimiento
-            queda anotado en «Movimientos» con el motivo <em>Carga de inventario</em>. No se tocan precios ni compatibilidad.
+            <strong>CSV (recomendado):</strong> trae TODOS los campos del producto (categoría —incluso nuevas—,
+            marca, modelo, variante, compatibilidad, costo, venta, efectivo, stock, mínimo, proveedor, código) y
+            el stock <strong>se suma</strong> a lo que ya hay; antes de aplicar ves en dos pestañas qué es nuevo y qué
+            ya existe, con el diff y las acciones por fila.
+          </span>
+          <span className="text-[11px] text-muted-foreground">
+            <strong>Conteo físico:</strong> pegás la lista como la tenés escrita (marca/modelo y la cantidad entre
+            paréntesis: <em>A30/A50 (2)</em>) y lo que no está en la lista queda en <strong>0</strong>. Todo movimiento queda
+            anotado en «Movimientos» con el motivo <em>Carga de inventario</em>.
           </span>
         </CardContent>
       </Card>
+
+      {showCsv && (
+        <LoadCsvDialog
+          categories={categories}
+          onClose={() => setShowCsv(false)}
+          onApplied={() => { toast.success('Inventario cargado desde el CSV'); onRefresh(); }}
+        />
+      )}
 
       {showLoad && (
         <LoadInventoryDialog

@@ -18,6 +18,10 @@
 // **el aviso del PAGO se ve PRIMERO**, con la foto al final (lo decide `ORDEN_EN_PANTALLA`: pedido
 // del dueño, 2026-09-21) — para no inundar la pantalla del mostrador y para preguntar el pago
 // mientras el cliente todavía está enfrente.
+//
+// F77: el `title` de cada aviso es la ORDEN CORTA y grande del cartel («Toma la foto al teléfono» /
+// «Toma la foto al entregar» / «Pregúntale al cliente»); el `message` es el que explica el porqué.
+// Este módulo sigue sin saber de React ni de tamaños: quién lo agranda es `PolicyModal.tsx`.
 
 import type { Service } from '../types';
 // Extensión explícita: este módulo lo cargan TAMBIÉN las pruebas puras con Node
@@ -74,10 +78,15 @@ export interface ReceiveContext {
   status: string;
 }
 
+// F77 — EL TÍTULO ES LA ORDEN CORTA (pedido del dueño, 2026-09-25): «si le doy clic a imprimir salga
+// el mensaje que tenemos, o algo más en grande que diga *Toma la foto al teléfono*». El `title` es la
+// línea MÁS GRANDE del modal (ver `PolicyModal.tsx`), así que ahí va lo que hay que HACER y el
+// `message` sigue explicando el porqué (los mensajes NO cambiaron: la política de la empresa, el
+// plural de equipos y «pagar» en vez de «cancelar» están fijados por `tools/reminders_test.ts`).
 const FOTO_ENTRADA: Reminder = {
   key: 'photo_in',
   tone: 'entrada',
-  title: 'Foto de ENTRADA',
+  title: 'Toma la foto al teléfono',
   message: 'Recuerda tomarle la foto al teléfono al recibirlo: es política de la empresa.',
   actions: [
     { id: 'foto_tomada', label: 'Ya le tomé la foto' },
@@ -93,7 +102,8 @@ function fotoEntrada(devices: number): Reminder {
 const FOTO_SALIDA: Reminder = {
   key: 'photo_out',
   tone: 'salida',
-  title: 'Foto de SALIDA',
+  // F77: la orden corta y grande («Toma la foto al entregar»); el mensaje sigue siendo el de siempre.
+  title: 'Toma la foto al entregar',
   message: '¿Le tomaste la foto al teléfono al entregarlo? Es política de la empresa.',
   actions: [
     { id: 'foto_tomada', label: 'Ya le tomé la foto' },

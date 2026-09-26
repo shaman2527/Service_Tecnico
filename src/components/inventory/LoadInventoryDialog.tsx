@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import {
-  Check, ChevronLeft, CircleAlert, FileUp, ListChecks, Loader2, PackagePlus, AlertTriangle, Search, Truck, X,
+  ChevronLeft, CircleAlert, FileUp, ListChecks, Loader2, PackagePlus, AlertTriangle, Search, Truck, X,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { api, isTauri } from '@/db';
 import type { LoadCandidate, LoadPreview, LoadReport, LoadRow } from '@/types';
 import { cn } from '@/lib/utils';
+import { WizardSteps } from './WizardSteps';
 
 // F25 — Asistente para CARGAR EL INVENTARIO del local.
 //   1) pegás (o abrís) la lista tal como la tenés escrita,
@@ -32,26 +33,8 @@ Tecno
 Spark 8P (3)
 Camon 18 (0)`;
 
-function Stepper({ step }: { step: number }) {
-  return (
-    <div className="flex items-center gap-2">
-      {PASOS.map((label, i) => (
-        <div key={label} className="flex items-center gap-2">
-          <span
-            className={cn(
-              'flex size-6 items-center justify-center rounded-full text-[11px] font-semibold',
-              i < step ? 'bg-success text-white' : i === step ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
-            )}
-          >
-            {i < step ? <Check className="size-3.5" /> : i + 1}
-          </span>
-          <span className={cn('text-xs', i === step ? 'font-medium text-foreground' : 'text-muted-foreground')}>{label}</span>
-          {i < PASOS.length - 1 && <span className="text-muted-foreground/40">·</span>}
-        </div>
-      ))}
-    </div>
-  );
-}
+// F78: el stepper se movió a `WizardSteps.tsx` para que el asistente del CSV muestre los pasos igual
+// (una sola implementación para los dos asistentes de carga).
 
 export function LoadInventoryDialog({ onClose, onApplied }: {
   onClose: () => void;
@@ -304,7 +287,7 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
           <DialogTitle className="flex items-center gap-2">
             <PackagePlus className="size-4 text-muted-foreground" /> Cargar el inventario del local
           </DialogTitle>
-          <div className="pt-1"><Stepper step={step} /></div>
+          <div className="pt-1"><WizardSteps steps={PASOS} current={step} /></div>
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-3">

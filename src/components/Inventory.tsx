@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Layers, MoveHorizontal, Package, Smartphone, Tag, Wand2 } from 'lucide-react';
+import { FileSpreadsheet, Layers, MoveHorizontal, Package, Smartphone, Tag, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -12,6 +12,7 @@ import { ModelsTab } from './inventory/ModelsTab';
 import { ByModelTab } from './inventory/ByModelTab';
 import { MovementsTab } from './inventory/MovementsTab';
 import { PricesTab } from './inventory/PricesTab';
+import { LoadCsvDialog } from './inventory/LoadCsvDialog';
 import { DuplicatesDialog } from './inventory/DuplicatesDialog';
 
 // MÓDULO ÚNICO de inventario (2026-09-15). Antes había dos pantallas sobre la
@@ -32,6 +33,8 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
   const [showDuplicates, setShowDuplicates] = useState(false);
+  /** F78: la carga masiva por CSV abierta desde la cabecera (el mismo asistente de Ajustes). */
+  const [showCsvMasivo, setShowCsvMasivo] = useState(false);
   const [modelQuery, setModelQuery] = useState(initialModel);
   /**
    * F65 (2ª vuelta) — la categoría del FILTRO activo de la pestaña Productos. Sirve para que un
@@ -123,11 +126,18 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
               <Layers data-icon="inline-start" /> Buscar por modelo
             </Button>
             {/* F69 — crear/editar un producto abre el formulario con el COSTO y los precios, y
-                `add_product`/`update_product` son del dueño en el backend: la caja no ve el botón. */}
+                `add_product`/`update_product` son del dueño en el backend: la caja no ve el botón.
+                F78: al lado está la carga masiva por CSV (mismo gate: `apply_inventory_csv` es del
+                dueño), para no cargar producto por producto. */}
             {role === 'owner' && (
-              <Button onClick={() => { setEditing(null); setShowForm(true); }} data-action="nuevo-producto">
-                <Package data-icon="inline-start" /> Nuevo producto
-              </Button>
+              <>
+                <Button variant="outline" onClick={() => { setTab('precios'); setShowCsvMasivo(true); }} data-action="cargar-csv">
+                  <FileSpreadsheet data-icon="inline-start" /> Cargar CSV
+                </Button>
+                <Button onClick={() => { setEditing(null); setShowForm(true); }} data-action="nuevo-producto">
+                  <Package data-icon="inline-start" /> Nuevo producto
+                </Button>
+              </>
             )}
           </div>
         </div>
@@ -176,6 +186,7 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
                   mostrar su resumen sin que la pestaña se desmonte.
                   F65: las categorías también se releen (el filtro de Productos las usa). */}
               <PricesTab
+                categories={categories}
                 refreshKey={refreshKey}
                 onChanged={() => { refreshAll(); reloadCategories(); setTab('productos'); }}
                 onRefresh={() => { refreshAll(); reloadCategories(); }}
@@ -201,6 +212,15 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
           onClose={() => setShowDuplicates(false)}
           onChanged={refreshAll}
         />
+
+        {/* F78: la carga masiva por CSV, abierta desde la cabecera de Inventario. */}
+        {showCsvMasivo && (
+          <LoadCsvDialog
+            categories={categories}
+            onClose={() => setShowCsvMasivo(false)}
+            onApplied={() => { refreshAll(); reloadCategories(); }}
+          />
+        )}
       </div>
     </TooltipProvider>
   );

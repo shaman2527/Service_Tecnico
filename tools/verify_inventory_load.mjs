@@ -62,7 +62,10 @@ await sleep(1200);
 await clickCenter(`[...document.querySelectorAll('[role="tab"]')].find(t => t.innerText.trim() === 'Productos')`);
 await sleep(2500);
 const catLabel = await evalx(`(() => document.querySelector('[role="combobox"]')?.innerText.trim() ?? null)()`);
-const categorias = await evalx(`(() => [...document.querySelectorAll('table tbody tr')].map(r => r.querySelectorAll('td')[1]?.innerText.trim()).filter(Boolean).slice(0, 8))()`);
+// OJO con el índice de la columna: F50 agregó la columna «En uso» como SEGUNDA (td[1]) y la
+// categoría pasó a td[2]. Antes la prueba leía td[1] y comparaba «✓ Sí» contra «Pantalla» (fallaba
+// por la columna, no por el filtro).
+const categorias = await evalx(`(() => [...document.querySelectorAll('table tbody tr')].map(r => r.querySelectorAll('td')[2]?.innerText.trim()).filter(Boolean).slice(0, 8))()`);
 check('F26: el inventario abre filtrado en «Pantalla»',
   /pantalla/i.test(String(catLabel)) && categorias.length > 0 && categorias.every(c => /pantalla/i.test(c)),
   `filtro=${catLabel} · filas=${[...new Set(categorias)].join(', ')}`);
