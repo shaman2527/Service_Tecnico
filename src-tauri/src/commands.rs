@@ -94,6 +94,19 @@ pub fn get_products(db: State<Database>, search: String, category_id: Option<i64
     Ok(items)
 }
 
+/// F80 — una ficha por ID (lectura). La usa el atajo del wizard para RELEER la fila antes de
+/// escribirla: armar los 12 argumentos de `update_product` con una copia vieja revierte en silencio lo
+/// que otro camino acaba de guardar (hallazgo BLOQUEANTE de la revisión adversarial). `None` = la
+/// ficha ya no existe (borrada desde Inventario) y el wizard tiene que soltar la pantalla elegida.
+#[tauri::command]
+pub fn get_product(db: State<Database>, id: i64) -> Result<Option<crate::db::Product>, String> {
+    let mut item = db.get_product(id).map_err(|e| e.to_string())?;
+    if let Some(p) = item.as_mut() {
+        sin_costo_para_caja(&db, std::slice::from_mut(p));
+    }
+    Ok(item)
+}
+
 #[tauri::command]
 pub fn get_low_stock_products(db: State<Database>) -> Result<Vec<crate::db::Product>, String> {
     let mut items = db.get_low_stock_products().map_err(|e| e.to_string())?;

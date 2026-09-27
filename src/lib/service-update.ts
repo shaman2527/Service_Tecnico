@@ -25,15 +25,31 @@ export interface OrderPatch {
   technician?: string;
   technicianId?: number | null;
   currency?: string;
+  // ── F79 (cobrar dentro del wizard) ─────────────────────────────────────────────────────────
+  // La orden que nace desde el botón «Cobrar» del paso 2 se sigue editando DESDE el wizard (para
+  // que «Guardar» no cree una segunda orden). Para eso el patch tiene que poder llevar TODOS los
+  // datos que el formulario de alta sí tiene por equipo — si no, el blindaje, el color o el modelo
+  // que el operario corrige en el paso 3 quedarían sin guardar. Todos son opcionales: `undefined`
+  // SIEMPRE conserva el valor de la fila (la regla de este helper).
+  client?: string;
+  phone?: string;
+  clientCi?: string;
+  clientAddress?: string;
+  model?: string;
+  fault?: string;
+  color?: string;
+  deviceChecklist?: string;
+  bankFeePercent?: number;
+  zelleReference?: string;
 }
 
 export async function updateOrderKeepingFields(s: Service, patch: OrderPatch = {}): Promise<void> {
   await api.updateService(
     s.id,
-    s.client ?? '',
-    s.phone ?? '',
-    s.model ?? '',
-    s.fault ?? '',
+    patch.client ?? s.client ?? '',
+    patch.phone ?? s.phone ?? '',
+    patch.model ?? s.model ?? '',
+    patch.fault ?? s.fault ?? '',
     patch.serviceType ?? s.service_type ?? 'Cambio pantalla',
     patch.serviceTypes ?? s.service_types ?? '',
     patch.amount ?? s.amount,
@@ -47,18 +63,18 @@ export async function updateOrderKeepingFields(s: Service, patch: OrderPatch = {
     patch.dateOut ?? (s.date_out ?? '').slice(0, 10),
     patch.status ?? s.status ?? 'Recibido',
     patch.observations ?? s.observations ?? '',
-    s.bank_fee_percent ?? 0,
-    s.zelle_reference ?? '',
+    patch.bankFeePercent ?? s.bank_fee_percent ?? 0,
+    patch.zelleReference ?? s.zelle_reference ?? '',
     patch.currency ?? s.currency ?? 'USD',
-    s.client_ci ?? '',
-    s.client_address ?? '',
-    s.device_checklist ?? '',
+    patch.clientCi ?? s.client_ci ?? '',
+    patch.clientAddress ?? s.client_address ?? '',
+    patch.deviceChecklist ?? s.device_checklist ?? '',
     patch.technician ?? s.technician ?? '',
     // Mismo cuidado con el técnico: `?? ` no alcanza porque `null` es un valor VÁLIDO (desasignar).
     // Con `patch.technicianId ?? s.technician_id` el id viejo sobrevivía a «Sin asignar» y la orden
     // quedaba con technician NULL + technician_id apuntando al anterior (la tarjeta no cambiaba).
     patch.technicianId !== undefined ? patch.technicianId : (s.technician_id ?? null),
-    s.color ?? '',
+    patch.color ?? s.color ?? '',
     patch.screenProductId !== undefined ? patch.screenProductId : s.screen_product_id ?? null,
     patch.discountAmount ?? s.discount_amount ?? 0,
   );

@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
-import { AlertTriangle, Check, CheckCircle2, Smartphone } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { AlertTriangle, Check, CheckCircle2, Pencil, Plus, Smartphone } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api } from '../db';
 import { cn, partLabel } from '@/lib/utils';
+import { useDataVersion } from '@/lib/use-data-version';
 import { isCrossBrand, warnsCrossBrand } from '@/lib/screen-rules';
 import { partPrice } from '@/lib/screen-price';
 import type { Product, ScreenCandidate } from '../types';
@@ -58,6 +60,19 @@ export function useCompatibleProducts(model: string, enabled = true) {
    * «candidatos cargados / modelo escrito» tiene que coincidir antes de sacar plata de ahí.
    */
   const [resuelto, setResuelto] = useState('');
+  /**
+   * F80 — CONTADOR DE RECARGA: al editar una ficha desde el lápiz del wizard hay que volver a pedir la
+   * compatibilidad, si no la fila sigue mostrando el precio y el stock VIEJOS (el bug clásico de
+   * «edité y no se ve»). `reload()` lo sube.
+   */
+  const [version, setVersion] = useState(0);
+  /**
+   * F80 — EL BUS DE SINCRONIZACIÓN (F76) TAMBIÉN MANDA ACÁ: cualquier escritura de producto
+   * (`add_product`/`update_product`) sube la versión de datos y esta lista se vuelve a pedir. Sin esto,
+   * editar una ficha desde OTRO equipo de la misma recepción (cada uno tiene su propia lista) o desde
+   * el buscador libre dejaba la fila con el precio viejo y el operario cobraba el número viejo.
+   */
+  const dataVersion = useDataVersion();
   useEffect(() => {
     const q = model.trim();
     if (!enabled || q.length < 3) { setCandidates([]); setResuelto(''); return; }
@@ -70,10 +85,11 @@ export function useCompatibleProducts(model: string, enabled = true) {
         .finally(() => { if (alive) setLoading(false); });
     }, 250);
     return () => { alive = false; clearTimeout(t); };
-  }, [model, enabled]);
+  }, [model, enabled, version, dataVersion]);
   /** `true` cuando los candidatos son de ESTE modelo (y por lo tanto se puede usar su precio). */
   const alDia = resuelto !== '' && resuelto === model.trim();
-  return { candidates, loading, resuelto, alDia };
+  const reload = useCallback(() => setVersion(v => v + 1), []);
+  return { candidates, loading, resuelto, alDia, reload };
 }
 
 // Lista de pantallas compatibles con su stock: se elige la EXACTA que se instala (al entregar
@@ -85,7 +101,7 @@ export function useCompatibleProducts(model: string, enabled = true) {
 // debajo del modelo); acá vive la BÚSQUEDA LIBRE: el operario escribe y elige cualquier pantalla del
 // catálogo, aunque no figure en la compatibilidad de ese teléfono (se marca «buscada» y sigue
 // avisando si es de otra marca o si está agotada; al entregar descuenta ESA, como cualquier otra).
-export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, permiteBuscar = false, efectivo = false, onPickOtra, onChange, onConfirm }: {
+export function ScreenSelect({ screenProductId, screenOptions, loading, confirmed, descuenta = true, permiteBuscar = false, efectivo = false, onPickOtra, onChange, onConfirm, onEditarProducto, onRegistrarPantalla }: {
   screenProductId: number | null;
   screenOptions: ScreenCandidate[];
   loading: boolean;
@@ -104,12 +120,21 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
   onPickOtra?: (candidate: ScreenCandidate) => void;
   onChange: (id: number | null) => void;
   onConfirm: (v: boolean) => void;
+  /**
+   * F80 — EL LÁPIZ: editar ESA ficha sin salir del wizard (precio, stock, compatibilidad). Solo se
+   * dibuja si el llamador lo autoriza (sesión master) — sin la prop no hay lápiz (la caja no lo ve).
+   */
+  onEditarProducto?: (p: Product) => void;
+  /** F80 — registrar la pantalla que FALTA para este modelo (nace con su compatibilidad y su stock). */
+  onRegistrarPantalla?: () => void;
 }) {
   const chosen = screenOptions.find(o => o.product.id === screenProductId) ?? null;
   const chosenOut = chosen != null && !chosen.in_stock;
   const [q, setQ] = useState('');
   const [resultados, setResultados] = useState<ScreenCandidate[]>([]);
   const [buscando, setBuscando] = useState(false);
+  /** F80: los resultados del buscador libre también siguen al bus (F76): una ficha editada se refresca. */
+  const dataVersion = useDataVersion();
 
   // Búsqueda en TODO el catálogo de pantallas (Pantalla + Táctil + Táctil Tablet, las mismas
   // categorías del padrón del taller): una consulta paginada por categoría, con rebote.
@@ -139,7 +164,7 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
         .finally(() => { if (alive) setBuscando(false); });
     }, 250);
     return () => { alive = false; clearTimeout(t); };
-  }, [q, permiteBuscar]);
+  }, [q, permiteBuscar, dataVersion]);
 
   return (
     <div className="flex flex-col gap-2">
@@ -159,10 +184,25 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
       )}
 
       {!loading && screenOptions.length === 0 && (
-        <p className="text-xs text-muted-foreground bg-muted/40 rounded-md px-3 py-2">
-          Modelo sin pantallas en el catálogo — el inventario no se descuenta automáticamente.
-          Revisa cómo está escrito el modelo o registra la pantalla en Inventario.
-        </p>
+        // `data-screen-vacio` = el modelo NO tiene ninguna pantalla en el catálogo (gancho de la prueba
+        // en vivo: distingue este estado del botón «registrar» del buscador, que siempre está).
+        <div data-screen-vacio className="flex flex-col gap-2 rounded-md bg-muted/40 px-3 py-2">
+          <p className="text-xs text-muted-foreground">
+            Modelo sin pantallas en el catálogo — el inventario no se descuenta automáticamente.
+            {onRegistrarPantalla
+              ? <> Revisá cómo está escrito el modelo o <strong>registrala acá mismo</strong> con su stock.</>
+              : ' Revisá cómo está escrito el modelo, o pedile al dueño que registre la pantalla.'}
+          </p>
+          {/* F80: el camino corto para «cargar el inventario mientras se registra» (pedido del dueño:
+              «que me sirva, carga también nuevos stock»). Solo con la llave del dueño: a la caja no se
+              le ofrece un botón que el backend va a rechazar (`require_owner`). */}
+          {onRegistrarPantalla && (
+            <Button type="button" variant="outline" size="sm" className="self-start gap-1.5 text-xs"
+              data-action="registrar-pantalla" onClick={onRegistrarPantalla}>
+              <Plus className="size-3.5" /> Registrar esa pantalla (con su stock)
+            </Button>
+          )}
+        </div>
       )}
 
       {!loading && screenOptions.length > 0 && (
@@ -174,42 +214,58 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
             const active = p.id === screenProductId;
             const otraMarca = warnsCrossBrand(o);
             return (
-              <button
-                key={p.id}
-                type="button"
-                data-screen-option={p.id}
-                data-screen-elegida={active ? '1' : '0'}
-                onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
+              // F80: la fila deja de ser UN botón para poder llevar el lápiz al lado (dos acciones
+              // distintas: elegir la pantalla y editar la ficha). El botón de elegir conserva
+              // `data-screen-option`, que es el gancho que usan las pruebas y el resto del formulario.
+              <div key={p.id}
                 className={cn(
-                  'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                  'flex items-center gap-1 rounded-md pr-1 transition-colors',
                   active ? 'bg-primary/10 ring-1 ring-primary/40' : 'hover:bg-accent',
-                )}
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
-                  <span className="truncate">
-                    {partLabel(p)}
-                    {p.variant && <Badge variant="secondary" className="ml-2 text-[10px]">{p.variant}</Badge>}
+                )}>
+                <button
+                  type="button"
+                  data-screen-option={p.id}
+                  data-screen-elegida={active ? '1' : '0'}
+                  onClick={() => { onChange(p.id); if (in_stock) onConfirm(false); }}
+                  className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Check className={cn('size-3.5 shrink-0', active ? 'text-primary' : 'text-transparent')} />
+                    <span className="truncate">
+                      {partLabel(p)}
+                      {p.variant && <Badge variant="secondary" className="ml-2 text-[10px]">{p.variant}</Badge>}
+                    </span>
                   </span>
-                </span>
-                <span className="flex items-center gap-1.5 shrink-0">
-                  {otraMarca && (
-                    <Badge variant="outline" className="text-[10px] text-warning border-warning/50">otra marca</Badge>
-                  )}
-                  {match_quality !== 'exacta' && (
-                    <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
-                  )}
-                  {tienePrecio(p, efectivo) && (
-                    <PrecioFila p={p} efectivo={efectivo} />
-                  )}
-                  <Badge
-                    variant={in_stock ? 'default' : 'outline'}
-                    className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}
-                  >
-                    {in_stock ? `stock ${p.stock}` : 'agotada'}
-                  </Badge>
-                </span>
-              </button>
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    {otraMarca && (
+                      <Badge variant="outline" className="text-[10px] text-warning border-warning/50">otra marca</Badge>
+                    )}
+                    {match_quality !== 'exacta' && (
+                      <Badge variant="outline" className="text-[10px]">{match_quality}</Badge>
+                    )}
+                    {tienePrecio(p, efectivo) && (
+                      <PrecioFila p={p} efectivo={efectivo} />
+                    )}
+                    <Badge
+                      variant={in_stock ? 'default' : 'outline'}
+                      className={cn('text-[10px] tabular-nums', in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}
+                    >
+                      {in_stock ? `stock ${p.stock}` : 'agotada'}
+                    </Badge>
+                  </span>
+                </button>
+                {/* F80 — el lápiz: la ficha se corrige acá (precio, stock, compatibilidad) y el
+                    inventario se refresca solo (bus de sincronización, F76). */}
+                {onEditarProducto && (
+                  <Button type="button" variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground hover:text-primary"
+                    data-editar-producto={p.id}
+                    aria-label={`Editar la ficha de ${p.name}`}
+                    title={`Editar «${p.name}»: precio, stock y compatibilidad`}
+                    onClick={() => onEditarProducto(p)}>
+                    <Pencil className="size-3" />
+                  </Button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -235,22 +291,43 @@ export function ScreenSelect({ screenProductId, screenOptions, loading, confirme
           {resultados.length > 0 && (
             <div className="flex flex-col gap-0.5 rounded-md border border-border p-1">
               {resultados.map(c => (
-                <button key={c.product.id} type="button" data-screen-buscada={c.product.id}
-                  onClick={() => { onChange(c.product.id); if (c.in_stock) onConfirm(false); onPickOtra?.(c); }}
-                  className="flex items-center justify-between gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-accent">
-                  <span className="truncate text-muted-foreground">
-                    {partLabel(c.product)}
-                  </span>
-                  <span className="flex shrink-0 items-center gap-1.5">
-                    {tienePrecio(c.product, efectivo) && <PrecioFila p={c.product} efectivo={efectivo} />}
-                    <Badge variant={c.in_stock ? 'default' : 'outline'}
-                      className={cn('text-[10px] tabular-nums', c.in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}>
-                      {c.in_stock ? `stock ${c.product.stock}` : 'agotada'}
-                    </Badge>
-                  </span>
-                </button>
+                <div key={c.product.id} className="flex items-center gap-1 rounded pr-0.5 transition-colors hover:bg-accent">
+                  <button type="button" data-screen-buscada={c.product.id}
+                    onClick={() => { onChange(c.product.id); if (c.in_stock) onConfirm(false); onPickOtra?.(c); }}
+                    className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded px-2 py-1 text-left text-xs transition-colors">
+                    <span className="truncate text-muted-foreground">
+                      {partLabel(c.product)}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {tienePrecio(c.product, efectivo) && <PrecioFila p={c.product} efectivo={efectivo} />}
+                      <Badge variant={c.in_stock ? 'default' : 'outline'}
+                        className={cn('text-[10px] tabular-nums', c.in_stock ? 'bg-success text-white hover:bg-success' : 'text-warning border-warning/50')}>
+                        {c.in_stock ? `stock ${c.product.stock}` : 'agotada'}
+                      </Badge>
+                    </span>
+                  </button>
+                  {onEditarProducto && (
+                    <Button type="button" variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground hover:text-primary"
+                      data-editar-producto={c.product.id}
+                      aria-label={`Editar la ficha de ${c.product.name}`}
+                      title={`Editar «${c.product.name}»: precio, stock y compatibilidad`}
+                      onClick={() => onEditarProducto(c.product)}>
+                      <Pencil className="size-3" />
+                    </Button>
+                  )}
+                </div>
               ))}
             </div>
+          )}
+
+          {/* F80: si el repuesto no está en el catálogo (o es una variante nueva), se registra acá
+              mismo — nace con la compatibilidad de ESTE modelo y con su stock. */}
+          {onRegistrarPantalla && (
+            <button type="button" data-action="registrar-pantalla"
+              onClick={onRegistrarPantalla}
+              className="self-start text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
+              ¿No está en la lista? Registrar la pantalla que falta (con su stock)
+            </button>
           )}
         </div>
       )}

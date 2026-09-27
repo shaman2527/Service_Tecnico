@@ -124,6 +124,12 @@ export const api = {
     }),
 
   deleteProduct: (id: number) => tauriInvoke<void>('delete_product', { id }),
+  /**
+   * F80 — una ficha por ID (lectura). El atajo del wizard la usa para RELEER la fila antes de
+   * escribirla (armar los 12 argumentos con una copia vieja revierte lo que otro camino acaba de
+   * guardar) y para saber si la pantalla elegida sigue existiendo. `null` = ya no está en el catálogo.
+   */
+  getProduct: (id: number) => tauriInvoke<Product | null>('get_product', { id }),
   getProducts: (search: string = '', categoryId: number | null = null) =>
     tauriInvoke<Product[]>('get_products', { search, categoryId }),
 

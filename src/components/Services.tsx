@@ -28,6 +28,9 @@ import { useDataVersion } from '@/lib/use-data-version';
 // F74 — el IVA: la configuración (prender/apagar, alícuota, modo) y la línea de desglose que se ve
 // mientras se carga el monto. La cuenta vive en la regla pura src/lib/iva.ts.
 import { parseIvaConfig, ivaActivo, totalACobrar, IVA_DEFAULT, type IvaConfig } from '@/lib/iva';
+// F79 — el cobro DENTRO del wizard: la etiqueta y el estado del dinero salen de una regla pura
+// (con pruebas en tools/wizard_cobro_test.ts), nunca de cuentas escritas en el formulario.
+import { etiquetaCobro, ayudaCobro, estadoCobro, avisoOrdenGuardada, avisoEquiposFijos, avisoMontoSinGuardar, avisoMontoPendiente, type EstadoCobro } from '@/lib/wizard-cobro';
 import IvaDesglose from './IvaDesglose';
 // F32: recordatorios de política (foto / pago) y panel de los teléfonos entregados hoy. Las reglas
 // viven en módulos puros con pruebas (lib/service-guide, lib/reminders): acá solo se conectan.
@@ -37,7 +40,8 @@ import { FichaIngreso } from './FichaIngreso';
 import { firePolicyReminders } from './policy-actions';
 import { PolicyModalHost } from './PolicyModal';
 import DiscountDialog from './DiscountDialog';
-import { EntregadosHoy } from './EntregadosHoy';
+// F80: el lápiz de la ficha del repuesto (precio, stock y compatibilidad) sin salir del wizard.
+import { EditarProductoDialog } from './EditarProductoDialog';import { EntregadosHoy } from './EntregadosHoy';
 import { buildFicha } from '@/lib/ficha';
 import { nextStep, DEFAULT_NEW_STATUS, isCreatableStatus, photoOutIsCurrent, needsTechnician } from '@/lib/service-guide';
 import { deliverReminders, receiveReminders, payIntentLabel, isDelivered } from '@/lib/reminders';
@@ -90,7 +94,7 @@ const agregarTrabajoDeOtro = (arr: string[], texto: string): void => {
   if (!arr.some(t => foldWork(t) === clave)) arr.push(etiqueta);
 };
 import { cn, methodCurrency, currencySymbol, warrantyEnd, warrantyStatus, CHECKLIST_ITEMS, checklistDefaults, parseChecklist, checklistSummary, SERVICE_TYPES, parseServiceTypes, partLabel, initialsOf, titleCase, isRefund, isFinalized, shortMethodLabel, localDate, addDays } from '@/lib/utils';
-import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate } from '../types';
+import type { Service, ServicePayment, ServiceStatus, Product, Client, Technician, ServiceDeviceInput, ScreenCandidate, Category } from '../types';
 
 // Paleta de colores de técnicos (clases Tailwind) — la misma lista en el dialog de gestión
 const TECH_COLORS = ['bg-purple-500', 'bg-blue-500', 'bg-green-600', 'bg-amber-500', 'bg-pink-500', 'bg-cyan-500', 'bg-red-500', 'bg-orange-500'];
@@ -1444,8 +1448,16 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
              (`remove_work_type_extra` pide su sesión). Agregar una nueva sí es del mostrador. */
           onQuitarCategoria={ab.manageCatalog ? quitarCategoria : undefined}
           canManageTecnicos={ab.manageCatalog}
+          /* F80: el lápiz para editar la ficha del repuesto (precio, stock, compatibilidad) desde el
+             wizard es del DUEÑO: el backend (`require_owner`) rechaza a la caja y la convención del
+             proyecto es no dibujarle un botón que va a chocar contra el mensaje del PIN. */
+          puedeEditarProducto={ab.manageCatalog}
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSaved={() => { setShowForm(false); setEditing(null); refrescar(); }}
+          /* F79: el botón «Cobrar» del wizard guarda la orden y el registro SIGUE — la lista de atrás
+             tiene que mostrar la orden nueva sin cerrar el formulario (por eso `refrescar`, no
+             `onSaved`). */
+          onListChanged={refrescar}
           /* F77: el comprobante se abre por la MISMA vía que la tarjeta y el asistente de cierre. */
           onPrint={s => setPrintFor(s)}
         />
@@ -1862,7 +1874,151 @@ function NuevaCategoriaChip({ onAgregar, onCancelar, existentes, locales = [], o
     </span>
   );
 }
-function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, iva = IVA_DEFAULT, tasa = 0 }: {
+/**
+ * F80 — LA PANTALLA ELEGIDA, VIVA (no dibuja nada: solo mantiene al día lo que el wizard muestra de la
+ * ficha del repuesto). Cuando algo del catálogo cambia (el bus de sincronización, F76), la ficha elegida
+ * y la buscada a mano se RELEEN por id:
+ *   · si se BORRÓ desde Inventario, se SUELTA la elección — una orden con `screen_product_id` muerto no
+ *     se puede entregar (el movimiento de inventario no puede apuntar a una ficha que no existe);
+ *   · si cambió (precio o stock), se refresca la copia para que los avisos de stock no mientan;
+ *   · si dejó de figurar entre las opciones compatibles (el operario le quitó este modelo a la ficha),
+ *     se marca como «elegida a mano» (F65c) para que el aviso lo diga, en vez de quedar una pantalla
+ *     invisible que igual descuenta stock.
+ * (Los tres casos los marcó la revisión adversarial: «Ficha completa» traía el botón Eliminar al
+ * wizard y el atajo permite cambiar la compatibilidad.)
+ */
+function PantallaViva({ elegidaId, extra, enLaLista, listo, onPerdida, onExtra }: {
+  elegidaId: number | null;
+  extra: ScreenCandidate | null;
+  /** ¿la elegida figura entre las opciones compatibles del modelo? */
+  enLaLista: boolean;
+  /** ¿ya se resolvió la compatibilidad de este modelo? (evita marcar «buscada» con la lista en camino) */
+  listo: boolean;
+  onPerdida: () => void;
+  onExtra: (c: ScreenCandidate | null) => void;
+}) {
+  const dataVersion = useDataVersion();
+  const perdidaRef = useRef(onPerdida);
+  const extraRef = useRef(onExtra);
+  perdidaRef.current = onPerdida;
+  extraRef.current = onExtra;
+  const extraId = extra?.product?.id ?? null;
+
+  // 1) la ficha elegida: ¿sigue existiendo?
+  useEffect(() => {
+    if (elegidaId == null) return;
+    let vivo = true;
+    api.getProduct(elegidaId)
+      .then(p => { if (vivo && !p) perdidaRef.current(); })
+      .catch(() => {});
+    return () => { vivo = false; };
+  }, [elegidaId, dataVersion]);
+
+  // 2) la copia de la pantalla buscada a mano (F65c): se refresca (o se suelta si ya no está)
+  useEffect(() => {
+    if (extraId == null) return;
+    let vivo = true;
+    api.getProduct(extraId)
+      .then(p => {
+        if (!vivo) return;
+        if (!p) { extraRef.current(null); perdidaRef.current(); return; }
+        const viejo = extra?.product;
+        if (!viejo || p.stock !== viejo.stock || p.price_sale !== viejo.price_sale || p.price_usd !== viejo.price_usd) {
+          extraRef.current({ ...(extra as ScreenCandidate), product: p, in_stock: (p.stock ?? 0) > 0 });
+        }
+      })
+      .catch(() => {});
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extraId, dataVersion]);
+
+  // 3) elegida que ya no figura como compatible: se conserva (es una pantalla real del catálogo y al
+  //    entregar se descuenta) pero se marca como elegida a mano para que el aviso lo diga.
+  useEffect(() => {
+    if (elegidaId == null || !listo || enLaLista) return;
+    if (extra?.product.id === elegidaId) return;
+    let vivo = true;
+    api.getProduct(elegidaId)
+      .then(p => {
+        if (!vivo || !p) return;
+        extraRef.current({ product: p, in_stock: (p.stock ?? 0) > 0, match_quality: 'buscada', brand_match: true, brand_known: false });
+      })
+      .catch(() => {});
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elegidaId, enLaLista, listo, dataVersion]);
+
+  return null;
+}
+
+/**
+ * F80 — EL LÁPIZ DE LA FICHA DEL REPUESTO (el estado y los datos que comparten el alta por equipos y
+ * la edición): qué ficha se está editando (`null` = la pantalla que falta), las categorías que necesita
+ * el formulario, y la recarga de la compatibilidad al guardar. Una sola implementación para los dos
+ * lados del wizard (misma regla que `CobroEnWizard`).
+ */
+function useFichaDeRepuesto(reloadCompat: () => void) {
+  /** `null` = cerrado · `{producto: null}` = alta de la pantalla que falta · `{producto: p}` = editar p */
+  const [abierto, setAbierto] = useState<{ producto: Product | null; catPantalla: number } | null>(null);
+  const [cats, setCats] = useState<Category[]>([]);
+  const catsRef = useRef<Category[]>([]);
+  catsRef.current = cats;
+  /**
+   * F80 — LAS CATEGORÍAS PRIMERO (bloqueante de la 2ª revisión adversarial, medido en vivo): si el
+   * diálogo se montaba con la lista de categorías todavía vacía, la pantalla nueva nacía SIN CATEGORÍA
+   * y, como `onlyScreens()` filtra `category_id === 1`, **no aparecía en la lista del wizard** (ni en el
+   * buscador, ni en el padrón, ni en el asistente de cierre) aunque el toast dijera «registrada».
+   * Por eso el diálogo se abre recién cuando las categorías están (8 filas: milisegundos).
+   */
+  const abrir = useCallback(async (producto: Product | null) => {
+    let lista = catsRef.current;
+    if (lista.length === 0) {
+      lista = await api.getCategories().catch(() => [] as Category[]);
+      setCats(lista);
+    }
+    // El fallback es el id canónico de Pantalla (1) y NO `cats[0]`: por orden alfabético sería
+    // «Accesorio» y la pantalla nacería fuera del padrón.
+    setAbierto({ producto, catPantalla: lista.find(c => /^pantalla$/i.test(c.name.trim()))?.id ?? 1 });
+  }, []);
+  const cerrar = useCallback(() => setAbierto(null), []);
+  const guardado = useCallback(() => {
+    setAbierto(null);
+    // La lista vuelve a pedirse para mostrar el precio/stock REALES (si no, la fila miente). Las OTRAS
+    // listas del wizard (buscador libre, la copia de la pantalla buscada a mano, el otro equipo de la
+    // misma recepción) se ponen al día solas con el bus de sincronización (F76).
+    reloadCompat();
+  }, [reloadCompat]);
+  return { abierto, cats, abrir, cerrar, guardado };
+}
+
+/**
+ * F80 — EL DIÁLOGO DE LA FICHA (el mismo para el alta y la edición). Se dibuja UNA vez por formulario
+ * y solo cuando hay algo abierto.
+ */
+function FichaDeRepuestoDialog({ estado, cats, catPantallaId, modelo, puedeCategorias, onClose, onSaved }: {
+  estado: { producto: Product | null } | null;
+  cats: Category[];
+  catPantallaId: number | null;
+  modelo: string;
+  puedeCategorias: boolean;
+  onClose: () => void;
+  onSaved: (id: number) => void;
+}) {
+  if (!estado) return null;
+  return (
+    <EditarProductoDialog
+      producto={estado.producto}
+      modeloDelEquipo={modelo}
+      categories={cats}
+      categoriaSugeridaId={catPantallaId}
+      puedeCategorias={puedeCategorias}
+      onClose={onClose}
+      onSaved={onSaved}
+    />
+  );
+}
+
+function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, hideChecklist = false, onScreenValid, autoFocus = false, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, iva = IVA_DEFAULT, tasa = 0, onCobrar, cobroEstado, cobroAviso, cobrando = false, puedeEditarProducto = false }: {
   device: FormDevice;
   onChange: (patch: Partial<FormDevice>) => void;
   methods: { id: number; name: string }[];
@@ -1883,6 +2039,16 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   tasa?: number;
   /** F62: quita una categoría del local */
   onQuitarCategoria?: (nombre: string) => Promise<boolean>;
+  /** F79 — el cobro de ESTE equipo (el botón vive al lado del color); sin la prop no se dibuja */
+  onCobrar?: (index: number) => void;
+  /** F79 — el estado del dinero de este equipo (solo cuando la orden ya existe) */
+  cobroEstado?: EstadoCobro | null;
+  /** F79 — lo que hay que decir antes de cobrar (aviso, nunca bloqueo) */
+  cobroAviso?: string | null;
+  /** F79 — hay un guardado en curso (el botón de cobro se apaga) */
+  cobrando?: boolean;
+  /** F80 — sesión master: se dibuja el lápiz para editar la ficha del repuesto sin salir del wizard */
+  puedeEditarProducto?: boolean;
 }) {
   const [showChecklist, setShowChecklist] = useState(false);
 
@@ -1894,7 +2060,9 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
   const deviceNet = Math.max(0, device.amount - device.discount);
 
   // Compatibilidad resuelta por el backend para el modelo escrito
-  const { candidates, loading: compatLoading, alDia: compatAlDia } = useCompatibleProducts(device.model);
+  const { candidates, loading: compatLoading, alDia: compatAlDia, reload: reloadCompat } = useCompatibleProducts(device.model);
+  // F80: el lápiz de la ficha del repuesto (precio, stock, compatibilidad) sin salir del wizard.
+  const ficha = useFichaDeRepuesto(reloadCompat);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   // F65c: si el operario buscó OTRA pantalla (que no está en la compatibilidad del modelo), se suma
   // a las opciones para que figure como ELEGIDA y con sus avisos (stock / otra marca). El gate
@@ -2161,6 +2329,15 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           <ColorSelect value={device.color} onChange={c => onChange({ color: c })} />
           {/* F48: el color es obligatorio; se dice acá (además de la ficha y del «Falta: …» del pie). */}
           {!device.color.trim() && <p className="text-xs text-danger">Elegí el color del equipo</p>}
+          {/* F79 — EL COBRO, AL LADO DEL COLOR (el espacio que el dueño señaló). El método de pago se
+              sigue eligiendo arriba, en esta misma tarjeta: acá se COBRA lo acordado. La orden todavía
+              no existe, así que el botón lleva el monto de ESTE equipo y al tocarlo la guarda y abre
+              el «Pago / Abono» de siempre. */}
+          {onCobrar && (
+            <CobroEnWizard modo="crear" total={totalACobrar(deviceNet, iva)}
+              estado={cobroEstado} aviso={cobroAviso} cobrando={cobrando}
+              onClick={() => onCobrar(index)} bloqueado={!!cobroEstado?.motivo} />
+          )}
         </div>
       </div>
 
@@ -2198,8 +2375,38 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
           onPickOtra={c => onChange({ screenExtra: c })}
           onChange={id => onChange({ screenProductId: id })}
           onConfirm={v => onChange({ screenConfirm: v })}
+          /* F80: el lápiz (solo master) edita la ficha ahí mismo; y si la pantalla no está en el
+             catálogo, se registra desde el mismo lugar con su stock. El alta pide el MODELO escrito:
+             con menos de 3 letras la ficha nacería sin compatibilidad (un repuesto huérfano). */
+          onEditarProducto={puedeEditarProducto ? p => ficha.abrir(p) : undefined}
+          onRegistrarPantalla={puedeEditarProducto && device.model.trim().length >= 3 ? () => ficha.abrir(null) : undefined}
         />
       )}
+
+      <FichaDeRepuestoDialog
+        estado={ficha.abierto}
+        cats={ficha.cats}
+        catPantallaId={ficha.abierto?.catPantalla ?? 1}
+        modelo={device.model}
+        puedeCategorias={puedeEditarProducto}
+        onClose={ficha.cerrar}
+        /* F80: editar la ficha marca el MONTO como escrito por el operario: así el precio nuevo NO se
+           escribe solo en la orden (regla F67: se ofrece con un toque). Si no, corregir un precio en la
+           ficha movía la orden sin que nadie lo pidiera (lo marcó la revisión adversarial). */
+        onSaved={() => { onChange({ amountTouched: true }); ficha.guardado(); }}
+      />
+
+      {/* F80 — la pantalla elegida se relee por id: si la ficha se borró, se suelta; si cambió su
+          precio/stock, se refresca; y si dejó de figurar como compatible, se muestra como «elegida a
+          mano» (F65c) en vez de quedar invisible descontando igual. */}
+      <PantallaViva
+        elegidaId={device.screenProductId}
+        extra={device.screenExtra ?? null}
+        enLaLista={screenOptionsTodas.some(o => o.product.id === device.screenProductId)}
+        listo={!compatLoading && compatAlDia}
+        onPerdida={() => onChange({ screenProductId: null })}
+        onExtra={c => onChange({ screenExtra: c })}
+      />
 
       <div className="space-y-2">
         {/* F62: el rótulo y el botón «+ Nueva categoría» van juntos: el operario agrega la categoría
@@ -2448,7 +2655,73 @@ function PrintOnSaveField({ value, onChange, equipos }: {
   );
 }
 
-function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true }: {
+/**
+ * F79 — EL BOTÓN DE COBRO DEL PASO 2, AL LADO DEL COLOR DEL EQUIPO.
+ *
+ * Pedido del dueño (2026-09-26): «el botón de pago en servicio también que aparezca en el wizard,
+ * que en el mismo wizard podamos cobrar sin problema… hay un espacio al lado del color de equipo,
+ * meterlo ahí… pero si revisa arriba te sale método de pago también: esté todo bien ordenado,
+ * óptimo, no sea confuso. Para poder cobrar al cliente, seguir el proceso del wizard. Y dejamos la
+ * misma opción como la tenemos actualmente».
+ *
+ * Qué ES: el botón que abre el MISMO diálogo «Pago / Abono» de la tarjeta (en el alta, primero
+ * guarda la orden, porque un cobro necesita una orden guardada y con número).
+ * Qué NO ES: una segunda forma de cobrar, ni otra pregunta del método de pago. El método se sigue
+ * eligiendo arriba, en la tarjeta de cada equipo (F77b), y el acuerdo «paga ahora / al retirar» en
+ * su bloque de política: acá solo se COBRA lo que ya se acordó, al lado del color del equipo.
+ *
+ * La etiqueta («Cobrar $30.00» en el alta, «Cobrar / Abono» al editar), la ayuda y el estado del
+ * dinero los decide la regla pura `lib/wizard-cobro.ts` — una sola implementación para los dos
+ * modos y para las pruebas.
+ */
+const TONO_COBRO: Record<EstadoCobro['tono'], string> = {
+  'sin-monto': 'text-muted-foreground',
+  pendiente: 'text-warning',
+  parcial: 'text-warning',
+  cobrado: 'text-success',
+  'a-favor': 'text-warning',
+  cerrada: 'text-muted-foreground',
+};
+
+function CobroEnWizard({ modo, total, estado, aviso, onClick, bloqueado = false, cobrando = false }: {
+  modo: 'crear' | 'editar';
+  /** el monto que se va a cobrar (en el alta, el de ESE equipo) */
+  total: number;
+  /**
+   * El estado del dinero — SOLO cuando la orden ya existe (en el alta, antes del primer cobro, no hay
+   * nada que contar: mostrar «Por cobrar $30.00» de una orden que todavía no está guardada sería
+   * inventar un estado). Sin estado, el botón queda con su etiqueta y su ayuda, nada más.
+   */
+  estado?: EstadoCobro | null;
+  /** lo que hay que decir ANTES de cobrar (monto sin guardar, o por qué no se guardó) */
+  aviso?: string | null;
+  onClick: () => void;
+  bloqueado?: boolean;
+  /** hay un guardado en curso: el botón se apaga (además del candado de reentrada del guardado) */
+  cobrando?: boolean;
+}) {
+  const ayuda = ayudaCobro(modo);
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-success/30 bg-success/5 p-2" data-cobro-wizard={modo}>
+      <Button type="button" variant="outline" size="sm" className="w-full justify-center gap-1.5"
+        onClick={onClick} disabled={bloqueado || cobrando} title={ayuda}
+        data-action="cobrar-equipo" data-cobro-modo={modo}>
+        <Banknote className="size-3.5 text-success" /> {etiquetaCobro(modo, total)}
+      </Button>
+      <p className="text-[11px] leading-snug text-muted-foreground">{ayuda}</p>
+      {/* El estado se dice SIEMPRE con números reales (lo cobrado, el saldo) o con el motivo por el
+          que no se puede cobrar (orden cancelada/devuelta) — nunca con una estimación. */}
+      {estado && (
+        <p className={cn('text-[11px] font-medium', TONO_COBRO[estado.tono])} data-cobro-estado={estado.tono}>
+          {estado.texto}
+        </p>
+      )}
+      {aviso && <p className="text-[11px] font-medium text-danger" data-cobro-aviso>{aviso}</p>}
+    </div>
+  );
+}
+
+function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, onListChanged, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true, puedeEditarProducto = false }: {
   service: Service | null;
   statuses: ServiceStatus[];
   dayOpen: boolean | null;
@@ -2461,6 +2734,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
    * entregados y el asistente de cierre (`setPrintFor`), no una segunda forma de imprimir.
    */
   onPrint?: (s: Service) => void;
+  /**
+   * F79: refrescar la LISTA sin cerrar el wizard. El botón «Cobrar» del paso 2 guarda la orden y el
+   * registro SIGUE (el operario va al blindaje y al paso final), así que no puede usarse `onSaved`
+   * — ese cierra el formulario. Se pasa el `refrescar` del padre.
+   */
+  onListChanged?: () => void;
   /** F62: categorías de trabajo que agregó el local (van después de las canónicas) */
   tiposExtra?: string[];
   /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
@@ -2469,6 +2748,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
   onQuitarCategoria?: (nombre: string) => Promise<boolean>;
   /** F69: el padrón de técnicos es del dueño (`add/update/delete_technician` piden su sesión) */
   canManageTecnicos?: boolean;
+  /**
+   * F80 — EL LÁPIZ DE LA FICHA DEL REPUESTO: `add_product`/`update_product` son del DUEÑO
+   * (`require_owner` en el backend), así que el lápiz se dibuja solo con la sesión master — a la caja
+   * no se le muestra un botón que va a chocar contra el mensaje del PIN (convención de F65).
+   */
+  puedeEditarProducto?: boolean;
 }) {
   const [orderNum, setOrderNum] = useState('');
   // F74 — LA CONFIGURACIÓN DEL IVA (y la tasa del turno abierto). La lee cualquiera: la caja necesita
@@ -2519,6 +2804,11 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
   const [clientHistory, setClientHistory] = useState<Service[]>([]);
   const modelPicked = useRef(false);
   const clientPicked = useRef(false);
+  /**
+   * F79 — el candado de reentrada del guardado (ver `guardarOrden`): un ref y no un estado, porque
+   * dos clics despachados en la MISMA tarea ven el mismo valor y ambos pasarían.
+   */
+  const guardandoRef = useRef(false);
   const amountTouched = useRef(false);
   const discountTouched = useRef(false);
   const [discount, setDiscount] = useState(0);
@@ -2534,6 +2824,28 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
   const [showTechDialog, setShowTechDialog] = useState(false);
   // Órdenes multi-equipo (solo modo crear): un cliente, N teléfonos en una sola orden
   const [devices, setDevices] = useState<FormDevice[]>([emptyDevice()]);
+  /**
+   * F79 — LA ORDEN QUE YA SE GUARDÓ DESDE EL WIZARD. La crea el botón «Cobrar» del paso 2 (un cobro
+   * necesita una orden guardada, con número y fila en la base). Mientras exista, el botón del último
+   * paso ACTUALIZA estas filas en vez de crear una segunda orden — es lo que pidió el dueño: «en el
+   * mismo wizard podamos cobrar… y seguir el proceso del wizard».
+   *
+   * `rows` va en el MISMO orden que `devices` (equipo 1 = orden base, 2+ = base-A/B, como los numera
+   * el backend). Por eso, con la orden ya guardada, no se agregan ni se quitan equipos desde acá:
+   * el mapeo fila ↔ equipo no se puede romper.
+   */
+  const [ordenCreada, setOrdenCreada] = useState<{ base: string; rows: Service[] } | null>(null);
+  /** F79: lo que hay que decir junto al botón de cobro (por qué no se guardó, o monto sin guardar). */
+  const [cobroAviso, setCobroAviso] = useState<string | null>(null);
+  /** F79: en QUÉ equipo se tocó el botón (el aviso se dibuja solo ahí, no en las N tarjetas). */
+  const [cobroAvisoEn, setCobroAvisoEn] = useState<number | null>(null);
+  /**
+   * F79: el cobro se abrió desde el botón del PASO 2 (y no desde el «Registrar Pago / Abono» del
+   * último paso). En EDICIÓN eso decide si al guardar el pago se cierra el registro: el botón del
+   * último paso conserva el comportamiento de siempre (cierra) y el del paso 2 NO (así lo que el
+   * operario tenga escrito sigue ahí — en edición cobrar no guarda nada).
+   */
+  const [cobroDesdePaso2, setCobroDesdePaso2] = useState(false);
   const setDevice = (i: number, patch: Partial<FormDevice>) =>
     setDevices(prev => prev.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
   const addDevice = () => setDevices(prev => [...prev, emptyDevice()]);
@@ -2658,7 +2970,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
   };
 
   // Compatibilidad del modelo (backend) para el modo edición de UNA orden
-  const { candidates, loading: compatLoading, alDia: compatAlDia } = useCompatibleProducts(model);
+  const { candidates, loading: compatLoading, alDia: compatAlDia, reload: reloadCompatEdit } = useCompatibleProducts(model);
+  // F80: el lápiz de la ficha del repuesto también en la EDICIÓN (mismo diálogo, misma llave).
+  const fichaEdit = useFichaDeRepuesto(reloadCompatEdit);
   const screenOptions = useMemo(() => onlyScreens(candidates), [candidates]);
   // F65c: la pantalla buscada A MANO (no estaba en la compatibilidad del modelo) se suma como opción.
   const screenOptionsTodas = useMemo(
@@ -2752,18 +3066,19 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
     ? 'Elige la pantalla exacta a instalar'
     : null;
 
-  const save = async () => {
-    // F31: los MISMOS gates que el botón, también por Ctrl+Enter (antes el atajo los salteaba y se
-    // podía guardar un cliente nuevo sin cédula o con el día cerrado, sin ningún aviso).
+  /**
+   * F79 — LO QUE FALTA PARA GUARDAR, en un solo lugar: lo usan el botón del último paso, el botón
+   * «Cobrar» del paso 2 y el atajo Ctrl+Enter. Antes vivía adentro de `save()`; con un segundo botón
+   * que también guarda, la lista tiene que ser UNA (dos verdades sobre lo mismo se separan solas).
+   * OJO: el MONTO **no** es un bloqueo del guardado. El paso del wizard pide un monto para avanzar,
+   * pero una orden de $0 es legítima (garantía, cortesía, descuento del 100%) y hay órdenes reales
+   * así en la base: bloquear acá dejaba esas órdenes sin poder guardarse.
+   */
+  const bloqueosDeGuardado = (): string[] => {
     const bloqueos: string[] = [];
     if (saving) bloqueos.push('ya se está guardando');
     if (dayOpen === false) bloqueos.push('abrir el día en Libro Diario');
     if (needCi && !clientCi.trim()) bloqueos.push('cédula del cliente nuevo');
-    // OJO: el MONTO **no** es un bloqueo del guardado. El paso del wizard pide un monto para
-    // avanzar, pero una orden de $0 es legítima (garantía, cortesía, descuento del 100%) y hay
-    // órdenes reales así en la base: bloquear acá dejaba esas órdenes sin poder guardarse.
-    // La guía lo muestra como AVISO (no bloqueante), no como requisito.
-    if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
     // Los mismos datos que apagan el botón, pero DICHOS: antes este `return` era mudo y desde el
     // medio del wizard (o con Ctrl+Enter) el guardado no hacía nada y no explicaba por qué.
     if (service) {
@@ -2781,12 +3096,134 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
         if (deviceScreenValid[i] === false) bloqueos.push(`elegir la pantalla${n}`);
       });
     }
-    if (bloqueos.length > 0) { setAvisoGuardar(`No se guardó — falta: ${bloqueos.join(' · ')}`); return; }
+    return bloqueos;
+  };
+
+  /**
+   * Las filas de una orden multi-equipo EN ORDEN DE EQUIPO (base, base-A, base-B…). Es el orden con
+   * el que el backend numera los equipos (`add_service_order`), así que es lo único que permite
+   * mapear fila ↔ equipo sin adivinar (la consulta devuelve las filas en su propio orden).
+   */
+  const filasEnOrdenDeEquipo = (base: string, filas: Service[]): Service[] =>
+    devices
+      .map((_, i) => {
+        const num = i === 0 ? base : `${base}-${String.fromCharCode(65 + i - 1)}`;
+        return filas.find(r => r.order_num === num);
+      })
+      .filter((r): r is Service => !!r);
+
+  /**
+   * F79 — ACTUALIZAR LA ORDEN QUE YA SE GUARDÓ DESDE EL WIZARD (la creó el botón «Cobrar»). Cada
+   * equipo es una fila propia, así que se actualiza fila por fila con la ÚNICA vía permitida
+   * (`updateOrderKeepingFields`): lo que no se manda se CONSERVA — sobre todo el dinero ya cobrado y
+   * sus pagos, la fecha de entrega y las observaciones. La fila se relee ANTES de escribir para no
+   * pisar nada cambiado desde otra pantalla (una entrega hecha desde la tarjeta, por ejemplo).
+   */
+  const actualizarEquiposCreados = async (
+    creada: { base: string; rows: Service[] }, techName: string, techId: number | null,
+  ): Promise<Service[]> => {
+    // La orden tiene que tener una fila por equipo (no debería fallar: con la orden guardada no se
+    // agregan ni se quitan equipos). Si el wizard perdió las filas en memoria —una recarga fallida— se
+    // relee la orden del backend ANTES de escribir: actualizar el equipo equivocado es peor que un
+    // aviso. Si tampoco así coinciden, se corta con un mensaje claro (nunca se escribe a medias).
+    let filasBase = creada.rows;
+    if (filasBase.length !== devices.length) {
+      const nuevas = await api.getServices(creada.base, '', '', '', 'in').catch(() => [] as Service[]);
+      const recuperadas = filasEnOrdenDeEquipo(creada.base,
+        nuevas.filter(r => r.order_num === creada.base || (r.order_num ?? '').startsWith(`${creada.base}-`)));
+      if (recuperadas.length === devices.length) filasBase = recuperadas;
+      else throw new Error(`la orden ${creada.base} no tiene los mismos equipos que el formulario`
+        + ` (${recuperadas.length} en la base, ${devices.length} acá): revisala en su tarjeta`
+        + ' — para no pisar el equipo equivocado no se guardó nada.');
+    }
+    const rows: Service[] = [];
+    for (let i = 0; i < devices.length; i++) {
+      const d = devices[i];
+      const fila = filasBase[i];
+      if (!fila) continue;
+      const typesArr = [...d.serviceTypes];
+      // F58: misma normalización del texto libre que en el alta y la edición (una sola regla).
+      if (d.serviceTypes.includes('Otro') && d.otherFault.trim()) agregarTrabajoDeOtro(typesArr, d.otherFault.trim());
+      const actual = await api.getService(fila.id).catch(() => fila);
+      await updateOrderKeepingFields(actual, {
+        client, phone, clientCi, clientAddress,
+        model: d.model, color: d.color, fault: d.fault,
+        serviceType: typesArr[0] ?? 'Cambio pantalla',
+        serviceTypes: JSON.stringify(typesArr),
+        // La MISMA cuenta que usa el alta (monto − descuento, con el IVA que corresponda): el monto
+        // que se guarda es el que paga el cliente.
+        amount: totalACobrar(Math.max(0, d.amount - d.discount), iva),
+        discountAmount: d.discount,
+        paymentMethod: d.payment,
+        currency: methodCurrency(d.payment),
+        screenProductId: d.screenProductId,
+        deviceChecklist: JSON.stringify(d.checklist),
+        bankFeePercent: d.bankFeePercent,
+        zelleReference: d.zelleReference,
+        status,
+        technician: techName, technicianId: techId,
+      });
+      rows.push(await api.getService(fila.id).catch(() => actual));
+    }
+    return rows;
+  };
+
+  /**
+   * F79 — LOS RECORDATORIOS DE LA RECEPCIÓN (foto de ENTRADA + preguntar el pago), con los datos
+   * vivos del formulario y una sola implementación para los dos momentos en que la recepción queda
+   * guardada: el botón de cobro del paso 2 y el guardado que cierra el registro. Nunca bloquean y no
+   * se apilan (el aviso es el mismo para la misma orden).
+   */
+  const avisosDeRecepcion = (ids: number[], alCerrar: () => void) => {
+    if (service || ids.length === 0) return;
+    firePolicyReminders(
+      receiveReminders(
+        {
+          photo_in_at: photoInDone ? 'si' : null,
+          photo_out_at: photoOutDone ? 'si' : null,
+          pay_intent: payIntentSel === 'sin' ? null : payIntentSel,
+          date_out: null,
+        },
+        { devices: devices.length, status },
+      ),
+      ids,
+      alCerrar,
+    );
+  };
+
+  /**
+   * F79 — GUARDAR (y, si se pidió, COBRAR) EN UNA SOLA FUNCIÓN. Es el camino de siempre con un
+   * destino nuevo:
+   *   · `cobrarEquipo` — al terminar de guardar se abre el MISMO diálogo «Pago / Abono» de la
+   *     tarjeta, sobre la fila de ESE equipo, y el registro SIGUE abierto (el wizard va al blindaje
+   *     y su «Guardar» ACTUALIZA esta orden, sin duplicarla).
+   */
+  const guardarOrden = async (opts: { cobrarEquipo?: number } = {}) => {
+    // F79 — CANDADO DE REENTRADA (bloqueante de la revisión adversarial, reproducido en vivo): `saving`
+    // es ESTADO de React y dentro de la MISMA tarea todavía vale `false`, así que tres clics
+    // despachados juntos (un script, un autoclicker, un segundo handler futuro) pasaban los tres el
+    // guard y creaban TRES órdenes para el mismo registro — plata y stock contados tres veces. El ref
+    // corta de forma SINCRÓNICA y se libera en el `finally`. (El doble clic humano —dos tareas
+    // separadas— ya lo frenaba `saving`; esto cierra la otra puerta.)
+    if (guardandoRef.current) return;
+    const bloqueos = bloqueosDeGuardado();
+    if (bloqueos.length > 0) {
+      const aviso = `No se guardó — falta: ${bloqueos.join(' · ')}`;
+      setAvisoGuardar(aviso);
+      // F79: el aviso se dibuja SOLO debajo del botón del equipo que se tocó (no en las N tarjetas).
+      if (opts.cobrarEquipo !== undefined) { setCobroAviso(aviso); setCobroAvisoEn(opts.cobrarEquipo); }
+      return;
+    }
+    guardandoRef.current = true;
     setAvisoGuardar(null);
+    setCobroAviso(null);
+    setCobroAvisoEn(null);
     setSaving(true);
     // F77: la orden que se va a imprimir al terminar (null = no se imprime nada). Se resuelve en cada
     // rama con la fila REALMENTE guardada, no con los datos del formulario.
     let paraImprimir: Service | null = null;
+    // F79: las filas de la orden — las que ya existían por un cobro anterior, o las que se crean ahora.
+    let filas: Service[] = ordenCreada?.rows ?? [];
     try {
       let cid = clientId;
       if (client && !cid) {
@@ -2813,6 +3250,18 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
         // F77: se relee la orden guardada para el comprobante (así se imprime lo que quedó en la base,
         // con el mismo número de orden y los datos ya normalizados).
         paraImprimir = await api.getService(service.id).catch(() => null);
+        // F79: la fila de la orden en EDICIÓN (la usa el cobro del paso 2: se cobra sobre la orden
+        // RECIÉN guardada, no sobre lo que haya quedado en memoria).
+        filas = paraImprimir ? [paraImprimir] : [];
+      } else if (ordenCreada) {
+        // ── F79 — LA ORDEN YA EXISTE (la creó el botón «Cobrar»): se ACTUALIZA, no se duplica. Es el
+        // camino del «Guardar» del último paso después de haber cobrado, y el de un segundo equipo
+        // que se cobra: primero se escriben los cambios del formulario y recién después se abre el
+        // cobro (nunca se cobra un monto viejo).
+        filas = await actualizarEquiposCreados(ordenCreada, techName, techId);
+        setOrdenCreada(o => (o ? { ...o, rows: filas } : o));
+        await anotarPoliticaSinRomper(filas.map(r => r.id));
+        paraImprimir = filas.find(r => r.order_num === ordenCreada.base) ?? filas[0] ?? null;
       } else {
         const inputs: ServiceDeviceInput[] = devices.map(d => {
           const typesArr = [...d.serviceTypes];
@@ -2844,38 +3293,53 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
             status,
           };
         });
-        // addServiceOrder es transaccional y asigna los números: equipo 1 = base, 2+ = base-B/C...
-        // (1 solo equipo → sin group_id, exactamente como antes)
+        // addServiceOrder es transaccional y asigna los números: equipo 1 = base, 2+ = base-A, base-B…
+        // (el backend usa `b'A' + (i-1)`; 1 solo equipo → sin group_id, exactamente como antes)
         const base = await api.addServiceOrder(client, phone, clientCi, clientAddress, cid, techName, techId, inputs);
         // F32: filas creadas (una por equipo) para anotar la política y recordar lo pendiente
         const nuevas = await api.getServices(base, '', '', '', 'in').catch(() => [] as Service[]);
-        const filas = nuevas.filter(r => r.order_num === base || (r.order_num ?? '').startsWith(`${base}-`));
-        const ids = filas.map(r => r.id);
-        await anotarPoliticaSinRomper(ids);
+        // F79: las filas se guardan EN ORDEN DE EQUIPO (base, base-A, base-B…). Es lo que permite que
+        // el wizard siga con ESTA orden —cobrar otro equipo, corregir el blindaje— y que el botón del
+        // último paso la ACTUALICE en vez de crear una segunda orden.
+        filas = filasEnOrdenDeEquipo(base, nuevas.filter(r => r.order_num === base || (r.order_num ?? '').startsWith(`${base}-`)));
+        setOrdenCreada({ base, rows: filas });
+        // El número que se ve en el paso Cliente pasa a ser el REAL (antes era el «próximo»).
+        setOrderNum(base);
+        await anotarPoliticaSinRomper(filas.map(r => r.id));
         // F77: el comprobante que se abre al terminar es el de la orden BASE (equipo 1). Con varios
         // equipos no se abren N comprobantes: los demás se imprimen desde su tarjeta (y el bloque del
         // último paso lo dice). Si la relectura no trajo la fila base (la consulta falló), NO se imprime
         // nada: abrir el comprobante de una variante vieja `base-…` sería imprimir otra orden. La orden
         // ya quedó guardada y se imprime desde su tarjeta.
         paraImprimir = filas.find(r => r.order_num === base) ?? null;
-        // Recordatorios de política de la RECEPCIÓN: foto de ENTRADA + preguntar el pago.
-        // Se muestran una sola vez y solo por lo que quedó pendiente (si el operario ya lo
-        // marcó en el formulario, no aparece). Nunca bloquean.
-        firePolicyReminders(
-          receiveReminders(
-            {
-              photo_in_at: photoInDone ? 'si' : null,
-              photo_out_at: photoOutDone ? 'si' : null,
-              pay_intent: payIntentSel === 'sin' ? null : payIntentSel,
-              date_out: null,
-            },
-            { devices: devices.length, status },
-          ),
-          ids,
-          onSaved,
-        );
+      }
+      // F79 — EL COBRO DENTRO DEL WIZARD. La orden ya está guardada (recién creada o actualizada
+      // arriba), así que se abre el MISMO diálogo «Pago / Abono» de la tarjeta sobre la fila de ESE
+      // equipo: no hay una segunda forma de cobrar ni un segundo formulario de pago. El registro NO
+      // termina acá: no se cierra el wizard y no se imprime (eso es del «Guardar» del último paso).
+      if (opts.cobrarEquipo !== undefined) {
+        const fila = filas[opts.cobrarEquipo];
+        if (fila) {
+          setSvc(fila);
+          setShowPayDialog(true);
+        } else {
+          setCobroAviso('La orden quedó guardada, pero no se pudo abrir el cobro de ese equipo. Cobralo desde su tarjeta.');
+          setCobroAvisoEn(opts.cobrarEquipo);
+        }
+        // F79 — LOS RECORDATORIOS DE LA RECEPCIÓN SALEN TAMBIÉN ACÁ. Si el operario cobra y después
+        // cierra el wizard sin pasar por el último paso, la recepción YA quedó guardada: callarse la
+        // política (la foto del teléfono y el acuerdo de pago) dejaría la recepción sin aviso, que es
+        // justo lo contrario de lo que pide el taller. Se encolan y aparecen cuando el wizard se
+        // cierre; el guardado final los vuelve a calcular frescos y el mismo aviso para la misma orden
+        // no se apila (dedupe por id).
+        avisosDeRecepcion(filas.map(r => r.id), () => onListChanged?.());
+        onListChanged?.();
+        return;
       }
       onSaved();
+      // F79: salen acá, en el guardado que CIERRA el registro, aunque la orden se haya creado antes
+      // con el botón de cobro — así el aviso es el de lo que falta de verdad en ese momento.
+      avisosDeRecepcion(filas.map(r => r.id), onSaved);
       // F77 — CERRAR EL REGISTRO CON LA IMPRESIÓN: se abre el COMPROBANTE de la orden recién guardada
       // por la MISMA vía que usa la tarjeta (`onPrint` → `setPrintFor`). Va DESPUÉS de `onSaved()`:
       // así el wizard ya se cerró y el aviso de política que quedó encolado se puede dibujar (F54: el
@@ -2884,7 +3348,17 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
       if (imprimirAhora && onPrint && paraImprimir) {
         try { onPrint(paraImprimir); } catch { /* el comprobante es un extra: la orden ya está guardada */ }
       }
+    } catch (e) {
+      // F79: el guardado NUNCA puede quedar mudo. Antes, un error del backend (una orden que ya no
+      // existe, el día que se cerró en el medio) rechazaba la promesa sin que el operario viera nada
+      // —y con dos botones que guardan, ese silencio se vuelve «no hizo nada, toco de nuevo»—. Se dice
+      // también junto al botón de cobro, que es donde estaba mirando.
+      const aviso = `No se guardó — ${e instanceof Error ? e.message : String(e)}`;
+      setAvisoGuardar(aviso);
+      setCobroAviso(aviso);
+      setCobroAvisoEn(opts.cobrarEquipo ?? 0);
     } finally {
+      guardandoRef.current = false;
       setSaving(false);
     }
   };
@@ -2900,6 +3374,66 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
   const saldoUsd = totalOrden - abonadoUsd;
   const excedenteUsd = -Math.min(0, saldoUsd);
   const totalAbonadoBs = payments.reduce((a, p) => a + (p.currency === 'VES' ? p.amount : 0), 0);
+
+  // ── F79 — EL COBRO DENTRO DEL WIZARD ─────────────────────────────────────────────────────────
+  /**
+   * El estado del dinero de la ORDEN GUARDADA en modo edición (lo cobrado de verdad y el saldo).
+   * Se lee de `svc` (la fila de la base), no del formulario: si el operario acaba de cambiar el monto
+   * sin guardar, el cobro sigue siendo sobre lo guardado y `avisoMontoSinGuardar` lo dice.
+   */
+  const estadoCobroEditar = estadoCobro({
+    total: svc?.amount ?? service?.amount ?? totalOrden,
+    pagado: svc?.paid_amount ?? 0,
+    status: svc?.status ?? service?.status ?? status,
+  });
+
+  /** El estado del dinero de UN equipo del alta — null mientras la orden todavía no existe (antes de
+   *  eso solo se sabe el monto del formulario, y no se inventa un «cobrado»). */
+  const estadoCobroEquipo = (i: number): EstadoCobro | null => {
+    const fila = ordenCreada?.rows[i];
+    if (!fila) return null;
+    return estadoCobro({ total: fila.amount, pagado: fila.paid_amount ?? 0, status: fila.status });
+  };
+
+  /**
+   * EL BOTÓN DE COBRO DEL PASO 2 (al lado del color del equipo).
+   *   · ALTA: la orden todavía no existe → se guarda (se crea) con TODO lo cargado y se abre el cobro
+   *     de ESE equipo. Si ya se había creado (segundo equipo, o se vuelve a cobrar), primero se
+   *     actualiza lo que el operario haya cambiado y después se abre: nunca un monto viejo.
+   *   · EDICIÓN: la orden YA existe → **el botón NO guarda nada** (es la opción de siempre: «la misma
+   *     que tenemos actualmente», decisión del dueño). Guardar desde un botón de COBRO tendría efectos
+   *     de dinero que nadie pidió: si el formulario trae el estado en «Entregado», guardar descuenta el
+   *     stock, estampa la fecha de entrega (y con ella la garantía y la caja del día) aunque después el
+   *     operario cancele el pago. Para eso está el botón del último paso. Lo que sí se avisa es si el
+   *     monto escrito no es el guardado: el cobro trabaja sobre la orden guardada (y el registro queda
+   *     abierto al guardar el pago, así que lo escrito NO se pierde).
+   */
+  const cobrarEquipo = (i: number) => {
+    if (service) {
+      setCobroAviso(avisoMontoSinGuardar(totalOrden, svc?.amount ?? service.amount));
+      setSvc(svc ?? service);
+      setCobroDesdePaso2(true);
+      setShowPayDialog(true);
+      return;
+    }
+    void guardarOrden({ cobrarEquipo: i });
+  };
+
+  /**
+   * F79 — EL AVISO QUE VA DEBAJO DEL BOTÓN DE **UN** EQUIPO. Dos cosas distintas y nunca las dos
+   * juntas: (a) el motivo por el que el último clic de cobro no guardó — solo en el equipo que se
+   * tocó, no en todas las tarjetas (un fallo del equipo 2 no tiene por qué pintar de rojo el botón
+   * del equipo 1); y (b) el monto que el formulario todavía no guardó cuando la orden ya existe: el
+   * clic siguiente GUARDA ese monto y cobra ESE monto, así que el aviso lo dice con esas palabras (si
+   * dijera «se cobra el guardado» mentiría: se guarda y se cobra lo que el operario escribió).
+   */
+  const avisoCobroEquipo = (i: number): string | null => {
+    if (cobroAviso && cobroAvisoEn === i) return cobroAviso;
+    const fila = ordenCreada?.rows[i];
+    if (!fila) return null;
+    const totalFormulario = totalACobrar(Math.max(0, devices[i].amount - devices[i].discount), iva);
+    return avisoMontoPendiente(totalFormulario, fila.amount);
+  };
 
   // Moneda SIEMPRE derivada del método de pago (harness): nunca editable
   useEffect(() => {
@@ -3154,7 +3688,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
         // Cliente (o en el primer campo del paso) sin que nada se lo robe.
         onOpenAutoFocus={e => { e.preventDefault(); clientRef.current?.focus(); }}
         onKeyDown={e => {
-          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { save(); return; }
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { void guardarOrden(); return; }
           // F31: Enter en un campo de texto AVANZA al paso siguiente cuando el paso está completo
           // (nunca guarda: eso sigue siendo Ctrl+Enter o el botón del último paso). No se dispara
           // si el propio campo ya usó el Enter —el buscador de modelo hace preventDefault al
@@ -3194,6 +3728,29 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
           className="shrink-0"
           onGoToStep={irAlCampo}
         />
+        {/* F79 — LA ORDEN YA ESTÁ GUARDADA (la creó el botón «Cobrar» del paso 2). Es el aviso que
+            evita la confusión que el dueño temía («que no sea confuso»): dice el número REAL de la
+            orden, que el botón del último paso la ACTUALIZA (no crea otra) y qué se cobró de cada
+            equipo, con los números reales de la base. */}
+        {ordenCreada && (
+          <Alert className="shrink-0 border-success/40 bg-success/5 py-2" data-orden-guardada={ordenCreada.base}>
+            <CheckCircle2 className="size-4 text-success" />
+            <AlertDescription className="flex flex-col gap-1 text-[11px] text-foreground">
+              <span className="font-semibold">{avisoOrdenGuardada(ordenCreada.base, devices.length)}</span>
+              <span className="flex flex-wrap gap-x-3 gap-y-1">
+                {devices.map((_, i) => {
+                  const est = estadoCobroEquipo(i);
+                  if (!est) return null;
+                  return (
+                    <span key={i} className={cn('font-medium', TONO_COBRO[est.tono])} data-cobro-equipo={i + 1}>
+                      Equipo {i + 1}: {est.texto}
+                    </span>
+                  );
+                })}
+              </span>
+            </AlertDescription>
+          </Alert>
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           {wizStep === 0 && (
           <>
@@ -3444,6 +4001,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
           <div className="space-y-2">
             <label className="text-sm font-medium">Color del equipo</label>
             <ColorSelect value={color} onChange={setColor} />
+            {/* F79 — EL COBRO, AL LADO DEL COLOR (el espacio que el dueño señaló). En EDICIÓN la orden
+                ya existe, así que abre el MISMO «Pago / Abono» de la tarjeta sin guardar nada: es la
+                opción de siempre, ahora también acá. Si el monto cambió sin guardar, el aviso lo dice
+                (el cobro trabaja sobre la orden guardada). */}
+            <CobroEnWizard modo="editar" total={svc?.amount ?? service.amount}
+              estado={estadoCobroEditar} aviso={cobroAviso} cobrando={saving}
+              onClick={() => cobrarEquipo(0)} bloqueado={!!estadoCobroEditar.motivo} />
           </div>
 
           <div className="space-y-2">
@@ -3506,8 +4070,30 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
               onPickOtra={setScreenExtra}
               onChange={setScreenProductId}
               onConfirm={setScreenConfirm}
+              /* F80: el lápiz, igual que en el alta (solo master). */
+              onEditarProducto={puedeEditarProducto ? p => fichaEdit.abrir(p) : undefined}
+              onRegistrarPantalla={puedeEditarProducto && model.trim().length >= 3 ? () => fichaEdit.abrir(null) : undefined}
             />
           )}
+
+          <FichaDeRepuestoDialog
+            estado={fichaEdit.abierto}
+            cats={fichaEdit.cats}
+            catPantallaId={fichaEdit.abierto?.catPantalla ?? 1}
+            modelo={model}
+            puedeCategorias={puedeEditarProducto}
+            onClose={fichaEdit.cerrar}
+            onSaved={() => { amountTouched.current = true; fichaEdit.guardado(); }}
+          />
+
+          <PantallaViva
+            elegidaId={screenProductId}
+            extra={screenExtra}
+            enLaLista={screenOptionsTodas.some(o => o.product.id === screenProductId)}
+            listo={!compatLoading && compatAlDia}
+            onPerdida={() => setScreenProductId(null)}
+            onExtra={setScreenExtra}
+          />
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Falla / Trabajo realizado <span className="font-normal text-muted-foreground">(opcional)</span></label>
@@ -3535,16 +4121,27 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
               <p className="rounded-md bg-amber-500/10 px-3 py-2 text-[11px] text-amber-800" data-pay-early-hint>
                 Aprovechá que el cliente está enfrente: al lado de cada equipo está el <strong>método de pago</strong>,
                 y abajo el <strong>monto</strong> y —si lleva repuesto— el <strong>producto (la pantalla)</strong> que se
-                le va a instalar. Todo eso se carga ahora, en este mismo paso.
+                le va a instalar. Cuando el monto y el color ya estén, tocá <strong>«Cobrar»</strong> (al lado del
+                color del equipo): la orden se guarda y se abre el mismo <strong>Pago / Abono</strong> de siempre.
               </p>
+              {ordenCreada && (
+                <p className="rounded-md bg-success/10 px-3 py-2 text-[11px] text-foreground" data-equipos-fijos-paso>
+                  {avisoEquiposFijos(ordenCreada.base)}
+                </p>
+              )}
               <div className="space-y-3">
                 {devices.map((d, i) => (
                   <DeviceFields key={i} device={d} onChange={patch => setDevice(i, patch)} iva={iva} tasa={tasaIva}
                     methods={methods} index={i} onScreenValid={onScreenValid} autoFocus={false}
-                    tiposExtra={tiposExtra} onNuevaCategoria={onNuevaCategoria} onQuitarCategoria={onQuitarCategoria} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1} hideChecklist />
+                    tiposExtra={tiposExtra} onNuevaCategoria={onNuevaCategoria} onQuitarCategoria={onQuitarCategoria} /* F31: no se auto-enfoca el combobox de modelo: al enfocarse abre su lista de 60 modelos tapando los campos */                    onRemove={() => removeDevice(i)} canRemove={devices.length > 1 && !ordenCreada} hideChecklist
+                    /* F79: el cobro de ESTE equipo, al lado de su color, con SU aviso (un fallo del
+                       equipo 2 no pinta de rojo el botón del equipo 1). */
+                    onCobrar={cobrarEquipo} cobroEstado={estadoCobroEquipo(i)} cobroAviso={avisoCobroEquipo(i)}
+                    cobrando={saving} puedeEditarProducto={puedeEditarProducto} />
                 ))}
               </div>
-              <Button type="button" variant="outline" onClick={addDevice} disabled={devices.length >= 10}>
+              <Button type="button" variant="outline" onClick={addDevice} disabled={devices.length >= 10 || !!ordenCreada}
+                title={ordenCreada ? avisoEquiposFijos(ordenCreada.base) : undefined}>
                 <Plus className="size-4" /> Agregar otro equipo
               </Button>
               {devices.length > 1 && (
@@ -3679,6 +4276,17 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
                         <div className="text-right shrink-0">
                           <p className="text-sm font-bold">${net.toFixed(2)}</p>
                           <p className="text-[11px] text-muted-foreground">{d.payment}</p>
+                          {/* F79: lo COBRADO de verdad de este equipo, si la orden ya se guardó desde
+                              el wizard (mismo texto y mismos números que el botón del paso 2). */}
+                          {(() => {
+                            const est = estadoCobroEquipo(i);
+                            if (!est) return null;
+                            return (
+                              <p className={cn('text-[11px] font-medium', TONO_COBRO[est.tono])} data-cobro-resumen={i + 1}>
+                                {est.texto}
+                              </p>
+                            );
+                          })()}
                         </div>
                       </div>
                     );
@@ -3688,7 +4296,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
                     <span className="font-bold text-lg">${devices.reduce((a, d) => a + Math.max(0, d.amount - d.discount), 0).toFixed(2)}</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Al guardar se crea la orden con el número siguiente. La garantía de 7 días se aplica al entregar el equipo.
+                    {/* F79: con la orden YA guardada (la creó el botón de cobro) este texto no puede
+                        seguir diciendo que «se crea la orden»: el botón del pie dice «Actualizar
+                        orden» y el aviso verde dice que no crea otra. */}
+                    {ordenCreada
+                      ? `La orden ${ordenCreada.base} ya está guardada: «Actualizar orden» la corrige (no crea otra). La garantía de 7 días se aplica al entregar el equipo.`
+                      : 'Al guardar se crea la orden con el número siguiente. La garantía de 7 días se aplica al entregar el equipo.'}
                   </p>
                 </div>
               </div>
@@ -3802,7 +4415,13 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
         </div>
         <DialogFooter className="shrink-0 border-t pt-3">
           <div className="flex w-full items-center justify-between gap-2">
-            <Button variant="outline" onClick={onClose}>Cancelar</Button>
+            {/* F79: si la orden ya se guardó desde este wizard (botón «Cobrar»), cerrar NO cancela
+                nada — se dice, para que nadie crea que pierde el registro ni que tiene que guardar
+                otra vez para que exista. */}
+            <Button variant="outline" onClick={onClose}
+              title={ordenCreada ? `La orden ${ordenCreada.base} ya está guardada: cerrar no la borra (se corrige desde su tarjeta).` : undefined}>
+              {ordenCreada ? 'Cerrar' : 'Cancelar'}
+            </Button>
             {/* F31: decir QUÉ FALTA en vez de dejar el botón apagado sin explicación, y recordar
                 el teclado (Enter avanza · Ctrl+Enter guarda). */}
             <div className="flex min-w-0 flex-1 flex-col items-end gap-1 px-2">
@@ -3821,7 +4440,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
               <span className="text-right text-[11px] text-muted-foreground">
                 {wizStep < steps.length - 1
                   ? 'Enter avanza · Ctrl+Enter guarda'
-                  : (service ? 'Ctrl+Enter actualiza · Esc cierra' : 'Ctrl+Enter guarda · Esc cierra')}
+                  : (service || ordenCreada ? 'Ctrl+Enter actualiza · Esc cierra' : 'Ctrl+Enter guarda · Esc cierra')}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -3835,16 +4454,20 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
                   Siguiente
                 </Button>
               ) : (
-                <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+                <Button onClick={() => guardarOrden()} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
                   {/* F77: el botón dice lo que va a pasar — guardar y abrir el comprobante (o solo
-                      guardar si el operario destildó el check del paso). */}
+                      guardar si el operario destildó el check del paso).
+                      F79: con la orden ya guardada desde el botón de cobro, este botón ACTUALIZA esa
+                      orden (y lo dice), para que nadie espere una segunda orden ni un duplicado. */}
                   {saving
                     ? 'Guardando...'
                     : (service
                         ? (imprimirAhora ? 'Actualizar e imprimir' : 'Actualizar Servicio')
-                        : (imprimirAhora
-                            ? `Guardar e imprimir${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`
-                            : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`))}
+                        : ordenCreada
+                          ? (imprimirAhora ? 'Actualizar e imprimir' : 'Actualizar orden')
+                          : (imprimirAhora
+                              ? `Guardar e imprimir${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`
+                              : `Guardar Servicio${devices.length > 1 ? ` (${devices.length} equipos)` : ''}`))}
                 </Button>
               )}
             </div>
@@ -3860,8 +4483,22 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, ti
         onSaved={() => {
           if (!svc) return;
           api.getServicePayments(svc.id).then(setPayments).catch(() => setPayments([]));
-          api.getService(svc.id).then(setSvc).catch(() => {});
-          onSaved();
+          api.getService(svc.id).then(fresh => {
+            setSvc(fresh);
+            // F79: si el cobro fue sobre una fila de la orden creada desde el wizard, se refresca acá
+            // para que el paso 2 muestre el cobro AL INSTANTE (el operario VE que la plata entró, con
+            // el saldo real) y para que el próximo guardado trabaje sobre la fila al día.
+            setOrdenCreada(o => (o && o.rows.some(r => r.id === fresh.id)
+              ? { ...o, rows: o.rows.map(r => (r.id === fresh.id ? fresh : r)) }
+              : o));
+          }).catch(() => {});
+          // F79: en el ALTA el cobro NO cierra el registro (el wizard sigue al blindaje). En EDICIÓN
+          // se conserva el comportamiento de siempre (guardar un abono cierra el registro) SALVO que
+          // el cobro se haya abierto desde el botón del paso 2: ahí el registro se queda abierto para
+          // no tirar lo que el operario tenga escrito (en edición cobrar no guarda nada).
+          if (service && !cobroDesdePaso2) onSaved();
+          else onListChanged?.();
+          setCobroDesdePaso2(false);
         }}
       />
 

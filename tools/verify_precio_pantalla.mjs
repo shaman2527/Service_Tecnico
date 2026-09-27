@@ -556,13 +556,32 @@ check('F67: en efectivo la fila muestra el precio CONTADO (con la lista al lado)
   if (okPantalla && elegida != null) {
     await clickPantalla(idx, elegida);
     const chipModelo = await leerChipModelo(idx);
-    check('F67: el precio del MODELO se ofrece a un toque con su número',
-      chipModelo == null ? grupoF1 == null : Number(chipModelo) === Number(grupoF1), `botón=${chipModelo} · grupo=${grupoF1}`);
-    if (chipModelo != null) {
-      await clickChip(idx, '[data-usar-precio-modelo]');
-      check('F67: y el clic escribe el precio del modelo y lo declara como tal',
-        (await leerMonto(idx)) === Number(chipModelo) && (await leerFuente(idx)) === 'modelo',
-        `monto=${await leerMonto(idx)} · fuente=${await leerFuente(idx)}`);
+    const montoAca = await leerMonto(idx);
+    // DOS RAZONES LEGÍTIMAS para que NO haya chip del modelo (y la prueba tiene que aceptarlas, no
+    // reportarlas como falla): (1) el grupo de repuestos no tiene UN precio (`ofertaModelo = null`:
+    // precios distintos entre repuestos → no se adivina); (2) el monto YA es el del modelo —
+    // `PrecioRepuesto` nunca ofrece un precio que ya está escrito. El caso medido (2026-09-27): el
+    // equipo quedó con una pantalla elegida FUERA de la compatibilidad del modelo (sin precio), así que
+    // el monto lo escribió el propio modelo (`fuente=modelo`) y no había nada que ofrecer.
+    const yaEsElDelModelo = grupoF1 != null && Number(montoAca) === Number(grupoF1);
+    check('F67: el precio del MODELO está a un toque (y no se ofrece si el monto ya es el suyo)',
+      chipModelo == null ? (grupoF1 == null || yaEsElDelModelo) : Number(chipModelo) === Number(grupoF1),
+      `botón=${chipModelo} · grupo=${grupoF1} · monto=${montoAca} · fuente=${await leerFuente(idx)}`);
+    // EL CASO POSITIVO (lo que esta comprobación quiere medir de verdad): con una pantalla elegida cuyo
+    // precio NO es el del modelo, el precio del modelo está a un toque y el clic lo escribe y lo declara.
+    const conOtroPrecio = F1.conPrecio.find(p => Number(montoDeFicha(p, true)) !== Number(grupoF1));
+    if (grupoF1 != null && conOtroPrecio) {
+      await clickPantalla(idx, conOtroPrecio.id);
+      const chipTras = await leerChipModelo(idx);
+      check('F67: con una pantalla de OTRO precio, el del MODELO se ofrece con su número',
+        chipTras != null && Number(chipTras) === Number(grupoF1),
+        `botón=${chipTras} · grupo=${grupoF1} · pantalla=$${montoDeFicha(conOtroPrecio, true)} · monto=${await leerMonto(idx)}`);
+      if (chipTras != null) {
+        await clickChip(idx, '[data-usar-precio-modelo]');
+        check('F67: y el clic escribe el precio del modelo y lo declara como tal',
+          (await leerMonto(idx)) === Number(chipTras) && (await leerFuente(idx)) === 'modelo',
+          `monto=${await leerMonto(idx)} · fuente=${await leerFuente(idx)}`);
+      }
     }
   }
 }

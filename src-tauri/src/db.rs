@@ -3580,6 +3580,31 @@ impl Database {
         Ok(())
     }
 
+    /// F80 — LEER UNA FICHA POR ID. Existe para una sola cosa, y es importante: el atajo del wizard
+    /// (`EditarProductoDialog`) arma los 12 argumentos posicionales de `update_product` y **no puede
+    /// hacerlo con la copia que le pasó una lista** — esa copia puede estar vieja (el buscador libre no
+    /// se vuelve a pedir, u otro equipo de la misma recepción tiene su propia lista) y guardar con ella
+    /// REVIERTE en silencio lo que el operario acaba de guardar desde otra fila (lo encontró la
+    /// revisión adversarial: subía el precio a $25, después corregía la compatibilidad y el segundo
+    /// guardado devolvía el precio a $20). Es la misma regla que ya sigue `actualizarEquiposCreados`
+    /// con las órdenes: **releer antes de escribir**.
+    pub fn get_product(&self, id: i64) -> SqlResult<Option<Product>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {PRODUCT_COLS} FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?1"
+        );
+        conn.query_row(&sql, params![id], |r| {
+            Ok(Product {
+                id: r.get(0)?, name: r.get(1)?, category_id: r.get(2)?, brand: r.get(3)?,
+                model: r.get(4)?, variant: r.get(5)?, compatibility: r.get(6)?,
+                price_cost: r.get(7)?, price_sale: r.get(8)?, stock: r.get(9)?, min_stock: r.get(10)?,
+                created_at: r.get(11)?, updated_at: r.get(12)?, category_name: r.get(14)?,
+                price_usd: r.get(13)?, supplier: r.get(15).unwrap_or_default(),
+                in_use: r.get(16).unwrap_or(1), code: r.get(17).unwrap_or_default(),
+            })
+        }).optional()
+    }
+
     pub fn get_products(&self, search: &str, category_id: Option<i64>) -> SqlResult<Vec<Product>> {
         let conn = self.conn.lock().unwrap();
         let mut sql = format!(

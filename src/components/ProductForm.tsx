@@ -10,7 +10,7 @@ import type { Product, Category } from '../types';
 import { NewCategoryInline } from './inventory/NewCategoryInline';
 import { toast } from 'sonner';
 
-export function ProductForm({ product, categories, onClose, onSaved, onCategoryChanged, defaultCategoryId, canManageCategories = true }: {
+export function ProductForm({ product, categories, onClose, onSaved, onCategoryChanged, defaultCategoryId, canManageCategories = true, permiteEliminar = true }: {
   product: Product | null;
   categories: Category[];
   onClose: () => void;
@@ -31,6 +31,13 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
    * mensaje del PIN (la convención del proyecto: «la cajera no ve esos botones»).
    */
   canManageCategories?: boolean;
+  /**
+   * F80 — ¿se puede BORRAR la ficha desde acá? En Inventario sí (es su casa). Desde el WIZARD, no:
+   * borrar la pantalla que el equipo tiene elegida deja la orden apuntando a una ficha que no existe y
+   * después la ENTREGA falla (el movimiento de inventario no puede referenciar un producto borrado).
+   * Para borrar, el camino es Inventario (donde además el backend avisa si la ficha está en uso).
+   */
+  permiteEliminar?: boolean;
 }) {
   const [name, setName] = useState(product?.name ?? '');
   const [categoryId, setCategoryId] = useState<number | null>(
@@ -226,7 +233,7 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          {product && (
+          {product && permiteEliminar && (
             <Button variant="destructive" onClick={async () => {
               if (confirm(`¿Eliminar '${product.name}'?`)) {
                 await api.deleteProduct(product.id);

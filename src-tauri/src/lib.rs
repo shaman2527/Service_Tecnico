@@ -50,6 +50,7 @@ pub fn run() {
             commands::update_product,
             commands::delete_product,
             commands::get_products,
+            commands::get_product,
             commands::get_low_stock_products,
             commands::get_reorder_suggestions,
             commands::suggest_products,
