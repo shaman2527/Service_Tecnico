@@ -47,6 +47,17 @@ interface AppUser { id: number; name: string; role: 'master' | 'caja'; color: st
 
 function App() {
   const [tab, setTab] = useState<Tab>('dashboard');
+  /**
+   * F82 — A QUÉ PESTAÑA DEL LIBRO DIARIO lleva el aviso de la caja vieja: directo a **Cierres**, que
+   * es donde está el botón «Cerrar» por fila del día que quedó abierto (el remedio tiene que poder
+   * completarse desde el propio aviso). El contador `n` es necesario: sin él, pulsar dos veces
+   * «Ir a cerrar esa caja» mandaría el mismo valor y la pestaña no volvería a cambiar.
+   */
+  const [libroFoco, setLibroFoco] = useState<{ tab: 'diario' | 'cierres'; n: number }>({ tab: 'diario', n: 0 });
+  const irAlLibroDiario = (t: 'diario' | 'cierres' = 'cierres') => {
+    setLibroFoco(f => ({ tab: t, n: f.n + 1 }));
+    setTab('libro');
+  };
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');
   const [role, setRole] = useState<Role>('loading');
   // F76 — el rótulo del indicador de sincronización (sube con cada escritura y se refresca solo).
@@ -496,13 +507,15 @@ function App() {
       <main className="flex-1 overflow-y-auto bg-background">
         <div className="max-w-7xl mx-auto px-10 py-8">
           <Suspense fallback={<div className="flex items-center justify-center py-24 text-sm text-muted-foreground">Cargando…</div>}>
-            {tab === 'dashboard' && <Dashboard />}
-            {tab === 'ventas' && <Sales role={role === 'cashier' ? 'cashier' : 'owner'} />}
-            {tab === 'servicios' && <Services role={role === 'cashier' ? 'cashier' : 'owner'} />}
+            {tab === 'dashboard' && <Dashboard onGoToLedger={irAlLibroDiario} />}
+            {tab === 'ventas' && <Sales role={role === 'cashier' ? 'cashier' : 'owner'} onGoToLedger={irAlLibroDiario} />}
+            {tab === 'servicios' && <Services role={role === 'cashier' ? 'cashier' : 'owner'} onGoToLedger={irAlLibroDiario} />}
             {tab === 'inventario' && <Inventory role={role} />}
+            {/* F82: Pedidos NO recibe el aviso de la caja vieja a propósito: el pedido a proveedor es
+                mercancía que entra, no mueve caja (`add_purchase_order` conserva su gate histórico). */}
             {tab === 'pedidos' && <Pedidos role={role === 'cashier' ? 'cashier' : 'owner'} />}
             {tab === 'clientes' && <Clients />}
-            {tab === 'libro' && <DailyLedger role={role} />}
+            {tab === 'libro' && <DailyLedger role={role} focusTab={libroFoco} />}
             {tab === 'ayuda' && <Help />}
           </Suspense>
         </div>

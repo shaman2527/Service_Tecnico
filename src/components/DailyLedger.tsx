@@ -208,7 +208,16 @@ const ICONO_ACCION: Record<LedgerActionId, ReactNode> = {
   personas: <Users className="size-4" />,
 };
 
-export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+export default function DailyLedger({ role = 'owner', focusTab }: {
+  role?: 'owner' | 'cashier';
+  /**
+   * F82 — LA PESTAÑA A LA QUE HAY QUE IR. El aviso de «la caja del día anterior sigue abierta» de
+   * Ventas / Servicio Técnico / Pedidos lleva DIRECTO a **Cierres**, donde está el botón «Cerrar»
+   * por fila (F34): el remedio tiene que poder completarse desde el propio aviso. El contador `n`
+   * existe para que la MISMA pestaña se pueda volver a pedir (sin él, el segundo clic no haría nada).
+   */
+  focusTab?: { tab: 'diario' | 'cierres'; n: number };
+}) {
   const isOwner = role === 'owner';
   // F69 — LAS CAPACIDADES DE LA SESIÓN salen de la regla pura (`src/lib/session.ts`), no de un
   // `isOwner` repartido por el archivo: es la única implementación de «qué ve y qué toca cada rol» y
@@ -219,6 +228,11 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
   // al día siguiente después de las 20:00 en Venezuela y el día aparecía sin movimientos.
   const today = localDate();
   const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud' | 'movimientos'>('diario');
+  // F82: la petición externa de pestaña (el aviso de la caja del día anterior sin cerrar). Depende
+  // del contador `n` para que pedir la MISMA pestaña otra vez vuelva a aplicarla.
+  useEffect(() => {
+    if (focusTab && focusTab.n > 0) setTab(focusTab.tab);
+  }, [focusTab?.n, focusTab?.tab]);
   const [startDate, setStartDate] = useState(() => addDays(today, -30));
   const [endDate, setEndDate] = useState(() => localDate());
   const [totals, setTotals] = useState<DailyTotals[]>([]);
@@ -926,7 +940,8 @@ export default function DailyLedger({ role = 'owner' }: { role?: 'owner' | 'cash
               </Button>
             ) : (
               <span className="text-xs text-emerald-700/80 max-w-[230px] text-right" data-field="cierre-solo-dueno">
-                El cierre del día lo hace el dueño (Cambiar persona → Master): vos seguí cobrando.
+                El cierre del día lo hace el dueño (Cambiar persona → Master). Si la caja quedó abierta
+                de OTRO día, el mostrador no puede facturar hasta que el dueño la cierre.
               </span>
             )}
           </div>

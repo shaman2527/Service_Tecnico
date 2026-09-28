@@ -12,8 +12,11 @@ import {
 import { api } from '../db';
 // F76 — la pantalla se recarga sola cuando cambian los datos (sin botón «Actualizar»).
 import { useDataVersion } from '@/lib/use-data-version';
-import { initialsOf } from '@/lib/utils';
+import { initialsOf, localDate } from '@/lib/utils';
 import { TechnicianProfileDialog } from './TechnicianProfile';
+// F82 — la caja del día anterior sin cerrar: la regla es pura (`tools/day_shift_test.ts`).
+import { shiftPending } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 import { cn } from '@/lib/utils';
 import type { ServiceDashboard, Product, DashboardAnalytics, StatusStat, TechnicianStat } from '../types';
 
@@ -40,7 +43,10 @@ function FlowNode({ label, count, dot, ring, muted }: { label: string; count: nu
   );
 }
 
-export default function Dashboard() {
+export default function Dashboard({ onGoToLedger }: {
+  /** F82: llevar al Libro Diario → Cierres (el remedio de la caja del día anterior sin cerrar). */
+  onGoToLedger?: () => void;
+} = {}) {
   const [dash, setDash] = useState<ServiceDashboard | null>(null);
   const [analytics, setAnalytics] = useState<DashboardAnalytics | null>(null);
   const [lowStock, setLowStock] = useState<Product[]>([]);
@@ -50,6 +56,13 @@ export default function Dashboard() {
   const [showProfile, setShowProfile] = useState(false);
   const [synced, setSynced] = useState<boolean | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  /**
+   * F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR. En el Dashboard, que es donde cae el dueño al abrir
+   * la app: con un turno viejo los números de HOY no son los que se están cobrando, porque todo lo
+   * que se registre se anota en el día del turno abierto. Se avisa sin bloquear nada acá.
+   */
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  const turnoViejo = shiftPending(fechaTurno, localDate());
 
   const dataVersion = useDataVersion();
   const load = useCallback(async () => {
@@ -71,6 +84,12 @@ export default function Dashboard() {
     load().catch(() => setSynced(false));
     // F76: se vuelve a leer cada vez que la app avisa que los datos cambiaron (o al volver a la app).
   }, [load, dataVersion]);
+
+  // F82: el estado del turno (se relee con la misma señal que todo lo demás, para que al cerrar la
+  // caja vieja el cartel desaparezca solo).
+  useEffect(() => {
+    api.getActiveDay().then(d => setFechaTurno(d?.close_date ?? null)).catch(() => {});
+  }, [dataVersion]);
 
   const statusCount = (status: string) =>
     (dash?.status_stats ?? []).find(s => (s.status ?? '').toLowerCase() === status.toLowerCase())?.count ?? 0;
@@ -112,6 +131,9 @@ export default function Dashboard() {
 
   return (
     <div className="flex flex-col gap-8">
+      {/* F82 — LO PRIMERO QUE SE VE AL ABRIR LA APP: si la caja del día anterior quedó abierta, los
+          números de hoy no son los que se están cobrando (todo se anota en el día del turno abierto). */}
+      <TurnoViejoBanner turno={turnoViejo} onGoToLedger={onGoToLedger} />
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>

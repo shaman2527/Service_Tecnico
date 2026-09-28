@@ -20,14 +20,19 @@ import PrintReceiptDialog from './PrintReceiptDialog';
 import { PaymentMethodPicker } from './PaymentMethodPicker';
 // F38: el saldo se muestra en la moneda en que se cobró + su equivalencia del día.
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
+// F82 — la caja del día anterior sin cerrar: la regla pura decide si el abono se puede guardar hoy.
+import { shiftPending, turnoViejoTexto, fechaLegible } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 import type { Service, ServicePayment } from '../types';
 
-export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
+export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen, puedeCerrarCaja = true }: {
   service: Service | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onSaved?: () => void;
   dayOpen?: boolean | null;
+  /** F82: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel. */
+  puedeCerrarCaja?: boolean;
 }) {
   const [payments, setPayments] = useState<ServicePayment[]>([]);
   const [payAmount, setPayAmount] = useState(0);
@@ -53,6 +58,15 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   // del abono (en el uso normal coincide con hoy; si el turno quedó abierto de otro día, el abono
   // va a ESA caja, que es la única que el backend acepta).
   const [diaTurno, setDiaTurno] = useState('');
+  /** F82: la fecha del turno abierto, para saber si es el de HOY (el abono de hoy se bloquea). */
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  const turnoViejo = shiftPending(fechaTurno, localDate());
+  /**
+   * F82 — ¿el abono está bloqueado por la caja vieja? Solo cuando la fecha elegida es HOY y el turno
+   * abierto es de otro día (el backend lo rechaza: no hay turno de esa fecha). Elegir A PROPÓSITO la
+   * fecha del turno abierto sigue permitido: es el camino retroactivo de F35.
+   */
+  const pagoBloqueadoPorTurno = turnoViejo.stale && payDate.slice(0, 10) === localDate();
   // Si el usuario tecleó el monto a mano, no se re-sugiere
   const payTouched = useRef(false);
   // Si el usuario cambió el toggle $/Bs. a mano, no se le pisa la elección (F38)
@@ -113,7 +127,13 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
       setTasaBcv(d?.tasa_bcv ?? 0);
       // F35: la fecha del abono arranca en la del TURNO ABIERTO (su caja es la que lo va a contar).
       setDiaTurno(d?.close_date ?? '');
-      setPayDate((d?.close_date ?? localDate()));
+      // F82 — PERO SI ESE TURNO ES DE OTRO DÍA, el default pasa a HOY: el cobro de hoy no puede
+      // caer en la caja de ayer sin que el operario lo note. Con el default en hoy el guardado choca
+      // con el portón y el aviso de arriba dice qué cerrar; el camino RETROACTIVO sigue existiendo
+      // (elegir a propósito la fecha del turno abierto, con su aviso ámbar de a qué caja va).
+      setFechaTurno(d?.close_date ?? null);
+      const turno = shiftPending(d?.close_date ?? null, localDate());
+      setPayDate(turno.stale ? localDate() : (d?.close_date ?? localDate()));
     }).catch(() => {});
     // Inicializar el form con el método del servicio (el toggle sigue la moneda del método)
     setPayMethod(service.payment_method ?? 'Divisas (USD Cash)');
@@ -231,6 +251,9 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
         <DialogHeader className="shrink-0">
           <DialogTitle>Registrar Pago / Abono {service ? `· ${service.order_num}` : ''}</DialogTitle>
         </DialogHeader>
+        {/* F82: la caja del día anterior sin cerrar. Se ve ANTES de escribir el monto, y solo si el
+            problema afecta a ESTE abono (fecha de hoy con el turno abierto de otro día). */}
+        {pagoBloqueadoPorTurno && <TurnoViejoBanner turno={turnoViejo} className="shrink-0" puedeCerrar={puedeCerrarCaja} />}
         <div className="min-h-0 flex-1 overflow-y-auto flex flex-col gap-4 pr-1">
           <div className="text-sm flex flex-col gap-1 rounded-md bg-muted/60 px-3 py-2">
             <p>Total: <strong>${(service?.amount ?? 0).toFixed(2)}</strong></p>
@@ -465,6 +488,12 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
             </div>
           )}
           {payError && <p className="text-sm text-danger">{payError}</p>}
+          {/* F82: el motivo del botón apagado, dicho (nunca un botón gris sin explicación). */}
+          {pagoBloqueadoPorTurno && (
+            <p className="text-xs text-danger" data-field="aviso-turno-viejo-pago">
+              {turnoViejoTexto(turnoViejo)} Si el cobro fue realmente del {fechaLegible(turnoViejo.fechaTurno)}, elegí esa fecha en «Fecha del pago».
+            </p>
+          )}
         </div>
         <DialogFooter className="shrink-0 flex-wrap gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
@@ -473,7 +502,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               <Printer className="size-4" /> Imprimir orden
             </Button>
           )}
-          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || dayOpen === false || (payIsBs && tasaBcv <= 0) || isFinalized(service?.status)}>
+          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || dayOpen === false || (payIsBs && tasaBcv <= 0) || isFinalized(service?.status) || pagoBloqueadoPorTurno}>
             {savingPay ? 'Guardando...' : 'Guardar Pago'}
           </Button>
         </DialogFooter>

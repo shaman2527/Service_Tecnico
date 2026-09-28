@@ -44,6 +44,15 @@ import DiscountDialog from './DiscountDialog';
 import { EditarProductoDialog } from './EditarProductoDialog';import { EntregadosHoy } from './EntregadosHoy';
 import { buildFicha } from '@/lib/ficha';
 import { nextStep, DEFAULT_NEW_STATUS, isCreatableStatus, photoOutIsCurrent, needsTechnician } from '@/lib/service-guide';
+// F81 — EL PREDETERMINADO DE LOS FILTROS es una regla de negocio, no un detalle de pantalla: el
+// estado en el que la orden recién REGISTRADA se ve (sin búsqueda, «Todos los estados», eje
+// Recibidos, sin rango y sin chip de trabajo). Vive en un módulo puro con pruebas
+// (`tools/service_filters_test.ts`) para que la pantalla no tenga seis `useState('')` sueltos.
+import { DEFAULT_SERVICE_FILTERS, clearServiceFilters, resetFiltersForNewOrder, type ServiceFilters } from '@/lib/service-filters';
+// F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR: la regla y el texto salen del módulo puro
+// `lib/day-shift` (con pruebas) y el aviso es el MISMO cartel en Ventas, Servicio Técnico y Pedidos.
+import { shiftPending, turnoViejoTexto, fechaLegible, type TurnoViejo } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 import { deliverReminders, receiveReminders, payIntentLabel, isDelivered } from '@/lib/reminders';
 // Piezas compartidas con el asistente de cierre (Harness F30): el stepper del wizard y la
 // elección de la pantalla exacta viven en archivos propios para no tener dos copias.
@@ -352,27 +361,46 @@ function ResumenTile({ id, titulo, valor, sub, tono, onClick, kpi, cargando = fa
   );
 }
 
-export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+/**
+ * F81 — LA ORDEN QUE ACABA DE NACER. Es lo que el wizard devuelve al padre al guardar un ALTA para
+ * que la lista la resalte y baje hasta ella: `base` es el número de la orden (el del equipo 1),
+ * `ids` las filas REALMENTE guardadas (una por equipo) y `groupId` el grupo cuando la recepción
+ * llevó 2+ equipos. Se arma con las filas que devolvió el backend, nunca con el formulario.
+ */
+type NuevaOrden = { base: string; ids: number[]; groupId: string | null };
+
+/** Arma el dato del resaltado con las filas guardadas. */
+const nuevaOrdenDe = (filas: Service[], base: string): NuevaOrden => ({
+  base,
+  ids: filas.map(r => r.id),
+  groupId: filas.find(r => r.group_id)?.group_id ?? null,
+});
+
+export default function Services({ role = 'owner', onGoToLedger }: {
+  role?: 'owner' | 'cashier';
+  /** F82: llevar al Libro Diario → Cierres (el remedio de la caja del día anterior sin cerrar). */
+  onGoToLedger?: () => void;
+}) {
   // F69 — QUÉ PUEDE TOCAR ESTA SESIÓN (regla pura `src/lib/session.ts`): la caja recibe equipos,
   // cobra y entrega; la impresora, el padrón de técnicos y la lista de trabajos del local son del
   // dueño (el backend los rechaza con `require_owner`), así que la pantalla no los ofrece.
   const ab = abilities(role === 'owner' ? 'master' : 'caja');
   const [services, setServices] = useState<Service[]>([]);
   const [statuses, setStatuses] = useState<ServiceStatus[]>([]);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(DEFAULT_SERVICE_FILTERS.search);
   // F44 (pedido del dueño: «el filtro predeterminado debería ser todos los estados, el que tengo
   // actual es activos en taller, no debería ser ese»): `''` = TODOS LOS ESTADOS. Antes la lista
   // abría con el sentinel `__activos__` y, como lo entregado no está activo, el mostrador abría en
   // una lista vacía (en la base real las 4 órdenes son Entregado/Devuelto) justo cuando el cliente
   // pregunta «¿cuántas pantallas hiciste?». El eje Recibidos/Entregados sigue igual: con el eje de
   // ENTREGA una orden sin `date_out` no entra por sí sola, así que ya no hace falta forzar el estado.
-  const [statusFilter, setStatusFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState(DEFAULT_SERVICE_FILTERS.statusFilter);
   // F32: eje del rango de fechas — 'in' recibidos (histórico) · 'out' ENTREGADOS (permite
   // «entregados hoy», que con el eje de recibido era imposible de ver).
-  const [dateField, setDateField] = useState<'in' | 'out'>('in');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [dateStart, setDateStart] = useState('');
-  const [dateEnd, setDateEnd] = useState('');
+  const [dateField, setDateField] = useState<'in' | 'out'>(DEFAULT_SERVICE_FILTERS.dateField);
+  const [typeFilter, setTypeFilter] = useState(DEFAULT_SERVICE_FILTERS.typeFilter);
+  const [dateStart, setDateStart] = useState(DEFAULT_SERVICE_FILTERS.dateStart);
+  const [dateEnd, setDateEnd] = useState(DEFAULT_SERVICE_FILTERS.dateEnd);
   /**
    * ¿La lista está SIN filtros de servidor? (el resumen reusa sus filas en ese caso: son toda la
    * base y no hace falta otra lectura). Se calcula acá arriba porque el efecto del resumen lo usa.
@@ -421,6 +449,9 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
   // Tasa del turno abierto: con ella se muestra la equivalencia en Bs. del saldo (F38).
   const [tasaDia, setTasaDia] = useState(0);
+  // F82 — la fecha del turno abierto y el veredicto de la regla pura (¿es de otro día?).
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  const turnoViejo = shiftPending(fechaTurno, localDate());
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [catalog, setCatalog] = useState<Product[]>([]);
   // F62: las categorías de trabajo que AGREGA EL LOCAL (settings work_types_extra). Se cargan una
@@ -429,6 +460,90 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   const dataVersion = useDataVersion();
   const [tiposExtra, setTiposExtra] = useState<string[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // ── F81 — EL PREDETERMINADO, EL RESET DEL ALTA Y LA TARJETA NUEVA ────────────────────────────
+  // Pedido del dueño (2026-09-27): «cuando escribo en el filtro, en servicio, y cuando vaya a
+  // registrar un servicio nuevo el filtro automáticamente se ponga sin filtro predeterminado, se
+  // borre la búsqueda, porque a veces cuando creo un servicio y tiene un filtro activado me confunde
+  // la card: debería aparecerme el servicio que acabe de registrar». Tres piezas:
+  //   1. `abrirAlta()` — ÚNICA puerta del alta (botón «Nuevo Servicio» y atajo N/F2): los filtros
+  //      vuelven al predeterminado COMPLETO (regla pura `lib/service-filters`, con pruebas), así la
+  //      orden nueva —que todavía no tiene `date_out`— no puede quedar escondida por el eje
+  //      «Entregados» (el caso que lo confundía: «Entregados hoy» deja estado=Entregado + eje=out).
+  //   2. Si el wizard se cierra SIN registrar nada, los filtros que había VUELVEN: un N apretado sin
+  //      querer no le borra la búsqueda al operario.
+  //   3. Al guardar, la orden creada se marca (`nuevaOrden`) → tarjeta resaltada + la lista baja
+  //      hasta ella. Se apaga sola (8 s) y con el primer cambio de filtro: nunca queda mintiendo.
+
+  /** La orden recién creada que hay que resaltar (y a la que hay que bajar). */
+  const [nuevaOrden, setNuevaOrden] = useState<NuevaOrden | null>(null);
+  /** Los filtros que había cuando el operario fue a registrar (para devolvérselos si no registró). */
+  const filtrosPrevios = useRef<ServiceFilters | null>(null);
+  /** F79: la orden que creó el botón «Cobrar» del wizard (el registro sigue abierto): se resalta
+   *  cuando el wizard se cierre, porque detrás del modal nadie la vería. */
+  const creadaEnWizard = useRef<NuevaOrden | null>(null);
+  /** ¿Ya se bajó hasta la tarjeta nueva? (una sola vez por orden) */
+  const yaBaje = useRef<string | null>(null);
+
+  /** Pone los seis filtros en el PREDETERMINADO (no-op si ya están: React no re-renderiza de gusto). */
+  const aplicarPredeterminado = () => {
+    const d = resetFiltersForNewOrder();
+    setSearch(d.search);
+    setStatusFilter(d.statusFilter);
+    setTypeFilter(d.typeFilter);
+    setDateField(d.dateField);
+    setDateStart(d.dateStart);
+    setDateEnd(d.dateEnd);
+  };
+
+  /** Devuelve los filtros que había antes de ir a registrar (solo si NO se registró nada). */
+  const restaurarFiltrosPrevios = () => {
+    const p = filtrosPrevios.current;
+    filtrosPrevios.current = null;
+    if (!p) return;
+    setSearch(p.search);
+    setStatusFilter(p.statusFilter);
+    setTypeFilter(p.typeFilter);
+    setDateField(p.dateField);
+    setDateStart(p.dateStart);
+    setDateEnd(p.dateEnd);
+  };
+
+  /**
+   * ABRIR EL ALTA (F81): la ÚNICA puerta del registro nuevo. Guarda los filtros vigentes y deja la
+   * lista en el predeterminado. Los caminos de EDICIÓN no la usan: editar una orden no le cambia la
+   * pantalla al operario.
+   */
+  const abrirAlta = () => {
+    filtrosPrevios.current = { search, statusFilter, typeFilter, dateField, dateStart, dateEnd };
+    creadaEnWizard.current = null;
+    aplicarPredeterminado();
+    setEditing(null);
+    setShowForm(true);
+  };
+
+  // F81 — BAJAR HASTA LA TARJETA NUEVA, una sola vez por orden y cuando la lista ya trae esas filas.
+  // Se busca el `[data-nueva]` del DOM (no una ref de React) porque en una recepción multi-equipo la
+  // tarjeta puede estar dentro del grupo y el nodo se vuelve a montar al recargar la lista.
+  useEffect(() => {
+    if (!nuevaOrden) { yaBaje.current = null; return; }
+    if (yaBaje.current === nuevaOrden.base) return;
+    const el = document.querySelector('[data-nueva]');
+    if (!el) return;   // la respuesta todavía no llegó: este efecto vuelve a correr con la lista nueva
+    yaBaje.current = nuevaOrden.base;
+    try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* bajar es una ayuda */ }
+  }, [nuevaOrden, services]);
+
+  // El resaltado se apaga SOLO (nadie quiere una tarjeta brillando media hora) y también cuando el
+  // operario toca un filtro: a partir de ahí la lista ya no es «la que se abrió para registrar».
+  // OJO: el EJE (Recibidos/Entregados) también es un filtro — la revisión adversarial encontró que
+  // sin `dateField` el anillo volvía a aparecer al cambiar de eje dentro de los 8 s.
+  useEffect(() => {
+    if (!nuevaOrden) return;
+    const t = setTimeout(() => setNuevaOrden(null), 8000);
+    return () => clearTimeout(t);
+  }, [nuevaOrden]);
+  useEffect(() => { setNuevaOrden(null); }, [search, statusFilter, dateStart, dateEnd, typeFilter, dateField]);
 
   // Atajos de teclado: N/F2 = Nuevo Servicio, F4 = cerrar una entrega (cola), / = buscar.
   // Solo cuando NO se está escribiendo en un campo (o el dialog está cerrado).
@@ -439,10 +554,13 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-      if ((e.key === 'n' || e.key === 'N' || e.key === 'F2') && !typing && !showForm) {
+      // F81: el alta pasa por `abrirAlta` (filtros al predeterminado) — también por el atajo. Y NO se
+      // apila sobre otro diálogo abierto (antes solo miraba `showForm`: con el cobro o el comprobante
+      // abiertos, N abría el alta encima y —nuevo en F81— le reencuadraba los filtros al operario).
+      if ((e.key === 'n' || e.key === 'N' || e.key === 'F2') && !typing && !algunDialogoAbierto) {
         e.preventDefault();
-        setEditing(null);
-        setShowForm(true);
+        // F81: el alta pasa por `abrirAlta` (filtros al predeterminado) — también por el atajo.
+        abrirAlta();
       } else if (e.key === 'F4' && !typing && !algunDialogoAbierto) {
         // El mostrador recibe mucho cliente: F4 → cola de entregas → asistente de cierre.
         e.preventDefault();
@@ -454,7 +572,7 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [showForm, algunDialogoAbierto]);
+  }, [showForm, algunDialogoAbierto, abrirAlta]);
 
   // Pantalla exacta → etiqueta del repuesto para el chip de la tarjeta
   const screenProductById = useMemo(() => {
@@ -635,7 +753,12 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   };
 
   useEffect(() => {
-    api.getActiveDay().then(d => { setDayOpen(!!d); setTasaDia(d?.tasa_bcv ?? 0); }).catch(() => setDayOpen(true));
+    api.getActiveDay().then(d => {
+      setDayOpen(!!d);
+      setTasaDia(d?.tasa_bcv ?? 0);
+      // F82: la fecha del turno abierto (para avisar si quedó abierto el día ANTERIOR).
+      setFechaTurno(d?.close_date ?? null);
+    }).catch(() => setDayOpen(true));
   }, []);
 
   const handleDelete = async (s: Service) => {
@@ -737,14 +860,18 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
   const totalAmount = visibleServices.reduce((a, s) => a + s.amount, 0);
   const listos = visibleServices.filter(s => s.status === 'Por entregar').length;
 
+  // ── F81 — ver el bloque de arriba (abrirAlta / restaurarFiltrosPrevios / nuevaOrden) ───────────
   // Quitar TODOS los filtros de una vez (F44: antes «Limpiar» borraba solo las fechas y quedaba el
-  // resto puesto sin que se notara; el eje Recibidos/Entregados se conserva porque sin rango no filtra).
+  // resto puesto sin que se notara). El eje Recibidos/Entregados se conserva porque sin rango de
+  // fechas no filtra nada: eso es el botón A MANO. El reset del alta sí devuelve el eje a «Recibidos».
   const limpiarFiltros = () => {
-    setSearch('');
-    setStatusFilter('');
-    setDateStart('');
-    setDateEnd('');
-    setTypeFilter('');
+    const f = clearServiceFilters({ search, statusFilter, typeFilter, dateField, dateStart, dateEnd });
+    setSearch(f.search);
+    setStatusFilter(f.statusFilter);
+    setTypeFilter(f.typeFilter);
+    setDateField(f.dateField);
+    setDateStart(f.dateStart);
+    setDateEnd(f.dateEnd);
   };
 
   // Órdenes multi-equipo: los equipos con group_id se renderizan juntos bajo un banner de orden
@@ -799,9 +926,15 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
     const realMethods = pays.length > 0
       ? [...new Set(pays.map(p => p.payment_method).filter(Boolean))].map(shortMethodLabel)
       : null;
+    // F81: ¿es la orden que se acaba de registrar? Se resalta y la lista baja hasta ella (el
+    // `data-nueva` lo lee el efecto de scroll). Se cubren las filas REALES de la orden (`ids`) y, en
+    // una recepción multi-equipo, todas las del mismo grupo.
+    const esNueva = !!nuevaOrden
+      && (nuevaOrden.ids.includes(s.id) || (!!nuevaOrden.groupId && s.group_id === nuevaOrden.groupId));
     return (
-      <Card key={s.id} className={cn(
+      <Card key={s.id} data-nueva={esNueva ? nuevaOrden?.base : undefined} className={cn(
         'overflow-hidden transition-shadow hover:shadow-md border-l-4',
+        esNueva && 'ring-2 ring-primary/60 shadow-lg',
         entregado && 'border-emerald-500/40 bg-emerald-500/5 border-l-emerald-500',
         porEntregar && 'border-amber-500/40 bg-amber-500/5 border-l-amber-500',
         !entregado && !porEntregar && ['Cancelado', 'Devuelto', 'Cancelado / Devuelto'].includes(s.status ?? '')
@@ -1077,7 +1210,9 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
               <Lock className="size-4" /> Día cerrado — abre el día en Libro Diario para registrar servicios
             </div>
           )}
-          {dayOpen === true && (
+          {/* F82: con un turno de OTRO día no se dice «Día abierto» (el backend rechaza la
+              recepción: la plata de hoy se anotaría en la caja de ayer). */}
+          {dayOpen === true && !turnoViejo.stale && (
             <span className="text-sm text-emerald-600 flex items-center gap-1.5">
               <CheckCircle2 className="size-4" /> Día abierto
             </span>
@@ -1090,11 +1225,18 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
               <Printer className="size-4" /> Impresora
             </Button>
           )}
-          <Button onClick={() => { setEditing(null); setShowForm(true); }} title="Nuevo Servicio (N o F2)">
+          {/* F82: con la caja del día anterior sin cerrar, el alta se apaga (el backend la rechaza y
+              la orden no se puede guardar): el cartel de abajo dice por qué y lleva al remedio. */}
+          <Button onClick={abrirAlta} disabled={turnoViejo.stale}
+            title={turnoViejo.stale ? turnoViejoTexto(turnoViejo) : 'Nuevo Servicio (N o F2)'}>
             <Plus className="size-4" /> Nuevo Servicio
           </Button>
         </div>
       </div>
+
+      {/* F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR: antes de recibir un equipo, con las dos fechas y
+          el camino del remedio a un toque (Libro Diario → Cierres → «Cerrar» de esa fila). */}
+      <TurnoViejoBanner turno={turnoViejo} onGoToLedger={onGoToLedger} puedeCerrar={ab.closeDay} />
 
       {/* ── F56 — RESUMEN DEL DÍA ────────────────────────────────────────────────────────────────
           Lo que el cliente pregunta de verdad («¿cuántas pantallas hiciste hoy?», «¿cuántos equipos
@@ -1442,6 +1584,7 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
           service={editing}
           statuses={statuses}
           dayOpen={dayOpen}
+          turnoViejo={turnoViejo}
           tiposExtra={tiposExtra}
           onNuevaCategoria={agregarCategoria}
           /* F69: quitar una categoría del LOCAL la saca para todos → la ofrece el dueño
@@ -1452,12 +1595,50 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
              wizard es del DUEÑO: el backend (`require_owner`) rechaza a la caja y la convención del
              proyecto es no dibujarle un botón que va a chocar contra el mensaje del PIN. */
           puedeEditarProducto={ab.manageCatalog}
-          onClose={() => { setShowForm(false); setEditing(null); }}
-          onSaved={() => { setShowForm(false); setEditing(null); refrescar(); }}
+          puedeCerrarCaja={ab.closeDay}
+          /* F81 — CERRAR SIN REGISTRAR: si era un ALTA y no se creó nada, los filtros que había
+             VUELVEN (un N apretado sin querer no le borra la búsqueda al operario). Si la orden SÍ se
+             creó —aunque sea con el botón «Cobrar» del wizard (F79)— NO se restaura: la lista queda
+             en el predeterminado mostrando la orden nueva, que es lo que pidió el dueño. */
+          onClose={() => {
+            const eraAlta = !editing;
+            const creada = creadaEnWizard.current;
+            creadaEnWizard.current = null;
+            setShowForm(false);
+            setEditing(null);
+            if (eraAlta) {
+              if (creada) setNuevaOrden(creada);
+              else restaurarFiltrosPrevios();
+            }
+            refrescar();
+          }}
+          /* F81: al guardar un ALTA se reafirma el predeterminado (por si algo lo movió mientras el
+             wizard estaba abierto) y la tarjeta recién creada queda resaltada con la lista bajada
+             hasta ella. En EDICIÓN no se toca nada: `editing` sigue puesto y los filtros son del
+             operario. */
+          onSaved={(nueva) => {
+            const eraAlta = !editing;
+            // F81 (hallazgo de la revisión adversarial): si la orden se creó con el botón «Cobrar»
+            // del wizard (F79) y después se pulsa «Guardar», `nueva` llega vacía — la orden creada
+            // está en el ref. Sin este fallback el resaltado se perdía justo en ese camino.
+            const objetivo = nueva ?? creadaEnWizard.current;
+            creadaEnWizard.current = null;
+            setShowForm(false);
+            setEditing(null);
+            if (eraAlta) {
+              aplicarPredeterminado();
+              if (objetivo) setNuevaOrden(objetivo);
+            }
+            refrescar();
+          }}
           /* F79: el botón «Cobrar» del wizard guarda la orden y el registro SIGUE — la lista de atrás
              tiene que mostrar la orden nueva sin cerrar el formulario (por eso `refrescar`, no
-             `onSaved`). */
-          onListChanged={refrescar}
+             `onSaved`). F81: cuando el wizard trae la orden creada, se guarda para resaltarla al
+             cerrarse (detrás del modal nadie vería el resaltado). */
+          onListChanged={(creada) => {
+            if (creada) creadaEnWizard.current = creada;
+            refrescar();
+          }}
           /* F77: el comprobante se abre por la MISMA vía que la tarjeta y el asistente de cierre. */
           onPrint={s => setPrintFor(s)}
         />
@@ -1482,6 +1663,7 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
         open={!!payFor}
         onOpenChange={(o) => { if (!o) setPayFor(null); }}
         dayOpen={dayOpen}
+        puedeCerrarCaja={ab.closeDay}
         onSaved={refrescar}
       />
 
@@ -1554,6 +1736,7 @@ export default function Services({ role = 'owner' }: { role?: 'owner' | 'cashier
         open={!!cierreFor}
         onOpenChange={(o) => { if (!o) setCierreFor(null); }}
         dayOpen={dayOpen}
+        puedeCerrarCaja={ab.closeDay}
         onSaved={refrescar}
         onPrint={(s) => setPrintFor(s)}
       />
@@ -2721,12 +2904,19 @@ function CobroEnWizard({ modo, total, estado, aviso, onClick, bloqueado = false,
   );
 }
 
-function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, onListChanged, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true, puedeEditarProducto = false }: {
+function ServiceForm({ service, statuses, dayOpen, turnoViejo, onClose, onSaved, onPrint, onListChanged, tiposExtra = [], onNuevaCategoria, onQuitarCategoria, canManageTecnicos = true, puedeEditarProducto = false, puedeCerrarCaja = true }: {
   service: Service | null;
   statuses: ServiceStatus[];
   dayOpen: boolean | null;
+  /** F82: el turno abierto es de OTRO día → no se puede recibir (el backend lo rechaza). */
+  turnoViejo: TurnoViejo;
   onClose: () => void;
-  onSaved: () => void;
+  /**
+   * F81: al guardar un ALTA el wizard devuelve la orden REALMENTE creada (número, filas y grupo) para
+   * que la lista la resalte y baje hasta ella; en EDICIÓN no manda nada, porque los filtros del
+   * operario no se tocan.
+   */
+  onSaved: (nueva?: NuevaOrden) => void;
   /**
    * F77: abrir el comprobante de la orden (vista previa + imprimir). Se usa para CERRAR EL REGISTRO
    * dentro del propio wizard: al guardar, si el check «Imprimir la orden ahora» está marcado, se abre
@@ -2739,7 +2929,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
    * registro SIGUE (el operario va al blindaje y al paso final), así que no puede usarse `onSaved`
    * — ese cierra el formulario. Se pasa el `refrescar` del padre.
    */
-  onListChanged?: () => void;
+  onListChanged?: (creada?: NuevaOrden) => void;
   /** F62: categorías de trabajo que agregó el local (van después de las canónicas) */
   tiposExtra?: string[];
   /** F62: agrega una categoría nueva y devuelve el nombre GUARDADO (null si falló) */
@@ -2754,6 +2944,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
    * no se le muestra un botón que va a chocar contra el mensaje del PIN (convención de F65).
    */
   puedeEditarProducto?: boolean;
+  /** F82: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel del wizard. */
+  puedeCerrarCaja?: boolean;
 }) {
   const [orderNum, setOrderNum] = useState('');
   // F74 — LA CONFIGURACIÓN DEL IVA (y la tasa del turno abierto). La lee cualquiera: la caja necesita
@@ -3078,6 +3270,12 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
     const bloqueos: string[] = [];
     if (saving) bloqueos.push('ya se está guardando');
     if (dayOpen === false) bloqueos.push('abrir el día en Libro Diario');
+    // F82: la caja del día anterior sin cerrar. Se dice con la fecha y el camino (no un «no se
+    // puede»). OJO (revisión adversarial): el backend rechaza lo mismo al CREAR (`add_service_order`
+    // → `require_open_day_para`), pero **editar** una orden existente va por `update_service`, que NO
+    // tiene gate de día: bloquear la edición es una decisión de la UI (misma asimetría deliberada que
+    // «entregar sí, cobrar no»), no una paridad con el backend.
+    if (turnoViejo.stale) bloqueos.push(`cerrar la caja del ${fechaLegible(turnoViejo.fechaTurno)} (Libro Diario → Cierres)`);
     if (needCi && !clientCi.trim()) bloqueos.push('cédula del cliente nuevo');
     // Los mismos datos que apagan el botón, pero DICHOS: antes este `return` era mudo y desde el
     // medio del wizard (o con Ctrl+Enter) el guardado no hacía nada y no explicaba por qué.
@@ -3224,6 +3422,10 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
     let paraImprimir: Service | null = null;
     // F79: las filas de la orden — las que ya existían por un cobro anterior, o las que se crean ahora.
     let filas: Service[] = ordenCreada?.rows ?? [];
+    // F81: la orden creada en ESTE guardado (solo en el alta) — se arma con las filas que devolvió el
+    // backend y viaja al padre para resaltar la tarjeta. Se guarda en LOCAL: `setOrdenCreada` es
+    // estado de React y en este mismo tick todavía valdría lo viejo.
+    let creada: NuevaOrden | undefined;
     try {
       let cid = clientId;
       if (client && !cid) {
@@ -3303,6 +3505,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
         // último paso la ACTUALICE en vez de crear una segunda orden.
         filas = filasEnOrdenDeEquipo(base, nuevas.filter(r => r.order_num === base || (r.order_num ?? '').startsWith(`${base}-`)));
         setOrdenCreada({ base, rows: filas });
+        creada = nuevaOrdenDe(filas, base);   // F81: lo que el padre resalta al cerrar(se) el wizard
         // El número que se ve en el paso Cliente pasa a ser el REAL (antes era el «próximo»).
         setOrderNum(base);
         await anotarPoliticaSinRomper(filas.map(r => r.id));
@@ -3332,14 +3535,16 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
         // justo lo contrario de lo que pide el taller. Se encolan y aparecen cuando el wizard se
         // cierre; el guardado final los vuelve a calcular frescos y el mismo aviso para la misma orden
         // no se apila (dedupe por id).
-        avisosDeRecepcion(filas.map(r => r.id), () => onListChanged?.());
-        onListChanged?.();
+        avisosDeRecepcion(filas.map(r => r.id), () => onListChanged?.(creada));
+        onListChanged?.(creada);
         return;
       }
-      onSaved();
+      onSaved(creada);
       // F79: salen acá, en el guardado que CIERRA el registro, aunque la orden se haya creado antes
       // con el botón de cobro — así el aviso es el de lo que falta de verdad en ese momento.
-      avisosDeRecepcion(filas.map(r => r.id), onSaved);
+      // F81: la callback va envuelta para que la orden creada llegue como DATO (nunca `map(onSaved)`,
+      // que le pasaría el índice del array como si fuera la orden).
+      avisosDeRecepcion(filas.map(r => r.id), () => onSaved(creada));
       // F77 — CERRAR EL REGISTRO CON LA IMPRESIÓN: se abre el COMPROBANTE de la orden recién guardada
       // por la MISMA vía que usa la tarjeta (`onPrint` → `setPrintFor`). Va DESPUÉS de `onSaved()`:
       // así el wizard ya se cerró y el aviso de política que quedó encolado se puede dibujar (F54: el
@@ -3546,6 +3751,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
   const faltaEnPaso = (() => {
     const falta: string[] = [];
     if (dayOpen === false) falta.push('abrir el día en Libro Diario');
+    if (turnoViejo.stale) falta.push(`cerrar la caja del ${fechaLegible(turnoViejo.fechaTurno)} (Libro Diario → Cierres)`);
     if (wizStep === 0) {
       if (!client.trim()) falta.push('nombre del cliente');
       if (needCi && !clientCi.trim()) falta.push('cédula del cliente nuevo');
@@ -3703,6 +3909,9 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{service ? `Editar ${service.order_num}` : 'Nuevo Servicio Técnico'}</DialogTitle>
         </DialogHeader>
+        {/* F82 — el aviso de la caja del día anterior sale AL ABRIR el formulario (no al guardar):
+            así el operario no carga toda la ficha para que después no se pueda guardar. */}
+        <TurnoViejoBanner turno={turnoViejo} className="shrink-0" puedeCerrar={puedeCerrarCaja} />
         {service?.status === 'Entregado' && service.date_out && warrantyStatus(service.date_out) === 'activa' && (
           <div className="shrink-0 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">
             <ShieldCheck className="size-4 shrink-0" />
@@ -4331,7 +4540,8 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
                   <p className="text-sm font-semibold flex items-center gap-2">
                     <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
                   </p>
-                  <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false}>
+                  <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false || turnoViejo.stale}
+                    title={turnoViejo.stale ? turnoViejoTexto(turnoViejo) : undefined}>
                     <Plus className="size-3.5" /> Registrar Pago / Abono
                   </Button>
                 </div>
@@ -4454,7 +4664,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
                   Siguiente
                 </Button>
               ) : (
-                <Button onClick={() => guardarOrden()} title="Ctrl+Enter" disabled={saving || dayOpen === false || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
+                <Button onClick={() => guardarOrden()} title="Ctrl+Enter" disabled={saving || dayOpen === false || turnoViejo.stale || !client || (service ? (!model || !!screenMissing || !!colorMissing) : !devicesValid) || (needCi && !clientCi.trim())}>
                   {/* F77: el botón dice lo que va a pasar — guardar y abrir el comprobante (o solo
                       guardar si el operario destildó el check del paso).
                       F79: con la orden ya guardada desde el botón de cobro, este botón ACTUALIZA esa
@@ -4480,6 +4690,7 @@ function ServiceForm({ service, statuses, dayOpen, onClose, onSaved, onPrint, on
         open={showPayDialog}
         onOpenChange={setShowPayDialog}
         dayOpen={dayOpen}
+        puedeCerrarCaja={puedeCerrarCaja}
         onSaved={() => {
           if (!svc) return;
           api.getServicePayments(svc.id).then(setPayments).catch(() => setPayments([]));

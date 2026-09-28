@@ -3728,7 +3728,10 @@ impl Database {
         let net_amount = total - bank_fee_amount;
         let client_name = title_case(client_name.trim());
         let conn = self.conn.lock().unwrap();
-        self.require_open_day(&conn)?;
+        // F82 — LA VENTA ES DE HOY: el turno abierto tiene que ser el de HOY. Antes bastaba con que
+        // hubiera CUALQUIER turno abierto, así que una venta de hoy entraba en la caja de ayer.
+        let hoy_venta = self.today_local(&conn)?;
+        self.require_open_day_para(&conn, &hoy_venta)?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount, iva_rate, iva_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
@@ -3954,7 +3957,9 @@ impl Database {
                        client_id: Option<i64>, technician: &str, technician_id: Option<i64>,
                        color: &str, screen_product_id: Option<i64>, discount_amount: f64) -> SqlResult<i64> {
         let conn = self.conn.lock().unwrap();
-        self.require_open_day(&conn)?;
+        // F82 — la orden de servicio es de HOY (misma regla que la venta).
+        let hoy_orden = self.today_local(&conn)?;
+        self.require_open_day_para(&conn, &hoy_orden)?;
         // F32: `add_service` (compatibilidad) no elige estado → histórico 'Por entregar'.
         Self::insert_service_row(&conn, order_num, None, client, phone, model, fault, service_type, service_types, amount, payment_method, observations, bank_fee_percent, zelle_reference, currency, client_ci, client_address, device_checklist, client_id, technician, technician_id, color, screen_product_id, discount_amount, "", 0.0, "")
     }
@@ -4015,7 +4020,9 @@ impl Database {
             }
         }
         let conn = self.conn.lock().unwrap();
-        self.require_open_day(&conn)?;
+        // F82 — la recepción multi-equipo también es de HOY (es la puerta que usa el wizard).
+        let hoy_recepcion = self.today_local(&conn)?;
+        self.require_open_day_para(&conn, &hoy_recepcion)?;
         let tx = conn.unchecked_transaction()?;
         let base = Self::next_order_num_on(&tx)?;
         let group_id = if devices.len() > 1 { Some(base.as_str()) } else { None };
@@ -7496,6 +7503,19 @@ impl Database {
         Ok(id)
     }
 
+    /// «¿HAY UN TURNO ABIERTO, CUALQUIERA?» — el gate HISTÓRICO, ciego a la fecha.
+    ///
+    /// F82: quedan acá las escrituras que NO llevan la fecha del día. **(1)** La devolución
+    /// (`add_service_refund`): se fecha con el `close_date` del turno ABIERTO —la plata sale del cajón
+    /// que se está trabajando; invariante de F36/F69— así que «el turno abierto» ya es su fecha.
+    /// **(2)** El pedido a proveedor (`add_purchase_order`): mercancía que entra, no mueve caja.
+    /// **(3)** El cobro (`add_service_payment`) lo conserva como gate de EXISTENCIA a propósito: su
+    /// regla de fecha la aplica `payment_date_ok` justo después, con su mensaje propio (el orden se
+    /// mantiene para no cambiar los textos que ya están fijados por pruebas).
+    ///
+    /// Todo lo que se fecha HOY (venta, orden de servicio) pasa por `require_open_day_para`, que es la
+    /// regla del dueño: «si no cerré la caja del día anterior, que me diga que tengo que cerrarla
+    /// antes de facturar».
     fn require_open_day(&self, conn: &rusqlite::Connection) -> SqlResult<()> {
         let day_open: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE is_closed=0)",
@@ -7505,6 +7525,44 @@ impl Database {
             return Err(day_shift_error("Debe abrir el día (Libro Diario) antes de registrar ventas o servicios."));
         }
         Ok(())
+    }
+
+    /// F82 — EL TURNO ABIERTO TIENE QUE SER EL DE LA FECHA EFECTIVA DE LA OPERACIÓN.
+    ///
+    /// Por qué existe: `require_open_day` solo preguntaba «¿hay algún turno abierto?», así que con la
+    /// caja del 16/09 sin cerrar y hoy 17/09 una VENTA o una ORDEN DE SERVICIO de hoy se anotaban en
+    /// la caja del 16/09: ese arqueo se descuadraba, el de hoy no existía y el resumen del día mentía.
+    /// Pedido del dueño (2026-09-27): «si yo no he cerrado la caja del día y estamos en otro día…
+    /// que me diga "tiene que cerrar la caja del día anterior para facturar", un mensaje así, ANTES de
+    /// que vaya a facturar: todo se liga hasta la venta de ayer».
+    ///
+    /// Fail-closed y con el remedio COMPLETABLE (lección de F34/M2): el mensaje nombra las dos fechas
+    /// y el camino exacto (Libro Diario → Cierres → «Cerrar» de esa fila, que existe desde F34), y
+    /// `close_day` / `reopen_day` / `open_day` NO pasan por acá — si no, quedaría encerrado sin salida.
+    fn require_open_day_para(&self, conn: &rusqlite::Connection, fecha: &str) -> SqlResult<()> {
+        // `daily_closings.close_date` es UNIQUE, así que no hace falta ORDER BY/LIMIT.
+        let del_dia: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE close_date = ?1 AND is_closed = 0)",
+            params![fecha], |r| r.get(0),
+        )?;
+        if del_dia {
+            return Ok(());
+        }
+        // No hay turno de ESA fecha: si hay uno abierto de OTRO día, el problema es el cierre que
+        // falta y el mensaje lo dice; si no hay ninguno, se conserva el mensaje histórico.
+        let otro: Option<String> = conn.query_row(
+            "SELECT close_date FROM daily_closings WHERE is_closed = 0 ORDER BY close_date DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional()?;
+        match otro {
+            None => Err(day_shift_error("Debe abrir el día (Libro Diario) antes de registrar ventas o servicios.")),
+            Some(d) => Err(day_shift_error(&format!(
+                "La caja del {d} sigue ABIERTA y esta operación es del {fecha}. Si se registra ahora, la \
+                 plata se anota en el día {d} y ese arqueo queda descuadrado. Cerrá esa caja en Libro \
+                 Diario → Cierres (botón «Cerrar» de la fila del {d}, contá el cajón) y después abrí el \
+                 día de hoy (Libro Diario → «Abrir Día»)."
+            ))),
+        }
     }
 
     /// F35 — ¿hay tasa BCV > 0 para el DÍA de un pago? (cierre de ese día con tasa, o el turno
@@ -12994,5 +13052,126 @@ discount_amount: 0.0,
             );
             std::fs::write(&marca, texto).expect("no pude escribir el centinela de la migración");
         }
+    }
+
+    // ── F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR ────────────────────────────────────────────────
+    //
+    // Pedido del dueño (2026-09-27): «si yo no he cerrado la caja del día y estamos en otro día —
+    // por ejemplo hoy no cerré la caja — que me diga "tiene que cerrar la caja del día anterior para
+    // facturar", un mensaje así, ANTES de que vaya a facturar: todo se liga hasta la venta de ayer».
+    //
+    // ANTES: `require_open_day` solo miraba que hubiera ALGÚN turno abierto, así que con el turno del
+    // 16/09 abierto una venta o una orden de servicio de HOY se anotaban en la caja del 16/09 (ese
+    // arqueo se descuadraba, el de hoy no existía y el resumen del día mentía). NINGÚN test cubría
+    // ese escenario: estos lo fijan, y —lo más importante— que el REMEDIO no quede gateado (si no,
+    // el mostrador se queda sin poder facturar NI abrir el día).
+    #[test]
+    fn test_turno_viejo_no_deja_facturar_y_el_remedio_destranca() {
+        let test_path = PathBuf::from("test_f82_turno_viejo.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let (hoy, ayer): (String, String) = {
+            let conn = db.conn.lock().unwrap();
+            let q = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+            (q("SELECT date('now','localtime')"), q("SELECT date('now','localtime','-1 day')"))
+        };
+        let cuenta = |tabla: &str| -> i64 {
+            db.conn.lock().unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {tabla}"), [], |r| r.get(0)).unwrap()
+        };
+
+        // EL ESCENARIO REAL: nadie cerró la caja de ayer. `open_day` no sirve para armarlo (abre HOY),
+        // así que se inserta la fila abierta de ayer — que es exactamente el estado en el que queda la
+        // base del taller cuando el operario se va sin cerrar la caja.
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, is_closed) VALUES (?1, 0, 40.5, 45, 0)",
+            params![ayer],
+        ).unwrap();
+
+        // 1) LA VENTA DE HOY SE RECHAZA — nombrando las DOS fechas y el camino del remedio.
+        let err = db.add_sale(None, "Pantalla de prueba", 1, 10.0, 10.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD", 0.0)
+            .unwrap_err().to_string();
+        assert!(err.contains(&ayer) && err.contains(&hoy), "el mensaje nombra las dos fechas: {err}");
+        assert!(err.contains("Cierres") && err.contains("Cerrar"), "y el camino del remedio: {err}");
+
+        // 2) LA ORDEN DE SERVICIO (la puerta del wizard) también, y también la variante legacy.
+        let equipo = ServiceDeviceInput {
+            model: "Samsung A15".into(), fault: "Rota".into(),
+            service_type: "Cambio pantalla".into(), service_types: "[\"Cambio pantalla\"]".into(),
+            amount: 30.0, payment_method: "Divisas (USD Cash)".into(), observations: "".into(),
+            bank_fee_percent: 0.0, zelle_reference: "".into(), currency: "USD".into(),
+            device_checklist: "".into(), color: "".into(), screen_product_id: None,
+            discount_amount: 0.0, status: "Recibido".into(), iva_rate: 0.0, iva_mode: "".into(),
+        };
+        let err = db.add_service_order("Cliente", "0412-1", "", "", None, "", None, &[equipo])
+            .unwrap_err().to_string();
+        assert!(err.contains(&ayer) && err.contains("Cierres"), "orden de servicio rechazada: {err}");
+        let err = db.add_service("DEV-F82", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            30.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0)
+            .unwrap_err().to_string();
+        assert!(err.contains(&ayer), "el camino legacy también: {err}");
+
+        // 3) FAIL-CLOSED DE VERDAD: no se escribió NADA (ni la venta ni las órdenes).
+        assert_eq!(cuenta("sales"), 0, "ninguna venta entró a la caja de ayer");
+        assert_eq!(cuenta("services"), 0, "ninguna orden entró a la caja de ayer");
+
+        // 4) EL REMEDIO NO ESTÁ GATEADO: cerrar la caja vieja y abrir la de hoy (el camino que la UI
+        //    ofrece con el botón «Cerrar» por fila y «Abrir Día»). Un solo turno por vez, de ahí el
+        //    orden: primero se cierra ayer y recién después se abre hoy.
+        db.close_day(&ayer, "prueba F82 (turno viejo)", 0.0, 45.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        db.open_day(0.0, 45.0, 50.0).unwrap();
+
+        // 5) Y AHORA SÍ FACTURA: la misma venta y la misma orden que antes eran rechazadas.
+        db.add_sale(None, "Pantalla de prueba", 1, 10.0, 10.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD", 0.0).unwrap();
+        let sid = db.add_service("DEV-F82", "Cliente", "0412-1", "Samsung A15", "Rota", "Cambio pantalla", "[\"Cambio pantalla\"]",
+            30.0, "Divisas (USD Cash)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        assert_eq!(cuenta("sales"), 1);
+        assert_eq!(cuenta("services"), 1);
+
+        // 6) F35 SIGUE INTACTO: con el turno de ayer reabierto (↺ en Cierres), un abono fechado A
+        //    PROPÓSITO en ayer entra en la caja de AYER; y la regla es POR FECHA, así que las dos
+        //    fechas conviven (cada una con su turno abierto).
+        db.reopen_day(&ayer).unwrap();
+        db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "cobrado ayer", &ayer).unwrap();
+        db.add_service_payment(sid, 7.0, "Divisas (USD Cash)", 0.0, "", "USD", "cobrado hoy", "").unwrap();
+        let t_ayer = db.get_daily_totals(&ayer, &ayer).unwrap();
+        let t_hoy = db.get_daily_totals(&hoy, &hoy).unwrap();
+        assert_eq!(t_ayer[0].usd_cash_total, 5.0, "ayer tiene solo el abono fechado ayer");
+        assert_eq!(t_hoy[0].usd_cash_total, 17.0, "hoy tiene la venta ($10) y su abono ($7)");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F82 — sin NINGÚN turno abierto se conserva el mensaje histórico (el que ya conocen el
+    /// mostrador y las pruebas).
+    #[test]
+    fn test_sin_turno_abierto_mensaje_de_siempre() {
+        let test_path = PathBuf::from("test_f82_sin_turno.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let err = db.add_sale(None, "Pantalla de prueba", 1, 10.0, 10.0, "Divisas (USD Cash)", "Cliente", None, "", 0.0, "", "USD", 0.0)
+            .unwrap_err().to_string();
+        assert!(err.contains("Debe abrir el día"), "mensaje histórico: {err}");
+        assert!(!err.contains("sigue ABIERTA"), "y NO el de la caja vieja (no hay ninguna abierta): {err}");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F82 — el gasto NO se gatea por fecha A PROPÓSITO: es la única escritura de dinero que puede
+    /// anotarse sin turno abierto (decisión documentada: un gasto del cierre o retroactivo tiene que
+    /// poder anotarse). Esta prueba existe para que nadie «arregle» esa decisión sin darse cuenta.
+    #[test]
+    fn test_gasto_sigue_sin_exigir_turno() {
+        let test_path = PathBuf::from("test_f82_gasto.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let ayer: String = db.conn.lock().unwrap()
+            .query_row("SELECT date('now','localtime','-1 day')", [], |r| r.get(0)).unwrap();
+        db.add_expense(&ayer, "Prueba F82", 3.0, "USD", "sin turno abierto", "Divisas (USD Cash)").unwrap();
+        let n: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM expenses", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "el gasto se anotó sin turno abierto (comportamiento histórico intacto)");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
     }
 }

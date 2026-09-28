@@ -1,7 +1,7 @@
 # Codebase Patterns
 
 > Auto-consolidated learnings from loop iterations.
-> Last updated: 2026-09-27T22:21:12.836Z
+> Last updated: 2026-09-28T01:35:55.612Z
 
 ---
 
@@ -22,57 +22,63 @@
 - `[CRITICAL]` Una regla de dinero debe tener UNA sola implementación, y las MIGRACIONES DE ARRANQUE son parte de ella: en este proyecto db.rs::init() tenía su propio UPDATE de paid_amount con la fórmula vieja y, como init() corre en cada arranque, revertía la regla nueva cada vez que se abría la app (el mismo saldo valía distinto según cuál fue la última acción). Al cambiar una fórmula de dinero hay que buscar TODAS las copias de la fórmula (incluidas las migraciones y los UPDATE inline en init()), y dejar un test que simule el REINICIO (cerrar y reabrir la base) — no solo el camino de la app. Además, en un invariante de dinero («X nunca puede ser negativo») hay que enumerar los caminos que lo rompen y cubrir cada uno: borrar un movimiento después de devolver, la tolerancia de redondeo aplicada repetidamente con el saldo en 0, y un monto con signo contrario que saltea el tope. (1)
 - `[CRITICAL]` Una verificación que solo mira el EXIT CODE de la herramienta que muta los datos puede dar un FALSO VERDE: `cargo test -- --ignored <filtro>` sale 0 con «running 0 tests / 0 filtered out» cuando el filtro no matchea, y entonces la comparación antes/después es la copia contra sí misma y el veredicto es «los datos están intactos». Le pasó a la prueba que sostiene la condición del dueño (release 0.4.0, 2026-09-18). (1)
 - `[CRITICAL]` F78 (2026-09-24) — «CELDA VACÍA = NO TOCAR» VALE PARA TODOS LOS CAMPOS, NO SÓLO PARA LOS NÚMEROS. En el aplicar del CSV los TEXTOS se tomaban como `if columna_presente { valor_de_la_fila } else { valor_actual }`: con la columna presente y la celda vacía, la marca quedaba en «Genérico», el modelo/variante en blanco y la COMPATIBILIDAD curada se BORRABA en silencio — y con la compatibilidad se pierde el vínculo del repuesto con su teléfono en el padrón de Modelos (apply_service_stock deja de encontrarlo). Los números sí usaban `unwrap_or(actual)`. Arreglo: un solo helper `texto_celda()` que conserva el valor cuando la celda viene vacía y usa el guion `-` (o «ninguno/a») como forma EXPLÍCITA de vaciar. Regla general: la regla de «vacío = no tocar» tiene que estar implementada en UN solo lugar y aplicarse a TODOS los tipos de campo, o el diff de la pantalla miente. (1)
-  - `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs fn finales() + fn texto_celda()``````````
-  - `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_celda_vacia_no_borra_los_textos``````````
-  - `- `- `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (columnas ausentes = solo lectura)``````````
+  - `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs fn finales() + fn texto_celda()```````````
+  - `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_celda_vacia_no_borra_los_textos```````````
+  - `- `- `- `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (columnas ausentes = solo lectura)```````````
 - `[HIGH]` F78 (2026-09-24) — EL FORMATO LOCAL DE LOS NÚMEROS Y LA NOTACIÓN CIENTÍFICA: filtrar «los caracteres que no son de número» convierte `1E5` en 15 y `1.5E3` en 1.53, y ese número equivocado se escribe en el precio o en el stock SIN AVISO (Excel exporta en notación científica en cuanto la celda tiene formato Scientific o el valor es grande). Regla del proyecto: «nada inventado — lo que no se entiende BLOQUEA la fila». Arreglo: leer la notación científica como el número que es y, si no se entiende, marcarlo con el número de línea y bloquear el aplicar. En la misma línea: el PAYLOAD del frontend se valida en el BACKEND (rangos + checked_add), porque las celdas son editables y `stock_hoy + i64::MAX` desborda (en release deja el stock en 0; en dev paniquea con el mutex tomado y envenena la app). (1)
-  - `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs fn leer_numero()/leer_cientifico()/leer_precio()`````````
-  - `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_numeros_absurdos_bloquean_la_fila y test_el_payload_del_frontend_se_valida_en_el_backend`````````
+  - `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs fn leer_numero()/leer_cientifico()/leer_precio()``````````
+  - `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_numeros_absurdos_bloquean_la_fila y test_el_payload_del_frontend_se_valida_en_el_backend``````````
 - `[HIGH]` HARNESS (2026-09-24) — `tools/progress/patterns.md` CRECÍA SOLO hasta 49,7 MB (86.000 líneas) con 43 aprendizajes únicos. Causa: `savePatternLearning` (tools/governance/learning-injector.ts) escribía un SEGUNDO bloque «### Conventions» además de la sección del bucle; como el archivo se re-lee en cada corrida (parsePatternsFromMd), cada llamada DUPLICABA cada convención (exponencial 2^n: antes llegó a 310 MB). Arreglo: se quitó el bloque duplicado y se corrió `node tools/dedupe_patterns.mjs` → 28 KB con los 43 aprendizajes (backup del viejo en tools/backup, que está gitignoreado). Regla: cualquier archivo que se REGENERE leyéndose a sí mismo tiene que ser idempotente, y hay que mirar el tamaño de los artefactos antes de commitear. (1)
-  - `- `- `- `- `- `- `tools/governance/learning-injector.ts (savePatternLearning: el bloque «### Conventions» duplicado)```````
-  - `- `- `- `- `- `- `tools/dedupe_patterns.mjs (86.157 líneas -> 43 únicos -> 28 KB)```````
-  - `- `- `- `- `- `- `release_gate.mjs avisaba «2 archivo(s) grandes en el repo»```````
+  - `- `- `- `- `- `- `- `tools/governance/learning-injector.ts (savePatternLearning: el bloque «### Conventions» duplicado)````````
+  - `- `- `- `- `- `- `- `tools/dedupe_patterns.mjs (86.157 líneas -> 43 únicos -> 28 KB)````````
+  - `- `- `- `- `- `- `- `release_gate.mjs avisaba «2 archivo(s) grandes en el repo»````````
 - `[CRITICAL]` La app de dev (`npx tauri dev`) sirve el `dist` EMBEBIDO en el binario: el WebView carga `http://tauri.localhost/assets/index-<hash>.js`, NO el dev server de Vite. Después de tocar el frontend hay que `npm run build` + relanzar la app; recargar la página NO alcanza. Costó una corrida entera de verificación en vivo (40/50 con el producto correcto) porque las aserciones medían el bundle viejo. (1)
-  - `- `- `- `- `- `verify_cobro_en_wizard: 'antes de guardar NO hay estado de dinero inventado' FAIL con el código ya corregido``````
-  - `- `- `- `- `- `AGENTS.md (F79, lección 1)``````
+  - `- `- `- `- `- `- `verify_cobro_en_wizard: 'antes de guardar NO hay estado de dinero inventado' FAIL con el código ya corregido```````
+  - `- `- `- `- `- `- `AGENTS.md (F79, lección 1)```````
 
 ---
 
 ### Conventions
 
 - `[CRITICAL]` F78 (2026-09-24) — CARGA MASIVA EN CSV: el STOCK SUMA (nunca pisa) y el catálogo se refresca FILA A FILA dentro de la transacción. Leer el catálogo UNA vez antes del bucle hacía que la segunda fila del mismo archivo sobre la misma ficha PISARA el stock de la primera (3+10+5 quedaba en 8 en vez de 18) mientras los movimientos y el informe decían +15: historial y stock incoherentes (bloqueante de la revisión adversarial). Regla: cuando un lote puede tocar la misma fila dos veces, el estado tiene que ser VIVO (mapa en memoria refrescado tras cada escritura) o hay que releer dentro de la transacción. Y cada UPDATE/DELETE tiene que exigir EXACTAMENTE una fila afectada. (1)
-  - `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs:1052-1136 (vivo: HashMap<i64, CsvCurrent> refrescado por fila)```````````
-  - `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_dos_filas_de_la_misma_ficha_suman_stock```````````
-  - `- `- `- `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (2 filas de la misma ficha: 3+10+6=19 y movimientos que suman 16)```````````
+  - `- `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs:1052-1136 (vivo: HashMap<i64, CsvCurrent> refrescado por fila)````````````
+  - `- `- `- `- `- `- `- `- `- `- `- `src-tauri/src/csvload.rs test_dos_filas_de_la_misma_ficha_suman_stock````````````
+  - `- `- `- `- `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (2 filas de la misma ficha: 3+10+6=19 y movimientos que suman 16)````````````
 - `[HIGH]` En las pruebas CDP, con DOS diálogos apilados (wizard + diálogo de cobro/impresión), `document.querySelector('[role="dialog"]')` devuelve el WIZARD, no el de arriba: toda aserción del diálogo apilado tiene que leer el ÚLTIMO (`[...querySelectorAll('[role="dialog"]')].pop()`). El modal de política (`role="alertdialog"`) NO entra en ese conteo, así que tampoco sirve para comprobar que la pantalla quedó limpia. (1)
-  - `- `- `- `- `tools/verify_cobro_en_wizard.mjs: 'el saldo del diálogo es el de ESA orden' daba null leyendo el primer diálogo`````
-  - `- `- `- `- `AGENTS.md (F79, lección 2)`````
+  - `- `- `- `- `- `tools/verify_cobro_en_wizard.mjs: 'el saldo del diálogo es el de ESA orden' daba null leyendo el primer diálogo``````
+  - `- `- `- `- `- `AGENTS.md (F79, lección 2)``````
 - `[CRITICAL]` Cuando una pantalla tiene DOS botones que guardan la misma orden (guardar y cobrar), tienen que compartir UNA sola función de guardado y UNA sola lista de bloqueos; y si la orden ya existe, todo guardado posterior tiene que ser un UPDATE por la vía única (`updateOrderKeepingFields`) con el patch que CONSERVA lo que no se manda (nunca `date_out` ni `observations`, y jamás tocar el dinero ya cobrado) — crear una segunda orden por duplicado es el riesgo real de estos flujos. (1)
-  - `- `- `src/components/Services.tsx: bloqueosDeGuardado() + guardarOrden({ cobrarEquipo })```
-  - `- `- `src/lib/service-update.ts: OrderPatch extendido (undefined = conservar)```
-  - `- `- `verify_cobro_en_wizard 55/55: la orden no se duplica y el monto 30→40 queda guardado con el abono intacto```
+  - `- `- `- `src/components/Services.tsx: bloqueosDeGuardado() + guardarOrden({ cobrarEquipo })````
+  - `- `- `- `src/lib/service-update.ts: OrderPatch extendido (undefined = conservar)````
+  - `- `- `- `verify_cobro_en_wizard 55/55: la orden no se duplica y el monto 30→40 queda guardado con el abono intacto````
 - `[HIGH]` Pruebas en vivo del wizard: (1) un equipo NUEVO ya nace con el trabajo «Cambio pantalla» marcado, así que clickear el chip para «activarlo» lo APAGA y el bloque de la pantalla desaparece (la corrida entera falló por eso: se comprueba el BLOQUE, no el chip); (2) guardar la ficha del repuesto marca el monto del equipo como «escrito por el operario», así que los casos de «el monto no se mueve» se miden en un SEGUNDO equipo; (3) con dos diálogos apilados `[role="dialog"]` devuelve el WIZARD: hay que usar el ÚLTIMO de la pila, sobre todo para «Cancelar», que existe en los dos; (4) tras guardar la ficha la lista queda unos instantes en esqueleto de carga: se ESPERA el precio en la fila (`waitFor`), no un sleep fijo; (5) una prueba que deja el wizard abierto ensucia la corrida siguiente: terminar con `location.reload()` y comprobar `diálogos === 0` contando también los `[role="alertdialog"]`. (1)
-  - `tools/verify_editar_producto_wizard.mjs (54/54 ×2)`
-  - `Services.tsx: emptyDevice + chips [...SERVICE_TYPES].map con onClick toggle`
-  - `Tools/progress/specs/F80-editar-repuesto-en-el-wizard.md (sección «Lecciones de prueba en vivo»)`
-  - Fix: Antes de tocar un chip de trabajo en el wizard, comprobar si el bloque que depende de él YA está a la vista: el default de un equipo nuevo es «Cambio pantalla» marcado. Y para cualquier caso de dinero, usar un equipo nuevo del formulario (multi-equipo) en vez de reutilizar el que ya tuvo una ficha editada.
+  - `- `tools/verify_editar_producto_wizard.mjs (54/54 ×2)``
+  - `- `Services.tsx: emptyDevice + chips [...SERVICE_TYPES].map con onClick toggle``
+  - `- `Tools/progress/specs/F80-editar-repuesto-en-el-wizard.md (sección «Lecciones de prueba en vivo»)``
+- `[HIGH]` Las verificaciones EN VIVO (CDP) de esta app necesitan DOS cosas que no estaban escritas juntas: (1) para levantar el puerto 9222 con la app instalada abierta hay que aislar la carpeta de WebView2 (WEBVIEW2_USER_DATA_FOLDER fuera del proyecto + WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 + REGISTRO_DB a una copia) y el binario de dev sirve el dist EMBEBIDO (npm run build + cargo build --no-default-features + relanzar; recargar la página NO alcanza); (2) las copias de la base traen el PIN REAL del dueño HASHEADO (settings.pin y users.pin_hash), así que un script que entra tecleando 1234 falla con «PIN incorrecto», y el bloqueo por intentos SE PERSISTE en settings.pin_locked_until. Solución adoptada en F81/F82: `node tools/snapshot_db.mjs --out copia.db --pin-dev` deja la copia con 1234 en las dos tablas y sin bloqueo, y los scripts abren la sesión con `verify_user_pin` (la misma vía del frontend) + recarga, en vez de manejar la pantalla de acceso (la sesión vive 12 h en el backend). (1)
+  - `tools/snapshot_db.mjs`
+  - `tools/verify_turno_viejo.mjs`
+  - `tools/verify_alta_limpia_filtros.mjs`
+  - `src-tauri/src/db.rs:verify_user_pin`
+  - `src-tauri/src/db.rs:hash_pin`
+  - Fix: Estandarizar el arranque de toda verificación en vivo: snapshot con --pin-dev, lanzar con las tres variables de entorno y abrir sesión con verify_user_pin + reload.
 
 ---
 
 ### Anti-Patterns
 
 - `[HIGH]` F78 (2026-09-24) — PRUEBAS EN VIVO (CDP): tres trampas que hacen fallar el script con el producto perfecto. (1) El fixture tiene que reproducir el estado LEGACY con las MISMAS reglas del producto: `verify_modelos_f53` insertaba la fila con `source='manual'` y `rebuild_phones` NUNCA borra las filas manuales, así que la separación no podía quitarla y 6 comprobaciones fallaban; además `add_product` YA reconstruye el padrón, así que el fixture tiene que borrar los modelos que él mismo crea. (2) Un `confirm()` sin contestar BLOQUEA la página y todos los `evalx` mueren por timeout (hay que llamar `handleDialog(true)` DESPUÉS del clic). (3) Un clic por COORDENADAS puede no aterrizar (botón al fondo de una pestaña con tarjetas arriba): apretar con click programático (`scrollIntoView` + `el.click()`) y REINTENTAR hasta ver el resultado. Y la comparación de saldos tiene que usar la foto tomada ANTES del fixture, no después. (1)
-  - `- `- `- `- `- `- `- `tools/verify_modelos_f53.mjs (fixture con source='catalogo', clic programático, handleDialog tras el merge, antesBase)````````
-  - `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (vista previa que no escribe, columnas de solo lectura, doble fila de la misma ficha)````````
+  - `- `- `- `- `- `- `- `- `tools/verify_modelos_f53.mjs (fixture con source='catalogo', clic programático, handleDialog tras el merge, antesBase)`````````
+  - `- `- `- `- `- `- `- `- `tools/verify_carga_csv.mjs (vista previa que no escribe, columnas de solo lectura, doble fila de la misma ficha)`````````
 - `[HIGH]` En una prueba CDP, avanzar de paso o cambiar de pantalla con UN clic contado a ojo y sin comprobar el estado: (a) el primer clic de «Siguiente» puede caer durante la animación de entrada del diálogo; (b) si un paso anterior dejó un diálogo abierto, el clic a la lista NO llega (el velo se lo come) y las comprobaciones siguientes corren contra la pantalla equivocada — 8 fallos falsos en la verificación de F79 que parecían bugs del producto. (1)
-  - `- `- `- `verify_cobro_en_wizard, sección de EDICIÓN: 8 fallos falsos porque el wizard del alta seguía abierto y el velo se comía el clic a la tarjeta````
-  - `- `- `- `F77: mismo patrón de reintento para avanzar de paso````
-  - `- `- `- `AGENTS.md (F79, lecciones 3 y 4)````
+  - `- `- `- `- `verify_cobro_en_wizard, sección de EDICIÓN: 8 fallos falsos porque el wizard del alta seguía abierto y el velo se comía el clic a la tarjeta`````
+  - `- `- `- `- `F77: mismo patrón de reintento para avanzar de paso`````
+  - `- `- `- `- `AGENTS.md (F79, lecciones 3 y 4)`````
 - `[HIGH]` Una aserción protegida por un `if` puede NO ejecutarse nunca y el conteo «N/N OK» lo tapa: en `verify_precio_pantalla` la comprobación «el precio del MODELO se ofrece a un toque» vivía dentro de `if (okPantalla && elegida != null)`, y `leerElegida` busca la fila `[data-screen-option][data-screen-elegida="1"]`; cuando el equipo quedaba con una pantalla elegida FUERA de la compatibilidad del modelo esa fila no existía → la prueba entraba en el `if` nunca, y el «52/52» se leía como cobertura completa. F80 (que ahora publica la pantalla elegida como fila «elegida a mano») hizo visible el caso y la aserción apareció fallando: esperaba el chip del modelo siempre, pero en ese estado el monto YA era el del modelo (`fuente=modelo`) y el chip correctamente no se dibuja (`PrecioRepuesto` nunca ofrece un precio ya escrito). (1)
-  - `- `tools/verify_precio_pantalla.mjs (sección 11: `if (okPantalla && elegida != null)` + `leerElegida`)``
-  - `- `medido en vivo: filas [1094*, 825, 1140, 306] con `elegida=1094` fuera de compatibilidad y `monto=8.75 · fuente=modelo```
-  - `- `src/components/Services.tsx → PantallaViva (publica la elegida fuera de compatibilidad como `screenExtra` con match_quality 'buscada')``
-  - `- `src/lib/screen-price.ts → groupPriceFields (null si los repuestos no comparten UN precio) y PrecioRepuesto (no ofrece el precio ya escrito)``
+  - `- `- `tools/verify_precio_pantalla.mjs (sección 11: `if (okPantalla && elegida != null)` + `leerElegida`)```
+  - `- `- `medido en vivo: filas [1094*, 825, 1140, 306] con `elegida=1094` fuera de compatibilidad y `monto=8.75 · fuente=modelo````
+  - `- `- `src/components/Services.tsx → PantallaViva (publica la elegida fuera de compatibilidad como `screenExtra` con match_quality 'buscada')```
+  - `- `- `src/lib/screen-price.ts → groupPriceFields (null si los repuestos no comparten UN precio) y PrecioRepuesto (no ofrece el precio ya escrito)```
 
 ---
 

@@ -22,8 +22,16 @@ import { useDataVersion } from '@/lib/use-data-version';
 import IvaDesglose from './IvaDesglose';
 // F70: qué puede tocar cada sesión (anular es del dueño; el backend lo exige igual)
 import { abilities } from '@/lib/session';
+// F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR: la regla y el texto viven en un módulo puro con
+// pruebas (`tools/day_shift_test.ts`); acá solo se conectan y se dibuja el aviso antes de facturar.
+import { shiftPending, turnoViejoTexto, type TurnoViejo } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 
-export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }) {
+export default function Sales({ role = 'owner', onGoToLedger }: {
+  role?: 'owner' | 'cashier';
+  /** F82: llevar al Libro Diario → Cierres (el remedio de la caja del día anterior sin cerrar). */
+  onGoToLedger?: () => void;
+}) {
   // F76 — LA PANTALLA SE RECARGA SOLA: la versión de los datos entra en las dependencias de la
   // carga, así que cualquier escritura (o volver a la app) la pone al día sin apretar «Actualizar».
   const dataVersion = useDataVersion();
@@ -39,6 +47,14 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
   const [stats, setStats] = useState<SaleStat[]>([]);
   const [statsDays, setStatsDays] = useState(7);
   const [dayOpen, setDayOpen] = useState<boolean | null>(null);
+  /**
+   * F82 — LA FECHA DEL TURNO ABIERTO. `get_active_day` devuelve el turno abierto más reciente SIN
+   * compararlo con hoy, así que la comparación se hace acá con la regla pura `shiftPending`: si el
+   * turno es de otro día, el mostrador NO puede facturar (el backend lo rechaza) y hay que decirlo
+   * ANTES, no al guardar.
+   */
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  const turnoViejo = shiftPending(fechaTurno, localDate());
   // F70 — anulación: la venta que se está anulando, el motivo y el error del intento
   const [aAnular, setAAnular] = useState<Sale | null>(null);
   const [motivoAnular, setMotivoAnular] = useState('');
@@ -78,7 +94,7 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
   }, [period, search, dateStart, dateEnd]);
 
   useEffect(() => {
-    api.getActiveDay().then(d => setDayOpen(!!d)).catch(() => setDayOpen(true));
+    api.getActiveDay().then(d => { setDayOpen(!!d); setFechaTurno(d?.close_date ?? null); }).catch(() => setDayOpen(true));
   }, []);
 
   const openStats = async (days: number) => {
@@ -125,16 +141,23 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
               <Lock className="size-4" /> Día cerrado — abre el día en Libro Diario para registrar ventas
             </div>
           )}
-          {dayOpen === true && (
+          {/* F82: el cartel verde «Día abierto» NO puede mentir — con un turno de otro día el
+              mostrador no puede facturar (el backend lo rechaza), así que ahí no se dice «abierto». */}
+          {dayOpen === true && !turnoViejo.stale && (
             <span className="text-sm text-emerald-600 flex items-center gap-1.5">
               <CheckCircle2 className="size-4" /> Día abierto
             </span>
           )}
-          <Button onClick={() => setShowForm(true)}>
+          <Button onClick={() => setShowForm(true)} disabled={turnoViejo.stale}
+            title={turnoViejo.stale ? turnoViejoTexto(turnoViejo) : undefined}>
             <Plus className="size-4" /> Nueva Venta
           </Button>
         </div>
       </div>
+
+      {/* F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR: antes de facturar, con las dos fechas y el
+          camino del remedio a un toque (Libro Diario → Cierres → «Cerrar» de esa fila). */}
+      <TurnoViejoBanner turno={turnoViejo} onGoToLedger={onGoToLedger} puedeCerrar={ab.closeDay} />
 
       <div className="grid grid-cols-3 gap-4">
         <Card>
@@ -289,6 +312,7 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
         <SaleForm
           methods={methods}
           dayOpen={dayOpen}
+          turnoViejo={turnoViejo}
           onClose={() => setShowForm(false)}
           onSaved={() => { setShowForm(false); load(); }}
         />
@@ -342,9 +366,11 @@ export default function Sales({ role = 'owner' }: { role?: 'owner' | 'cashier' }
   );
 }
 
-function SaleForm({ methods, dayOpen, onClose, onSaved }: {
+function SaleForm({ methods, dayOpen, turnoViejo, onClose, onSaved }: {
   methods: PaymentMethod[];
   dayOpen: boolean | null;
+  /** F82: el turno abierto de otro día bloquea el guardado (y se explica ANTES, no al fallar). */
+  turnoViejo: TurnoViejo;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -498,6 +524,8 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
         <DialogHeader>
           <DialogTitle>Nueva Venta</DialogTitle>
         </DialogHeader>
+        {/* F82: el aviso sale ANTES de cargar la venta (y queda a la vista mientras se carga). */}
+        <TurnoViejoBanner turno={turnoViejo} />
         <div className="space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">Producto</label>
@@ -634,9 +662,16 @@ function SaleForm({ methods, dayOpen, onClose, onSaved }: {
               (botón «Editar», o el filtro «Sin precio» del KPI).
             </p>
           )}
+          {/* F82 — LA CAJA DEL DÍA ANTERIOR SIN CERRAR (el aviso va acá, junto al botón, además del
+              cartel de arriba): no se guarda hasta cerrarla, y se dice por qué. */}
+          {turnoViejo.stale && (
+            <p className="text-xs text-danger text-left" data-field="aviso-turno-viejo">
+              {turnoViejo.message} {turnoViejo.remedy}
+            </p>
+          )}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={onClose}>Cancelar</Button>
-            <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false}>
+            <Button onClick={save} title="Ctrl+Enter" disabled={saving || dayOpen === false || turnoViejo.stale}>
               {saving ? 'Guardando...' : `Guardar Venta (${isBs ? `Bs. ${totalFinal.toFixed(2)}` : `$${totalUsdTmp.toFixed(2)}`})`}
             </Button>
           </div>

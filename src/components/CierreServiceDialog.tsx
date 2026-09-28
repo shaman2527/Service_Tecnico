@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { api } from '@/db';
 import type { ScreenCandidate, Service, ServicePayment } from '@/types';
-import { cn, currencySymbol, methodCurrency, parseServiceTypes, partLabel, shortMethodLabel } from '@/lib/utils';
+import { cn, currencySymbol, methodCurrency, parseServiceTypes, partLabel, shortMethodLabel, localDate } from '@/lib/utils';
 // F38: el saldo se dice en la moneda del cobro (+ equivalencia del día) también al cerrar/entregar.
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
 // Regla del proyecto (AGENTS.md): entregar una pantalla AGOTADA exige confirmación explícita
@@ -27,6 +27,9 @@ import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { firePolicyReminders } from './policy-actions';
 import { deliverReminders } from '@/lib/reminders';
 import { photoOutIsCurrent } from '@/lib/service-guide';
+// F82 — la caja del día anterior sin cerrar (regla pura con pruebas): bloquea el COBRO al entregar.
+import { shiftPending } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 
 // F30 — ASISTENTE DE CIERRE: entregar un equipo rápido y sin pensar.
 //
@@ -42,7 +45,7 @@ import { photoOutIsCurrent } from '@/lib/service-guide';
 const esFinal = (status?: string | null) =>
   ['Entregado', 'Cancelado', 'Devuelto', 'Cancelado / Devuelto'].includes(status ?? '');
 
-export default function CierreServiceDialog({ service, open, onOpenChange, onSaved, onPrint, dayOpen }: {
+export default function CierreServiceDialog({ service, open, onOpenChange, onSaved, onPrint, dayOpen, puedeCerrarCaja = true }: {
   service: Service | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -50,6 +53,8 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   /** abre el recibo de esa orden (lo maneja Services.tsx) */
   onPrint?: (s: Service) => void;
   dayOpen?: boolean | null;
+  /** F82: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel. */
+  puedeCerrarCaja?: boolean;
 }) {
   const [svc, setSvc] = useState<Service | null>(service);
   const [busy, setBusy] = useState(false);
@@ -69,6 +74,13 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   const [tasaBcv, setTasaBcv] = useState(0);
   /** Fecha del turno abierto: su caja es la que recibe el cobro al entregar (F35). */
   const [diaTurno, setDiaTurno] = useState('');
+  /**
+   * F82 — SI EL TURNO ABIERTO ES DE OTRO DÍA: el cobro de hoy caería en la caja de ayer. Con el
+   * turno viejo se puede ENTREGAR igual (la entrega no es plata y hay saldo con motivo), pero el
+   * COBRO se bloquea y el cartel dice qué cerrar.
+   */
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  const turnoViejo = shiftPending(fechaTurno, localDate());
   /** Movimientos de la orden: dicen en qué moneda se viene cobrando (F38). */
   const [movimientos, setMovimientos] = useState<ServicePayment[]>([]);
   const [payMethod, setPayMethod] = useState('Divisas (USD Cash)');
@@ -110,6 +122,7 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
       if (!alive) return;
       setTasaBcv(d?.tasa_bcv ?? 0);
       setDiaTurno(d?.close_date ?? '');
+      setFechaTurno(d?.close_date ?? null);   // F82: para saber si el turno es de otro día
     }).catch(() => {});
     // F38: los movimientos reales dicen en qué moneda se viene cobrando (para el saldo en Bs.)
     api.getServicePayments(service.id).then(p => { if (alive) setMovimientos(p); }).catch(() => { if (alive) setMovimientos([]); });
@@ -198,6 +211,8 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   const sinPantallas = necesitaPantalla && !cargandoPantallas && candidatos.length === 0 && screenId == null;
   const puedeCerrar = pantallaOk && !faltaMotivo && !cobroImposible && !cargandoPantallas
     && (payAmount <= 0 || dayOpen !== false)
+    // F82: un cobro es plata de HOY — con la caja de ayer abierta se bloquea el cobro, no la entrega.
+    && (payAmount <= 0 || !turnoViejo.stale)
     && (tasaBcv > 0 || !payIsBs || payAmount <= 0);
   // F32: ¿ya está la foto de SALIDA de la entrega de ESTA orden? (se compara con su fecha de
   // entrega; si el equipo se reabrió y se entrega de nuevo, la foto vieja no cuenta)
@@ -301,6 +316,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
             {svc.technician && <span>· {svc.technician}</span>}
           </div>
         </DialogHeader>
+
+        {/* F82: si la caja del día anterior quedó abierta, el COBRO de esta entrega se bloquea (la
+            entrega sigue disponible con saldo y motivo). El aviso sale al abrir el asistente. */}
+        {turnoViejo.stale && <TurnoViejoBanner turno={turnoViejo} className="shrink-0" puedeCerrar={puedeCerrarCaja} />}
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-3">
           {/* qué está y qué falta (P1: los faltantes se ven ANTES, no al guardar) */}
