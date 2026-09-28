@@ -141,6 +141,23 @@ check('el aviso dice el remedio completo (Libro Diario → Cierres → Cerrar �
 check('el aviso trae el botón para ir a cerrar la caja a un toque',
   await evalx(`!!document.querySelector('[data-action="ir-a-cerrar-caja"]')`));
 
+// ── 3b) EL BOTÓN DEL AVISO LLEVA A CIERRES **Y NO DEJA LA PANTALLA EN BLANCO** ───────────────────
+// Bug reportado por el dueño (2026-09-27): al pulsar «Ir a cerrar esa caja» la pantalla quedaba en
+// blanco. La causa era que el `onClick` pasaba el EVENTO del click como si fuera el nombre de la
+// pestaña (el estado de la pestaña del Libro Diario quedaba con un MouseEvent adentro). Esta
+// comprobación fija el camino completo: clic → pestaña Cierres → la fila del día viejo con su botón.
+await irA('Dashboard');
+await waitFor(`!!document.querySelector('[data-action="ir-a-cerrar-caja"]')`, 10000);
+await clickCenter(`document.querySelector('[data-action="ir-a-cerrar-caja"]')`);
+const llego = await waitFor(`/Libro Diario/.test(document.querySelector('main')?.innerText ?? '')`, 10000);
+const noBlanco = await evalx(`(document.querySelector('main')?.innerText ?? '').trim().length > 40`);
+check('el botón del aviso abre el Libro Diario (y la pantalla NO queda en blanco)', llego && noBlanco,
+  `llego=${llego} · texto=${String(await evalx(`(document.querySelector('main')?.innerText ?? '').slice(0, 40)`))}`);
+const enCierres = await evalx(`document.querySelector('[data-action="cerrar-dia-fila"]') !== null || /Cierres/.test(document.querySelector('main')?.innerText ?? '')`);
+check('…y cae en la pestaña CIERRES (donde está el botón «Cerrar» de la fila)', enCierres);
+const hayFilaDirecta = await waitFor(`!!document.querySelector('[data-action="cerrar-dia-fila"]')`, 8000);
+check('…y la fila del día que quedó abierto está a la vista con su «Cerrar»', hayFilaDirecta);
+
 await irA('Ventas');
 const ventasAviso = await waitFor(`!!document.querySelector('[data-field="turno-viejo"]')`, 10000);
 check('Ventas: el aviso sale ANTES de facturar (no al guardar)', ventasAviso);

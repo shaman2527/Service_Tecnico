@@ -54,8 +54,11 @@ function App() {
    * «Ir a cerrar esa caja» mandaría el mismo valor y la pestaña no volvería a cambiar.
    */
   const [libroFoco, setLibroFoco] = useState<{ tab: 'diario' | 'cierres'; n: number }>({ tab: 'diario', n: 0 });
-  const irAlLibroDiario = (t: 'diario' | 'cierres' = 'cierres') => {
-    setLibroFoco(f => ({ tab: t, n: f.n + 1 }));
+  const irAlLibroDiario = (t?: 'diario' | 'cierres') => {
+    // Guarda defensiva: si llega cualquier otra cosa (p. ej. el evento del click, que fue el bug que
+    // dejó la pantalla en blanco), se cae a «cierres», que es el remedio que se está ofreciendo.
+    const destino: 'diario' | 'cierres' = t === 'diario' || t === 'cierres' ? t : 'cierres';
+    setLibroFoco(f => ({ tab: destino, n: f.n + 1 }));
     setTab('libro');
   };
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === '1');

@@ -833,6 +833,32 @@ export default function Help() {
         </CardContent>
       </Card>
 
+      {/* ── FIRMA DEL AUTOR ─────────────────────────────────────────────────────────────────────
+          Pedido del dueño (2026-09-27): «quiero dejar mi firma con un icono pequeño, puede ser el
+          mismo icono que tiene la app… "Creado por DEV. Comercio & Servicios Digitales RBS" en
+          mayúscula, en el footer de ayuda, que sea profesional y moderno». Va al pie del Centro de
+          Ayuda: el logo de la app (el mismo `favicon.svg` que usa la ventana), el rótulo en
+          mayúsculas y el nombre del sistema. */}
+      <footer
+        data-field="firma-autor"
+        className="mt-2 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border/70 bg-gradient-to-r from-muted/60 via-muted/30 to-transparent px-5 py-4"
+      >
+        <div className="flex items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-background shadow-sm">
+            <img src="/favicon.svg" alt="Registro" className="size-6" data-field="firma-icono" />
+          </span>
+          <div className="flex flex-col leading-tight">
+            <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+              Creado por
+            </span>
+            <span className="text-sm font-bold uppercase tracking-wide text-foreground">
+              DEV. Comercio &amp; Servicios Digitales RBS
+            </span>
+          </div>
+        </div>
+        <span className="text-[11px] text-muted-foreground">Registro · Sistema de Servicio Técnico</span>
+      </footer>
+
       {/* F71 — la pantalla de respaldos (respaldar ahora, elegir carpeta/USB, restaurar) */}
       {showBackups && <BackupsDialog onClose={() => setShowBackups(false)} />}
     </div>

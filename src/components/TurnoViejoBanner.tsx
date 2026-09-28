@@ -54,14 +54,17 @@ export function TurnoViejoBanner({ turno, onGoToLedger, puedeCerrar = true, clas
       </div>
       {onGoToLedger && puedeCerrar && (
         <Button size="sm" variant="outline" className="ml-auto shrink-0 border-destructive/40"
-          onClick={onGoToLedger} data-action="ir-a-cerrar-caja"
+          // OJO: envuelto en arrow a propósito. Con `onClick={onGoToLedger}` React le pasa el EVENTO
+          // como primer argumento y la pestaña del Libro Diario quedaba con un MouseEvent adentro →
+          // pantalla en blanco (bug reportado por el dueño el 2026-09-27).
+          onClick={() => onGoToLedger()} data-action="ir-a-cerrar-caja"
           title="Abrir el Libro Diario en la pestaña Cierres (ahí está el botón «Cerrar» de esa fila)">
           Ir a cerrar esa caja
         </Button>
       )}
       {onGoToLedger && !puedeCerrar && (
         <Button size="sm" variant="outline" className="ml-auto shrink-0 border-destructive/40"
-          onClick={onGoToLedger} data-action="ir-al-libro-diario"
+          onClick={() => onGoToLedger()} data-action="ir-al-libro-diario"
           title="Abrir el Libro Diario (la pestaña Cierres y el cierre del día son del dueño)">
           Ver el Libro Diario
         </Button>

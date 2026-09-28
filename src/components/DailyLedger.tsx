@@ -229,10 +229,15 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
   const today = localDate();
   const [tab, setTab] = useState<'diario' | 'cierres' | 'pagos' | 'gastos' | 'salud' | 'movimientos'>('diario');
   // F82: la petición externa de pestaña (el aviso de la caja del día anterior sin cerrar). Depende
-  // del contador `n` para que pedir la MISMA pestaña otra vez vuelva a aplicarla.
+  // del contador `n` para que pedir la MISMA pestaña otra vez vuelva a aplicarla. La pestaña se
+  // valida ANTES de aplicarla: un valor raro (un evento, un string desconocido) dejaría el contenido
+  // en blanco (bug reportado por el dueño). Acá solo se aceptan pestañas que existen para esta sesión.
   useEffect(() => {
-    if (focusTab && focusTab.n > 0) setTab(focusTab.tab);
-  }, [focusTab?.n, focusTab?.tab]);
+    if (!focusTab || !focusTab.n) return;
+    const pedida = focusTab.tab;
+    if (pedida !== 'diario' && pedida !== 'cierres') return;
+    setTab(isOwner || pedida === 'diario' ? pedida : 'diario');
+  }, [focusTab?.n, focusTab?.tab, isOwner]);
   const [startDate, setStartDate] = useState(() => addDays(today, -30));
   const [endDate, setEndDate] = useState(() => localDate());
   const [totals, setTotals] = useState<DailyTotals[]>([]);
