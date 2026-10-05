@@ -74,14 +74,16 @@ export default function TaxSettingsDialog({ open, onClose, config, tasa = 0, onS
 
   return (
     <Dialog open={open} onOpenChange={v => { if (!v) onClose(); }}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — patrón de la casa: con la ventana de 750 px de alto, el pie con
+          «Guardar IVA» quedaba fuera de la pantalla. Encabezado y pie fijos, cuerpo scrolleable. */}
+      <DialogContent className="sm:max-w-lg max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="flex items-center gap-2">
             <Percent className="size-4" /> IVA — cómo se cobra
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-muted-foreground">¿El negocio cobra IVA?</label>
             <ToggleGroup type="single" value={activo ? 'si' : 'no'} data-field="iva-activo"
@@ -163,7 +165,7 @@ export default function TaxSettingsDialog({ open, onClose, config, tasa = 0, onS
           )}
         </div>
 
-        <DialogFooter className="gap-2">
+        <DialogFooter className="shrink-0 border-t pt-3 gap-2">
           <Button variant="outline" onClick={onClose} disabled={saving}>
             <X className="size-4" /> Cancelar
           </Button>

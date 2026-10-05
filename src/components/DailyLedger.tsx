@@ -1859,11 +1859,13 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
       </AlertDialog>
 
       <Dialog open={showExpenseDialog} onOpenChange={setShowExpenseDialog}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
+        {/* F86 (REQ-8/AC-11) — patrón de la casa: con la ventana de 750 px de alto el pie con
+            «Guardar gasto» quedaba fuera de la pantalla. */}
+        <DialogContent className="sm:max-w-sm max-h-[92vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Registrar gasto</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Fecha</label>
               <Input type="date" value={expDate} onChange={e => setExpDate(e.target.value)} />
@@ -1910,7 +1912,7 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
             {expError && <p className="text-sm text-danger">{expError}</p>}
             {expWarning && <p className="text-sm text-warning">{expWarning}</p>}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowExpenseDialog(false)}>Cancelar</Button>
             <Button onClick={doAddExpense}>
               <Plus className="size-4" /> Guardar gasto
@@ -1920,11 +1922,11 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
       </Dialog>
 
       <Dialog open={showOpen} onOpenChange={setShowOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-sm max-h-[92vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>{activeDay ? 'Actualizar Día (tasa BCV)' : 'Abrir Día'}</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
             {activeDay && (
               <p className="text-xs text-muted-foreground">
                 El día {activeDay.close_date} ya está abierto: guardar actualiza la tasa y la apertura
@@ -1970,7 +1972,7 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
             )}
             {openError && <p className="text-sm text-danger">{openError}</p>}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowOpen(false)}>Cancelar</Button>
             <Button onClick={doOpen}>
               <Play className="size-4" /> {activeDay ? 'Actualizar Día' : 'Abrir Día'}
@@ -2249,11 +2251,11 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
       </Dialog>
 
       <Dialog open={!!showSettle} onOpenChange={() => setShowSettle(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-sm max-h-[92vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Liquidación Punto: {showSettle?.close_date}</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
             <div className="text-sm flex flex-col gap-1">
               <p>Cargado esperado (sistema): <strong>{fmtMix(settleChargedUsd, settleChargedBs)}</strong></p>
               <p className="text-muted-foreground">Registra el monto total impreso por la máquina del Punto — debe dar el mismo.</p>
@@ -2285,7 +2287,7 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
               </div>
             )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button variant="outline" onClick={() => setShowSettle(null)}>Cancelar</Button>
             <Button onClick={doSettle}>Guardar Liquidación</Button>
           </DialogFooter>
@@ -2293,11 +2295,11 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
       </Dialog>
 
       <Dialog open={showPinDialog} onOpenChange={setShowPinDialog}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-sm max-h-[92vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>{pinStatus ? 'Configurar PIN' : 'Crear PIN de dueño'}</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
             {!pinStatus ? (
               <>
                 <div className="flex flex-col gap-2">
@@ -2336,13 +2338,15 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
               </>
             )}
             {pinError && <p className="text-sm text-danger">{pinError}</p>}
-            {!pinStatus && (
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setShowPinDialog(false)}>Cancelar</Button>
-                <Button onClick={savePin}>Guardar</Button>
-              </DialogFooter>
-            )}
           </div>
+          {/* F86: el pie estaba DENTRO del cuerpo, así que se desplazaba con el formulario y con la
+              ventana de 750 px podía quedar fuera de la vista; ahora es fijo (patrón de la casa). */}
+          {!pinStatus && (
+            <DialogFooter className="shrink-0 border-t pt-3">
+              <Button variant="outline" onClick={() => setShowPinDialog(false)}>Cancelar</Button>
+              <Button onClick={savePin}>Guardar</Button>
+            </DialogFooter>
+          )}
         </DialogContent>
       </Dialog>
 

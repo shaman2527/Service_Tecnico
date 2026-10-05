@@ -38,7 +38,17 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        // F86 (REQ-8/AC-11) — RED DE SEGURIDAD, no el arreglo. La ventana de la app es 1200×750 (mínimo
+        // 900×600): un contenido más alto que eso dejaba el pie con los botones Guardar/Cancelar FUERA
+        // de la pantalla y no había forma de llegar a ellos. Este tope + scroll alcanza para que
+        // CUALQUIER diálogo del sistema siga siendo usable, aunque nadie se acuerde de ponerle tope.
+        // Es seguro para los que ya lo resuelven bien: `cn` usa tailwind-merge, así que la clase que
+        // trae el consumidor gana (los diálogos con `max-h-[88vh] … overflow-hidden` + cuerpo
+        // scrolleable + pie fijo NO cambian). A propósito NO se agrega `flex`/`grid-rows-*`/
+        // `overflow-hidden`: hay diálogos con banner (4 hijos directos) a los que el recorte les
+        // comería el aviso o el pie. El arreglo de verdad es el patrón de la casa (header y pie fijos
+        // + cuerpo scrolleable), que sí se aplica diálogo por diálogo en el inventario.
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg max-h-[92vh] overflow-y-auto translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
         className
       )}
       {...props}

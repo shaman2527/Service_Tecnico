@@ -349,10 +349,14 @@ check('F50: se llega al paso de Equipos (donde vive el selector de modelo)', enE
   String(await evalx(`(document.querySelector('[role="dialog"]')?.innerText ?? '').split('\\n').find(l => /Paso \\d+ de \\d+/.test(l)) ?? null`)));
 
 /** Lee las pantallas que el formulario ofrece para el modelo elegido. */
+// OJO (medido 2026-10-04): NO se cuentan los `button` del contenedor. Desde F80 cada fila de
+// pantalla tiene DOS botones (el de elegir, `data-screen-option`, y el lápiz, `data-editar-producto`),
+// así que contar botones daba el DOBLE de pantallas y esta comprobación venía fallando desde F80
+// culpando al filtro de «en uso». Se cuentan las FILAS, que es lo que la comprobación quiere medir.
 const pantallasOfrecidas = () => evalx(`(() => {
   const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => /Pantalla a instalar/.test(x.innerText || ''));
-  const cont = l?.parentElement?.querySelector('div.overflow-y-auto');
-  return cont ? cont.querySelectorAll('button').length : -1;
+  const cont = l?.parentElement?.querySelector('[data-screen-options], div.overflow-y-auto');
+  return cont ? cont.querySelectorAll('[data-screen-option]').length : -1;
 })()`);
 const pantallasDelBackend = (modelo) => evalx(`(async () => {
   const r = await window.__TAURI_INTERNALS__.invoke('find_compatible_products', { model: ${JSON.stringify(modelo)}, categoryId: null, limit: 80 });

@@ -211,10 +211,15 @@ try {
     estadoVacio && opcionesVacias === 0, `vacío=${estadoVacio} · opciones=${opcionesVacias}`);
   await clickEn(`document.querySelector('${dev(EQUIPO_F)} [data-screen-vacio] [data-action="registrar-pantalla"]')`);
   const abrioAlta = await waitFor(`document.querySelector('[data-editar-producto-corta]')?.getAttribute('data-editar-producto-corta') === 'alta'`, 10000);
+  // F93 (arreglo de la PRUEBA, no del producto): F91 cambió el campo de texto de la compatibilidad por
+  // la LISTA DE MODELOS (`data-compat-picker` con un chip por teléfono). Leer `[data-field="prod-compat"]`
+  // —que ya no existe— dejaba `null` esta comprobación con el alta funcionando perfecto.
   const alta = await evalx(`(() => {
     const n = document.querySelector('[data-field="prod-nombre"]');
-    const c = document.querySelector('[data-field="prod-compat"]');
-    return n && c ? { nombre: n.value, compat: c.value, categoria: (document.querySelector('[data-field="prod-categoria"]')?.innerText ?? '').trim(), faltaCategoria: !!document.querySelector('[data-falta-categoria]') } : null;
+    const p = document.querySelector('[data-compat-picker]');
+    if (!n || !p) return null;
+    const chips = [...p.querySelectorAll('[data-compat-chip]')].map(c => c.getAttribute('data-compat-chip'));
+    return { nombre: n.value, compat: chips.join(' / '), categoria: (document.querySelector('[data-field="prod-categoria"]')?.innerText ?? '').trim(), faltaCategoria: !!document.querySelector('[data-falta-categoria]') };
   })()`);
   check('F80: el alta abre como PRIMER diálogo de la sesión, con nombre y compatibilidad del modelo',
     abrioAlta && /^Pantalla /.test(String(alta?.nombre))
@@ -311,8 +316,10 @@ try {
   const valores = await evalx(`(() => {
     const v = document.querySelector('[data-field="prod-venta"]');
     const s = document.querySelector('[data-field="prod-stock"]');
-    const c = document.querySelector('[data-field="prod-compat"]');
-    return v && s && c ? { venta: Number(v.value), stock: Number(s.value), compat: c.value } : null;
+    // F93: la compatibilidad es la LISTA DE MODELOS (F91), no un campo de texto.
+    const p = document.querySelector('[data-compat-picker]');
+    const compat = p ? [...p.querySelectorAll('[data-compat-chip]')].map(c => c.getAttribute('data-compat-chip')).join(' / ') : null;
+    return v && s && p ? { venta: Number(v.value), stock: Number(s.value), compat } : null;
   })()`);
   check('F80: el atajo arranca con los valores REALES de la ficha',
     Number(valores?.venta) === Number(original?.price_sale) && Number(valores?.stock) === Number(original?.stock), JSON.stringify(valores));
@@ -398,7 +405,11 @@ try {
       && (await evalx(`!!document.querySelector('[data-compat-ok]')`)) === false);
     await clickEn(`document.querySelector('[data-action="prod-agregar-modelo"]')`);
     await sleep(800);
-    const compatTexto = await evalx(`document.querySelector('[data-field="prod-compat"]')?.value ?? ''`);
+    // F93: el «+ agregar» mete el modelo como un CHIP de la lista (F91), no como texto.
+    const compatTexto = await evalx(`(() => {
+      const p = document.querySelector('[data-compat-picker]');
+      return p ? [...p.querySelectorAll('[data-compat-chip]')].map(c => c.getAttribute('data-compat-chip')).join(' / ') : '';
+    })()`);
     check('F80: el «+ agregar» escribe el modelo en la compatibilidad',
       String(compatTexto).toLowerCase().includes(String(MODELO).toLowerCase()), String(compatTexto).slice(0, 120));
     const campoD = Number(filaBuscadaAntes?.precio) === Number(originalBuscada.price_sale) ? 'prod-venta' : 'prod-efectivo';

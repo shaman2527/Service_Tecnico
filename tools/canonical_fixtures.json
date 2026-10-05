@@ -121,7 +121,7 @@
       "brand": "Tecno",
       "model": "Spark 9 Pro",
       "variant": "",
-      "compatibility": "[]",
+      "compatibility": "[\"Tecno Spark 9 Pro\",\"Tecno 8P\"]",
       "name": "Pantalla Tecno Spark 9 Pro / 8P"
     }
   },
@@ -135,7 +135,7 @@
       "brand": "Amazon",
       "model": "Fire 7 HD 2019",
       "variant": "",
-      "compatibility": "",
+      "compatibility": "[\"Amazon Fire 7 HD 2019\"]",
       "name": "Táctil Tablet Amazon Fire 7 HD 2019"
     }
   },
@@ -149,7 +149,7 @@
       "brand": "Genérico",
       "model": "287 3G",
       "variant": "",
-      "compatibility": "[]",
+      "compatibility": "[\"Genérico 287 3G\"]",
       "name": "Táctil Tablet Genérico 287 3G"
     }
   },

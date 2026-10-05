@@ -518,15 +518,19 @@ function SaleForm({ methods, dayOpen, turnoViejo, onClose, onSaved }: {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-lg" onKeyDown={e => {
+      {/* F86 (REQ-8/AC-11) — patrón de la casa. OJO: este diálogo tiene CUATRO hijos directos
+          (encabezado + banner del turno + cuerpo + pie), así que el banner va con `shrink-0` y el
+          cuerpo es el único scrolleable: un `overflow-hidden` a secas recortaría el aviso. */}
+      <DialogContent className="sm:max-w-lg max-h-[92vh] flex flex-col overflow-hidden" onKeyDown={e => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') save();
       }}>
-        <DialogHeader>
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>Nueva Venta</DialogTitle>
         </DialogHeader>
-        {/* F82: el aviso sale ANTES de cargar la venta (y queda a la vista mientras se carga). */}
-        <TurnoViejoBanner turno={turnoViejo} />
-        <div className="space-y-4">
+        {/* F82: el aviso sale ANTES de cargar la venta (y queda a la vista mientras se carga).
+            `shrink-0` para que el cuerpo scrolleable no lo aplaste (igual que en CierreServiceDialog). */}
+        <TurnoViejoBanner turno={turnoViejo} className="shrink-0" />
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">Producto</label>
             <Input placeholder="Buscar producto..." value={productQuery}
@@ -647,7 +651,7 @@ function SaleForm({ methods, dayOpen, turnoViejo, onClose, onSaved }: {
           </div>
           {saveError && <p className="text-sm text-danger" data-field="error-venta">{saveError}</p>}
         </div>
-        <DialogFooter className="flex-col items-stretch gap-2 sm:flex-col">
+        <DialogFooter className="shrink-0 border-t pt-3 flex-col items-stretch gap-2 sm:flex-col">
           {/* F70 — EL BOTÓN YA NO ESTÁ APAGADO EN SILENCIO: antes `disabled={… || !productName || price <= 0}`
               dejaba «Guardar Venta» gris sin decir por qué (el operario apretaba y no pasaba nada). Ahora se
               puede apretar y, si falta algo, se dice exactamente qué y dónde se arregla. */}
@@ -687,34 +691,38 @@ function StatsModal({ title, stats, onClose }: { title: string; stats: SaleStat[
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — patrón de la casa: la tabla de un día cargado es larga y el pie
+          «Cerrar» quedaba fuera de la pantalla. */}
+      <DialogContent className="sm:max-w-xl max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
-        <div className="text-sm text-muted-foreground mb-4">
-          Total: <strong>{totalQty}</strong> unidades · <strong>${totalAmount.toFixed(2)}</strong>
-        </div>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Producto</TableHead>
-              <TableHead className="text-right">Unidades</TableHead>
-              <TableHead className="text-right">Total</TableHead>
-              <TableHead className="text-right">Ventas</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {stats.map((s, i) => (
-              <TableRow key={i}>
-                <TableCell className="font-medium">{s.product_name ?? 'N/A'}</TableCell>
-                <TableCell className="text-right">{s.qty}</TableCell>
-                <TableCell className="text-right">${s.total.toFixed(2)}</TableCell>
-                <TableCell className="text-right">{s.count}</TableCell>
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
+          <div className="text-sm text-muted-foreground">
+            Total: <strong>{totalQty}</strong> unidades · <strong>${totalAmount.toFixed(2)}</strong>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Producto</TableHead>
+                <TableHead className="text-right">Unidades</TableHead>
+                <TableHead className="text-right">Total</TableHead>
+                <TableHead className="text-right">Ventas</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-        <DialogFooter>
+            </TableHeader>
+            <TableBody>
+              {stats.map((s, i) => (
+                <TableRow key={i}>
+                  <TableCell className="font-medium">{s.product_name ?? 'N/A'}</TableCell>
+                  <TableCell className="text-right">{s.qty}</TableCell>
+                  <TableCell className="text-right">${s.total.toFixed(2)}</TableCell>
+                  <TableCell className="text-right">{s.count}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        <DialogFooter className="shrink-0 border-t pt-3">
           <Button onClick={onClose}>Cerrar</Button>
         </DialogFooter>
       </DialogContent>

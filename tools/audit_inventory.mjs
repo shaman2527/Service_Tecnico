@@ -251,6 +251,15 @@ function normalizeFields(category, brandRaw, modelRaw, variantRaw, compatibility
   const cModelFull = canonicalModel(modelClean, brand);
 
   const entries = parseCompat(compatibilityRaw);
+  // F86/REQ-1 — EL MODELO ARMA LA COMPATIBILIDAD (mismas reglas que `catalog::normalize_fields`).
+  // Pedido del dueño (2026-10-04): «tengo dos campos de compatibilidad, debería ver una… sea funciona en
+  // base al modelo que debería ir». Si la ficha trae MODELO y no trae lista, la lista ES su modelo (sus
+  // alternativas «A30/A50» son DOS teléfonos). Antes, con la lista vacía, la ficha no entraba al padrón
+  // de teléfonos. Este espejo tiene que aplicar la MISMA regla: si no, `--gen-fixtures` escribe una
+  // expectativa vieja y el test de paridad de Rust falla (pasó el 2026-10-04).
+  if (entries.length === 0 && cModelFull.trim() !== '') {
+    entries.push(...cModelFull.split(' / ').map((s) => s.trim()).filter(Boolean));
+  }
   let currentBrand = brand;
   const byKey = new Map();
   for (const entry of entries) {

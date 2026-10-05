@@ -135,7 +135,7 @@ await sleep(1200);
 const tabOk = await clickCenter(`[...document.querySelectorAll('[role="tab"]')].find(t => t.innerText.trim() === 'Modelos')`).then(() => true).catch(() => false);
 check('pestaña «Modelos» abre', tabOk && await evalx(`!!document.querySelector('input[placeholder^="Buscar por teléfono"]')`));
 check('las pestañas usan el nombre nuevo', await evalx(`[...document.querySelectorAll('[role="tab"]')].map(t => t.innerText.trim()).join(' | ')`) ===
-  'Productos | Modelos | Repuesto por modelo | Movimientos | Ajustes',
+  'Productos | Modelos | Movimientos | Ajustes',
   await evalx(`[...document.querySelectorAll('[role="tab"]')].map(t => t.innerText.trim()).join(' | ')`));
 await sleep(1200);
 await resetFilters();
@@ -156,7 +156,9 @@ check('columna Marca con datos', marcas.filter(Boolean).length === 50, `${[...ne
 // --- 4. orden de 3 estados ---
 const h0 = await headers();
 const sortables = h0.filter(h => h.sort).map(h => h.label.toUpperCase());
-check('las 5 columnas ordenables exponen aria-sort', sortables.length === 5 && sortables.includes('MARCA'),
+// F86 (AC-9): la columna «Stock» del teléfono se eliminó (ese número era la suma del stock de sus
+// repuestos compatibles), así que ahora son CUATRO las columnas ordenables.
+check('las 4 columnas ordenables exponen aria-sort', sortables.length === 4 && sortables.includes('MARCA'),
   h0.map(h => `${h.label}:${h.sort ?? '—'}`).join(' '));
 
 await clickHeader('Repuestos'); await sleep(900);
@@ -170,11 +172,16 @@ const none = await table(0);
 const hNone = headOf(await headers(), 'Repuestos');
 const maxOf = (arr) => Math.max(...arr.map(v => Number(v) || 0));
 const minOf = (arr) => Math.min(...arr.map(v => Number(v) || 0));
+// El teléfono SIN repuestos se pinta con la etiqueta «sin repuestos» (no con un número), y ordenando
+// de menor a mayor esas filas van PRIMERO: comparar `Number("sin repuestos")` daba NaN y la
+// comprobación fallaba sin que la app tuviera nada mal (medido 2026-10-04 con 1076 teléfonos, la
+// mayoría sin repuestos). Se lee la etiqueta como 0, que es lo que significa.
+const numRepuestos = (v) => (/sin repuestos/i.test(String(v)) ? 0 : (Number(v) || 0));
 check('click 1 → ascendente (aria-sort=ascending)', hAsc?.sort === 'ascending', `${hAsc?.sort} · muestra ${asc.sample.join(',')}`);
 check('click 2 → descendente (aria-sort=descending)', hDesc?.sort === 'descending', `${hDesc?.sort} · muestra ${desc.sample.join(',')}`);
 check('click 3 → sin orden (aria-sort=none)', hNone?.sort === 'none', `${hNone?.sort}`);
 check('el orden cambia el contenido (asc ≤ desc)',
-  minOf(asc.sample) <= maxOf(desc.sample) && Number(desc.sample[0] || 0) >= Number(asc.sample[0] || 0),
+  minOf(asc.sample) <= maxOf(desc.sample) && numRepuestos(desc.sample[0]) >= numRepuestos(asc.sample[0]),
   `asc[0]=${asc.sample[0]} desc[0]=${desc.sample[0]}`);
 
 // orden por Marca (columna que antes ignoraba el sentido)
@@ -193,7 +200,7 @@ await sleep(1200);
 await waitTable();
 const rev = await table(5, 50);
 check('vista Por revisar devuelve filas', rev.rows > 0, `${rev.rows} filas · ${rev.total} en total`);
-const revFlags = await evalx(`(() => [...document.querySelectorAll('table tbody tr')].map(r => r.querySelectorAll('td')[5]?.innerText.trim().toLowerCase()))()`);
+const revFlags = await evalx(`(() => [...document.querySelectorAll('table tbody tr')].map(r => r.querySelectorAll('td')[4]?.innerText.trim().toLowerCase()))()`);
 check('todas las filas marcadas «Por revisar»', revFlags.every(f => f === 'por revisar'), `${new Set(revFlags).size} valores distintos`);
 check('el total de la vista = KPI Por revisar', num(rev.total) === EXPECT.review, `${rev.total} vs ${EXPECT.review}`);
 

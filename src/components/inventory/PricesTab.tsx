@@ -298,38 +298,50 @@ export function PricesTab({ categories = [], onChanged, onRefresh, refreshKey = 
         </CardContent>
       </Card>
 
+      {/* F86 (REQ-9 / «más intuitivo») — DOS asistentes, DOS tarjetas. Antes los dos botones vivían
+          en la misma tarjeta «Inventario del local (contar la mercancía)» y el texto describía sólo el
+          conteo: el dueño no sabía cuál de los dos estaba cargando (el CSV SUMA el stock; el conteo
+          FIJA la cantidad y lo que no está en la lista queda en 0, con su movimiento de SALIDA). */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            <PackagePlus className="size-4 text-primary" /> Inventario del local (contar la mercancía)
+            <FileSpreadsheet className="size-4 text-primary" /> Cargar o actualizar el catálogo (CSV/Excel)
           </CardTitle>
           <CardDescription>
-            Para cuando contás lo que hay en el mostrador: pegás (o abrís) la lista tal como la tenés escrita —una marca por
-            línea y debajo sus modelos, con la cantidad entre paréntesis: <em>A30/A50 (2)</em> — y la app la cruza contra el
-            catálogo. <span className="font-medium text-foreground">Antes de aplicar ves y corregís</span> qué pantalla
+            Para cargar <strong>muchos productos de una vez</strong> (o corregir los que ya están) desde un archivo.
+            Trae todos los campos del producto —categoría (incluso nuevas), marca, modelo, variante, compatibilidad,
+            costo, venta, efectivo, stock, mínimo, proveedor, código— y antes de aplicar ves <strong>todo lo que va a
+            pasar</strong>: qué es nuevo, qué ya existe, el stock con el que queda cada ficha y qué filas tienen
+            problemas. El stock del archivo se puede <strong>sumar</strong> a lo que hay o <strong>reemplazarlo</strong>
+            (el archivo es el inventario real): lo elegís vos en el asistente.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={() => setShowCsv(true)} data-action="cargar-csv">
+            <FileSpreadsheet data-icon="inline-start" /> Cargar inventario por CSV
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <PackagePlus className="size-4 text-primary" /> Contar la mercancía (lista del local)
+          </CardTitle>
+          <CardDescription>
+            Para cuando contás lo que hay en el mostrador: pegás (o abrís) la lista tal como la tenés escrita —una
+            marca por línea y debajo sus modelos, con la cantidad entre paréntesis: <em>A30/A50 (2)</em>— y la app la
+            cruza contra el catálogo. <span className="font-medium text-foreground">Acá la cantidad es la que CONTÁS</span>:
+            se fija como el stock real, y las pantallas que no están en la lista <strong>quedan en 0</strong> (cada
+            bajada se anota en «Movimientos» como movimiento de <strong>salida</strong>, y el asistente te dice
+            cuántas fichas y cuántas unidades son antes de aplicar). Antes de aplicar ves y corregís qué pantalla
             recibe cada cantidad, y se guarda copia de seguridad.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => setShowCsv(true)} data-action="cargar-csv">
-              <FileSpreadsheet data-icon="inline-start" /> Cargar inventario por CSV
-            </Button>
-            <Button variant="outline" onClick={() => setShowLoad(true)}>
-              <PackagePlus data-icon="inline-start" /> Cargar la lista del local (conteo físico)
-            </Button>
-          </div>
-          <span className="text-[11px] text-muted-foreground">
-            <strong>CSV (recomendado):</strong> trae TODOS los campos del producto (categoría —incluso nuevas—,
-            marca, modelo, variante, compatibilidad, costo, venta, efectivo, stock, mínimo, proveedor, código) y
-            el stock <strong>se suma</strong> a lo que ya hay; antes de aplicar ves en dos pestañas qué es nuevo y qué
-            ya existe, con el diff y las acciones por fila.
-          </span>
-          <span className="text-[11px] text-muted-foreground">
-            <strong>Conteo físico:</strong> pegás la lista como la tenés escrita (marca/modelo y la cantidad entre
-            paréntesis: <em>A30/A50 (2)</em>) y lo que no está en la lista queda en <strong>0</strong>. Todo movimiento queda
-            anotado en «Movimientos» con el motivo <em>Carga de inventario</em>.
-          </span>
+        <CardContent>
+          <Button variant="outline" onClick={() => setShowLoad(true)}>
+            <PackagePlus data-icon="inline-start" /> Cargar la lista del local (conteo físico)
+          </Button>
         </CardContent>
       </Card>
 

@@ -11,11 +11,13 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api } from '@/db';
 import { toast } from 'sonner';
 import type { Category, InventoryStats, Product, VariantFamily } from '@/types';
 import { cn, partLabel } from '@/lib/utils';
+import { useVentanaAngosta } from '@/lib/use-media';
 import { variantFamilyLabel, variantLabel } from '@/lib/variant';
 import { StockBadge } from './StockBadge';
 import { CompatChips } from './CompatChips';
@@ -28,14 +30,19 @@ const PAGE_SIZE = 50;
  * F51 — ENCABEZADO QUE ORDENA (pedido del dueño: «en Producto tenga el ordenamiento por columnas»).
  * Clic: `<col>` (su orden útil) → `<col>_desc` → sin orden (nombre). La flecha y `aria-sort` dicen
  * en qué estado está, y el `title` explica qué hace (nada de iconos mudos).
+ *
+ * La FLECHA se ve siempre que la columna manda y al pasar por encima (o al enfocar con el teclado).
+ * Antes estaba fija en las once columnas: a 1024 px de ventana el hueco de la flecha hacía que
+ * rótulos como «Variante» o «Categoría» se cortaran, que es lo que se veía sucio.
  */
-function SortHead({ col, label, estado, onClick, className, title }: {
+function SortHead({ col, label, estado, onClick, className, title, align = 'left' }: {
   col: string;
   label: string;
   estado: 'asc' | 'desc' | null;
   onClick: (col: string) => void;
   className?: string;
   title?: string;
+  align?: 'left' | 'center' | 'right';
 }) {
   const Icono = estado === 'desc' ? ChevronDown : estado === 'asc' ? ChevronUp : ChevronsUpDown;
   return (
@@ -47,15 +54,45 @@ function SortHead({ col, label, estado, onClick, className, title }: {
         onClick={() => onClick(col)}
         title={title ?? `Ordenar por ${label.toLowerCase()} (clic: asc → desc → sin orden)`}
         className={cn(
-          'flex w-full items-center gap-1 rounded px-1 py-0.5 text-left transition-colors hover:bg-accent',
+          'group/orden flex w-full items-center rounded transition-colors hover:bg-accent',
+          align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start',
           estado && 'font-semibold text-foreground',
         )}
       >
-        {label}
-        <Icono className={cn('size-3.5 shrink-0', estado ? 'text-primary' : 'text-muted-foreground/50')} />
+        <span className="truncate">{label}</span>
+        <Icono className={cn('size-3 shrink-0 transition-opacity duration-150 motion-reduce:transition-none',
+          estado ? 'text-primary opacity-100' : 'text-muted-foreground/50 opacity-0 group-hover/orden:opacity-100 group-focus-visible/orden:opacity-100')} />
       </button>
     </TableHead>
   );
+}
+
+/**
+ * El reparto del ancho de la tabla, en porcentajes que suman 100 % (uno por columna, en el MISMO
+ * orden en que se pintan). Con `table-fixed` la tabla NUNCA se sale de la tarjeta: si falta sitio
+ * las columnas se aprietan y el texto se corta con `truncate` + `title`.
+ *
+ * Antes la tabla pedía ~1.500 px (anchos fijos de `w-24`/`w-32` y `p-3` por celda), así que en
+ * cualquier ventana normal aparecía la barra de scroll horizontal y había que moverse a los lados
+ * para ver el stock — justo lo que el dueño pidió quitar.
+ *
+ * Van dos repartos porque la columna «Costo» solo existe en la sesión del dueño (F68): si el
+ * porcentaje de esa columna se quedara en la lista, la tabla se estiraría de menos y no llenaría.
+ */
+const ANCHOS_CON_COSTO = ['19.2%', '6.5%', '8.2%', '6.2%', '7.2%', '7.4%', '10.6%', '9%', '6%', '5.8%', '4.8%', '9.1%'];
+const ANCHOS_SIN_COSTO = ['25.2%', '6.5%', '8.2%', '6.2%', '7.2%', '7.4%', '10.6%', '9%', '5.8%', '4.8%', '9.1%'];
+
+/**
+ * Una celda del inventario. `overflow-hidden` es la pieza que impide que un dato largo ensanche la
+ * tabla (sin él, un nombre sin espacios empujaba y volvía la barra horizontal).
+ */
+const CELDA = 'overflow-hidden px-1.5 py-2 align-middle';
+/** La misma celda cuando la tabla está APILADA: rótulo a la izquierda, dato a la derecha. */
+const CELDA_APILADA = 'flex items-center justify-between gap-3 px-0 py-1';
+
+/** El rótulo de una celda apilada (en la tabla normal el rótulo es el encabezado). */
+function Rotulo({ children }: { children: string }) {
+  return <span className="shrink-0 text-[11px] text-muted-foreground">{children}</span>;
 }
 
 const STOCK_FILTERS = [
@@ -227,7 +264,17 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
   // cambiar de filtro, de página ¡o de orden! — y encima desaparecía el encabezado para ordenar por
   // precio. Un producto sin precio se dice con su chip («sin precio») y el costo va en «—».
   // F52: se sumó la columna «Variante» (la variante ya no va pegada al nombre).
-  const cols = 11;
+  //
+  // RESPONSIVE (pedido del dueño: «que se vea todo el inventario sin scrollear a los lados»):
+  //   · ancho: la tabla es `table-fixed` con su reparto de porcentajes → nunca sale la barra
+  //     horizontal, el contenido se aprieta y se corta con `title`.
+  //   · angosto (ventana < 1024 px): la MISMA tabla se APILA — cada celda dice su rótulo a la
+  //     izquierda y su dato a la derecha, como una ficha. Se decide en JS (no con dos marcados)
+  //     para que las verificaciones en vivo, que cuentan `[data-in-use]` y leen `td[2]`, sigan
+  //     viendo exactamente lo mismo.
+  const angosta = useVentanaAngosta();
+  const anchos = verCosto ? ANCHOS_CON_COSTO : ANCHOS_SIN_COSTO;
+  const cols = anchos.length;
   // los KPI son de todo el catálogo: se avisa cuando la tabla está filtrada
   const filterActive = catFilter !== 'todas' || stockFilter !== 'todos' || variantFilter !== 'todas' || search.trim() !== '';
 
@@ -312,7 +359,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           />
         </div>
         <Select value={catFilter} onValueChange={v => { setCatFilter(v); setPage(0); }}>
-          <SelectTrigger className="w-44" aria-label="Filtrar por categoría"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-[9rem] flex-1 sm:w-44 sm:flex-none" aria-label="Filtrar por categoría"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="todas">Todas las categorías</SelectItem>
             {categories.map(c => (
@@ -321,7 +368,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           </SelectContent>
         </Select>
         <Select value={stockFilter} onValueChange={v => { setStockFilter(v); setPage(0); }}>
-          <SelectTrigger className="w-48" aria-label="Filtrar por stock"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-[10rem] flex-1 sm:w-48 sm:flex-none" aria-label="Filtrar por stock"><SelectValue /></SelectTrigger>
           <SelectContent>
             {STOCK_FILTERS.map(f => (
               <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
@@ -331,7 +378,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
         {/* F52 — filtro por FAMILIA de variante: pedir «OLED» trae OLED y OLED Con Marco (el filtro
             agrupa por material, que es como lo pide el mostrador). */}
         <Select value={variantFilter} onValueChange={v => { setVariantFilter(v); setPage(0); }}>
-          <SelectTrigger className="w-44" aria-label="Filtrar por variante"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-[9rem] flex-1 sm:w-44 sm:flex-none" aria-label="Filtrar por variante"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="todas">Todas las variantes</SelectItem>
             {familias.map(f => (
@@ -342,7 +389,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
           </SelectContent>
         </Select>
         <Select value={sort} onValueChange={v => { setSort(v); setPage(0); }}>
-          <SelectTrigger className="w-44" aria-label="Ordenar la tabla"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full min-w-[9rem] flex-1 sm:w-44 sm:flex-none" aria-label="Ordenar la tabla"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="nombre">Nombre (A-Z)</SelectItem>
             <SelectItem value="stock">Más stock primero</SelectItem>
@@ -356,7 +403,9 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
       {/* F51 — se puede ordenar haciendo CLIC en el encabezado de la columna (asc → desc → nombre).
           El desplegable de arriba sigue existiendo para «recientes»; los dos escriben lo mismo. */}
       <p className="text-[11px] text-muted-foreground">
-        Clic en el encabezado de una columna para ordenar (otra vez para el orden inverso).
+        {angosta
+          ? 'Cada repuesto va en su ficha (la ventana está angosta): se ve todo de frente, sin moverse a los lados.'
+          : 'Clic en el encabezado de una columna para ordenar (otra vez para el orden inverso).'}
       </p>
 
       {filterActive && (
@@ -366,40 +415,64 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
         </p>
       )}
 
-      <Card>
+      {/* `@container`: la tarjeta se mide a sí misma, no a la ventana. Sirve para los detalles que
+          solo tienen sitio cuando el inventario ocupa una pantalla ancha (el proveedor de la fila). */}
+      <Card className="@container overflow-hidden">
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortHead col="nombre" label="Producto" estado={estadoOrden('nombre')} onClick={ordenarPor} />
+          {/* `table-fixed` + el reparto de `colgroup`: la tabla mide EXACTAMENTE lo que mide la
+              tarjeta, así que la barra de scroll horizontal no puede aparecer. */}
+          <Table className={cn('w-full text-[13px]', angosta ? 'block' : 'table-fixed')}>
+            {!angosta && (
+              <colgroup>
+                {anchos.map((ancho, i) => <col key={i} style={{ width: ancho }} />)}
+              </colgroup>
+            )}
+            <TableHeader className={cn(angosta && 'hidden')}>
+              <TableRow className="border-b bg-muted/40 hover:bg-muted/40">
+                <SortHead col="nombre" label="Producto" className="h-10 px-3 text-[11px] font-semibold"
+                  estado={estadoOrden('nombre')} onClick={ordenarPor} />
                 {/* F50: el check «lo uso» — columna propia, ordenable, y es lo que se ofrece al
-                    registrar un servicio. El ✓ va por fila (sin abrir el producto). */}
-                <SortHead col="uso" label="En uso" className="w-24 justify-center" estado={estadoOrden('uso')} onClick={ordenarPor}
+                    registrar un servicio. Va por fila, sin abrir el producto. */}
+                <SortHead col="uso" label="En uso" align="center" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('uso')} onClick={ordenarPor}
                   title="Marcá lo que usás: en el registro de servicio solo aparece lo marcado" />
-                <SortHead col="categoria" label="Categoría" className="w-28" estado={estadoOrden('categoria')} onClick={ordenarPor} />
-                <SortHead col="marca" label="Marca" className="w-28" estado={estadoOrden('marca')} onClick={ordenarPor} />
-                <SortHead col="modelo" label="Modelo" className="w-40" estado={estadoOrden('modelo')} onClick={ordenarPor} />
+                <SortHead col="categoria" label="Categoría" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('categoria')} onClick={ordenarPor} />
+                <SortHead col="marca" label="Marca" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('marca')} onClick={ordenarPor} />
+                <SortHead col="modelo" label="Modelo" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('modelo')} onClick={ordenarPor} />
                 {/* F52: la VARIANTE tiene su propia columna (antes iba pegada al nombre) y se ordena. */}
-                <SortHead col="variante" label="Variante" className="w-36" estado={estadoOrden('variante')} onClick={ordenarPor}
+                <SortHead col="variante" label="Variante" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('variante')} onClick={ordenarPor}
                   title="INCELL / OLED / ORIGINAL y sus marcos. Clic para ordenar por variante" />
-                <TableHead>Modelos compatibles</TableHead>
-                <SortHead col="precio" label="Precio" className="w-32 justify-end" estado={estadoOrden('precio')} onClick={ordenarPor} />
-                {/* F68: la columna de COSTO es del dueño (la caja vende, no administra el margen) */}
-                {verCosto && <SortHead col="costo" label="Costo" className="w-28 justify-end" estado={estadoOrden('costo')} onClick={ordenarPor} />}
-                <SortHead col="stock" label="Stock" className="w-24 justify-center" estado={estadoOrden('stock')} onClick={ordenarPor} />
-                <SortHead col="minimo" label="Mín" className="w-16 justify-end" estado={estadoOrden('minimo')} onClick={ordenarPor} />
-                <TableHead className="w-28"></TableHead>
+                <TableHead className="h-10 px-1 text-[11px] font-semibold leading-tight">Modelos compatibles</TableHead>
+                <SortHead col="precio" label="Precio" align="right" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('precio')} onClick={ordenarPor} />
+                {/* F68: la columna de COSTO es del dueño (la caja vende, no administra el margen).
+                    Va en el encabezado Y en el cuerpo: antes el cuerpo pintaba la celda igual, así
+                    que la sesión de caja veía doce celdas contra once encabezados y las columnas se
+                    corrían una posición. */}
+                {verCosto && (
+                  <SortHead col="costo" label="Costo" align="right" className="h-10 px-1 text-[11px] font-semibold"
+                    estado={estadoOrden('costo')} onClick={ordenarPor} />
+                )}
+                <SortHead col="stock" label="Stock" align="center" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('stock')} onClick={ordenarPor} />
+                <SortHead col="minimo" label="Mín" align="right" className="h-10 px-1 text-[11px] font-semibold"
+                  estado={estadoOrden('minimo')} onClick={ordenarPor} />
+                <TableHead className="h-10 px-2" />
               </TableRow>
             </TableHeader>
-            <TableBody>
+            <TableBody className={cn(angosta && 'block')}>
               {loading && Array.from({ length: 6 }).map((_, i) => (
                 <TableRow key={`sk-${i}`}>
-                  <TableCell colSpan={cols}><Skeleton className="h-6 w-full" /></TableCell>
+                  <TableCell colSpan={cols} className="px-3"><Skeleton className="h-6 w-full" /></TableCell>
                 </TableRow>
               ))}
               {!loading && items.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={cols} className="py-8">
+                  <TableCell colSpan={cols} className="px-3 py-8">
                     <Empty>
                       <EmptyMedia><PackageSearch className="size-5" /></EmptyMedia>
                       <EmptyTitle>Sin productos con esos filtros</EmptyTitle>
@@ -411,83 +484,131 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
                 </TableRow>
               )}
               {!loading && items.map(p => (
-                <TableRow key={p.id}>
-                  <TableCell className="font-medium">
-                    <div className="flex items-center gap-2">
+                <TableRow key={p.id} className={cn('align-middle', angosta && 'grid grid-cols-2 gap-x-4 px-3 py-2')}>
+                  {/* ── Producto (el nombre de la ficha; en la vista apilada encabeza la tarjeta).
+                      Dos renglones: el NOMBRE arriba (es lo que se busca) y el código + los avisos
+                      abajo. Antes todo iba en un renglón y con dos avisos el nombre quedaba en
+                      «PANTALLA OLED S…» — el nombre es el dato, los avisos son el adorno. ── */}
+                  <TableCell className={cn('px-3 py-1.5', angosta && 'col-span-2 flex flex-col items-start gap-1 px-0 py-0.5')}>
+                    <div className="flex w-full min-w-0 flex-col gap-0.5">
                       {/* F51: `data-product-name` expone el NOMBRE tal como está en la base (el rótulo
                           bonito de `partLabel` no sirve para comparar contra la base en las pruebas). */}
-                      <span data-product-name={p.name}>{partLabel(p)}</span>
-                      {p.code && (
-                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground" data-product-code={p.code}>{p.code}</span>
-                      )}
-                      {/* F52: la variante se fue a su propia columna (acá quedaba pegada al nombre). */}
-                      {dupSet.has(p.id) && (
-                        <Badge variant="outline" className="text-[10px] gap-1 text-warning border-warning/50">
-                          <Copy className="size-3" /> repetido
-                        </Badge>
-                      )}
-                      {p.supplier && (
-                        <span className="flex items-center gap-1 text-[10px] text-muted-foreground" title="Proveedor que trajo esta mercancía">
-                          <Truck className="size-3" /> {p.supplier}
-                        </span>
-                      )}
+                      <span className="min-w-0 truncate font-medium" data-product-name={p.name} title={partLabel(p)}>{partLabel(p)}</span>
+                      <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+                        {p.code && (
+                          <span className="shrink-0 font-mono" data-product-code={p.code}>{p.code}</span>
+                        )}
+                        {/* F52: la variante se fue a su propia columna (acá quedaba pegada al nombre). */}
+                        {dupSet.has(p.id) && (
+                          <span className="flex shrink-0 items-center gap-0.5 text-warning" title="Repetido: el mismo teléfono está en dos fichas (se fusionan desde el aviso de arriba)">
+                            <Copy className="size-3" /> repetido
+                          </span>
+                        )}
+                        {/* El proveedor solo cabe cuando el inventario ocupa una pantalla ancha. */}
+                        {p.supplier && (
+                          <span className="hidden min-w-0 items-center gap-1 truncate @4xl:flex"
+                            title={`Proveedor que trajo esta mercancía: ${p.supplier}`}>
+                            <Truck className="size-3 shrink-0" /> <span className="truncate">{p.supplier}</span>
+                          </span>
+                        )}
+                      </span>
                     </div>
                   </TableCell>
-                  {/* F50: el check «lo uso» (no abre el producto: un toque y se marca) */}
-                  <TableCell className="text-center">
-                    <button
-                      type="button"
+                  {/* ── En uso (F50): un interruptor de verdad, no un texto «✓ Sí» ── */}
+                  <TableCell className={cn(CELDA, 'text-center', angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>En uso</Rotulo>}
+                    <Switch
+                      checked={(p.in_use ?? 1) === 1}
+                      onCheckedChange={() => toggleUso(p)}
+                      disabled={savingUse === p.id}
                       data-in-use={p.id}
                       data-in-use-state={(p.in_use ?? 1) === 1 ? '1' : '0'}
+                      aria-label={`${partLabel(p)}: usarlo al registrar un servicio`}
                       title={(p.in_use ?? 1) === 1
                         ? 'Lo usás: aparece al registrar un servicio. Clic para apagarlo'
                         : 'Apagado: NO aparece al registrar un servicio. Clic para usarlo'}
-                      disabled={savingUse === p.id}
-                      onClick={() => toggleUso(p)}
-                      className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold transition-colors',
-                        (p.in_use ?? 1) === 1
-                          ? 'bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25'
-                          : 'text-muted-foreground hover:bg-accent')}
-                    >
-                      {(p.in_use ?? 1) === 1 ? '✓ Sí' : '—'}
-                    </button>
+                    />
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{p.category_name ?? '—'}</TableCell>
-                  <TableCell>{p.brand ?? '—'}</TableCell>
-                  <TableCell className="text-sm">{p.model ?? '—'}</TableCell>
-                  {/* F52: la VARIANTE con su nombre real (o «—» cuando la ficha no la tiene). */}
-                  <TableCell data-variant={p.variant ?? ''}>
+                  {/* ── Categoría (td[2]: las pruebas leen esta celda por posición) ── */}
+                  <TableCell className={cn(CELDA, 'truncate text-xs text-muted-foreground', angosta && CELDA_APILADA)}
+                    title={p.category_name ?? undefined}>
+                    {angosta && <Rotulo>Categoría</Rotulo>}
+                    <span className="truncate">{p.category_name ?? '—'}</span>
+                  </TableCell>
+                  <TableCell className={cn(CELDA, 'text-xs', angosta && CELDA_APILADA)} title={p.brand ?? undefined}>
+                    {angosta && <Rotulo>Marca</Rotulo>}
+                    <span className="truncate">{p.brand ?? '—'}</span>
+                  </TableCell>
+                  <TableCell className={cn(CELDA, 'text-xs', angosta && CELDA_APILADA)} title={p.model ?? undefined}>
+                    {angosta && <Rotulo>Modelo</Rotulo>}
+                    <span className="truncate font-medium tabular-nums">{p.model ?? '—'}</span>
+                  </TableCell>
+                  {/* F52: la VARIANTE con su nombre real (o «—» cuando la ficha no la tiene).
+                      `data-variant` va en el ELEMENTO DEL VALOR y no en la celda: así su `innerText`
+                      es exactamente la variante (la prueba la compara contra la base) y el rótulo de
+                      la vista apilada no lo ensucia. */}
+                  <TableCell className={cn(CELDA, angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>Variante</Rotulo>}
                     {p.variant
-                      ? <Badge variant="secondary" className="text-[10px]">{variantLabel(p.variant)}</Badge>
-                      : <span className="text-xs text-muted-foreground">—</span>}
+                      ? (
+                        <span data-variant={p.variant} className="min-w-0">
+                          <Badge variant="secondary" className="max-w-full truncate px-1.5 text-[10px] font-medium">{variantLabel(p.variant)}</Badge>
+                        </span>
+                      )
+                      : <span data-variant="" className="truncate text-xs text-muted-foreground">—</span>}
                   </TableCell>
-                  <TableCell className="max-w-[320px]">
-                    <CompatChips compatibility={p.compatibility} />
+                  {/* ── Modelos compatibles (los chips: dentro de la tabla uno solo + el «+N») ── */}
+                  <TableCell className={cn(CELDA, angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>Modelos compatibles</Rotulo>}
+                    <CompatChips
+                      compatibility={p.compatibility}
+                      max={angosta ? 6 : 1}
+                      /* Los chips NO se encogen (`shrink-0`): si falta sitio se recorta el «+N» del
+                         final y no el nombre del teléfono, que es el dato. Sin esto el chip se
+                         apretaba y el modelo salía partido en dos renglones. */
+                      className={cn('min-w-0', angosta ? 'justify-end' : 'flex-nowrap overflow-hidden [&>div]:shrink-0')}
+                    />
                   </TableCell>
                   {/* F51: precio y costo SIEMPRE visibles, en columnas separadas (cada una ordena) */}
-                  <TableCell className="text-right tabular-nums">
+                  <TableCell className={cn(CELDA, 'text-right', angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>Precio</Rotulo>}
                     {p.price_sale > 0
-                      ? <span className="font-medium" data-field="precio">${p.price_sale.toFixed(2)}</span>
-                      : <Badge variant="outline" className="text-[10px] text-warning border-warning/50">sin precio</Badge>}
+                      ? <span className="font-medium tabular-nums" data-field="precio">${p.price_sale.toFixed(2)}</span>
+                      : <Badge variant="outline" className="whitespace-nowrap border-warning/50 px-1.5 text-[10px] text-warning">sin precio</Badge>}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums text-[11px] text-muted-foreground" data-field="costo">
-                    {verCosto ? (p.price_cost > 0 ? `$${p.price_cost.toFixed(2)}` : '—') : <span className="text-muted-foreground/50">—</span>}
-                  </TableCell>
-                  <TableCell className="text-center">
+                  {verCosto && (
+                    <TableCell className={cn(CELDA, 'text-right text-[11px] text-muted-foreground', angosta && CELDA_APILADA)}>
+                      {angosta && <Rotulo>Costo</Rotulo>}
+                      <span className="tabular-nums" data-field="costo">{p.price_cost > 0 ? `$${p.price_cost.toFixed(2)}` : '—'}</span>
+                    </TableCell>
+                  )}
+                  <TableCell className={cn(CELDA, 'text-center', angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>Stock</Rotulo>}
                     <StockBadge stock={p.stock} minStock={p.min_stock} />
                   </TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{p.min_stock}</TableCell>
-                  <TableCell>
+                  <TableCell className={cn(CELDA, 'text-right tabular-nums text-muted-foreground', angosta && CELDA_APILADA)}>
+                    {angosta && <Rotulo>Mín</Rotulo>}
+                    <span>{p.min_stock}</span>
+                  </TableCell>
+                  {/* Las dos acciones van en ICONO: con texto («Editar») no caben en una tabla de
+                      once columnas sin volver a empujar el ancho. Cada una dice lo que hace en su
+                      `title`, y el botón de editar es el mismo que abre la ficha completa. */}
+                  <TableCell className={cn('overflow-hidden px-2 py-2', angosta && 'col-span-2 flex items-center justify-end px-0 py-1')}>
                     <div className="flex justify-end gap-1">
                       {p.model && (
-                        <Button variant="ghost" size="sm" title="Ver qué repuestos le sirven a este modelo"
+                        <Button variant="ghost" size="sm" className="size-8 px-0"
+                          title="Ver qué repuestos le sirven a este modelo"
+                          aria-label={`Ver los repuestos del modelo ${p.model}`}
                           onClick={() => onByModel(p.model ?? '')}>
-                          <Layers data-icon="inline-start" />
+                          <Layers />
                         </Button>
                       )}
                       {canEdit && (
-                        <Button variant="outline" size="sm" onClick={() => onEdit(p)}>
-                          <Pencil data-icon="inline-start" /> Editar
+                        <Button variant="outline" size="sm" className="size-8 px-0"
+                          title="Editar esta ficha (nombre, categoría, precios, stock)"
+                          aria-label={`Editar ${partLabel(p)}`}
+                          onClick={() => onEdit(p)}>
+                          <Pencil />
                         </Button>
                       )}
                     </div>
@@ -499,7 +620,7 @@ export function ProductsTab({ refreshKey, categories, onEdit, stats, onReviewDup
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
           {total === 0 ? 'Sin resultados' : `Mostrando ${from}–${to} de ${total}`}
           {/* hay tabla en pantalla y están llegando datos nuevos (o el rebote todavía espera):

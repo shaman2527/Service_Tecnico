@@ -75,7 +75,7 @@ pub fn add_product(db: State<Database>, name: String, category_id: Option<i64>, 
 #[tauri::command]
 pub fn update_product(db: State<Database>, id: i64, name: String, category_id: Option<i64>, brand: String, model: String,
                       variant: String, compatibility: String, price_cost: f64, price_sale: f64,
-                      stock: i64, min_stock: i64, price_usd: f64) -> Result<(), String> {
+                      stock: i64, min_stock: i64, price_usd: f64) -> Result<Vec<crate::catalog::CambioDeRed>, String> {
     db.require_owner()?;
     db.update_product(id, &name, category_id, &brand, &model, &variant, &compatibility, price_cost, price_sale, stock, min_stock, price_usd)
         .map_err(|e| e.to_string())
@@ -354,8 +354,16 @@ pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, pa
 /// cuadra. Sin gate de dueño (es la cajera la que está en el mostrador cuando pasa), pero con las
 /// guardas de día cerrado/futuro del backend.
 #[tauri::command]
-pub fn update_service_payment_date(db: State<Database>, id: i64, date: String) -> Result<(), String> {
+pub fn update_service_payment_date(db: State<Database>, id: i64, date: String) -> Result<Vec<crate::db::AjusteCierre>, String> {
     db.update_service_payment_date(id, &date).map_err(|e| e.to_string())
+}
+
+/// F92 — EL ESTADO DE LA CAJA DE UN DÍA (`{ existe, cerrado, tasa_bcv, es_hoy }`): lo que el diálogo de
+/// pago necesita para decirle al operario A QUÉ CAJA va el cobro que está por anotar — y, si ese día ya
+/// está cerrado, que su cierre se va a actualizar (antes eso se rechazaba).
+#[tauri::command]
+pub fn estado_del_dia(db: State<Database>, fecha: String) -> Result<crate::db::EstadoDelDia, String> {
+    db.estado_del_dia(&fecha).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1123,6 +1131,18 @@ pub fn find_compatible_products(db: State<Database>, model: String, category_id:
     Ok(items)
 }
 
+/// F89 — LAS PANTALLAS DE ESE MODELO, y de ningún otro (desplegable «Pantalla a instalar» del servicio).
+/// Solo devuelve las pantallas cuya COMPATIBILIDAD nombra al modelo: sin los parecidos de otro teléfono
+/// que entraban por coincidencia parcial («Google 7 Pro» para «Spark 7 Pro»). Ver
+/// `Database::find_compatible_screens_exactas`.
+#[tauri::command]
+pub fn find_compatible_screens_exactas(db: State<Database>, model: String, limit: i64)
+    -> Result<Vec<crate::db::ScreenCandidate>, String> {
+    let mut items = db.find_compatible_screens_exactas(&model, limit).map_err(|e| e.to_string())?;
+    sin_costo_candidatos(&db, &mut items);
+    Ok(items)
+}
+
 #[tauri::command]
 pub fn get_inventory_movements_page(db: State<Database>, product_id: Option<i64>, movement_type: Option<String>,
                                     reason: Option<String>, from_date: Option<String>, to_date: Option<String>,
@@ -1262,10 +1282,13 @@ pub fn apply_inventory_load(db: State<Database>, rows: Vec<crate::loadlist::Load
 // respaldo de la base. El stock se SUMA a lo que ya hay: un archivo parcial nunca baja mercancía.
 
 /// Cruce del CSV contra el catálogo: cada fila queda como NUEVO o YA EXISTE, con el diff y los avisos.
+/// `mode` (F86/REQ-3) es el modo del stock que eligió el asistente (`sumar` | `reemplazar`): es OPCIONAL
+/// a propósito (Tauri resuelve un `Option` ausente como `None`), así una llamada vieja sigue funcionando
+/// y `None` = «sumar», exactamente la conducta de siempre.
 #[tauri::command]
-pub fn preview_inventory_csv(db: State<Database>, text: String)
+pub fn preview_inventory_csv(db: State<Database>, text: String, mode: Option<String>)
     -> Result<crate::csvload::CsvPreview, String> {
-    db.preview_csv_load(&text).map_err(|e| e.to_string())
+    db.preview_csv_load_modo(&text, mode.as_deref()).map_err(|e| e.to_string())
 }
 
 /// Aplica la carga (crea / actualiza / deja / elimina) con respaldo previo, en UNA transacción.

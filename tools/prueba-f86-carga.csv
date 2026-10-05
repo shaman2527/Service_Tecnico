@@ -1,0 +1,5 @@
+nombre;categoria;marca;modelo;variante;compatibilidad;costo;venta;efectivo;stock;stock_min;proveedor;codigo;en_uso
+Pantalla Samsung A30 / A50;Pantalla;Samsung;A30;INCELL;Samsung A30 / Samsung A50;8,00;12,50;11,00;30;3;Cell World;P-1029;si
+Pantalla Tecno Spark 20 Pro Plus;Pantalla;Tecno;Spark 20 Pro Plus;ORIGINAL;Tecno Spark 20 Pro Plus;9,50;15,00;13,00;30;2;Cell World;P-0743;si
+Pantalla Infinix Hot 60 / Smart 10;Pantalla;Infinix;Hot 60;OLED;;7,00;11,00;10,00;12;3;Cell World;;si
+Pantalla Motorola Moto G8 Power;Pantalla;Motorola;Moto G8 Power;INCELL;Samsung A30;6,00;10,00;9,00;5;2;Cell World;;si

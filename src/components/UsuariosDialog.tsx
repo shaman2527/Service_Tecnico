@@ -110,8 +110,10 @@ export default function UsuariosDialog({ open, onClose, onChanged }: {
 
   return (
     <Dialog open={open} onOpenChange={o => { if (!o) onClose(); }}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — patrón de la casa: la lista de personas crece y el pie con «Cerrar»
+          quedaba fuera de la pantalla en la ventana de 750 px de alto. */}
+      <DialogContent className="sm:max-w-2xl max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="flex items-center gap-2">
             <Users className="size-4" /> Personas y accesos
           </DialogTitle>
@@ -121,7 +123,7 @@ export default function UsuariosDialog({ open, onClose, onChanged }: {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-3" data-panel="usuarios">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-3" data-panel="usuarios">
           {loading && <p className="text-sm text-muted-foreground">Cargando…</p>}
 
           {people.map(u => (
@@ -218,7 +220,7 @@ export default function UsuariosDialog({ open, onClose, onChanged }: {
           {error && <p className="text-sm text-danger" data-user-error>{error}</p>}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t pt-3">
           <p className="mr-auto text-[11px] text-muted-foreground">
             El nombre de cada persona queda anotado en cada venta, abono y gasto que registre.
           </p>

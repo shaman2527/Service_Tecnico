@@ -2,11 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { Banknote, Package, Plus, Pencil, Save, Smartphone, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
+import { CompatModelPicker } from './CompatModelPicker';
 import { api } from '../db';
 import { toast } from 'sonner';
 import { ProductForm } from './ProductForm';
@@ -185,8 +184,13 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
           // reescribe por corregirle el precio (invariante «lo que no se toca viaja tal cual»).
           compatibility: compatSiCambio(aFicha(fresca), compat),
         });
-        await api.updateProduct(...args);
+        const red = await api.updateProduct(...args);
         toast.success(`Ficha «${fresca.name}» actualizada`);
+        // F93 — la red de compatibilidad se sincroniza: se dice qué otras fichas se ajustaron.
+        if ((red ?? []).length > 0) {
+          toast.info(`Se sincronizó la red: ${red!.length} ficha${red!.length === 1 ? '' : 's'} más`,
+            { description: red!.map(c => `«${c.name}»: ${c.antes} → ${c.despues}`).join(' · '), duration: 9000 });
+        }
         onSaved(fresca.id);
       }
     } catch (e) {
@@ -226,8 +230,11 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
 
   return (
     <Dialog open onOpenChange={o => { if (!o) onClose(); }}>
-      <DialogContent className="sm:max-w-lg" data-editar-producto-corta={esAlta ? 'alta' : producto!.id}>
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — mismo patrón de la casa que `ProductForm`: con la ventana de 750 px de
+          alto el contenido de la ficha se salía y el pie («Guardar ficha») quedaba fuera de la
+          pantalla; acá el encabezado y el pie quedan fijos y el cuerpo se desplaza. */}
+      <DialogContent className="sm:max-w-lg max-h-[92vh] flex flex-col overflow-hidden" data-editar-producto-corta={esAlta ? 'alta' : producto!.id}>
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="flex items-center gap-2 text-base">
             {esAlta ? <Plus className="size-4 text-primary" /> : <Pencil className="size-4 text-primary" />}
             {esAlta
@@ -242,7 +249,7 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
           )}
         </DialogHeader>
 
-        <div className="flex flex-col gap-3">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-3">
           {esAlta && (
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Nombre *</label>
@@ -297,12 +304,14 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
             </div>
           </div>
 
-          {/* F80 — LA COMPATIBILIDAD, acá mismo: es lo que hace que el registro «depure» el catálogo. */}
+          {/* F80 — LA COMPATIBILIDAD, acá mismo: es lo que hace que el registro «depure» el catálogo.
+              F91 — y se edita con la LISTA DE MODELOS del padrón (no con texto libre): el dueño pidió
+              unificar en un solo lugar las compatibilidades, y ese lugar es esta lista. */}
           <div className="flex flex-col gap-2 rounded-lg border border-border/70 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="text-sm font-medium flex items-center gap-1.5">
                 <Smartphone className="size-3.5 text-muted-foreground" /> Compatibilidad
-                <span className="font-normal text-xs text-muted-foreground">(teléfonos separados por /)</span>
+                <span className="font-normal text-xs text-muted-foreground">(los teléfonos que llevan esta pantalla)</span>
               </label>
               {puedeAgregarModelo && (
                 <Button type="button" variant="outline" size="sm" className="h-7 gap-1 text-[11px]"
@@ -311,20 +320,7 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
                 </Button>
               )}
             </div>
-            <Textarea value={compat} data-field="prod-compat" rows={2}
-              aria-label="Compatibilidad de la ficha"
-              placeholder="Ej: Samsung A06 4G / Samsung A06s"
-              onChange={e => setCompat(e.target.value)} />
-            {listaCompat.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {listaCompat.slice(0, 14).map(m => (
-                  <Badge key={m} variant="outline" className="text-[10px] font-normal">{m}</Badge>
-                ))}
-                {listaCompat.length > 14 && (
-                  <span className="text-[10px] text-muted-foreground">+{listaCompat.length - 14} más</span>
-                )}
-              </div>
-            )}
+            <CompatModelPicker value={compat} onChange={setCompat} maximaAltura />
             {modeloYaEsta && (
               <p className="text-[11px] text-emerald-600" data-compat-ok>
                 «{modeloDelEquipo.trim()}» ya figura en la compatibilidad de esta pantalla.
@@ -354,7 +350,7 @@ export function EditarProductoDialog({ producto, modeloDelEquipo, categories, ca
           )}
         </div>
 
-        <DialogFooter className="gap-2">
+        <DialogFooter className="shrink-0 border-t pt-3 gap-2">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
           {!esAlta && (
             <Button variant="outline" data-action="prod-ficha-completa"

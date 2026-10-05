@@ -8,20 +8,36 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { api } from '@/db';
+import { useDataVersion } from '@/lib/use-data-version';
 import type { PhoneDetail } from '@/types';
 import { partLabel } from '@/lib/utils';
 
 // Ficha del teléfono (SOLO LECTURA): qué repuestos del catálogo le sirven,
 // agrupados por categoría y con el stock real. Es la vista que usa el taller
 // para decidir si un teléfono está bien cargado antes de renombrarlo (F4).
-export function PhoneDetailDialog({ phoneId, onClose, onByModel }: {
+//
+// F90 — LA FICHA VIVE DEL CAMPO DE COMPATIBILIDAD DEL PRODUCTO, Y SE ACTUALIZA SOLA.
+// Pedido del dueño (2026-10-05): «en la edición de producto, si yo le quito cualquiera de esto, en la
+// vista de la ficha debe eliminarse; si yo agrego algo acá también debe actualizarse en la ficha…
+// quiero centralizar las actualizaciones de ficha de compatibilidades en el campo de
+// compatibilidades de producto». El backend YA lo hace (guardar un producto reconstruye el padrón:
+// medido, quitarle «Tecno Pop 7» a la compatibilidad bajó la ficha del Pop 7 de 6 a 5 repuestos y
+// volvió a 6 al reagregarlo), pero la ficha pedía el detalle **una sola vez al abrirse**: con la
+// ficha abierta y un producto editado en el otro diálogo, seguía mostrando la lista vieja.
+//
+// Ahora se suscribe al bus de datos del proyecto (`useDataVersion`, el mismo que refresca las
+// pestañas del inventario): cualquier escritura —editar un producto, cargar el CSV, vender— vuelve a
+// pedir el detalle. La ficha es la única vista de SOLO LECTURA del padrón, así que el operario ve
+// reflejado lo que acaba de guardar sin cerrar y volver a abrir.
+export function PhoneDetailDialog({ phoneId, onClose }: {
   phoneId: number | null;
   onClose: () => void;
-  onByModel: (name: string) => void;
 }) {
   const [detail, setDetail] = useState<PhoneDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** F90 — la versión de datos del proyecto: sube con cada escritura (guardar un producto incluido). */
+  const dataVersion = useDataVersion();
 
   useEffect(() => {
     if (phoneId == null) { setDetail(null); setError(null); return; }
@@ -37,7 +53,7 @@ export function PhoneDetailDialog({ phoneId, onClose, onByModel }: {
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [phoneId]);
+  }, [phoneId, dataVersion]);
 
   const phone = detail?.phone;
   const blocks = detail?.blocks ?? [];
@@ -151,12 +167,11 @@ export function PhoneDetailDialog({ phoneId, onClose, onByModel }: {
           ))}
         </div>
 
+        {/* F86 (decisión del dueño 2026-10-04): acá había un botón «Ver repuestos compatibles» que
+            cerraba la ficha y llevaba a la pestaña «Repuesto por modelo». Esa pestaña SE ELIMINÓ y este
+            diálogo YA muestra los repuestos por categoría, así que el botón era un viaje de ida a lo
+            mismo (y encima mentía: terminaba filtrándole la lista de teléfonos). Queda solo Cerrar. */}
         <DialogFooter className="shrink-0 border-t pt-3">
-          {phone && (
-            <Button variant="outline" onClick={() => { onByModel(phone.name); onClose(); }}>
-              <Layers data-icon="inline-start" /> Ver repuestos compatibles
-            </Button>
-          )}
           <Button onClick={onClose}>Cerrar</Button>
         </DialogFooter>
       </DialogContent>

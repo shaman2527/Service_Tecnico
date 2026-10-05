@@ -630,6 +630,23 @@ pub struct DailyTotals {
     pub refund_bs: f64,
 }
 
+impl DailyTotals {
+    /// F92 — un día sin nada cobrado, con TODOS los campos en 0 (antes se armaba a mano en `close_day`
+    /// y en cualquier camino nuevo había que repetir los 19 ceros: se olvidaba uno y el cierre salía con
+    /// basura). Se usa para los días sin movimientos.
+    pub fn vacio(fecha: &str) -> Self {
+        DailyTotals {
+            date: fecha.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
+            pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
+            cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
+            pago_movil_total: 0.0, transfer_bs_total: 0.0,
+            usd_cash_total: 0.0, grand_total: 0.0,
+            grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
+            refund_usd: 0.0, refund_bs: 0.0,
+        }
+    }
+}
+
 // Resumen de actividad de un día (Libro Diario → tarjeta "Resumen del día", harness 2026-08-07)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DaySummary {
@@ -686,6 +703,93 @@ pub struct DrawerAdjust {
     /// Fondo de caja declarado al abrir el día (entra al esperado del cajón, en las dos monedas)
     pub fondo_usd: f64,
     pub fondo_bs: f64,
+}
+
+/// F92 — EL DÍA ELEGIDO PARA UN PAGO, con el estado de su caja.
+///
+/// Antes (`payment_date_ok`) el día tenía que estar **ABIERTO** y el cerrado se rechazaba con el
+/// remedio de reabrirlo con ↺. El dueño lo pidió al revés (2026-10-05): «hay clientes que pagan y
+/// envían el pago días anteriores y cuando uno quiere editar la fecha no deja editarla porque dice que
+/// ya se hizo el cierre… **hay que actualizar el cierre de esos días**. Si agrego el pago hoy siendo
+/// otro día no refleja la realidad.» Así que un día CERRADO se acepta: el cobro entra en la caja de
+/// ESE día y su cierre se **recalcula** (`recalcular_cierre_cerrado`) contra el mismo arqueo contado.
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct DiaDePago {
+    /// `YYYY-MM-DD`
+    pub fecha: String,
+    /// true = ese día ya tenía su cierre hecho: al guardar, ese cierre se actualiza.
+    pub cerrado: bool,
+}
+
+/// F92 — QUÉ LE PASÓ AL CIERRE DE UN DÍA CERRADO cuando le entró/salió plata después del cierre.
+/// Se devuelve a la UI para poder DECIRLO (nunca se cambia un arqueo en silencio).
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct AjusteCierre {
+    /// El día cuyo cierre se recalculó (`YYYY-MM-DD`).
+    pub fecha: String,
+    /// Diferencia guardada antes (arqueo contado − esperado del sistema).
+    pub diferencia_antes: f64,
+    /// Diferencia después del recálculo (el arqueo contado NO se toca).
+    pub diferencia_despues: f64,
+    /// La diferencia por MONEDA (la que muestra Libro Diario → Cierres: «Diferencia $» / «Bs.»).
+    pub diferencia_usd_antes: f64,
+    pub diferencia_usd: f64,
+    pub diferencia_bs_antes: f64,
+    pub diferencia_bs: f64,
+    /// Lo que el sistema esperaba en cada moneda antes / después.
+    pub esperado_usd_antes: f64,
+    pub esperado_usd: f64,
+    pub esperado_bs_antes: f64,
+    pub esperado_bs: f64,
+}
+
+/// F92 — EL ESTADO DE LA CAJA DE UN DÍA, para poder decirlo ANTES de guardar un cobro:
+/// si el día tiene turno, si ya está cerrado (su cierre se va a actualizar) y con qué tasa.
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct EstadoDelDia {
+    pub fecha: String,
+    /// Hay una fila de turno con esa fecha (si no, esa plata no entra en ningún arqueo).
+    pub existe: bool,
+    /// El turno está cerrado: al anotar/mover un cobro, su cierre se recalcula.
+    pub cerrado: bool,
+    pub tasa_bcv: f64,
+    /// El día es HOY (la caja que se está trabajando).
+    pub es_hoy: bool,
+}
+
+/// F92 — LAS CUENTAS DE UN CIERRE, separadas de su ESCRITURA.
+///
+/// Las usan DOS caminos y tienen que dar lo mismo: `close_day` (el operario cierra y cuenta el cajón)
+/// y `recalcular_cierre_cerrado` (un cobro retroactivo cambia la plata de un día ya cerrado). Si el
+/// recálculo usara otra fórmula, el arqueo guardado dejaría de explicarse.
+#[derive(Clone, Debug, Default)]
+struct CuentasCierre {
+    esperado_usd: f64,
+    esperado_bs: f64,
+    actual_usd: f64,
+    actual_bs: f64,
+    diff_usd: f64,
+    diff_bs: f64,
+    /// La columna histórica `difference` (USD + Bs/tasa) — informativa.
+    difference: f64,
+    grand_total: f64,
+    tasa: f64,
+    fondo_usd: f64,
+    gastos_usd: f64,
+    gastos_bs: f64,
+}
+
+/// F92 — EL ARQUEO GUARDADO de un día (lo que el operario CONTÓ) + la tasa del cierre. El recálculo de
+/// un cierre cerrado reusa exactamente esto: nunca se inventa un conteo nuevo. Solo los campos que la
+/// cuenta del cierre necesita (el Punto y lo liquidado no entran en el esperado: se concilian aparte).
+#[derive(Clone, Debug, Default)]
+struct ArqueoDia {
+    actual_cash_usd: f64,
+    actual_cash_bs: f64,
+    actual_zelle: f64,
+    actual_pago_movil: f64,
+    actual_transfer_bs: f64,
+    tasa_bcv: f64,
 }
 
 // Utilidad bruta del período: ingresos (ventas + servicios cobrados) − costo de mercancía.
@@ -881,6 +985,28 @@ fn fmt_miles(v: f64) -> String {
         s.truncate(corte);
     }
     format!("{}{}{},{:02}", if neg { "-" } else { "" }, s, con_puntos, resto)
+}
+
+/// F92 — EL DINERO SE GUARDA CON **2 DECIMALES**, SIEMPRE (half-up, simétrico para las devoluciones
+/// negativas). Pedido del dueño: «cuando pagan deja 2 decimales… se acepta solo 2 decimales».
+///
+/// Por qué existe y qué arregla (medido): `paid_amount` se redondeaba a **4 decimales** (regla D3 del
+/// 2026-08-18, que sacó el ruido flotante `60.000323284571245` pero dejó `60.0003`). Un cliente que paga
+/// los Bs. exactos de su saldo dejaba un **centavo fantasma** en la orden: `amount = 60`, `paid_amount =
+/// 60.0003` → el saldo quedaba en `−0.0003` y el mostrador veía «pagó de más» sin que nadie hubiera
+/// pagado de más. Con 2 decimales ese mismo caso da `60.00` y la orden queda cancelada.
+///
+/// Es la MISMA regla que `src/lib/payment-math.ts` (`round2`): una sola definición de «cuánto es
+/// dinero» en las dos puntas. En Bs. también rige: un monto en bolívares **no** se redondea a entero
+/// (eso perdía hasta 0,99 Bs. por cobro y descuadraba la caja del día).
+pub fn round2(v: f64) -> f64 {
+    if !v.is_finite() { return 0.0; }
+    (v * 100.0).round() / 100.0
+}
+
+/// Un monto en dólares para los MENSAJES (`$12.34`), el mismo formato que muestra la UI.
+fn fmt_usd_plano(v: f64) -> String {
+    format!("${:.2}", round2(v))
 }
 
 pub struct Database {
@@ -2220,6 +2346,24 @@ impl Database {
         // Filas nuevas sin código (el padrón se rearma desde el catálogo / alguien inserta a mano):
         // se numera lo que falte sin pisar los códigos que ya están (el local los usa para hablar).
         let _ = conn.execute_batch("UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE code IS NULL OR code = '';");
+        // ── F93: EL PADRÓN SE PONE AL DÍA UNA VEZ ─────────────────────────────────────────────────
+        // Hasta F93 el padrón creaba UN TELÉFONO POR VARIANTE («Gt 20 Pro INCELL» y «Gt 20 Pro
+        // ORIGINAL» como dos fichas) porque la compatibilidad del local escribe la variante pegada a
+        // la etiqueta. Con la regla nueva la variante es del REPUESTO, así que las fichas viejas hay
+        // que juntarlas: se reconstruye el padrón UNA sola vez (una marca en `settings` lo recuerda) y
+        // a partir de ahí cada guardado del catálogo lo mantiene al día. `rebuild_phones` NUNCA toca
+        // las filas `source='manual'` (un teléfono renombrado o fusionado por el taller queda igual).
+        if self.get_setting_sin_lock(&conn, "phones_variantes_f93").as_deref() != Some("1") {
+            if let Ok(r) = crate::catalog::rebuild_phones(&conn, false) {
+                // OJO: acá NO se puede usar `set_setting` (toma el candado de la conexión y `init` ya lo
+                // tiene: sería un DEADLOCK — la trampa que ya documenta el proyecto).
+                let _ = conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('phones_variantes_f93', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![format!("1 · teléfonos {} · creados {} · actualizados {} · borrados {}", r.phones, r.created, r.updated, r.removed)],
+                );
+            }
+        }
         if phones_cols_new {
             // Un teléfono queda EN USO si alguno de sus repuestos quedó en uso (misma fuente que el
             // padrón: la compatibilidad ya indexada en `phones.key`). Una sola vez: después manda el
@@ -3061,6 +3205,10 @@ impl Database {
             code: String,
             /// F53: pantalla de REFERENCIA del modelo (se auto-selecciona al registrar el servicio).
             default_product_id: Option<i64>,
+            /// F93 — los ALIAS del padrón, normalizados: cómo estaba escrito el teléfono en el
+            /// inventario («Infinix Gt 20 Pro INCELL», «Hot 10 Play»). Se busca también por ahí: el
+            /// local escribe el modelo como lo tiene en su lista y tiene que encontrarlo.
+            alias_norm: String,
         }
         // FUENTE ÚNICA: el PADRÓN (`phones`), no la compatibilidad cruda. Así el
         // formulario de servicio ofrece el MISMO nombre que el taller ve (y corrige)
@@ -3074,7 +3222,7 @@ impl Database {
             let totals = cache.phone_totals(&conn)?;
             let mut stmt = conn.prepare(
                 "SELECT COALESCE(key,''), COALESCE(brand,''), COALESCE(name,''), COALESCE(source,'catalogo'),
-                        COALESCE(in_use,0), COALESCE(code,''), default_product_id
+                        COALESCE(in_use,0), COALESCE(code,''), default_product_id, COALESCE(aliases,'[]')
                  FROM phones",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -3086,10 +3234,11 @@ impl Database {
                     r.get::<_, i64>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, Option<i64>>(6).unwrap_or(None),
+                    r.get::<_, String>(7)?,
                 ))
             })?;
             for row in rows {
-                let (key, brand, name, source, in_use, code, default_product_id) = row?;
+                let (key, brand, name, source, in_use, code, default_product_id, aliases) = row?;
                 let (products, stock) = totals.get(&key).copied().unwrap_or((0, 0));
                 // los teléfonos dados de ALTA a mano salen siempre (aunque todavía no tengan
                 // repuesto cargado): el taller los agregó justamente para poder usarlos
@@ -3100,7 +3249,12 @@ impl Database {
                 if in_use_only && in_use != 1 {
                     continue;
                 }
-                map.insert(key, Acc { label: name, brand, products, stock, in_use, code, default_product_id });
+                map.insert(key, Acc {
+                    label: name, brand, products, stock, in_use, code, default_product_id,
+                    alias_norm: crate::catalog::norm(
+                        &serde_json::from_str::<Vec<String>>(&aliases).unwrap_or_default().join(" "),
+                    ),
+                });
             }
         }
 
@@ -3115,6 +3269,8 @@ impl Database {
                     || tokens.iter().all(|t| {
                         crate::catalog::norm(&format!("{} {} {}", a.brand, a.label, a.code)).contains(t)
                             || crate::catalog::norm(&a.code).contains(t)
+                            // F93: también por los ALIAS («Gt 20 Pro INCELL» encuentra el Gt 20 Pro)
+                            || a.alias_norm.contains(t)
                     })
             })
             .map(|(key, a)| PhoneModelRow {
@@ -3141,6 +3297,33 @@ impl Database {
     /// `category_id = None` → todas las categorías (para sugerir precios del
     /// repuesto que corresponda); `Some(1)` → solo pantallas.
     pub fn find_compatible_products(&self, model: &str, category_id: Option<i64>, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
+        self.compatibles(model, category_id, limit, false)
+    }
+
+    /// F89 — LAS PANTALLAS DE ESE MODELO, sin parecidos de otro teléfono.
+    ///
+    /// Pedido del dueño (2026-10-05), con su archivo en la mano: «cada modelo comparte la misma
+    /// compatibilidad… tienes que reflejar eso también» y «no puede darme de otro modelo que no es».
+    /// Medido en su catálogo real: para «Spark 7 Pro» el desplegable del servicio ofrecía **7** pantallas
+    /// y **4 eran de OTRO teléfono** (`Google 7 Pro`, `Realme 7 Pro` ×2, `Redmi Note 7` / `7 Pro`): todas
+    /// entraban por la coincidencia **parcial**, que acepta que el teléfono del repuesto («7 Pro») sea una
+    /// PARTE del texto buscado («Spark 7 Pro»).
+    ///
+    /// Acá solo cuenta la compatibilidad que **nombra al modelo** (calidad «exacta», ya con la marca
+    /// normalizada fuera: «Hot 30i» y «Infinix Hot 30i» son el mismo teléfono). Es la regla que hace que
+    /// todos los teléfonos de una misma lista compartan la misma pantalla —y que ninguno reciba la de
+    /// otro—: con «Infinix Hot 30i / Tecno Spark Go 2023 / Tecno Pop 7 / Tecno Spark 10 / Tecno Spark 10C
+    /// / Infinix Smart 7», los SEIS modelos ofrecen esa pantalla y nada más.
+    ///
+    /// No se pierde nada a mano: el formulario sigue teniendo «buscar otra pantalla» (búsqueda libre por
+    /// nombre en todo el catálogo, que marca la elegida como «buscada»).
+    pub fn find_compatible_screens_exactas(&self, model: &str, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
+        self.compatibles(model, Some(1), limit, true)
+    }
+
+    /// El motor de compatibilidad. `solo_exactas` decide si las coincidencias «prefijo» y «parcial»
+    /// (el teléfono del repuesto es una PARTE del texto buscado) cuentan o no.
+    fn compatibles(&self, model: &str, category_id: Option<i64>, limit: i64, solo_exactas: bool) -> SqlResult<Vec<ScreenCandidate>> {
         let conn = self.conn.lock().unwrap();
         let base = crate::catalog::phone_model_norm(model);
         if base.is_empty() {
@@ -3201,6 +3384,11 @@ impl Database {
                 }
             }
             if let Some(q) = best {
+                // F89 — con `solo_exactas`, el único vínculo que cuenta es la compatibilidad que NOMBRA
+                // al modelo: los «prefijo» y «parcial» traían la pantalla de otro teléfono.
+                if solo_exactas && q != "exacta" {
+                    continue;
+                }
                 out.push(ScreenCandidate {
                     in_stock: p.stock > 0,
                     brand_match,
@@ -3224,7 +3412,7 @@ impl Database {
 
     /// Pantallas (categoría 1) compatibles con un modelo (desplegable del servicio).
     pub fn find_compatible_screens(&self, model: &str, limit: i64) -> SqlResult<Vec<ScreenCandidate>> {
-        self.find_compatible_products(model, Some(1), limit)
+        self.compatibles(model, Some(1), limit, false)
     }
 
     /// Grupos de productos repetidos (mismo marca+modelo+variante canónicos).
@@ -3401,8 +3589,15 @@ impl Database {
     }
 
     pub fn preview_csv_load(&self, text: &str) -> SqlResult<crate::csvload::CsvPreview> {
+        self.preview_csv_load_modo(text, None)
+    }
+
+    /// F86 — la vista previa con el MODO del stock elegido por el asistente (`sumar` | `reemplazar`).
+    /// `None`/vacío = «sumar» (lo de siempre): la carga masiva no puede pisar mercancía porque un
+    /// parámetro no llegó.
+    pub fn preview_csv_load_modo(&self, text: &str, modo: Option<&str>) -> SqlResult<crate::csvload::CsvPreview> {
         let conn = self.conn.lock().unwrap();
-        crate::csvload::preview_csv(&conn, text)
+        crate::csvload::preview_csv(&conn, text, modo)
     }
 
     pub fn export_products_csv(&self, category_id: Option<i64>) -> SqlResult<String> {
@@ -3410,9 +3605,39 @@ impl Database {
         crate::csvload::export_csv(&conn, category_id)
     }
 
+    /// AC-13 (F86) — El stock y el stock mínimo que llegan de un FORMULARIO no pueden ser negativos.
+    ///
+    /// El stock negativo es un estado REAL del negocio (una entrega con faltante lo deja en −2 y eso
+    /// tiene que verse), pero NO es un valor que se escriba a mano: si el operario teclea «−60» en la
+    /// ficha, ese negativo después lo arrastra cualquier carga («−60 + 30 = −30», el reclamo del dueño) y
+    /// el inventario queda diciendo que hay mercancía que no existe. Los caminos que SÍ bajan el stock
+    /// (venta, entrega de servicio, ajuste manual en Movimientos, fusión de fichas) no pasan por acá.
+    fn validar_stock_manual(stock: i64, min_stock: i64) -> SqlResult<()> {
+        if stock < 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "El stock no puede ser negativo (escribiste {stock}). El stock baja solo por un \
+                 movimiento real —una venta, una entrega con faltante o un ajuste tuyo en Movimientos—; \
+                 si la ficha quedó en faltante, cargá la mercancía que entró."
+            )));
+        }
+        if min_stock < 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "El stock mínimo no puede ser negativo (escribiste {min_stock}): es la cantidad de \
+                 unidades con la que la app te avisa que hay que comprar."
+            )));
+        }
+        Ok(())
+    }
+
     pub fn add_product(&self, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                        variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
                        stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<i64> {
+        // AC-13 (F86): un stock NEGATIVO escrito A MANO es un error, no un dato. El stock negativo
+        // existe en la app y es legítimo cuando lo produce un movimiento REAL (una venta, una entrega
+        // con faltante, el ajuste manual del dueño): lo que se prohíbe es que la ficha NAZCA con un
+        // negativo tecleado en el formulario, que es de donde salía el «−60» que después la carga masiva
+        // arrastraba a «−30». El mensaje explica el porqué, no solo el qué.
+        Self::validar_stock_manual(stock, min_stock)?;
         let conn = self.conn.lock().unwrap();
         // Marca/modelo/variante/compatibilidad se guardan CANÓNICOS (mismas reglas
         // que la limpieza masiva). El nombre lo escribe el operario y se respeta.
@@ -3543,17 +3768,29 @@ impl Database {
 
     pub fn update_product(&self, id: i64, name: &str, category_id: Option<i64>, brand: &str, model: &str,
                           variant: &str, compatibility: &str, price_cost: f64, price_sale: f64,
-                          stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<()> {
+                          stock: i64, min_stock: i64, price_usd: f64) -> SqlResult<Vec<crate::catalog::CambioDeRed>> {
+        // AC-13 (F86): la ficha tampoco se puede GUARDAR con un negativo tecleado (misma regla que
+        // `add_product`; el stock que baja por una venta/entrega no pasa por acá).
+        Self::validar_stock_manual(stock, min_stock)?;
         let conn = self.conn.lock().unwrap();
         let cat = Self::category_name(&conn, category_id);
+        // F93 — LA COMPATIBILIDAD QUE TENÍA: hace falta para saber qué teléfono SALIÓ de la red.
+        let compat_antes: String = conn
+            .query_row("SELECT COALESCE(compatibility,'') FROM products WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?
+            .unwrap_or_default();
         let n = crate::catalog::normalize_fields(&cat, brand, model, variant, compatibility);
         let search = crate::catalog::search_text(name, &n.brand, &n.model, &n.variant, &n.compatibility);
         conn.execute(
             "UPDATE products SET name=?1, category_id=?2, brand=?3, model=?4, variant=?5, compatibility=?6, price_cost=?7, price_sale=?8, stock=?9, min_stock=?10, price_usd=?11, updated_at=datetime('now','localtime'), search_text=?13 WHERE id=?12",
             params![name, category_id, n.brand, n.model, n.variant, n.compatibility, price_cost, price_sale, stock, min_stock, price_usd, id, search],
         )?;
+        // F93 — LA RED SE SINCRONIZA: los otros productos de la MISMA red (los que compartían
+        // exactamente esos teléfonos) se ajustan igual, para que el cambio se vea en las DOS fichas y no
+        // en una sola. Devuelve lo que cambió, para poder decírselo al dueño.
+        let cambios = crate::catalog::sincronizar_red(&conn, id, &compat_antes, &n.compatibility)?;
         let _ = crate::catalog::rebuild_phones(&conn, false);
-        Ok(())
+        Ok(cambios)
     }
 
     /// Proveedor que trajo esta mercancía (lo anota la carga de inventario; se puede corregir
@@ -3724,8 +3961,11 @@ impl Database {
         if quantity <= 0 || unit_price < 0.0 || total < 0.0 {
             return Err(day_shift_error("Cantidad y montos deben ser positivos."));
         }
-        let bank_fee_amount = if bank_fee_percent > 0.0 { total * bank_fee_percent / 100.0 } else { 0.0 };
-        let net_amount = total - bank_fee_amount;
+        // F92 — el dinero de una venta también son 2 decimales (monto, comisión y neto): es lo que
+        // suma la caja del día y lo que queda en el libro de plata.
+        let total = round2(total);
+        let bank_fee_amount = if bank_fee_percent > 0.0 { round2(total * bank_fee_percent / 100.0) } else { 0.0 };
+        let net_amount = round2(total - bank_fee_amount);
         let client_name = title_case(client_name.trim());
         let conn = self.conn.lock().unwrap();
         // F82 — LA VENTA ES DE HOY: el turno abierto tiene que ser el de HOY. Antes bastaba con que
@@ -3735,7 +3975,7 @@ impl Database {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount, iva_rate, iva_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
-            params![product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, discount_amount, if iva_rate > 0.0 { iva_rate } else { 0.0 }, if iva_rate > 0.0 { iva_mode } else { "" }],
+            params![product_id, product_name, quantity, round2(unit_price), total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, if zelle_reference.is_empty() { None } else { Some(zelle_reference) }, currency, round2(discount_amount), if iva_rate > 0.0 { iva_rate } else { 0.0 }, if iva_rate > 0.0 { iva_mode } else { "" }],
         )?;
         let sale_id = tx.last_insert_rowid();
         if let Some(pid) = product_id {
@@ -4430,6 +4670,10 @@ impl Database {
         if amount <= 0.0 {
             return Err(day_shift_error("El monto del pago debe ser mayor a 0. Para devolver dinero usá «Devolución»."));
         }
+        // F92 — EL DINERO SON 2 DECIMALES: lo que se guarda (y lo que suma la caja) es el monto
+        // redondeado a centavos, con su comisión y su neto. Un `amount` con más decimales dejaría
+        // un residuo fantasma en el saldo de la orden.
+        let amount = round2(amount);
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         // Una orden devuelta o cancelada no acepta más pagos (antes esto solo existía en la UI).
@@ -4440,16 +4684,22 @@ impl Database {
         if estado == "Devuelto" || estado == "Cancelado" || estado == "Cancelado / Devuelto" {
             return Err(day_shift_error(&format!("La orden está {}: no acepta más pagos.", estado)));
         }
-        let fecha = self.payment_date_ok(&conn, payment_date)?;
+        let dia = self.payment_date_ok(&conn, payment_date)?;
+        let fecha = dia.fecha.clone();
         // La moneda se deriva del método (un pago por Pago Móvil/Efectivo Bs/Transf Bs SIEMPRE es Bs)
         let currency = normalize_payment_currency(payment_method, currency);
         // Gate anti-corrupción: un pago Bs sin tasa BCV se convertiría a 1:1 en paid_amount.
         // La tasa que manda es la DEL DÍA DEL PAGO (recalc_paid_amount usa la misma).
         if currency == "VES" && !self.has_bcv_rate_for_date(&conn, &fecha)? {
-            return Err(day_shift_error(&format!("El día {} no tiene tasa BCV (está en 0). Actualizala en Libro Diario (botón \"Actualizar día\" o abrí esa fecha con su tasa) antes de registrar pagos en bolívares.", fecha)));
+            let extra = if dia.cerrado {
+                format!(" Ese día ({} ) ya está cerrado: pasá por Libro Diario → Cierres, ↺ para abrirlo, cargá la tasa y volvé a cerrarlo.", fecha)
+            } else {
+                " Actualizala en Libro Diario (botón \"Actualizar día\" o abrí esa fecha con su tasa) antes de registrar pagos en bolívares.".to_string()
+            };
+            return Err(day_shift_error(&format!("El día {} no tiene tasa BCV (está en 0).{}", fecha, extra)));
         }
-        let bank_fee_amount = if bank_fee_percent > 0.0 { amount * bank_fee_percent / 100.0 } else { 0.0 };
-        let net_amount = amount - bank_fee_amount;
+        let bank_fee_amount = if bank_fee_percent > 0.0 { round2(amount * bank_fee_percent / 100.0) } else { 0.0 };
+        let net_amount = round2(amount - bank_fee_amount);
         // La HORA se conserva en el pago del día (el mostrador la necesita para cuadrar contra la app
         // del banco: el detalle de pagos del Libro Diario tiene columna «Hora»). Un pago RETROACTIVO se
         // guarda solo con la fecha: la hora real del cobro es desconocida y mostrar «00:00» sería
@@ -4482,13 +4732,24 @@ impl Database {
             // F69: la fecha del libro es la DEL PAGO (puede ser retroactiva), no la de hoy.
             when: Some(&stamp),
         })?;
+        drop(conn);
+        // F92 — SI EL PAGO CAYÓ EN UN DÍA YA CERRADO, su cierre se actualiza (y se avisa). Antes esto
+        // se rechazaba y el operario tenía que reabrir el día, anotar el cobro y volver a cerrarlo: el
+        // dueño pidió lo contrario — la plata entró ese día y el arqueo tiene que explicarlo.
+        let _ = self.aviso_de_cierre(&fecha);
         Ok(pid)
     }
 
     /// F35 — CORREGIR LA FECHA de un pago ya anotado (lo que pidió el dueño: «pueda editar o agregar
     /// la fecha de ese pago»). Comando ANGOSTO: toca UNA columna. Recalcula `paid_amount` porque la
     /// tasa BCV del día del pago es la que convierte un abono en Bs a dólares.
-    pub fn update_service_payment_date(&self, id: i64, payment_date: &str) -> SqlResult<()> {
+    ///
+    /// **F92 — YA NO HAY BLOQUEO POR CIERRE.** Antes, si el día de origen o el de destino estaba
+    /// cerrado, la operación se rechazaba («abrí el día con ↺, mové el pago y volvé a cerrarlo») y el
+    /// dueño quedaba trabado justo cuando el cliente avisa que pagó días atrás. Ahora los dos días se
+    /// **recalculan** (`recalcular_cierre_cerrado`, con el mismo arqueo contado) y la respuesta dice
+    /// qué le pasó a cada cierre, para poder mostrarlo.
+    pub fn update_service_payment_date(&self, id: i64, payment_date: &str) -> SqlResult<Vec<AjusteCierre>> {
         let conn = self.conn.lock().unwrap();
         let (service_id, currency, desde): (i64, Option<String>, Option<String>) = conn.query_row(
             "SELECT service_id, currency, date(payment_date) FROM service_payments WHERE id = ?1",
@@ -4510,9 +4771,9 @@ impl Database {
                 ));
             }
         }
-        let hacia = self.payment_date_ok(&conn, payment_date)?;
+        let dia = self.payment_date_ok(&conn, payment_date)?;
+        let hacia = dia.fecha.clone();
         let desde = desde.unwrap_or_default();
-        self.payment_date_movable(&conn, &desde, &hacia)?;
         if currency.as_deref() == Some("VES") && !self.has_bcv_rate_for_date(&conn, &hacia)? {
             return Err(day_shift_error(&format!("El día {} no tiene tasa BCV (está en 0): sin tasa, un abono en Bs se convertiría 1:1. Cargá la tasa de ese día en Libro Diario.", hacia)));
         }
@@ -4543,14 +4804,22 @@ impl Database {
              WHERE payment_id = ?1",
             params![id, stamp],
         )?;
-        Ok(())
+        drop(conn);
+        // F92 — los DOS días que cambiaron de plata: el de origen (si es otro) y el de destino. Los que
+        // estén cerrados se recalculan; los abiertos no se tocan (se cierran después, ya corregidos).
+        let mut ajustes = Vec::new();
+        if !desde.is_empty() && desde != hacia {
+            if let Ok(Some(a)) = self.recalcular_cierre_cerrado(&desde) { ajustes.push(a); }
+        }
+        if let Ok(Some(a)) = self.recalcular_cierre_cerrado(&hacia) { ajustes.push(a); }
+        Ok(ajustes)
     }
 
     pub fn delete_service_payment(&self, id: i64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
-        let (service_id, amount, currency): (i64, f64, Option<String>) = conn.query_row(
-            "SELECT service_id, amount, currency FROM service_payments WHERE id=?1",
-            params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        let (service_id, amount, currency, dia): (i64, f64, Option<String>, Option<String>) = conn.query_row(
+            "SELECT service_id, amount, currency, date(payment_date) FROM service_payments WHERE id=?1",
+            params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ).optional()?.ok_or_else(|| day_shift_error("El pago no existe."))?;
         // F36: borrar un cobro del que ya se devolvió plata dejaría el neto de esa moneda en NEGATIVO
         // (abonado «−$100») y el descuadre se arrastraría a la caja. Se rechaza y se dice el orden.
@@ -4567,6 +4836,11 @@ impl Database {
         // BRUTO y sin método: un cobro por Punto con comisión inventaba −comisión, y borrar un cobro
         // EN EFECTIVO no bajaba el esperado del cajón (la caja «sobraba» lo borrado).
         self.reverse_book_entry(&conn, Some(id), None, "Cobro borrado")?;
+        drop(conn);
+        // F92 — borrar un cobro de un día YA CERRADO también deja ese arqueo mintiendo: se recalcula.
+        if let Some(d) = dia.filter(|d| !d.trim().is_empty()) {
+            let _ = self.aviso_de_cierre(&d);
+        }
         Ok(())
     }
 
@@ -4578,6 +4852,9 @@ impl Database {
         if amount <= 0.0 {
             return Err(day_shift_error("El monto a devolver debe ser mayor a 0."));
         }
+        // F92 — el dinero son 2 decimales: la devolución se anota a centavos (el tope de abajo sigue
+        // comparándose contra lo que entró, así que redondear hacia arriba nunca deja devolver de más).
+        let amount = round2(amount);
         let conn = self.conn.lock().unwrap();
         self.require_open_day(&conn)?;
         let currency = normalize_payment_currency(payment_method, currency);
@@ -4754,7 +5031,11 @@ impl Database {
             // abonos/devoluciones en Bs avisa antes de llegar acá).
             if tasa > 0.0 { ves_net / tasa } else { ves_net }
         };
-        let total = ((usd_net + ves_usd) * 10000.0).round() / 10000.0;
+        // F92 — EL «ABONADO» SE GUARDA CON 2 DECIMALES. Antes se redondeaba a 4 (regla D3 del
+        // 2026-08-18, que sacó el ruido flotante pero dejó `60.0003`): un cliente que pagaba los Bs.
+        // exactos de su saldo dejaba un centavo fantasma y la orden parecía pagada de más. Con 2
+        // decimales ese caso da `60.00` y la orden queda cancelada de verdad.
+        let total = round2(usd_net + ves_usd);
         // PISO EN 0 (invariante 1): el «abonado» de una orden nunca puede ser negativo. Un neto
         // negativo solo puede salir de datos incoherentes (p. ej. borrar el cobro después de haber
         // devuelto: `delete_service_payment` lo rechaza, y esto es la red de seguridad). Mostrar
@@ -4784,6 +5065,15 @@ impl Database {
             let product_name = item["productName"].as_str().unwrap_or("").to_string();
             let quantity = item["quantity"].as_i64().unwrap_or(1);
             let unit_price = item["unitPrice"].as_f64().unwrap_or(0.0);
+            // AC-13 (F86): la cantidad de un PEDIDO es mercancía que ENTRA (`stock = stock + cantidad`
+            // al recibirlo). Una cantidad negativa escrita en el formulario sería la única forma de
+            // bajar el stock a mano desde acá (y quedaría anotada como «entrada», que es peor).
+            if quantity < 0 {
+                return Err(day_shift_error(&format!(
+                    "La cantidad de «{product_name}» no puede ser negativa ({quantity}): un pedido es \
+                     mercancía que entra. Para dar de baja mercancía usá Movimientos."
+                )));
+            }
             conn.execute(
                 "INSERT INTO purchase_order_items (order_id, product_id, product_name, quantity, unit_price) VALUES (?1,?2,?3,?4,?5)",
                 params![order_id, product_id, product_name, quantity, unit_price],
@@ -6624,6 +6914,12 @@ impl Database {
         Ok(v.flatten())
     }
 
+    /// Igual que `get_setting` pero con la conexión YA bloqueada por quien llama (lo necesita `init`,
+    /// que tiene el candado tomado: pedirlo otra vez sería un DEADLOCK).
+    fn get_setting_sin_lock(&self, conn: &rusqlite::Connection, key: &str) -> Option<String> {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -7584,7 +7880,8 @@ impl Database {
         conn.query_row("SELECT date('now','localtime')", [], |r| r.get(0))
     }
 
-    /// F35 — FECHA DE UN PAGO (la clave para que la caja cuadre).
+    /// F35 — FECHA DE UN PAGO (la clave para que la caja cuadre). **F92: el día CERRADO ya NO se
+    /// rechaza** — su cierre se actualiza (`recalcular_cierre_cerrado`).
     ///
     /// Por qué existe: un cliente deja el teléfono y paga el mismo día, pero avisa después (o el
     /// operario se olvidó de anotarlo). Si el abono se guarda con la fecha del día en que se TIPEA,
@@ -7593,16 +7890,17 @@ impl Database {
     /// Reglas (fail-closed):
     ///   · vacío → HOY (local), el comportamiento histórico;
     ///   · no puede ser FUTURA (no se anota plata que todavía no entró);
-    ///   · el día tiene que tener un turno (`daily_closings`) **ABIERTO**. Si está cerrado, el error
-    ///     dice el camino real (abrir ese día, anotar el pago y volver a cerrarlo) en vez de dejar un
-    ///     arqueo guardado que miente: el cierre de ese día ya se calculó y no se recalcula solo.
-    ///
-    /// Devuelve la fecha normalizada `YYYY-MM-DD`.
-    fn payment_date_ok(&self, conn: &rusqlite::Connection, date: &str) -> SqlResult<String> {
+    ///   · el formato tiene que ser `YYYY-MM-DD` y la fecha existir en el calendario;
+    ///   · el día tiene que tener un TURNO de caja (`daily_closings`): sin turno no hay caja que reciba
+    ///     la plata (ni un cierre que actualizar) y el error nombra los últimos días que sí la tienen;
+    ///   · **cerrado → se acepta y `cerrado = true`** (F92: pedido del dueño: «clientes que pagan y
+    ///     envían el pago días anteriores… hay que actualizar el cierre de esos días»).
+    fn payment_date_ok(&self, conn: &rusqlite::Connection, date: &str) -> SqlResult<DiaDePago> {
         let date = date.trim();
         let hoy: String = conn.query_row("SELECT date('now','localtime')", [], |r| r.get(0))?;
         if date.is_empty() {
-            return Ok(hoy);
+            let cerrado = self.dia_esta_cerrado(conn, &hoy)?;
+            return Ok(DiaDePago { fecha: hoy, cerrado });
         }
         // Formato: exactamente YYYY-MM-DD (el input date del navegador lo manda así).
         if date.len() != 10 || !date.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }) {
@@ -7617,43 +7915,65 @@ impl Database {
         if date > hoy.as_str() {
             return Err(day_shift_error("La fecha del pago no puede ser futura: el dinero todavía no entró a la caja."));
         }
-        let abierto: Option<i64> = conn.query_row(
+        let cerrado: Option<i64> = conn.query_row(
             "SELECT is_closed FROM daily_closings WHERE close_date = ?1 ORDER BY id DESC LIMIT 1",
             params![date], |r| r.get(0),
         ).optional()?;
-        match abierto {
+        match cerrado {
             None => {
-                // El turno abierto (el único que puede recibir plata) se nombra en el error: el
-                // operario tiene que ver A QUÉ caja puede anotar el pago.
-                let turno: Option<String> = conn.query_row(
-                    "SELECT close_date FROM daily_closings WHERE is_closed = 0 ORDER BY close_date DESC LIMIT 1",
-                    [], |r| r.get(0),
-                ).optional()?;
-                let pista = match turno {
-                    Some(t) => format!(" El turno abierto es el {}.", t),
-                    None => " No hay ningún turno abierto: abrí el día en Libro Diario.".to_string(),
+                // Sin turno no hay caja: se nombran los últimos días con turno para que el operario
+                // elija uno real en vez de pelear con el campo de fecha.
+                let mut stmt = conn.prepare(
+                    "SELECT close_date, is_closed FROM daily_closings ORDER BY close_date DESC LIMIT 3",
+                )?;
+                let dias: Vec<String> = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                    .filter_map(|f| f.ok())
+                    .map(|(f, c)| if c == 0 { format!("{f} (abierto)") } else { f })
+                    .collect();
+                let pista = if dias.is_empty() {
+                    "Todavía no hay ningún turno de caja en el sistema.".to_string()
+                } else {
+                    format!(" Los últimos días con caja son: {}.", dias.join(", "))
                 };
-                Err(day_shift_error(&format!("No hay un turno de caja con la fecha {}.{}", date, pista)))
+                Err(day_shift_error(&format!(
+                    "No hay ninguna caja (turno) con la fecha {}: esa plata no entraría en ningún arqueo.{}",
+                    date, pista
+                )))
             }
-            Some(1) => Err(day_shift_error(&format!(
-                "El día {} ya está CERRADO: su cierre ya se calculó y no cambia solo. En Libro Diario → pestaña Cierres, pulsá el botón ↺ de ese día para abrirlo, anotá el pago con esa fecha y volvé a cerrarlo — así la caja de ese día cuadra.", date))),
-            _ => Ok(date.to_string()),
+            Some(1) => Ok(DiaDePago { fecha: date.to_string(), cerrado: true }),
+            _ => Ok(DiaDePago { fecha: date.to_string(), cerrado: false }),
         }
     }
 
-    /// F35 — ¿se puede MOVER un pago desde/ hacia esos días? El día de origen también tiene que
-    /// estar abierto: sacar un pago de un día ya cerrado dejaría ese arqueo mintiendo igual.
-    fn payment_date_movable(&self, conn: &rusqlite::Connection, desde: &str, hacia: &str) -> SqlResult<()> {
-        if desde == hacia { return Ok(()); }
-        let cerrado: Option<i64> = conn.query_row(
+    /// F92 — ¿ese día ya tiene su cierre hecho? (para saber si hay que recalcularlo).
+    fn dia_esta_cerrado(&self, conn: &rusqlite::Connection, fecha: &str) -> SqlResult<bool> {
+        let estado: Option<i64> = conn.query_row(
             "SELECT is_closed FROM daily_closings WHERE close_date = ?1 ORDER BY id DESC LIMIT 1",
-            params![desde], |r| r.get(0),
+            params![fecha], |r| r.get(0),
         ).optional()?;
-        if cerrado == Some(1) {
-            return Err(day_shift_error(&format!(
-                "El día {} (donde está anotado el pago) ya está CERRADO: abrilo con ↺ en Libro Diario → Cierres, mové el pago y volvé a cerrarlo.", desde)));
-        }
-        Ok(())
+        Ok(estado == Some(1))
+    }
+
+    /// F92 — EL ESTADO DE LA CAJA DE UN DÍA (comando `estado_del_dia`): lo usa el diálogo de pago para
+    /// decir a qué caja va el cobro y si esa caja ya está cerrada (y entonces se actualizará su cierre).
+    pub fn estado_del_dia(&self, fecha: &str) -> SqlResult<EstadoDelDia> {
+        let fecha = fecha.trim();
+        let conn = self.conn.lock().unwrap();
+        let hoy = self.today_local(&conn)?;
+        // Una fecha vacía = hoy (el default del formulario).
+        let fecha = if fecha.is_empty() { hoy.clone() } else { fecha.to_string() };
+        let fila: Option<(i64, f64)> = conn.query_row(
+            "SELECT is_closed, COALESCE(tasa_bcv,0) FROM daily_closings WHERE close_date = ?1 ORDER BY id DESC LIMIT 1",
+            params![fecha], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        Ok(EstadoDelDia {
+            es_hoy: fecha == hoy,
+            fecha,
+            existe: fila.is_some(),
+            cerrado: fila.map(|f| f.0 == 1).unwrap_or(false),
+            tasa_bcv: fila.map(|f| f.1).unwrap_or(0.0),
+        })
     }
 
     pub fn close_day(&self, close_date: &str, notes: &str, initial_cash_usd: f64, tasa_bcv: f64, tasa_eur: f64,
@@ -7662,79 +7982,33 @@ impl Database {
                      pos_settled: f64, pos_settled_bs: f64) -> SqlResult<i64> {
         // Calculate totals for this date from sales + services (sin lock: get_daily_totals lo toma)
         let totals = self.get_daily_totals(close_date, close_date)?;
-        let t = if totals.is_empty() {
-            DailyTotals {
-                date: close_date.to_string(), pos_charged: 0.0, pos_fees: 0.0, pos_net: 0.0,
-                pos_charged_usd: 0.0, pos_charged_bs: 0.0, pos_net_usd: 0.0, pos_net_bs: 0.0,
-                cash_usd: 0.0, cash_bs: 0.0, zelle_total: 0.0,
-                pago_movil_total: 0.0, transfer_bs_total: 0.0,
-                usd_cash_total: 0.0, grand_total: 0.0,
-                grand_usd: 0.0, grand_bs: 0.0, tasa_bcv: 0.0,
-                refund_usd: 0.0, refund_bs: 0.0,
-            }
-        } else { totals[0].clone() };
+        let t = if totals.is_empty() { DailyTotals::vacio(close_date) } else { totals[0].clone() };
         let conn = self.conn.lock().unwrap();
-
-        // Expected vs actual difference per currency group
-        // USD group: cash_usd + zelle + usd_cash vs actual_cash_usd + actual_zelle
-        // Bs group: cash_bs + pago_movil + transfer_bs vs actual_cash_bs + actual_pago_movil + actual_transfer_bs
-        //
-        // F69 — EL CAJÓN CUENTA LA PLATA REAL: al esperado del efectivo se le SUMA el fondo de caja
-        // declarado al abrir y se le RESTAN los **gastos pagados del cajón** (leídos del libro de
-        // plata). Antes nada de eso entraba: pagar un gasto del cajón hacía que la caja «faltara» en un
-        // día perfecto y el fondo la hacía «sobrar» todos los días. Los métodos digitales (Zelle, Pago
-        // Móvil, Transferencia) NO se tocan: se concilian por banco.
-        //
-        // OJO con las DEVOLUCIONES (bug que cazó `test_refund_ledger_full`): NO se restan acá. Una
-        // devolución se guarda como un `service_payments` NEGATIVO con el método por el que salió la
-        // plata, así que `t.cash_usd`/`t.cash_bs` YA vienen netos — restarla otra vez descontaba la
-        // misma plata dos veces (una orden de $50 devuelta entera daba un «faltante» de $50 con el
-        // cajón cuadrado). `adj.devoluciones_*` queda para MOSTRAR cuánto se devolvió del cajón.
-        let adj = self.drawer_adjustments_conn(&conn, close_date)?;
-        // F69 (revisión adversarial) — EL FONDO DE CAJA ES EL DE LA FILA DEL DÍA, no el parámetro.
-        // `initial_cash_usd` se declara al ABRIR (`open_day`/«Actualizar día»); `close_day` calculaba
-        // el esperado con el guardado pero PERSISTÍA el del parámetro: un llamador que mandara 0
-        // dejaba el cierre con `initial_cash_usd=0` y un `drawer_adjust_usd` que decía +30 — al
-        // reabrirlo (↺, el camino del remedio) el fondo desaparecía y el recierre mostraba «sobran
-        // $50». Ahora el fondo tiene UNA fuente (la fila del turno) y se guarda el mismo que se usó.
-        let fondo_usd = adj.fondo_usd;
-        let cash_usd_esperado = t.cash_usd + t.usd_cash_total + fondo_usd - adj.gastos_usd;
-        let cash_bs_esperado = t.cash_bs - adj.gastos_bs;
-        let expected_usd = cash_usd_esperado + t.zelle_total;
-        let actual_usd = actual_cash_usd + actual_zelle;
-        let expected_bs = cash_bs_esperado + t.pago_movil_total + t.transfer_bs_total;
-        let actual_bs = actual_cash_bs + actual_pago_movil + actual_transfer_bs;
-        let diff_usd = actual_usd - expected_usd;
-        let diff_bs = actual_bs - expected_bs;
-        // Tasa del cierre: si viene 0 (día abierto sin tasa), heredar la del último cierre con tasa
-        let effective_tasa = if tasa_bcv > 0.0 {
-            tasa_bcv
-        } else {
-            conn.query_row(
-                "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
-                [], |r| r.get(0),
-            ).optional()?.unwrap_or(0.0)
-        };
-        let difference = if effective_tasa > 0.0 { diff_usd + diff_bs / effective_tasa } else { diff_usd };
-        // Total General en USD equivalente: USD + Bs convertidos con la tasa del cierre (nunca sumar Bs como USD)
-        let grand_total = t.grand_usd + if effective_tasa > 0.0 { t.grand_bs / effective_tasa } else { 0.0 };
+        // F92 — las cuentas del cierre viven en UN SOLO lugar (`cuentas_del_cierre`), porque el
+        // recálculo de un día ya cerrado tiene que dar exactamente lo mismo que este cierre.
+        let c = self.cuentas_del_cierre(&conn, close_date, &t, &ArqueoDia {
+            actual_cash_usd, actual_cash_bs, actual_zelle, actual_pago_movil, actual_transfer_bs, tasa_bcv,
+        })?;
 
         let changes = conn.execute(
             "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6, zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10, grand_total=?11, is_closed=1, closed_at=datetime('now','localtime'), notes=?12, tasa_bcv=?13, tasa_eur=?14, initial_cash_usd=?15, actual_cash_usd=?16, actual_cash_bs=?17, actual_punto_usd=?18, actual_punto_bs=?19, actual_zelle=?20, actual_pago_movil=?21, actual_transfer_bs=?22, difference=?23, total_usd=?24, total_bs=?25, pos_settled=?26, pos_settled_bs=?27, drawer_adjust_usd=?28, drawer_adjust_bs=?29
              WHERE close_date=?1 AND is_closed=0",
-            params![close_date, t.pos_charged, t.pos_fees, t.pos_net, t.cash_usd, t.cash_bs,
-                    t.zelle_total, t.pago_movil_total, t.transfer_bs_total, t.usd_cash_total, grand_total, notes,
+            params![close_date, round2(t.pos_charged), round2(t.pos_fees), round2(t.pos_net),
+                    round2(t.cash_usd), round2(t.cash_bs),
+                    round2(t.zelle_total), round2(t.pago_movil_total), round2(t.transfer_bs_total),
+                    round2(t.usd_cash_total), c.grand_total, notes,
                     // F69: se guarda el fondo que se USÓ (`fondo_usd`, el de la fila del turno) y no el
                     // parámetro: un recierre después de reabrir (↺) tiene que volver a dar lo mismo.
-                    effective_tasa, tasa_eur, if fondo_usd > 0.0 { fondo_usd } else { initial_cash_usd },
-                    actual_cash_usd, actual_cash_bs, actual_punto_usd, actual_punto_bs,
-                    actual_zelle, actual_pago_movil, actual_transfer_bs, difference, t.grand_usd, t.grand_bs,
-                    pos_settled, pos_settled_bs,
+                    c.tasa, tasa_eur, if c.fondo_usd > 0.0 { c.fondo_usd } else { initial_cash_usd },
+                    round2(actual_cash_usd), round2(actual_cash_bs), round2(actual_punto_usd), round2(actual_punto_bs),
+                    round2(actual_zelle), round2(actual_pago_movil), round2(actual_transfer_bs),
+                    c.difference, round2(t.grand_usd), round2(t.grand_bs),
+                    round2(pos_settled), round2(pos_settled_bs),
                     // F69: el ajuste del cajón que se usó (fondo + gastos), guardado para que
                     // este cierre se siga explicando solo aunque después cambie algo. Las
                     // devoluciones NO van acá: ya están dentro de `cash_*` (vienen netas).
-                    fondo_usd - adj.gastos_usd,
-                    -adj.gastos_bs],
+                    round2(c.fondo_usd - c.gastos_usd),
+                    round2(-c.gastos_bs)],
         )?;
         if changes == 0 {
             return Err(day_shift_error("No hay un día abierto con esa fecha para cerrar."));
@@ -7748,7 +8022,7 @@ impl Database {
             r#type: "cierre",
             method: "",
             currency: "USD",
-            amount: difference,
+            amount: c.difference,
             sign: 0,
             reference: close_date,
             sale_id: None,
@@ -7762,6 +8036,155 @@ impl Database {
         // F71: el cierre deja una COPIA AUTOMÁTICA de la base (no rompe el cierre si falla).
         let _ = self.auto_backup();
         Ok(id)
+    }
+
+    /// F92 — LAS CUENTAS DEL CIERRE (una sola implementación para los dos caminos que las necesitan).
+    ///
+    /// `totals` es lo que el sistema dice que se cobró ese día (ventas + abonos, por método) y
+    /// `arqueo` es lo que el operario CONTÓ. Devuelve el esperado por moneda, la diferencia de cada una
+    /// y la `difference` histórica (USD + Bs/tasa).
+    ///
+    /// Reglas que NO se pueden perder (todas con su motivo, ver `close_day`):
+    ///  · al esperado del CAJÓN se le suma el fondo declarado y se le restan los gastos pagados del
+    ///    cajón (F69) — los métodos digitales se concilian por banco y no se tocan;
+    ///  · las DEVOLUCIONES no se restan acá: ya vienen netas dentro de `cash_*` (F36/F69);
+    ///  · el fondo sale de la FILA del día, nunca del parámetro (F69, revisión adversarial).
+    fn cuentas_del_cierre(&self, conn: &Connection, fecha: &str, t: &DailyTotals, a: &ArqueoDia) -> SqlResult<CuentasCierre> {
+        // El ajuste del cajón (fondo + gastos) se lee del LIBRO DE PLATA del día: una sola fuente.
+        let adj = self.drawer_adjustments_conn(conn, fecha)?;
+        let fondo_usd = adj.fondo_usd;
+        let cash_usd_esperado = t.cash_usd + t.usd_cash_total + fondo_usd - adj.gastos_usd;
+        let cash_bs_esperado = t.cash_bs - adj.gastos_bs;
+        let esperado_usd = cash_usd_esperado + t.zelle_total;
+        let actual_usd = a.actual_cash_usd + a.actual_zelle;
+        let esperado_bs = cash_bs_esperado + t.pago_movil_total + t.transfer_bs_total;
+        let actual_bs = a.actual_cash_bs + a.actual_pago_movil + a.actual_transfer_bs;
+        let diff_usd = actual_usd - esperado_usd;
+        let diff_bs = actual_bs - esperado_bs;
+        // Tasa del cierre: si viene 0 (día abierto sin tasa), heredar la del último cierre con tasa.
+        let tasa = if a.tasa_bcv > 0.0 {
+            a.tasa_bcv
+        } else {
+            conn.query_row(
+                "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+                [], |r| r.get(0),
+            ).optional()?.unwrap_or(0.0)
+        };
+        let difference = round2(if tasa > 0.0 { diff_usd + diff_bs / tasa } else { diff_usd });
+        // Total General en USD equivalente: USD + Bs convertidos con la tasa del cierre (nunca sumar Bs como USD)
+        let grand_total = round2(t.grand_usd + if tasa > 0.0 { t.grand_bs / tasa } else { 0.0 });
+        Ok(CuentasCierre {
+            esperado_usd: round2(esperado_usd),
+            esperado_bs: round2(esperado_bs),
+            actual_usd: round2(actual_usd),
+            actual_bs: round2(actual_bs),
+            diff_usd: round2(diff_usd),
+            diff_bs: round2(diff_bs),
+            difference,
+            grand_total,
+            tasa,
+            fondo_usd,
+            gastos_usd: adj.gastos_usd,
+            gastos_bs: adj.gastos_bs,
+        })
+    }
+
+    /// F92 — EL CIERRE DE UN DÍA CERRADO SE ACTUALIZA SOLO cuando le entra o le sale plata después.
+    ///
+    /// Pedido del dueño: «hay clientes que pagan y envían el pago días anteriores y cuando uno quiere
+    /// editar la fecha no deja editarla porque dice que ya se hizo el cierre… **hay que actualizar el
+    /// cierre de esos días**. Si agrego el pago hoy siendo otro día no refleja la realidad.»
+    ///
+    /// Qué hace: recalcula el ESPERADO (y con él la diferencia) con la misma fórmula del cierre, y deja
+    /// el **arqueo contado intacto** — el conteo del cajón es un hecho, no un número que se recalcula.
+    /// Los días ABIERTOS o sin turno no se tocan (devuelve `None`): un día abierto se cierra después con
+    /// los números ya corregidos.
+    ///
+    /// Devuelve `Some(AjusteCierre)` con la diferencia antes/después para poder DECIRLO: cambiar un
+    /// arqueo guardado sin avisar es exactamente lo que esta app no hace.
+    pub fn recalcular_cierre_cerrado(&self, fecha: &str) -> SqlResult<Option<AjusteCierre>> {
+        // 1) el arqueo GUARDADO de ese día (sin lock para no pelear con `get_daily_totals`).
+        let arqueo: Option<ArqueoDia> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COALESCE(actual_cash_usd,0), COALESCE(actual_cash_bs,0), COALESCE(actual_zelle,0),
+                        COALESCE(actual_pago_movil,0), COALESCE(actual_transfer_bs,0), COALESCE(tasa_bcv,0)
+                 FROM daily_closings WHERE close_date = ?1 AND is_closed = 1",
+                params![fecha],
+                |r| Ok(ArqueoDia {
+                    actual_cash_usd: r.get(0)?, actual_cash_bs: r.get(1)?, actual_zelle: r.get(2)?,
+                    actual_pago_movil: r.get(3)?, actual_transfer_bs: r.get(4)?, tasa_bcv: r.get(5)?,
+                }),
+            ).optional()?
+        };
+        let Some(arqueo) = arqueo else { return Ok(None) };
+        // 2) los totales de HOY de ese día (con el cobro nuevo ya adentro).
+        let totals = self.get_daily_totals(fecha, fecha)?;
+        let t = if totals.is_empty() { DailyTotals::vacio(fecha) } else { totals[0].clone() };
+        // 3) las cuentas + la ESCRITURA de las columnas del esperado (el arqueo NO se toca).
+        let conn = self.conn.lock().unwrap();
+        let antes: (f64, f64, f64) = conn.query_row(
+            "SELECT COALESCE(difference,0), COALESCE(cash_usd,0) + COALESCE(zelle_total,0) + COALESCE(usd_cash_total,0) + COALESCE(drawer_adjust_usd,0),
+                    COALESCE(cash_bs,0) + COALESCE(pago_movil_total,0) + COALESCE(transfer_bs_total,0) + COALESCE(drawer_adjust_bs,0)
+             FROM daily_closings WHERE close_date = ?1",
+            params![fecha], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let c = self.cuentas_del_cierre(&conn, fecha, &t, &arqueo)?;
+        conn.execute(
+            "UPDATE daily_closings SET pos_charged=?2, pos_fees=?3, pos_net=?4, cash_usd=?5, cash_bs=?6,
+                    zelle_total=?7, pago_movil_total=?8, transfer_bs_total=?9, usd_cash_total=?10,
+                    grand_total=?11, difference=?12, total_usd=?13, total_bs=?14,
+                    drawer_adjust_usd=?15, drawer_adjust_bs=?16
+             WHERE close_date=?1 AND is_closed=1",
+            params![fecha, round2(t.pos_charged), round2(t.pos_fees), round2(t.pos_net),
+                    round2(t.cash_usd), round2(t.cash_bs), round2(t.zelle_total),
+                    round2(t.pago_movil_total), round2(t.transfer_bs_total), round2(t.usd_cash_total),
+                    c.grand_total, c.difference, round2(t.grand_usd), round2(t.grand_bs),
+                    round2(c.fondo_usd - c.gastos_usd), round2(-c.gastos_bs)],
+        )?;
+        // 4) el libro de plata: el día ya tiene su movimiento de cierre con la diferencia VIEJA. Se
+        //    corrige ESE mismo asiento (no se agrega otro): la nota dice que se recalculó y por qué.
+        conn.execute(
+            "UPDATE cash_movements SET amount = ?2,
+                    note = 'Cierre del día (diferencia del arqueo) · recalculado: entró/salió plata después del cierre'
+             WHERE type = 'cierre' AND day = ?1",
+            params![fecha, c.difference],
+        )?;
+        Ok(Some(AjusteCierre {
+            fecha: fecha.to_string(),
+            diferencia_antes: round2(antes.0),
+            diferencia_despues: c.difference,
+            diferencia_usd_antes: round2(c.actual_usd - antes.1),
+            diferencia_usd: c.diff_usd,
+            diferencia_bs_antes: round2(c.actual_bs - antes.2),
+            diferencia_bs: c.diff_bs,
+            esperado_usd_antes: round2(antes.1),
+            esperado_usd: c.esperado_usd,
+            esperado_bs_antes: round2(antes.2),
+            esperado_bs: c.esperado_bs,
+        }))
+    }
+
+    /// F92 — El ajuste del cierre (si hacía falta) + el texto para el operario. Lo usan los caminos que
+    /// mueven plata de un día ya cerrado: anotar un cobro retroactivo, corregirle la fecha y borrarlo.
+    /// NUNCA falla por el recálculo: si el cierre no se pudo actualizar se DEVUELVE el aviso (la plata
+    /// ya está anotada y el operario tiene que enterarse, no quedarse con un error críptico).
+    fn aviso_de_cierre(&self, fecha: &str) -> Option<String> {
+        match self.recalcular_cierre_cerrado(fecha) {
+            Ok(Some(a)) => Some(format!(
+                "El cierre del {} se actualizó: su esperado ahora es {} USD{} y la diferencia pasó de {} a {} USD.",
+                a.fecha,
+                fmt_usd_plano(a.esperado_usd),
+                if a.esperado_bs.abs() > 0.005 { format!(" + {} Bs.", fmt_miles(a.esperado_bs)) } else { String::new() },
+                fmt_usd_plano(a.diferencia_antes),
+                fmt_usd_plano(a.diferencia_despues),
+            )),
+            Ok(None) => None,
+            Err(e) => Some(format!(
+                "La plata quedó anotada, pero el cierre del {} no se pudo recalcular ({}). Abrilo con ↺ en Libro Diario → Cierres y volvé a cerrarlo para que el arqueo explique el día.",
+                fecha, e
+            )),
+        }
     }
 
     /// F71 — COPIA AUTOMÁTICA AL CERRAR EL DÍA (bloqueante A2 de la auditoría): el cierre es el momento
@@ -8674,8 +9097,9 @@ mod tests {
         assert_eq!(payments[0].amount, 10.0);
         // La moneda se deriva del método: Efectivo Bs → VES aunque el frontend mande 'USD'
         assert_eq!(payments[0].currency.as_deref(), Some("VES"), "moneda derivada del método Bs");
-        // paid_amount convierte Bs→USD con la tasa del día (40.5) => 10/40.5 ≈ 0.2469 (ROUND 4 dp, D3)
-        let expected_bs: f64 = (10.0_f64 / 40.5 * 10000.0).round() / 10000.0;
+        // paid_amount convierte Bs→USD con la tasa del día (40.5) => 10/40.5 ≈ 0.2469 → **$0.25**
+        // (F92: el abonado se guarda con 2 decimales; antes quedaba 0.2469)
+        let expected_bs: f64 = round2(10.0_f64 / 40.5);
         let paid: f64 = conn_query(|| {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap()
@@ -8686,7 +9110,7 @@ mod tests {
             let c = db.conn.lock().unwrap();
             c.query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap()
         });
-        assert!((paid2 - (15.0 + expected_bs)).abs() < 1e-9, "paid_amount = 15 + 10/40.5, got {paid2}");
+        assert!((paid2 - round2(15.0 + expected_bs)).abs() < 1e-9, "paid_amount = 15 + 10/40.5, got {paid2}");
         // Eliminar un abono recalcula
         db.delete_service_payment(pid1).unwrap();
         let paid3: f64 = conn_query(|| {
@@ -9131,8 +9555,10 @@ mod tests {
 
     #[test]
     fn test_paid_amount_rounded_no_float_noise() {
-        // D3 (2026-08-18): paid_amount no debe arrastrar ruido flotante
-        // (60.000323284571245) al convertir Bs→USD — ROUND(...,4).
+        // D3 (2026-08-18): paid_amount no debe arrastrar ruido flotante (60.000323284571245).
+        // F92 (2026-10-05): el redondeo es a **2 DECIMALES**, no a 4. Con 4 decimales el caso de abajo
+        // daba 60.0003 y un cliente que pagaba los Bs. exactos de su saldo dejaba un centavo fantasma
+        // (la orden parecía pagada de más). Pedido del dueño: «se acepta solo 2 decimales».
         let test_path = PathBuf::from("test_paid_rounded.db");
         let _ = std::fs::remove_file(&test_path);
         let db = Database::new(&test_path).expect("Failed to create test DB");
@@ -9140,12 +9566,32 @@ mod tests {
 
         let sid = db.add_service("RND-1", "Cliente", "", "M1", "f", "Cambio pantalla",
             "[\"Cambio pantalla\"]", 60.0, "Pago Móvil", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
-        // Bs 46.399 @ 773.3125 = $60.00032328... → ROUND(...,4) = $60.0003 (sin ruido flotante)
+        // Bs 46.399 @ 773.3125 = $60.00032328... → F92: $60.00 (la orden queda CANCELADA, sin centavo fantasma)
         db.add_service_payment(sid, 46399.0, "Pago Móvil", 0.0, "", "USD", "", "").unwrap();
 
         let svc = db.get_service_by_id(sid).unwrap().unwrap();
-        assert!((svc.paid_amount - 60.0003).abs() < 1e-9,
-            "paid_amount redondeado a 4 decimales (60.0003, sin 60.000323284571245), got {}", svc.paid_amount);
+        assert!((svc.paid_amount - 60.0).abs() < 1e-9,
+            "paid_amount con 2 decimales (60.00, ni 60.0003 ni ruido flotante), got {}", svc.paid_amount);
+        assert!((svc.amount - svc.paid_amount).abs() < 0.005, "y el saldo queda en 0: la orden está cancelada");
+
+        // El mismo caso en el otro sentido: un monto con centavos se guarda con centavos (no se
+        // redondea a entero). Antes, un abono en Bs pasaba por `Math.round` en la UI y perdía 0,99.
+        let sid2 = db.add_service("RND-2", "Cliente", "", "M2", "f", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 10.0, "Efectivo Bs", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        let pid = db.add_service_payment(sid2, 12345.67, "Efectivo Bs", 0.0, "", "USD", "", "").unwrap();
+        let monto: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT amount FROM service_payments WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert!((monto - 12345.67).abs() < 1e-9, "los Bs. conservan sus centavos: {monto}");
+
+        // Y una comisión del Punto se guarda con 2 decimales (comisión + neto = monto, sin deriva)
+        let sid3 = db.add_service("RND-3", "Cliente", "", "M3", "f", "Cambio pantalla",
+            "[\"Cambio pantalla\"]", 33.33, "Punto de Venta ($)", "", 0.0, "", "USD", "", "", "", None, "", None, "", None, 0.0).unwrap();
+        let pid3 = db.add_service_payment(sid3, 33.33, "Punto de Venta ($)", 3.5, "", "USD", "", "").unwrap();
+        let (fee, neto): (f64, f64) = db.conn.lock().unwrap()
+            .query_row("SELECT bank_fee_amount, net_amount FROM service_payments WHERE id=?1", params![pid3],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!((fee - 1.17).abs() < 1e-9, "comisión 3,5% de 33,33 = 1,17: {fee}");
+        assert!((neto + fee - 33.33).abs() < 1e-9, "neto + comisión = monto exacto: {neto} + {fee}");
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
@@ -9197,7 +9643,7 @@ mod tests {
         let c = closings.iter().find(|x| x.close_date == today).unwrap();
         assert_eq!(c.total_usd, 150.0, "cierre guarda total_usd");
         assert_eq!(c.total_bs, 34500.0, "cierre guarda total_bs");
-        assert!((c.grand_total - (150.0 + 34500.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv, got {}", c.grand_total);
+        assert!((c.grand_total - round2(150.0 + 34500.0 / 40.5)).abs() < 1e-9, "grand_total del cierre en USD equiv (F92: a centavos), got {}", c.grand_total);
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
@@ -9327,7 +9773,7 @@ mod tests {
         db.add_service_refund(sid, 400.0, "Efectivo Bs", "", "USD", "").unwrap();
         let paid_final: f64 = db.conn.lock().unwrap()
             .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
-        let expected: f64 = ((40.0_f64 + (1000.0 - 400.0) / 40.5) * 10000.0).round() / 10000.0;
+        let expected: f64 = round2(40.0 + (1000.0 - 400.0) / 40.5);
         assert!((paid_final - expected).abs() < 1e-9, "paid_final={paid_final} expected={expected}");
         assert_eq!(payments[1].amount, -20.0, "el reembolso Bs queda negativo en service_payments");
 
@@ -11160,7 +11606,11 @@ discount_amount: 0.0,
         // la marca/modelo se guardan CANÓNICOS (Redmi -> Xiaomi)
         db.add_product("Pantalla Redmi 10 4G", Some(1), "Redmi", "Red 10 4G", "", r#"["Red 10 4G"]"#, 10.0, 20.0, 5, 2, 0.0).unwrap();
         db.add_product("Pantalla Samsung A06", Some(1), "Samsung", "A06 4G", "", r#"["Samsung A06 4G"]"#, 8.0, 15.0, 0, 2, 0.0).unwrap();
-        db.add_product("Táctil Tecno", Some(2), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 0.0, 0.0, -1, 0, 0.0).unwrap();
+        // F86/AC-13: la ficha en FALTANTE ya no se crea con un stock negativo a mano (el formulario lo
+        // rechaza); nace en 0 y el stock baja con un movimiento REAL de salida, que es la única forma de
+        // que el stock quede en negativo. El test sigue comprobando lo mismo: el filtro «negativo».
+        let tactil = db.add_product("Táctil Tecno", Some(2), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 0.0, 0.0, 0, 0, 0.0).unwrap();
+        db.add_inventory_movement(tactil, "salida", 1, "Ajuste de prueba (faltante)", "").unwrap();
 
         let all = db.get_products_page("", None, None, None, None, None, 50, 0).unwrap();
         assert_eq!(all.total, 3);
@@ -11190,6 +11640,44 @@ discount_amount: 0.0,
         assert_eq!(p1.items.len(), 2);
         let p2 = db.get_products_page("", None, None, None, None, Some("stock"), 2, 2).unwrap();
         assert_eq!(p2.items.len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// AC-13 (F86) — EL FORMULARIO NO ESCRIBE UN STOCK NEGATIVO.
+    ///
+    /// `add_product` / `update_product` (el camino del formulario de producto) RECHAZAN un stock o un
+    /// stock mínimo negativo, con un motivo que la pantalla puede mostrar. El stock negativo por un
+    /// movimiento REAL sigue siendo válido (venta, entrega con faltante, ajuste en Movimientos): lo que
+    /// se prohíbe es teclearlo en la ficha — de ahí salía el «−60» que la carga masiva después arrastraba
+    /// a «−30» (el reclamo del dueño).
+    #[test]
+    fn test_stock_negativo_a_mano_se_rechaza() {
+        let test_path = PathBuf::from("test_stock_negativo.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // nacer con un negativo: error con motivo, y NO se crea nada
+        let err = db.add_product("Pantalla Mala", Some(1), "Samsung", "A06", "", "", 5.0, 9.0, -1, 0, 0.0).unwrap_err();
+        assert!(err.to_string().contains("no puede ser negativo"), "{err}");
+        assert!(db.get_products("Mala", None).unwrap().is_empty(), "la ficha no se creó");
+
+        // nacer con un MÍNIMO negativo: también es un dato sin sentido (el aviso de compra)
+        let err = db.add_product("Pantalla Mala", Some(1), "Samsung", "A06", "", "", 5.0, 9.0, 0, -3, 0.0).unwrap_err();
+        assert!(err.to_string().contains("stock mínimo no puede ser negativo"), "{err}");
+
+        // el caso válido se crea, y guardarlo con un negativo tampoco se puede
+        let pid = db.add_product("Pantalla Buena", Some(1), "Samsung", "A06", "", "", 5.0, 9.0, 4, 1, 0.0).unwrap();
+        let err = db.update_product(pid, "Pantalla Buena", Some(1), "Samsung", "A06", "", "", 5.0, 9.0, -7, 1, 0.0).unwrap_err();
+        assert!(err.to_string().contains("no puede ser negativo"), "{err}");
+        let err = db.update_product(pid, "Pantalla Buena", Some(1), "Samsung", "A06", "", "", 5.0, 9.0, 4, -1, 0.0).unwrap_err();
+        assert!(err.to_string().contains("stock mínimo no puede ser negativo"), "{err}");
+        assert_eq!(db.get_product(pid).unwrap().unwrap().stock, 4, "el stock guardado no se tocó");
+
+        // y el camino LEGÍTIMO del negativo sigue funcionando: un movimiento real de salida
+        db.add_inventory_movement(pid, "salida", 5, "Servicio Entregado", "DEV-0001").unwrap();
+        assert_eq!(db.get_product(pid).unwrap().unwrap().stock, -1, "sin stock queda en faltante visible");
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
@@ -11349,8 +11837,13 @@ discount_amount: 0.0,
         let db = Database::new(&test_path).expect("Failed to create test DB");
         db.add_product("P1", Some(1), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 3, 1, 0.0).unwrap();
         db.add_product("P2", Some(1), "Tecno", "Spark 8C", "", r#"["Tecno Spark 8C"]"#, 10.0, 20.0, 1, 1, 0.0).unwrap(); // duplicado
-        db.add_product("P3", Some(2), "Samsung", "A06 4G", "", "[]", 0.0, 0.0, 0, 0, 0.0).unwrap();  // sin precio y sin compat
-        db.add_product("P4", Some(1), "Blu", "G73", "", r#"["Blu G73"]"#, 5.0, 9.0, -2, 0, 0.0).unwrap();
+        // F86/REQ-1: una ficha con MODELO ya no puede quedar sin compatibilidad (el modelo arma la suya),
+        // así que la única forma de tener una ficha «sin compat» es que tampoco tenga modelo.
+        db.add_product("P3", Some(2), "Samsung", "", "", "[]", 0.0, 0.0, 0, 0, 0.0).unwrap();  // sin precio y sin compat
+        // P4 en FALTANTE: mismo criterio que el resto de los fixtures (F86/AC-13) — nace en 0 y el stock
+        // baja con un movimiento real de salida. Las cuentas del test no cambian (3+1+0−2 = 2 unidades).
+        let p4 = db.add_product("P4", Some(1), "Blu", "G73", "", r#"["Blu G73"]"#, 5.0, 9.0, 0, 0, 0.0).unwrap();
+        db.add_inventory_movement(p4, "salida", 2, "Ajuste de prueba (faltante)", "").unwrap();
 
         let s = db.get_inventory_stats().unwrap();
         assert_eq!(s.sku, 4);
@@ -11514,6 +12007,75 @@ discount_amount: 0.0,
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F89 — LAS PANTALLAS DE ESE MODELO, Y DE NINGÚN OTRO (el caso real del dueño, 2026-10-05).
+    ///
+    /// Dos mitades, las dos con SU data:
+    ///  (1) una pantalla cuya compatibilidad es «Infinix Hot 30i / Tecno Spark Go 2023 / Tecno Pop 7 /
+    ///      Tecno Spark 10 / Tecno Spark 10C / Infinix Smart 7» la ofrecen los SEIS modelos (comparten
+    ///      la misma pantalla) — su pedido: «cada modelo comparte la misma compatibilidad, tienes que
+    ///      reflejar eso también»;
+    ///  (2) para «Spark 7 Pro» NO aparece la pantalla de un Google 7 Pro / Realme 7 Pro / Redmi Note 7,
+    ///      que entraban por coincidencia PARCIAL («7 Pro» es parte de «Spark 7 Pro») — su pedido: «no
+    ///      puede darme de otro modelo que no es».
+    #[test]
+    fn test_f89_el_servicio_ofrece_solo_las_pantallas_de_ese_modelo() {
+        let test_path = PathBuf::from("test_registro_servicio_exacto.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("base de test");
+
+        // la pantalla del Hot 30i, con la lista REAL del archivo del dueño
+        db.add_product(
+            "Pantalla Infinix Hot 30i / Go 2023 / Pop 7 / Spark 10C / Infinix Smart 7",
+            Some(1), "Infinix", "Hot 30i", "",
+            r#"["Infinix Hot 30i","Tecno Spark Go 2023","Tecno Pop 7","Tecno Spark 10","Tecno Spark 10C","Infinix Smart 7"]"#,
+            9.0, 30.0, 9, 0, 0.0,
+        )
+        .unwrap();
+        // las de OTROS teléfonos que la consulta con parecidos sí ofrecía para «Spark 7 Pro»
+        db.add_product("Pantalla Google 7 Pro (OLED)", Some(1), "Google", "7 Pro", "", r#"["Google 7 Pro"]"#, 9.0, 30.0, 0, 0, 0.0).unwrap();
+        db.add_product("Pantalla Oppo Realme 7 Pro", Some(1), "Oppo", "Realme 7 Pro", "", r#"["Realme 7 Pro"]"#, 9.0, 30.0, 0, 0, 0.0).unwrap();
+        db.add_product("Pantalla Xiaomi Redmi Note 7", Some(1), "Xiaomi", "Redmi Note 7", "", r#"["Xiaomi Redmi Note 7","Xiaomi 7 Pro"]"#, 9.0, 30.0, 0, 0, 0.0).unwrap();
+        // la pantalla DEL Spark 7 Pro (esta sí tiene que salir)
+        db.add_product("Pantalla Tecno Spark 7 Pro", Some(1), "Tecno", "Spark 7 Pro", "", r#"["Tecno Spark 7 Pro"]"#, 9.0, 30.0, 2, 0, 0.0).unwrap();
+
+        // (1) los SIETE textos de la lista comparten la MISMA pantalla
+        for modelo in ["Hot 30i", "Infinix Hot 30i", "Spark Go 2023", "Pop 7", "Spark 10", "Spark 10C", "Smart 7"] {
+            let ofrecidas = db.find_compatible_screens_exactas(modelo, 40).unwrap();
+            let nombres: Vec<String> = ofrecidas.iter().map(|c| c.product.name.clone()).collect();
+            assert!(
+                nombres.iter().any(|n| n.contains("Hot 30i")),
+                "«{modelo}» tiene que recibir la pantalla del Hot 30i (está en su compatibilidad): {nombres:?}"
+            );
+        }
+
+        // (2) para «Spark 7 Pro» NO puede venir la pantalla de otro teléfono
+        let spark: Vec<String> = db
+            .find_compatible_screens_exactas("Spark 7 Pro", 40)
+            .unwrap()
+            .iter()
+            .map(|c| c.product.name.clone())
+            .collect();
+        assert!(spark.iter().any(|n| n.contains("Spark 7 Pro")), "la suya sí: {spark:?}");
+        for ajeno in ["Google 7 Pro", "Realme 7 Pro", "Redmi Note 7"] {
+            assert!(
+                !spark.iter().any(|n| n.contains(ajeno)),
+                "«{ajeno}» es de OTRO modelo y no puede ofrecerse: {spark:?}"
+            );
+        }
+
+        // y la consulta VIEJA (con parecidos) sí las traía: si no, este test no estaría midiendo nada
+        let vieja: Vec<String> = db
+            .find_compatible_products("Spark 7 Pro", Some(1), 40)
+            .unwrap()
+            .iter()
+            .map(|c| c.product.name.clone())
+            .collect();
+        assert!(
+            vieja.iter().any(|n| n.contains("Google 7 Pro")),
+            "la consulta con parecidos traía la pantalla de otro modelo (el defecto medido): {vieja:?}"
+        );
     }
 
     /// GATE DE MARCA de la pantalla a instalar (B2 de la validación pre-producción).
@@ -12422,7 +12984,8 @@ discount_amount: 0.0,
         assert_eq!(t_hoy[0].usd_cash_total, 30.0, "la caja de HOY solo tiene los $30 de hoy");
 
         // 3) CORREGIR la fecha de un pago ya anotado mueve la plata de caja (y recalcula paid_amount)
-        db.update_service_payment_date(pid_hoy, &ayer).unwrap();
+        let ajustes = db.update_service_payment_date(pid_hoy, &ayer).unwrap();
+        assert!(ajustes.is_empty(), "mover entre dos días ABIERTOS no toca ningún cierre (se cierran después)");
         let t_ayer = db.get_daily_totals(&ayer, &ayer).unwrap();
         let t_hoy = db.get_daily_totals(&hoy, &hoy).unwrap();
         assert_eq!(t_ayer[0].usd_cash_total, 50.0, "ayer ahora tiene los dos pagos");
@@ -12439,22 +13002,61 @@ discount_amount: 0.0,
         let err = db.update_service_payment_date(pid_ayer, &manana).unwrap_err().to_string();
         assert!(err.contains("no puede ser futura"), "tampoco al editar: {err}");
 
-        // 5) DÍA CERRADO → rechazado con el camino real (así el arqueo guardado no queda mintiendo)
+        // 5) F92 — DÍA CERRADO: SE ACEPTA y su cierre se ACTUALIZA.
+        //
+        // Antes esto se rechazaba («abrí el día con ↺, anotá el pago y volvé a cerrarlo») y el dueño
+        // quedaba trabado justo cuando el cliente avisa que pagó días atrás. Ahora la plata entra en la
+        // caja de ESE día y el cierre se recalcula contra el MISMO arqueo contado.
+        //
+        // El día se abre y se CIERRA por el camino REAL (`close_day`), con el cajón contado en 0: así la
+        // prueba mira un cierre de verdad, con su asiento en el libro.
         db.conn.lock().unwrap().execute(
-            "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, is_closed) VALUES (?1, 0, 40.5, 45, 1)",
+            "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, is_closed)
+             VALUES (?1, 0, 40.5, 45, 0)",
             params![cerrado],
         ).unwrap();
-        let err = db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", &cerrado).unwrap_err().to_string();
-        assert!(err.contains("ya está CERRADO") && err.contains("Cierres"), "día cerrado rechazado con la salida: {err}");
-        // …y mover un pago FUERA de un día cerrado tampoco se permite
-        db.conn.lock().unwrap().execute("UPDATE service_payments SET payment_date = ?2 WHERE id = ?1",
-            params![pid_ayer, format!("{} 00:00:00", cerrado)]).unwrap();
-        let err = db.update_service_payment_date(pid_ayer, &hoy).unwrap_err().to_string();
-        assert!(err.contains("ya está CERRADO"), "no se saca un pago de un día cerrado: {err}");
+        db.add_service_payment(sid, 15.0, "Divisas (USD Cash)", 0.0, "", "USD", "cobrado ese día", &cerrado).unwrap();
+        let cierre_id = db.close_day(&cerrado, "cierre del día", 0.0, 40.5, 45.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        assert!(cierre_id > 0);
+        let diferencia = |d: &str| -> f64 {
+            db.conn.lock().unwrap()
+                .query_row("SELECT COALESCE(difference,0) FROM daily_closings WHERE close_date=?1", params![d], |r| r.get(0))
+                .unwrap()
+        };
+        // Con el cajón contado en 0 y $15 esperados, el arqueo dice «faltan $15» (diferencia −15).
+        assert!((diferencia(&cerrado) + 15.0).abs() < 1e-9, "el cierre nace con la diferencia real: {}", diferencia(&cerrado));
+
+        // 5a) un cobro MÁS, fechado en el día YA CERRADO: entra, y el cierre lo explica
+        let pid_cerrado = db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "cobrado ese día", &cerrado).unwrap();
+        let fecha_cerrado: String = db.conn.lock().unwrap()
+            .query_row("SELECT date(payment_date) FROM service_payments WHERE id=?1", params![pid_cerrado], |r| r.get(0)).unwrap();
+        assert_eq!(fecha_cerrado, cerrado, "el pago entró en el día cerrado (antes se rechazaba)");
+        let cierre_cerrado: (f64, f64, f64) = db.conn.lock().unwrap().query_row(
+            "SELECT COALESCE(usd_cash_total,0), COALESCE(actual_cash_usd,0), COALESCE(difference,0)
+             FROM daily_closings WHERE close_date=?1", params![cerrado],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert!((cierre_cerrado.0 - 20.0).abs() < 1e-9, "el cierre del día cerrado ve los $20: {cierre_cerrado:?}");
+        assert!(cierre_cerrado.1.abs() < 1e-9, "el ARQUEO contado (0) no se toca: {cierre_cerrado:?}");
+        assert!((cierre_cerrado.2 + 20.0).abs() < 1e-9, "y la diferencia pasa a «faltan $20»: {cierre_cerrado:?}");
+        // el asiento de cierre del libro se corrige con la diferencia nueva (no se agrega otro)
+        let mov_cierre: f64 = db.conn.lock().unwrap().query_row(
+            "SELECT COALESCE(amount,0) FROM cash_movements WHERE type='cierre' AND day=?1", params![cerrado], |r| r.get(0),
+        ).unwrap();
+        assert!((mov_cierre + 20.0).abs() < 1e-9, "el cierre del libro quedó en −20: {mov_cierre}");
+
+        // 5b) mover un pago DESDE un día cerrado también se permite: los dos cierres se recalculan
+        let ajustes = db.update_service_payment_date(pid_cerrado, &hoy).unwrap();
+        assert_eq!(ajustes.len(), 1, "solo el día de ORIGEN (cerrado) tenía cierre que recalcular");
+        assert_eq!(ajustes[0].fecha, cerrado);
+        assert!((ajustes[0].diferencia_antes + 20.0).abs() < 1e-9, "antes: −20: {:?}", ajustes[0]);
+        assert!((ajustes[0].diferencia_despues + 15.0).abs() < 1e-9, "después: quedan los $15 → −15: {:?}", ajustes[0]);
+        assert!((ajustes[0].esperado_usd - 15.0).abs() < 1e-9);
+        assert!((diferencia(&cerrado) + 15.0).abs() < 1e-9, "el cierre guardado volvió a −15");
 
         // 6) DÍA SIN TURNO → rechazado (la plata quedaría fuera de toda caja)
         let err = db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", &sin_turno).unwrap_err().to_string();
-        assert!(err.contains("No hay un turno"), "día sin turno rechazado: {err}");
+        assert!(err.contains("No hay ninguna caja"), "día sin turno rechazado: {err}");
 
         // 7) Formato inválido y pago inexistente
         assert!(db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", "17/09/2026").unwrap_err()

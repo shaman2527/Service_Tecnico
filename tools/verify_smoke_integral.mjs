@@ -773,15 +773,16 @@ const clickCardButton = async (orderNum, label) => {
 
 // ============================================================================================
 // 5) INVENTARIO: pestañas, búsqueda con stock, paginación, movimientos con referencia de orden
-//    y «Repuesto por modelo»
+//    (F86: la pestaña «Repuesto por modelo» se eliminó por decisión del dueño — su contenido vive
+//    en la FICHA del teléfono, dentro de «Modelos»)
 // ============================================================================================
 {
   await goto('Inventario');
   await waitH1('Inventario');
   await waitFor(`document.querySelectorAll('[role="tab"]').length > 0`, 8000);
   const tabs = await evalx(`[...document.querySelectorAll('[role="tab"]')].map(t => t.innerText.trim())`);
-  check('el Inventario tiene sus 5 pestañas (nombres reales de hoy)',
-    (tabs ?? []).join(' | ') === 'Productos | Modelos | Repuesto por modelo | Movimientos | Ajustes',
+  check('el Inventario tiene sus 4 pestañas (nombres reales de hoy)',
+    (tabs ?? []).join(' | ') === 'Productos | Modelos | Movimientos | Ajustes',
     (tabs ?? []).join(' | '));
 
   // --- Productos ---
@@ -850,12 +851,13 @@ const clickCardButton = async (orderNum, label) => {
     (tablaMov?.footer || '').includes(String(mov?.total ?? -1)),
     `pie: ${tablaMov?.footer} · backend: ${mov?.total}`);
 
-  // --- Repuesto por modelo ---
-  await clickExactText('[role="tab"]', 'Repuesto por modelo');
+  // --- Modelos: el teléfono y sus repuestos (F86: reemplaza el recorrido de «Repuesto por modelo»,
+  //     la pestaña que se eliminó por decisión del dueño — el mismo dato se ve en la FICHA) ---
+  await clickExactText('[role="tab"]', 'Modelos');
   await sleep(1000);
-  check('la pestaña «Repuesto por modelo» abre (buscador de teléfono)',
-    await waitFor(`!!document.querySelector('input[placeholder^="Ej: Redmi Note 11"]')`, 8000));
-  await clickCenter(`document.querySelector('input[placeholder^="Ej: Redmi Note 11"]')`);
+  check('la pestaña «Modelos» abre (buscador del padrón)',
+    await waitFor(`!!document.querySelector('input[placeholder^="Buscar por teléfono"]')`, 8000));
+  await clickCenter(`document.querySelector('input[placeholder^="Buscar por teléfono"]')`);
   await sleep(600);
   await insertText(modeloElegido ? modeloElegido.label : 'Redmi Note 11');
   await sleep(2200);
@@ -863,30 +865,39 @@ const clickCardButton = async (orderNum, label) => {
     const p = document.querySelector('[role="tabpanel"]');
     const t = p.innerText;
     const rows = [...p.querySelectorAll('table tbody tr')].map(r => [...r.querySelectorAll('td')].map(c => c.innerText.trim()));
-    const badgeStock = [...p.querySelectorAll('table tbody td [class*="bg-success"]')].map(b => b.innerText.trim());
+    // El stock que se mide es el de los REPUESTOS de la ficha del teléfono (F86: el modelo ya no
+    // muestra ningún número como stock propio: ese número era la suma de sus repuestos compatibles).
     return JSON.stringify({
-      cuenta: (t.match(/(\\d+) repuestos? compatibles/) || [])[1] ?? null,
+      filas: rows.length,
       conStock: (t.match(/(\\d+) con stock/) || [])[1] ?? null,
-      filas: rows.length, badgeStock,
-      coincide: rows.slice(0, 3).map(r => r[3]),
+      repuestos: (t.match(/(\\d+)\\s*repuestos?/i) || [])[1] ?? null,
+      primera: rows[0] ? rows[0].slice(0, 4) : null,
     });
   })()`);
   const pm = JSON.parse(porModelo || '{}');
-  check('el teléfono muestra sus repuestos con stock real',
-    Number(pm.filas) > 0 && Number(pm.conStock) > 0 && (pm.badgeStock || []).some(v => Number(v) > 0),
-    `${pm.filas} repuesto(s) · ${pm.conStock} con stock · badges: ${(pm.badgeStock || []).join(', ')}`);
+  check('el padrón encuentra el teléfono y le cuenta sus repuestos',
+    Number(pm.filas) > 0 && pm.primera != null,
+    `${pm.filas} fila(s) · repuestos=${pm.repuestos ?? '—'} · con stock=${pm.conStock ?? '—'} · primera: ${(pm.primera || []).join(' | ')}`);
   if (pantallaDePrueba) {
-    // Se busca el repuesto por el MODELO del teléfono (la tabla muestra el nombre del producto
-    // con sus chips de compatibilidad, que pueden partir el texto): lo estable es el modelo.
+    // F86: la pantalla del servicio de prueba se busca en la FICHA del teléfono (el botón «Ficha» de
+    // la fila), que es lo que reemplaza a la pestaña eliminada: ahí van sus repuestos por categoría.
+    await clickCenter(`(() => {
+      const tr = document.querySelector('[role="tabpanel"] table tbody tr');
+      return tr ? [...tr.querySelectorAll('button')].find(b => /Ficha/.test(b.innerText)) ?? null : null;
+    })()`).catch(() => {});
+    await sleep(1800);
     const aparecePantalla = await evalx(`(() => {
-      const main = document.querySelector('main');
-      const t = main?.innerText || '';
+      // el diálogo se monta en un portal (fuera de <main>): se busca en TODOS los diálogos abiertos
+      const t = [...document.querySelectorAll('[role="dialog"]')].map(d => d.innerText).join(' ');
       const nombre = ${JSON.stringify(pantallaDePrueba.pantalla)};
       const nucleo = nombre.replace(/^Pantalla\\s+/i, '').split('/')[0].trim();
       return t.includes(nucleo) || t.includes(${JSON.stringify(pantallaDePrueba.label)});
     })()`);
-    check('entre los repuestos aparece la pantalla que usa el servicio de prueba', aparecePantalla === true,
+    check('la ficha del teléfono lista la pantalla que usa el servicio de prueba', aparecePantalla === true,
       `${pantallaDePrueba.pantalla} · modelo ${pantallaDePrueba.label}`);
+    // cerrar la ficha para no dejar un diálogo abierto en el resto del recorrido
+    await keyNav('Escape', 'Escape', 27).catch(() => {});
+    await sleep(600);
   }
 }
 
@@ -905,6 +916,13 @@ const clickCardButton = async (orderNum, label) => {
   const buscar = (t) => setValue('input[placeholder^="Buscar por producto"]', t);
   const nombrePantalla = pantallaDePrueba ? pantallaDePrueba.pantalla : '';
   const modeloBuscar = pantallaDePrueba ? pantallaDePrueba.label : 'Redmi Note 11';
+  // Núcleo del nombre del repuesto (sin la categoría y sin las otras grafías « / »): es como se
+  // identifica su FILA en la tabla. NO se puede identificar por el texto de «Modelos compatibles»:
+  // desde el rediseño responsive (F85/F86) esa celda muestra UN chip + «+N» para que las 11 columnas
+  // entren sin scroll lateral, así que el teléfono buscado puede quedar escondido en el «+N»
+  // (medido 2026-10-04: el modelo «18i» quedaba dentro de «Tecno Spark 7 Pro +2» y la comprobación
+  // fallaba culpando a la búsqueda, que sí traía la fila).
+  const nucleoPantalla = nombrePantalla.replace(/^(Pantalla|Táctil Tablet|Táctil)\s+/i, '').split(' / ')[0].trim();
   await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
   await buscar(modeloBuscar);
   await sleep(2200);
@@ -935,7 +953,7 @@ const clickCardButton = async (orderNum, label) => {
   })()`);
 
   const filaPantalla = await filaDeProductos(
-    `(c[iComp] || '').includes(${JSON.stringify(modeloBuscar)}) || (c[iMod] || '') === ${JSON.stringify(modeloBuscar)}`);
+    `(c[iComp] || '').includes(${JSON.stringify(modeloBuscar)}) || (c[iMod] || '') === ${JSON.stringify(modeloBuscar)} || (c[iProd] || '').includes(${JSON.stringify(nucleoPantalla)})`);
   const fp = JSON.parse(filaPantalla || 'null');
   check('la pantalla compatible con el modelo aparece en Productos',
     !!fp, fp ? `${fp.producto} · ${fp.categoria} · compat: ${String(fp.compat).slice(0, 60)}` : 'no se encontró la fila');
@@ -946,7 +964,6 @@ const clickCardButton = async (orderNum, label) => {
   // cualquiera de las compatibles, que es lo que hacía antes y no probaba la pantalla elegida).
   // El nombre de la ficha trae las tres grafías separadas por « / »; en la tabla la primera parte es
   // la que está en la columna Producto (el resto vive en «Modelos compatibles»).
-  const nucleoPantalla = nombrePantalla.replace(/^Pantalla\s+/i, '').split('/')[0].trim();
   if (nombrePantalla) {
     await clickCenter(`document.querySelector('input[placeholder^="Buscar por producto"]')`);
     await buscar(nombrePantalla);
@@ -972,7 +989,13 @@ const clickCardButton = async (orderNum, label) => {
     `buscando: ${nombrePantalla || modeloBuscar}`);
   await clickCenter(`(() => {
     const r = ${filaParaAbrir};
-    return r ? ([...r.querySelectorAll('button')].find(b => (b.innerText || '').includes('Editar')) || null) : null;
+    if (!r) return null;
+    // F85/F86 — las acciones de la fila del inventario son de ICONO (para que las 11 columnas entren
+    // sin scroll lateral), así que el botón ya no dice «Editar»: su significado vive en el aria-label
+    // («Editar <producto>») y en el title. Se aceptan los dos (y el texto, por si vuelve el rótulo).
+    return [...r.querySelectorAll('button')].find(b =>
+      /^Editar/.test(b.getAttribute('aria-label') || '') || /Editar/.test(b.getAttribute('title') || '')
+      || (b.innerText || '').includes('Editar')) || null;
   })()`);
   // El formulario abre como «Editar: <nombre>» y el campo del nombre NO tiene placeholder (solo
   // label «Nombre *»): se comprueba el título y que algún input traiga el nombre del producto.

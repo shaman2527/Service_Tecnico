@@ -9,7 +9,6 @@ import type { Category, InventoryStats, Product } from '../types';
 import { ProductForm } from './ProductForm';
 import { ProductsTab } from './inventory/ProductsTab';
 import { ModelsTab } from './inventory/ModelsTab';
-import { ByModelTab } from './inventory/ByModelTab';
 import { MovementsTab } from './inventory/MovementsTab';
 import { PricesTab } from './inventory/PricesTab';
 import { LoadCsvDialog } from './inventory/LoadCsvDialog';
@@ -19,9 +18,12 @@ import { DuplicatesDialog } from './inventory/DuplicatesDialog';
 // misma tabla ("Inventario" y "Pantallas"); ahora es una sola con pestañas:
 //   Productos             → gestión del catálogo (KPIs, filtros, tabla paginada)
 //   Modelos               → padrón de teléfonos del taller (marca, repuestos, por revisar)
-//   Repuesto por modelo   → consulta "¿qué repuesto le sirve a este teléfono?"
 //   Movimientos           → auditoría de entradas/salidas con su orden o pedido
 //   Ajustes               → herramientas de datos (solo dueño)
+// F86 (decisión del dueño, 2026-10-04): la pestaña «Repuesto por modelo» SE ELIMINÓ. Tenía TRES
+// formas de ver «por modelo» (Productos, Modelos y Repuesto por modelo) y era justamente lo que le
+// hacía ruido; se quedó con «Modelos», que ya abre la ficha del teléfono con sus repuestos por
+// categoría. El atajo «buscar por modelo» ahora lleva a Modelos con ese teléfono ya buscado.
 export default function Inventory({ role = 'owner', initialTab = 'productos', initialModel = '' }: {
   role?: 'owner' | 'cashier' | 'loading';
   initialTab?: string;
@@ -65,7 +67,7 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
   useEffect(() => {
     api.getCategories().then(setCategories).catch(() => setCategories([]));
     loadStats();
-    // Las pestañas hijas (Productos / Modelos / Repuesto por modelo / Movimientos / Ajustes) usan
+    // Las pestañas hijas (Productos / Modelos / Movimientos / Ajustes) usan
     // `refreshKey`: subirlo las vuelve a leer a TODAS, sin que el operario toque nada.
     setRefreshKey(k => k + 1);
   }, [dataVersion]);
@@ -107,8 +109,11 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
   useEffect(() => { setModelQuery(initialModel); }, [initialModel]);
 
   const openByModel = (model: string) => {
+    // F86: el atajo «por modelo» (botones de capas de Productos / Modelos y «Buscar por modelo» de la
+    // cabecera) lleva al padrón con ESE teléfono ya buscado: ahí está su ficha, con los repuestos que
+    // le sirven agrupados por categoría, que es lo que hacía la pestaña que se eliminó.
     setModelQuery(model);
-    setTab('modelo');
+    setTab('modelos');
   };
 
   return (
@@ -146,7 +151,6 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
           <TabsList>
             <TabsTrigger value="productos"><Tag data-icon="inline-start" /> Productos</TabsTrigger>
             <TabsTrigger value="modelos"><Smartphone data-icon="inline-start" /> Modelos</TabsTrigger>
-            <TabsTrigger value="modelo"><Layers data-icon="inline-start" /> Repuesto por modelo</TabsTrigger>
             <TabsTrigger value="movimientos"><MoveHorizontal data-icon="inline-start" /> Movimientos</TabsTrigger>
             {role === 'owner' && <TabsTrigger value="precios"><Wand2 data-icon="inline-start" /> Ajustes</TabsTrigger>}
           </TabsList>
@@ -167,12 +171,10 @@ export default function Inventory({ role = 'owner', initialTab = 'productos', in
           </TabsContent>
 
           <TabsContent value="modelos">
-            <ModelsTab refreshKey={refreshKey} canEdit={role === 'owner'} onByModel={openByModel} />
-          </TabsContent>
-
-          <TabsContent value="modelo">
-            <ByModelTab refreshKey={refreshKey} initialModel={modelQuery} canEdit={role === 'owner'}
-              onEdit={p => { setEditing(p); setShowForm(true); }} />
+            {/* F86: `initialSearch` viene del atajo «por modelo» (y del buscador de la ficha del
+                producto): la pestaña abre con ESE teléfono ya buscado en vez de con la lista entera. */}
+            <ModelsTab refreshKey={refreshKey} canEdit={role === 'owner'}
+              initialSearch={modelQuery} />
           </TabsContent>
 
           <TabsContent value="movimientos">

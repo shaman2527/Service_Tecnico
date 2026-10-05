@@ -1,6 +1,8 @@
 import type { ServicePayment } from '../types';
 // Extensión explícita: los tests puros corren en Node (sin resolución estilo bundler).
 import { netByCurrency } from './refund-math.ts';
+// F92: el dinero se maneja con 2 decimales — una sola definición de «cuánto es dinero» en toda la app.
+import { round2 } from './payment-math.ts';
 
 // F38 — ¿EN QUÉ MONEDA SE DICE EL SALDO DE UNA ORDEN? (módulo PURO, sin React).
 //
@@ -27,9 +29,10 @@ export interface OrderBalance {
   usd: number;
   /** Equivalencia en bolívares del MISMO saldo (negativa si hay excedente a favor del cliente),
    *  con la tasa del día abierto (null si no hay tasa).
-   *  **Redondeada AL BOLÍVAR**, igual que el monto que se cobra (`payment-math.suggestAmount` y
-   *  `finalAmount` redondean los Bs. a entero): el número que se muestra tiene que ser EXACTAMENTE el
-   *  que el operario va a pedir, sin centavos de bolívar que no existen en la calle. */
+   *  **Con 2 decimales** (F92), igual que el monto que se cobra (`payment-math.suggestAmount` y
+   *  `finalAmount`): el número que se muestra tiene que ser EXACTAMENTE el que el operario va a pedir.
+   *  Antes se redondeaba AL BOLÍVAR ENTERO y el cobro se redondeaba igual, así que los dos coincidían
+   *  pero se perdían hasta 0,99 Bs. por cobro — plata que después no cuadraba en la caja del día. */
   bs: number | null;
   /** Moneda en la que se COBRÓ (si todos los movimientos fueron de una sola moneda). */
   cobroEn: Currency | null;
@@ -53,10 +56,10 @@ export function orderBalance(
 ): OrderBalance {
   // El saldo en $ se redondea a centavos para MOSTRARLO, pero la equivalencia en Bs. se calcula con el
   // saldo SIN redondear: `suggestAmount`/`saldoChipValue` (el monto que se cobra) parten del saldo
-  // exacto, y redondear antes de multiplicar por la tasa movía el número en un bolívar (medido en
-  // vivo: la pantalla decía Bs. 72.880,00 y el chip «Todo el saldo» cobraba 72.879).
+  // exacto, y redondear antes de multiplicar por la tasa movía el número (medido en vivo: la pantalla
+  // decía Bs. 72.880,00 y el chip «Todo el saldo» cobraba 72.879).
   const usdRaw = (amount ?? 0) - (paidUsd ?? 0);
-  const usd = Math.round(usdRaw * 100) / 100;
+  const usd = round2(usdRaw);
   const net = netByCurrency(payments);
   // La moneda del cobro: SOLO si hubo movimientos y todos son de la misma. Con cobros mixtos no hay
   // una moneda "del cobro" y el saldo se dice en $ (la moneda del monto de la orden).
@@ -70,7 +73,7 @@ export function orderBalance(
   // Equivalencia del MISMO saldo (sin recortar en 0): si el saldo es negativo, los Bs. también lo son
   // (es la plata que hay que devolverle al cliente en bolívares, no un cero). Con la orden SALDADA no
   // hay nada que cobrar: 0 (así coincide con `suggestAmount`/`saldoChipValue`, que cortan en SALDO_CERO).
-  const bs = saldado ? 0 : tasa > 0 ? Math.round(usdRaw * tasa) : null;
+  const bs = saldado ? 0 : tasa > 0 ? round2(usdRaw * tasa) : null;
   return {
     usd,
     bs,

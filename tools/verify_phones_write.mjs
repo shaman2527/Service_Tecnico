@@ -109,9 +109,15 @@ if (spark && eight) {
 await setSearch('');
 await clickButton('Agregar teléfono');
 await sleep(900);
+// OJO (medido 2026-10-05): la lista de marcas creció y la opción «Genérico» queda FUERA de la parte
+// visible del desplegable, así que el clic por coordenadas caía en otro lado y el alta se quedaba sin
+// marca (la prueba fallaba con la app perfecta). Se elige como lo hace el mostrador: se escribe la
+// marca y se confirma con Enter.
 await clickCenter(`document.querySelector('[role="dialog"] button[role="combobox"]')`);
 await sleep(600);
-await clickCenter(`[...document.querySelectorAll('[role="option"]')].find(o => /^Genérico$/i.test(o.innerText.trim()))`);
+await typeText('Genérico');
+await sleep(600);
+await keyNav('Enter', 'Enter', 13);
 await sleep(500);
 const inputs = `document.querySelector('[role="dialog"]').querySelectorAll('input')`;
 await clickCenter(`(() => { const i = (${inputs})[0]; return i ?? null; })()`);

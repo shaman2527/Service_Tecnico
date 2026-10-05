@@ -180,7 +180,10 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit, verCos
                 <TableHead className="w-24">Marca</TableHead>
                 <TableHead>Variantes</TableHead>
                 <TableHead className="w-24 text-center">Repuestos</TableHead>
-                <TableHead className="w-20 text-center">Stock</TableHead>
+                {/* F86 (REQ-6/AC-9) — la columna «Stock» del MODELO se eliminó: ese número era la
+                    suma del stock de sus repuestos compatibles (y el mismo repuesto cuenta en varios
+                    modelos), así que el teléfono «mostraba» unidades que no eran suyas. El stock real
+                    de cada repuesto se ve al desplegar la fila, uno por uno. */}
                 <TableHead className="w-32 text-right">Precios</TableHead>
                 <TableHead className="w-24 text-center">En uso</TableHead>
                 <TableHead className="w-56">Pantalla de referencia</TableHead>
@@ -188,11 +191,11 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit, verCos
             </TableHeader>
             <TableBody>
               {loading && Array.from({ length: 6 }).map((_, i) => (
-                <TableRow key={`sk-${i}`}><TableCell colSpan={9}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
+                <TableRow key={`sk-${i}`}><TableCell colSpan={8}><Skeleton className="h-6 w-full" /></TableCell></TableRow>
               ))}
               {!loading && rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={9} className="py-8">
+                  <TableCell colSpan={8} className="py-8">
                     <Empty>
                       <EmptyMedia><Smartphone className="size-5" /></EmptyMedia>
                       <EmptyTitle>Ningún modelo con ese nombre</EmptyTitle>
@@ -241,7 +244,6 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit, verCos
                         )}
                       </TableCell>
                       <TableCell className="text-center tabular-nums">{p.products}</TableCell>
-                      <TableCell className="text-center"><StockBadge stock={p.stock} minStock={0} /></TableCell>
                       <TableCell className="text-right text-xs tabular-nums" data-price-range={p.id}>
                         {priceRangeLabel(p.price_min ?? 0, p.price_max ?? 0)}
                       </TableCell>
@@ -280,7 +282,7 @@ export function ProductsByModel({ refreshKey, initialSearch = '', onEdit, verCos
 
                     {estaAbierto && (
                       <TableRow data-model-detail={p.id}>
-                        <TableCell colSpan={9} className="bg-muted/30 p-0">
+                        <TableCell colSpan={8} className="bg-muted/30 p-0">
                           {cargandoDetalle && (
                             <div className="flex flex-col gap-2 p-4">
                               {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-6 w-full" />)}

@@ -205,14 +205,18 @@ function TechniciansDialog({ open, technicians, onOpenChange, onChanged }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — patrón de la casa: la lista de técnicos crece y el pie quedaba fuera de
+          la pantalla en la ventana de 750 px de alto. */}
+      <DialogContent className="sm:max-w-lg max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="flex items-center gap-2"><Users className="size-4" /> Técnicos</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-muted-foreground">
+        {/* El cuerpo scrolleable es la lista de técnicos: el aviso y el error quedan FIJOS arriba y
+            abajo (con `shrink-0`), así no se los come el recorte del diálogo. */}
+        <p className="shrink-0 text-sm text-muted-foreground">
           La marca de color + iniciales identifica quién reparó cada equipo. Los cambios se guardan al salir del campo.
         </p>
-        <div className="space-y-2">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-2">
           {rows.map(t => (
             <div key={t.id} className="flex items-center gap-2">
               <span className={cn('size-4 shrink-0 rounded-full', t.color)} />
@@ -265,8 +269,8 @@ function TechniciansDialog({ open, technicians, onOpenChange, onChanged }: {
             </Button>
           </div>
         </div>
-        {error && <p className="text-sm text-danger">{error}</p>}
-        <DialogFooter>
+        {error && <p className="shrink-0 text-sm text-danger">{error}</p>}
+        <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Listo</Button>
         </DialogFooter>
       </DialogContent>
@@ -1669,13 +1673,15 @@ export default function Services({ role = 'owner', onGoToLedger }: {
 
       {/* F34: cambio rápido de técnico (clic en el círculo/nombre del técnico de la tarjeta). */}
       <Dialog open={!!quickTech} onOpenChange={(o) => { if (!o) setQuickTech(null); }}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
+        {/* F86 (REQ-8/AC-11) — patrón de la casa: con muchos técnicos la lista se salía de la
+            pantalla y no había pie; ahora la lista de opciones es la que se desplaza. */}
+        <DialogContent className="sm:max-w-sm max-h-[92vh] flex flex-col overflow-hidden">
+          <DialogHeader className="shrink-0 pr-6">
             <DialogTitle className="text-base">
               Cambiar técnico · {quickTech?.order_num}
             </DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-1" data-quick-tech>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-1" data-quick-tech>
             <p className="text-xs text-muted-foreground">
               {quickTech?.client} · {quickTech?.model}
             </p>
@@ -2307,6 +2313,27 @@ function DeviceFields({ device, onChange, methods, index, onRemove, canRemove, h
     if (device.screenExtra) onChange({ screenExtra: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [device.model]);
+
+  /**
+   * F89 — Y TAMBIÉN LA PANTALLA ELEGIDA, si ya no es de este modelo.
+   *
+   * Medido con su catálogo (2026-10-05): con un equipo en «A35E» la pantalla se elige sola (y toma su
+   * precio, $15); al cambiar el modelo a «Camon 17» la pantalla del A35E **seguía elegida** —y con ella
+   * su precio— aunque no esté en la compatibilidad del Camon 17: el operario veía un repuesto de OTRO
+   * modelo puesto en el equipo (su queja: «no puede darme de otro modelo que no es») y el monto quedaba
+   * en el precio del modelo anterior.
+   *
+   * La regla: cuando los candidatos ya son de ESTE modelo (`alDia`) y la pantalla elegida no está entre
+   * ellos, se suelta. El operario que quiera OTRA pantalla la busca a mano con «buscar otra pantalla»
+   * (esa sí se conserva como `screenExtra`, con sus avisos) — y en el asistente de cierre no se toca
+   * nada: la elección ya es definitiva y no hay cambio de modelo.
+   */
+  useEffect(() => {
+    if (!compatAlDia || device.screenProductId == null) return;
+    const esta = screenOptionsTodas.some(o => o.product.id === device.screenProductId);
+    if (!esta) onChange({ screenProductId: null, screenConfirm: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compatAlDia, screenOptionsTodas, device.model, device.screenProductId]);
 
   const selectModel = (label: string) => {
     // F67: acá SOLO se elige el modelo. El precio (de la pantalla elegida o del grupo del modelo) lo

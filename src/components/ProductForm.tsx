@@ -2,9 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
-import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { CompatModelPicker } from './CompatModelPicker';
 import { api } from '../db';
 import type { Product, Category } from '../types';
 import { NewCategoryInline } from './inventory/NewCategoryInline';
@@ -63,6 +62,8 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
   const [minStock, setMinStock] = useState(product?.min_stock ?? 2);
   const [supplier, setSupplier] = useState(product?.supplier ?? '');
   const [saving, setSaving] = useState(false);
+  /** F86 (REQ-10/AC-13): el motivo del rechazo del stock negativo, para mostrarlo junto al campo. */
+  const [stockError, setStockError] = useState<string | null>(null);
 
   useEffect(() => {
     if (product?.compatibility) {
@@ -75,12 +76,6 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
     }
   }, [product]);
 
-  // Vista previa de la compatibilidad tal como se va a guardar (chips, sin repetidos)
-  const compatPreview = useMemo(
-    () => [...new Set(compatibility.split('/').map(s => s.trim()).filter(Boolean))].slice(0, 12),
-    [compatibility],
-  );
-
   const save = async () => {
     // F65 (2ª vuelta) — el guardado ya NO falla en silencio: `add_product`/`update_product` son del
     // DUEÑO, así que una cajera (o el dueño con la sesión vencida) veía el diálogo quedarse abierto
@@ -89,15 +84,38 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
       toast.error('Falta el nombre', { description: 'El nombre del producto es obligatorio para guardar.' });
       return;
     }
+    /**
+     * F86 (REQ-10/AC-13) — EL STOCK NO PUEDE SER NEGATIVO.
+     * El `min={0}` del input es sólo una pista: no impide TECLEAR el signo «-» (el navegador recién lo
+     * marcaría al enviar un formulario, y acá no hay `<form>`), y `Number('-')` da `NaN`. El backend
+     * rechaza las dos cosas igual; la UI tiene que decir lo mismo ANTES de mandar, con un motivo en
+     * español, en vez de dejar que el guardado falle con el error crudo de la base.
+     */
+    if (!Number.isFinite(stock) || stock < 0) {
+      const motivo = 'El stock no puede ser negativo: las unidades del cajón se cuentan de 0 para arriba.';
+      setStockError(motivo); // queda a la vista, junto al campo del stock
+      toast.error('El stock no puede ser negativo', {
+        description: `${motivo} Si te falta mercancía, eso se carga como movimiento de salida.`,
+      });
+      return;
+    }
+    setStockError(null);
     setSaving(true);
     try {
       const compatList = compatibility.split('/').map(s => s.trim()).filter(Boolean);
       const compatJson = JSON.stringify(compatList);
       if (product) {
-        await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
+        const red = await api.updateProduct(product.id, name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
         // el proveedor va por su propio comando (update_product no lo toca)
         if ((product.supplier ?? '') !== supplier.trim()) await api.setProductSupplier(product.id, supplier.trim());
         toast.success(`Producto «${name.trim()}» actualizado`);
+        // F93 — LA RED DE COMPATIBILIDAD: si el cambio dejó/entró un teléfono, las otras pantallas del
+        // mismo par se ajustaron solas. Se dice CUÁLES, para que el dueño vea que la red se sincronizó
+        // (su pedido: «es importante que se sincronice en toda la red completa»).
+        if ((red ?? []).length > 0) {
+          toast.info(`Se sincronizó la red: ${red!.length} ficha${red!.length === 1 ? '' : 's'} más`,
+            { description: red!.map(c => `«${c.name}»: ${c.antes} → ${c.despues}`).join(' · '), duration: 9000 });
+        }
       } else {
         const id = await api.addProduct(name, categoryId, brand, model, variant, compatJson, priceCost, priceSale, stock, minStock, priceUsd);
         if (supplier.trim()) await api.setProductSupplier(id, supplier.trim());
@@ -113,8 +131,11 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — el patrón de la casa: el contenido mide ~800 px y la ventana es 750 px,
+          así que sin tope los botones Guardar/Cancelar quedaban fuera de la pantalla. Con el tope, el
+          encabezado y el pie quedan FIJOS y sólo se desplaza la lista de campos. */}
+      <DialogContent className="sm:max-w-xl max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{product ? `Editar: ${product.name}` : 'Nuevo Producto'}</DialogTitle>
           <div className="text-xs text-muted-foreground">
             {product
@@ -124,7 +145,7 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
               : <>Se guardará con la fecha de hoy (automática).</>}
           </div>
         </DialogHeader>
-        <div className="flex flex-col gap-4">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Nombre *</label>
@@ -162,9 +183,16 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
               <p className="text-xs text-muted-foreground">Se guarda normalizada (Lg→LG, Redmi→Xiaomi, Iphone→Apple).</p>
             </div>
             <div className="flex flex-col gap-2">
-              <label className="text-sm font-medium">Modelo</label>
+              <label className="text-sm font-medium">Modelo — teléfono principal</label>
               <Input value={model} onChange={e => setModel(e.target.value)} placeholder="Hot 40i, A06 4G…" />
-              <p className="text-xs text-muted-foreground">Teléfono PRINCIPAL de la ficha.</p>
+              {/* F86 (REQ-4/AC-7) — el dueño veía DOS campos de compatibilidad y no entendía por qué.
+                  Acá se dice, en una lectura, que el MODELO manda: de él sale la lista de
+                  compatibilidad y él entra al padrón de Modelos. El otro campo son los teléfonos
+                  ADEMÁS de éste (no una segunda forma de decir lo mismo). */}
+              <p className="text-xs text-muted-foreground">
+                Éste manda: de este modelo sale la <strong>compatibilidad</strong> y el repuesto entra al padrón de{' '}
+                <strong>Modelos</strong>. Los demás teléfonos que también lo llevan van abajo.
+              </p>
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Variante</label>
@@ -173,20 +201,11 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium">Compatibilidad</label>
-            <p className="text-xs text-muted-foreground">
-              Teléfonos separados por <strong>/</strong>. Se guardan con su marca (ej. <em>Honor X7</em>) y sin repetidos,
-              así la lista de modelos no duplica el mismo teléfono.
-            </p>
-            <Textarea value={compatibility} onChange={e => setCompatibility(e.target.value)}
-              placeholder="Redmi Note 11 / Redmi Note 11S / Redmi Note 11 Pro" />
-            {compatPreview.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {compatPreview.map(m => (
-                  <Badge key={m} variant="outline" className="text-[11px] font-normal">{m}</Badge>
-                ))}
-              </div>
-            )}
+            {/* F91 — EL CAMPO DE TEXTO SE FUE: la compatibilidad se edita con la LISTA DE MODELOS del
+                padrón (pedido del dueño: «dejá inactivo el campo compatibilidades y sustituilo por la
+                lista de modelos compatibles»). El dato guardado es el mismo texto de siempre, así que
+                Producto, Modelos, la ficha del teléfono y el servicio siguen diciendo lo mismo. */}
+            <CompatModelPicker value={compatibility} onChange={setCompatibility} />
           </div>
 
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
@@ -209,7 +228,13 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Stock</label>
               <Input type="number" min={0} value={stock}
-                onChange={e => setStock(Number(e.target.value))} />
+                onChange={e => { setStock(Number(e.target.value)); setStockError(null); }} />
+              {/* F86 (REQ-10/AC-13) — el motivo se dice ACÁ, junto al campo que está mal, no sólo en
+                  un aviso pasajero: `min` de HTML no impide teclear el signo «-» (y `Number('-')` es
+                  NaN), así que el rechazo tiene que ser explícito y quedar a la vista. */}
+              {stockError && (
+                <p className="text-xs text-danger" role="alert" data-field="prod-stock-error">{stockError}</p>
+              )}
             </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">Stock Mín</label>
@@ -231,7 +256,7 @@ export function ProductForm({ product, categories, onClose, onSaved, onCategoryC
             </p>
           </div>
         </div>
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
           {product && permiteEliminar && (
             <Button variant="destructive" onClick={async () => {

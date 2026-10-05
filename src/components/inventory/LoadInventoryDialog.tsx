@@ -119,11 +119,22 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
 
   const aplicar = async () => {
     setError(null);
-    // GUARDA DEL BARRIDO: si la lista es más chica que el catálogo que va a vaciar, casi seguro es
-    // una lista PARCIAL (probando el asistente, un conteo de un sector…) y el barrido está marcado
-    // por costumbre: eso deja en 0 mercancía que sí está. Se pide confirmación DENTRO del asistente
-    // (no con confirm() del navegador: en la ventana de la app no bloquea y se acepta solo).
-    if (zeroMissing && cruzadas > 0 && zeroLive.length > fichas && confirmar !== 'barrido') {
+    /**
+     * GUARDA DEL BARRIDO (F25) + REQ-9/AC-12 de F86.
+     *
+     * El barrido pone en 0 cada pantalla que NO está en la lista y le escribe un movimiento de
+     * SALIDA por lo que tenía. Antes la confirmación salía SÓLO cuando la lista parecía parcial
+     * (`zeroLive.length > fichas`): en el caso «normal» se aplicaba sin preguntar y el dueño vivía
+     * como sorpresa un «me cargó un −30 que yo no pedí». Ahora la confirmación sale SIEMPRE que el
+     * barrido vaya a tocar alguna ficha, con los números reales (fichas que quedan en 0 y unidades
+     * que salen) y diciendo que eso queda anotado como movimiento de SALIDA.
+     *
+     * Se elige CONFIRMAR (y no dejar el barrido desmarcado por defecto) porque «la lista es la
+     * verdad» es el sentido del asistente —si el conteo no cuadra con el sistema, el asistente no
+     * sirve— y porque desmarcarlo por defecto haría que el inventario dejara de reflejar la realidad
+     * sin que nadie lo note. El costo es UN clic en el camino normal.
+     */
+    if (zeroMissing && cruzadas > 0 && zeroLive.length > 0 && confirmar !== 'barrido') {
       setConfirmar('barrido');
       return;
     }
@@ -285,22 +296,43 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
       >
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="flex items-center gap-2">
-            <PackagePlus className="size-4 text-muted-foreground" /> Cargar el inventario del local
+            <PackagePlus className="size-4 text-muted-foreground" /> Contar la mercancía (lista del local)
           </DialogTitle>
+          {/* F86: los DOS asistentes de carga se leían como el mismo. Éste es el CONTEO: la lista es
+              la verdad y lo que no está en la lista queda en 0 (con sus movimientos de salida). El del
+              catálogo (CSV/Excel) es el otro: actualiza fichas y NUNCA borra ni vacía nada que no
+              diga el archivo. */}
+          <p className="text-[11px] text-muted-foreground">
+            La lista es la verdad del mostrador: cada pantalla queda con las unidades contadas y las que
+            no están en la lista quedan en <strong>0</strong> (con su movimiento de salida). No toca
+            precios ni compatibilidad, y no crea productos nuevos: para eso está «Cargar el catálogo (CSV/Excel)».
+          </p>
           <div className="pt-1"><WizardSteps steps={PASOS} current={step} /></div>
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-3">
           {confirmar === 'barrido' && (
-            <Alert variant="destructive">
+            <Alert variant="destructive" data-barrido-confirm="1">
               <AlertTriangle className="size-4" />
-              <AlertTitle>Ojo: esta lista parece parcial</AlertTitle>
+              <AlertTitle>
+                El barrido va a dejar {plural(zeroLive.length, 'pantalla', 'pantallas')} en 0
+              </AlertTitle>
               <AlertDescription className="flex flex-col gap-2 text-xs">
+                {/* REQ-9/AC-12: los números REALES de lo que va a pasar, no un «¿seguro?». */}
                 <span>
-                  Con el barrido marcado vas a dejar en <strong>0</strong> {plural(zeroLive.length, 'pantalla', 'pantallas')}
-                  {' '}({zeroUnidadesLive} unidades) que hoy tienen stock, y esta lista solo carga{' '}
-                  {plural(fichas, 'pantalla', 'pantallas')} ({unidades} u.).
+                  Las pantallas que <strong>no</strong> están en la lista quedan en <strong>0</strong>: son{' '}
+                  <strong>{plural(zeroLive.length, 'pantalla', 'pantallas')}</strong> y salen{' '}
+                  <strong>{zeroUnidadesLive} unidades</strong> del inventario. Eso se anota como{' '}
+                  <strong>movimiento de SALIDA</strong> en Inventario → Movimientos (motivo «Carga de inventario»),
+                  una por ficha.
                 </span>
+                {zeroLive.length > fichas && (
+                  <span>
+                    Además esta lista es más chica que lo que vacía: carga {plural(fichas, 'pantalla', 'pantallas')}{' '}
+                    ({unidades} u.) y deja en 0 {plural(zeroLive.length, 'pantalla', 'pantallas')}. Casi seguro es una
+                    lista PARCIAL (un sector, una marca, una prueba).
+                  </span>
+                )}
                 <span>
                   Si la lista <strong>no</strong> es todo el inventario del local, cancelá y desmarcá «Las pantallas que no
                   están en la lista quedan en 0».
@@ -455,7 +487,9 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
                       <TableHead className="w-36">Modelo</TableHead>
                       <TableHead className="w-24">Cantidad</TableHead>
                       <TableHead>Producto del catálogo</TableHead>
-                      <TableHead className="w-20 text-center">Stock hoy</TableHead>
+                      {/* REQ-9: la columna dice «hoy → queda» (con la lista, esa ficha queda con las
+                          unidades CONTADAS, no con lo que tenía más la cantidad). */}
+                      <TableHead className="w-28 text-center">Stock: hoy → queda</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -619,7 +653,18 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
                           </div>
                         </TableCell>
                         <TableCell className="text-center text-xs tabular-nums">
-                          {r.excluded || r.product_id == null ? '—' : r.stock_now}
+                          {r.excluded || r.product_id == null ? '—' : (
+                            /* REQ-9: se ve CUÁNDO BAJA (lo que el dueño no podía ver: si la lista trae
+                               menos de lo que hay, esta ficha baja y hay que saberlo antes de aplicar). */
+                            <span className={cn(total < r.stock_now ? 'text-warning font-medium' : total > r.stock_now ? 'text-success' : 'text-muted-foreground')}
+                              title={total < r.stock_now
+                                ? `La lista dice ${total} y hoy hay ${r.stock_now}: esta ficha BAJA ${r.stock_now - total} unidades`
+                                : total > r.stock_now
+                                  ? `La lista dice ${total} y hoy hay ${r.stock_now}: esta ficha sube ${total - r.stock_now} unidades`
+                                  : 'La lista coincide con lo que hay'}>
+                              {r.stock_now} → {total}
+                            </span>
+                          )}
                         </TableCell>
                       </TableRow>
                       );
@@ -633,23 +678,31 @@ export function LoadInventoryDialog({ onClose, onApplied }: {
                   type="checkbox"
                   className="mt-0.5 size-3.5"
                   checked={zeroMissing}
+                  data-barrido={zeroMissing ? 'on' : 'off'}
                   onChange={e => setZeroMissing(e.target.checked)}
                 />
                 <span>
                   <span className="font-medium text-foreground">Las pantallas que no están en la lista quedan en 0.</span>{' '}
                   Dejalo marcado si la lista es TODO lo que hay en el local (es lo normal): así el inventario del sistema
                   queda igual a la realidad y se registra el movimiento.{' '}
+                  {/* REQ-9: el número real de lo que el barrido va a vaciar y que eso son SALIDAS. Antes
+                      esto se aplicaba en silencio y el dueño lo vivía como «me cargó un −30 que no pedí». */}
                   {zeroMissing ? (
                     zeroLive.length > 0 ? (
-                      <span className="text-warning">
+                      <span className="text-warning" data-barrido-fichas={zeroLive.length} data-barrido-unidades={zeroUnidadesLive}>
                         Con esta lista quedan en 0 <strong>{plural(zeroLive.length, 'pantalla', 'pantallas')}</strong>
-                        {' '}({zeroUnidadesLive} unidades).
+                        {' '}({zeroUnidadesLive} unidades) y eso escribe{' '}
+                        <strong>{plural(zeroLive.length, 'movimiento de SALIDA', 'movimientos de SALIDA')}</strong> en
+                        Inventario → Movimientos (motivo «Carga de inventario»): son las unidades que hoy figuran y la
+                        lista no menciona.
                       </span>
                     ) : (
-                      <span className="text-success">Ninguna otra pantalla queda en 0.</span>
+                      <span className="text-success" data-barrido-fichas={0} data-barrido-unidades={0}>
+                        Ninguna otra pantalla queda en 0.
+                      </span>
                     )
                   ) : (
-                    <span className="text-muted-foreground">
+                    <span className="text-muted-foreground" data-barrido-fichas={zeroLive.length} data-barrido-unidades={zeroUnidadesLive}>
                       Sin marcar: las pantallas que no están en la lista conservan su stock (quedarían{' '}
                       {zeroLive.length} en 0 / {zeroUnidadesLive} unidades si lo marcás).
                     </span>

@@ -155,7 +155,9 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
     let alive = true;
     setCargandoPantallas(true);
     setErrorPantallas(null);
-    api.findCompatibleProducts(svc.model, null, 40)
+    // F89 — la misma regla que el desplegable del servicio: solo las pantallas cuya compatibilidad
+    // NOMBRA al modelo del equipo (sin los parecidos de otro teléfono).
+    api.findCompatibleScreensExactas(svc.model, 40)
       .then(r => { if (alive) setCandidatos(r.filter(c => c.product.category_id === 1)); })
       .catch(e => {
         // NO se traga el error: si la consulta falla, el asistente no puede fingir que el modelo

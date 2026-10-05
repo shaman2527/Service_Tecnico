@@ -12,30 +12,35 @@
 
 export type PayCur = 'USD' | 'VES';
 
-/** Redondeo a 2 decimales (dólares). */
+/**
+ * F92 — EL DINERO SON 2 DECIMALES: redondeo a centavos, SIMÉTRICO (una devolución de −0,005 va a
+ * −0,01, igual que `round2` del backend — `Math.round(-0.5)` da `-0`, y esa asimetría dejaba
+ * diferencias de un centavo entre lo que muestra la UI y lo que guarda la base).
+ */
 export function round2(v: number): number {
-  return Math.round(v * 100) / 100;
+  if (!Number.isFinite(v)) return 0;
+  return Math.sign(v) * Math.round(Math.abs(v) * 100) / 100;
 }
 
 /**
  * Conversión de la moneda del CAMPO cuando el operario cambia el toggle o el método.
- * Bs. entero, $ con 2 decimales. Sin tasa (≤ 0) NO hay conversión segura:
- * devuelve el valor sin cambios (la UI ya muestra el aviso ámbar).
+ * **Las dos monedas se manejan con 2 decimales** (F92): los Bs. también tienen centavos, y
+ * redondearlos a entero perdía hasta 0,99 Bs. por cobro — plata que después no cuadraba en la caja.
+ * Sin tasa (≤ 0) NO hay conversión segura: devuelve el valor sin cambios (la UI ya muestra el aviso ámbar).
  */
 export function convertAmount(value: number, from: PayCur, to: PayCur, tasa: number): number {
   if (tasa <= 0 || to === from) return value;
-  if (to === 'VES') return Math.round(value * tasa);
-  return round2(value / tasa);
+  return to === 'VES' ? round2(value * tasa) : round2(value / tasa);
 }
 
 /**
- * Monto FINAL a guardar: SIEMPRE en la moneda del MÉTODO.
+ * Monto FINAL a guardar: SIEMPRE en la moneda del MÉTODO, con 2 decimales (F92).
  * campo Bs. + método Bs. → tal cual · campo $ + método Bs. → × tasa ·
  * campo Bs. + método $ → ÷ tasa (tasa 0 → 0, el guardado queda bloqueado).
  */
 export function finalAmount(amountInField: number, fieldCur: PayCur, methodCur: PayCur, tasa: number): number {
   if (methodCur === 'VES') {
-    return fieldCur === 'VES' ? Math.round(amountInField) : tasa > 0 ? Math.round(amountInField * tasa) : 0;
+    return fieldCur === 'VES' ? round2(amountInField) : tasa > 0 ? round2(amountInField * tasa) : 0;
   }
   return fieldCur === 'USD' ? round2(amountInField) : tasa > 0 ? round2(amountInField / tasa) : 0;
 }
@@ -47,18 +52,17 @@ export function finalAmount(amountInField: number, fieldCur: PayCur, methodCur: 
 export function suggestAmount(saldoUsd: number, amountUsd: number, fieldCur: PayCur, tasa: number): number {
   if (saldoUsd <= 0.005) return 0;
   const bruto = Math.min(saldoUsd, amountUsd);
-  if (fieldCur === 'VES') return tasa > 0 ? Math.round(bruto * tasa) : 0;
+  if (fieldCur === 'VES') return tasa > 0 ? round2(bruto * tasa) : 0;
   return round2(bruto);
 }
 
 /** Valor del chip "Todo el saldo" en la moneda del CAMPO (saldo nunca negativo).
  *  Corte en 0,005 —el MISMO que `suggestAmount` y que `order-balance.SALDO_CERO`—: con un saldo de
- *  centavos (`paid_amount` se guarda con 4 decimales) el chip ofrecía bolívares mientras el campo se
- *  autocompletaba en 0 y el texto decía «Sin saldo» (revisión adversarial F39: tres respuestas para
- *  el mismo saldo). */
+ *  centavos el chip ofrecía bolívares mientras el campo se autocompletaba en 0 y el texto decía
+ *  «Sin saldo» (revisión adversarial F39: tres respuestas para el mismo saldo). */
 export function saldoChipValue(saldoUsd: number, fieldCur: PayCur, tasa: number): number {
   if (saldoUsd <= 0.005) return 0;
-  if (fieldCur === 'VES') return tasa > 0 ? Math.round(Math.max(0, saldoUsd) * tasa) : 0;
+  if (fieldCur === 'VES') return tasa > 0 ? round2(Math.max(0, saldoUsd) * tasa) : 0;
   return round2(Math.max(0, saldoUsd));
 }
 
@@ -70,10 +74,13 @@ export function quickAmounts(cur: PayCur): number[] {
   return cur === 'VES' ? QUICK_VES : QUICK_USD;
 }
 
-/** Comisión del Punto de Venta y su neto (sin redondear: la UI formatea con toFixed(2)). */
+/** Comisión del Punto de Venta y su neto. F92: los dos se redondean a centavos, y el neto se calcula
+ *  sobre el monto YA redondeado — así `neto + comisión = monto` exacto (la misma cuenta que hace el
+ *  backend, que guarda `bank_fee_amount` y `net_amount` con 2 decimales). */
 export function puntoCommission(amountFinal: number, feePercent: number): { commission: number; net: number } {
-  const commission = (amountFinal * feePercent) / 100;
-  return { commission, net: amountFinal - commission };
+  const bruto = round2(amountFinal);
+  const commission = round2((bruto * feePercent) / 100);
+  return { commission, net: round2(bruto - commission) };
 }
 
 /** Tasa por defecto de la comisión del Punto (la misma del harness). */

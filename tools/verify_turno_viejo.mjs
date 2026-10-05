@@ -239,8 +239,12 @@ const errPagoHoy = await invokeErr('add_service_payment', {
 check('el backend RECHAZA un abono fechado HOY con la caja de ayer abierta', !!errPagoHoy, String(errPagoHoy).slice(0, 110));
 // El MOTIVO importa: sin mirar el mensaje, un rechazo por «la orden está Devuelto» o «no existe»
 // pasaría como si fuera el gate de la caja (hallazgo menor de la revisión adversarial).
-check('…y lo rechaza POR LA CAJA (no por otra razón: nombra el día sin turno y el turno abierto)',
-  new RegExp(hoyDB).test(String(errPagoHoy)) && /turno abierto|turno de caja/i.test(String(errPagoHoy)),
+check('…y lo rechaza POR LA CAJA (no por otra razón: nombra el día sin turno y los días que SÍ tienen caja)',
+  // F92: el mensaje ahora dice «no hay ninguna caja (turno) con la fecha X» y lista los últimos días con
+  // caja (marcando cuál está abierto). Sigue nombrando la fecha pedida y a qué caja se puede anotar.
+  new RegExp(hoyDB).test(String(errPagoHoy))
+  && /No hay ninguna caja|turno de caja/i.test(String(errPagoHoy))
+  && /días con caja|turno abierto/i.test(String(errPagoHoy)),
   String(errPagoHoy).slice(0, 140));
 
 // ── 6) EL REMEDIO, COMPLETADO POR LA UI (que es lo que pidió el dueño) ───────────────────────────

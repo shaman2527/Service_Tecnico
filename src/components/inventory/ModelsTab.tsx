@@ -67,17 +67,23 @@ function SortHead({ label, sortKey, order, onToggle, className, align = 'left' }
 // F3 — PADRÓN DE TELÉFONOS del taller (tabla `phones`, reconstruida desde la
 // compatibilidad del catálogo). Solo LECTURA: renombrar/fusionar es la feature
 // siguiente. Marca como columna y como filtro, orden de 3 estados por columna.
-export function ModelsTab({ refreshKey, canEdit, onByModel }: {
+export function ModelsTab({ refreshKey, canEdit, initialSearch = '' }: {
   refreshKey: number;
   /** el dueño puede corregir la lista (el backend lo exige igual) */
   canEdit: boolean;
-  onByModel: (name: string) => void;
+  /**
+   * F86 — el teléfono que llega desde el atajo «por modelo» (botón de capas de un producto, o «Buscar
+   * por modelo» de la cabecera). Antes ese atajo abría la pestaña «Repuesto por modelo», que se eliminó
+   * por decisión del dueño (tenía tres vistas de lo mismo): ahora deja la búsqueda puesta acá, que es
+   * donde está la ficha del teléfono con sus repuestos.
+   */
+  initialSearch?: string;
 }) {
   // `searchInput` es lo escrito y `search` lo que se consulta: el rebote es SÓLO al escribir
   // (feature 41). Antes la pestaña —la más cara del módulo— esperaba 200 ms antes de su
   // PRIMERA consulta, y ésos 200 ms se sumaban a los ~550 ms de cálculo del backend.
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState(initialSearch);
+  const [search, setSearch] = useState(initialSearch);
   const [brand, setBrand] = useState('todas');
   const [vista, setVista] = useState<string>('todos');
   const [order, setOrder] = useState<PhoneOrder | null>(null);
@@ -124,6 +130,15 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
     const t = setTimeout(() => { setSearch(searchInput); setPage(0); }, 200);
     return () => clearTimeout(t);
   }, [searchInput, search]);
+
+  // F86 — el teléfono que pide el atajo «por modelo». Se escriben los DOS estados (lo escrito y lo
+  // consultado) para que la consulta salga YA y no quede un rebote de 200 ms mirando la lista vieja;
+  // si la pestaña ya estaba montada, el prop cambia y esto la vuelve a filtrar.
+  useEffect(() => {
+    setSearchInput(initialSearch);
+    setSearch(initialSearch);
+    setPage(0);
+  }, [initialSearch]);
 
   /**
    * F50 — el check «lo uso» del MODELO. Usa el comando `set_phone_use_all` (el teléfono y sus
@@ -298,7 +313,11 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
                 <SortHead label="Teléfono" sortKey="nombre" order={order} onToggle={toggleOrder} />
                 <SortHead label="Marca" sortKey="marca" order={order} onToggle={toggleOrder} className="w-32" />
                 <SortHead label="Repuestos" sortKey="repuestos" order={order} onToggle={toggleOrder} className="w-32" align="center" />
-                <SortHead label="Stock" sortKey="stock" order={order} onToggle={toggleOrder} className="w-24" align="center" />
+                {/* F86 (REQ-6/AC-9) — ACÁ ESTABA LA COLUMNA «Stock» DEL TELÉFONO, Y SE FUE.
+                    Ese número no era un stock: era la SUMA del stock de los repuestos compatibles, y el
+                    mismo repuesto cuenta en varios modelos, así que un teléfono «mostraba» unidades que
+                    no tenía (el dueño: «no debería ir stock modelo de tlf»). El padrón `phones` no
+                    guarda stock. Lo que sí es cierto —cuántos repuestos le sirven— está en su columna. */}
                 <TableHead className="w-48">Categorías</TableHead>
                 <SortHead label="Estado" sortKey="revisar" order={order} onToggle={toggleOrder} className="w-40" />
                 <TableHead className="w-32"></TableHead>
@@ -307,12 +326,12 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
             <TableBody>
               {loading && Array.from({ length: 8 }).map((_, i) => (
                 <TableRow key={`sk-${i}`}>
-                  <TableCell colSpan={7}><Skeleton className="h-6 w-full" /></TableCell>
+                  <TableCell colSpan={6}><Skeleton className="h-6 w-full" /></TableCell>
                 </TableRow>
               ))}
               {!loading && !error && items.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-8">
+                  <TableCell colSpan={6} className="py-8">
                     <Empty>
                       <EmptyMedia><Smartphone className="size-5" /></EmptyMedia>
                       <EmptyTitle>Ningún teléfono con esos filtros</EmptyTitle>
@@ -356,13 +375,11 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
                       <Badge variant="outline" className="text-[10px] text-muted-foreground">sin repuestos</Badge>
                     )}
                   </TableCell>
-                  <TableCell className="text-center">
-                    {p.stock > 0 ? (
-                      <Badge className="bg-success text-white hover:bg-success tabular-nums">{p.stock}</Badge>
-                    ) : (
-                      <Badge variant="outline" className="tabular-nums text-muted-foreground">0</Badge>
-                    )}
-                  </TableCell>
+                  {/* F86 (REQ-6/AC-9): acá iba el «stock» del teléfono, que en realidad era la SUMA
+                      del stock de sus repuestos compatibles (y el mismo repuesto cuenta en varios
+                      modelos). No se reemplaza por otro número que se lea como stock del teléfono:
+                      lo verdadero y útil —cuántos repuestos le sirven— ya está en la columna de al
+                      lado, y el stock real de cada repuesto se ve en la ficha («Ficha»). */}
                   <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate" title={p.categories}>
                     {p.categories || '—'}
                   </TableCell>
@@ -420,16 +437,9 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
                           </Button>
                         </>
                       )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        title="Ver qué repuestos le sirven"
-                        aria-label={`Ver los repuestos compatibles con ${p.name}`}
-                        disabled={p.products === 0}
-                        onClick={() => onByModel(p.name)}
-                      >
-                        <Layers />
-                      </Button>
+                      {/* F86 (decisión del dueño 2026-10-04): acá estaba el botón de «capas» que llevaba a
+                          la pestaña «Repuesto por modelo» (ELIMINADA). Al lado está «Ficha», que muestra
+                          los MISMOS repuestos agrupados por categoría: el botón era un viaje a lo mismo. */}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -479,7 +489,8 @@ export function ModelsTab({ refreshKey, canEdit, onByModel }: {
         )}
       </div>
 
-      <PhoneDetailDialog phoneId={detailId} onClose={() => setDetailId(null)} onByModel={onByModel} />
+      {/* F86: la ficha ya no recibe `onByModel` (la pestaña a la que llevaba se eliminó). */}
+      <PhoneDetailDialog phoneId={detailId} onClose={() => setDetailId(null)} />
 
       {editPhone && (
         <PhoneEditDialog

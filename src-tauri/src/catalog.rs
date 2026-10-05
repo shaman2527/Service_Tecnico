@@ -486,14 +486,244 @@ pub fn variant_in_text(text: &str) -> Option<String> {
     Some(v)
 }
 
+/// F87 — el texto de un teléfono SIN la VARIANTE/MATERIAL que lleve PEGADA («Infinix Gt 20 Pro INCELL»
+/// → «Infinix Gt 20 Pro»). El local escribe la variante dentro de la etiqueta de compatibilidad
+/// (su archivo real: modelo `Gt 20 Pro`, variante `INCELL`, compatibilidad «Infinix Gt 20 Pro INCELL /
+/// Infinix Note 40 INCELL»), y comparar la etiqueta CRUDA contra el modelo pelado avisaba «la
+/// compatibilidad no incluye a su propio modelo» en **25 de 83 filas que sí lo incluían**.
+///
+/// Usa la MISMA regla de variantes que ya tiene el catálogo (`variant_in_text`, F53) y quita sus
+/// palabras **por palabra completa**, igual que las detecta: quitarlas por subcadena rompería «Camon»
+/// (el error real que motivó la regla del AM). Si al quitar la variante no queda nada, se devuelve el
+/// texto original: «OLED» a secas no es un teléfono al que se le pueda sacar nada.
+fn sin_variante(text: &str) -> String {
+    let mut limpio = text.to_string();
+    if let Some(v) = variant_in_text(&limpio) {
+        let quitar: Vec<String> = norm(&v).split(' ').map(|s| s.to_string()).collect();
+        limpio = words(&limpio)
+            .into_iter()
+            .filter(|w| !quitar.iter().any(|q| *q == norm(w)))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    // El MARCO es parte del MISMO vocabulario de variantes (`variant_in_text` lo agrega al material:
+    // «OLED Con Marco»), y el local también lo escribe SOLO en su columna Variante: medido en su
+    // archivo, la fila `Infinix Hot 50` con variante «Con Marco» tiene la lista «Infinix Hot 50 Con
+    // Marco» — nombra a su propio modelo y avisaba en falso. Se quitan las dos palabras del final.
+    let n = norm(&limpio);
+    if n.ends_with("con marco") || n.ends_with("sin marco") {
+        let w = words(&limpio);
+        if w.len() > 2 {
+            limpio = w[..w.len() - 2].join(" ");
+        }
+    }
+    if limpio.trim().is_empty() { text.to_string() } else { limpio }
+}
+
 /// Cuenta de palabras de la MARCA real al inicio del texto (no de la línea:
 /// "Redmi Note 11" NO se toca, "Infinix Spark 10C" sí).
-fn leading_brand_words(text: &str) -> Option<usize> {    let r = rules();
+fn leading_brand_words(text: &str) -> Option<usize> {
+    let r = rules();
     let n = norm(text);
     r.brand_aliases
         .iter()
         .find(|(alias, _)| n.starts_with(&format!("{alias} ")))
         .map(|(alias, _)| alias.split(' ').count())
+}
+
+/// ────────────────────────────────────────────────────────────────────────────────────────────────
+/// F93 — LA RED DE COMPATIBILIDAD, Y LAS VARIANTES DENTRO DE ELLA
+/// ────────────────────────────────────────────────────────────────────────────────────────────────
+///
+/// Pedido del dueño (2026-10-05), con su caso medido: «si yo selecciono en Producto **Infinix Hot 10
+/// Play** los modelos compatibles son Infinix Hot 10 Play; Infinix Hot 11 Play. En módulo-fichas debe
+/// verse también los dos. Pero cuando en Producto le quito **Infinix Hot 11 Play** quedando solo Hot 10
+/// Play, **los cambios no surten efecto en módulo-fichas sobre Infinix Hot 10 Play sino en el otro que
+/// se retiró** (Hot 11 Play). Es importante que **se sincronice en toda la red completa**, es el deber
+/// ser. Punto importante: **las variantes permitir que entren en la compatibilidad**.»
+///
+/// Las dos cosas son la misma idea: la compatibilidad de un repuesto **es una RED de teléfonos**, y esa
+/// red tiene que decir lo mismo en todos lados.
+///
+/// (1) **La red se sincroniza.** Medido con su catálogo: el producto #212 «Infinix Hot 10 Play» tenía la
+/// lista `[Hot 10 Play, Hot 11 Play]` y el #1031 «Infinix Hot 11 Play» la misma lista (los dos
+/// pantallas del mismo par de teléfonos). Al quitarle «Hot 11 Play» al #212, la ficha del **Hot 11 Play**
+/// perdía el #212 (correcto) pero la del **Hot 10 Play** seguía mostrando el #1031: el vínculo quedaba
+/// roto en UNA sola dirección. Ahora, al guardar un producto, los **hermanos de la red** (los productos
+/// de la misma categoría cuya lista era exactamente esa red) se ajustan solos:
+///   · el que sigue en la red queda con la lista nueva + su propio modelo;
+///   · el que salió de la red (su modelo ya no está en la lista nueva) queda **solo con su modelo**.
+/// Así la red **se parte en las dos direcciones** y las fichas de los dos teléfonos dicen la verdad.
+///
+/// (2) **La variante es del REPUESTO, no del teléfono.** El local escribe la variante pegada a la
+/// etiqueta («Infinix Gt 20 Pro INCELL», «Infinix Hot 50 Con Marco»). Medido con su catálogo: 76
+/// productos tienen entradas así y el padrón creaba **un teléfono por variante** («Gt 20 Pro INCELL» y
+/// «Gt 20 Pro ORIGINAL» como DOS fichas), con dos consecuencias reales: la ficha del teléfono de verdad
+/// no existía (el técnico veía «Gt 20 Pro INCELL» en Modelos, no «Gt 20 Pro») y **el desplegable
+/// «Pantalla a instalar» del servicio quedaba VACÍO** para esos modelos (`Gt 20 Pro`, `Hot 50 Pro`,
+/// `Note 30`: 0 pantallas, medido), porque la compatibilidad «nombra» al modelo con la variante pegada
+/// y la coincidencia estricta (F89) no la aceptaba. Ahora el padrón y el índice de fichas **quitan la
+/// variante para identificar al teléfono** (misma regla que ya usaba F87 para el aviso de la carga
+/// masiva) y la variante sigue viva donde corresponde: en la fila del repuesto (su columna `variant`,
+/// que la ficha muestra) y en los **alias** del teléfono (buscar «Gt 20 Pro INCELL» lo encuentra).
+
+/// Los teléfonos de una compatibilidad, como CLAVES del padrón (`infinix|hot 10 play`).
+/// Es la identidad del teléfono: «Infinix Hot 10 Play», «Hot 10 Play» y «Hot 10 Play INCELL» son la
+/// misma clave.
+pub fn claves_de_compat(compatibility: &str, brand: &str) -> Vec<String> {
+    compat_phones(compatibility, brand).iter().map(phone_registry_key).collect()
+}
+
+/// La clave del padrón del MODELO de un producto (marca + modelo, como lo identifica la ficha).
+pub fn clave_del_modelo(brand: &str, model: &str) -> String {
+    let texto = if brand.trim().is_empty() { model.to_string() } else { format!("{brand} {model}") };
+    phone_registry_key(&canonical_phone(&texto, brand))
+}
+
+/// Cómo estaba ESCRITO en esa lista el teléfono de esa clave (se conserva la ortografía del local).
+pub fn etiqueta_de_clave(compatibility: &str, brand: &str, clave: &str) -> Option<String> {
+    compat_phones_raw(compatibility, brand)
+        .into_iter()
+        .find(|(_, p)| phone_registry_key(p) == clave)
+        .map(|(crudo, _)| crudo)
+}
+
+/// Las entradas de una compatibilidad, limpias (lo que el dueño ve como «la lista»).
+pub fn entradas_de_compat(compatibility: &str) -> Vec<String> {
+    parse_compat(compatibility)
+        .into_iter()
+        .map(|e| clean_compat_entry(&e))
+        .filter(|e| !e.trim().is_empty() && !is_junk_entry(e))
+        .collect()
+}
+
+/// F93 (1) — ¿QUÉ LISTA LE TOCA A UN HERMANO DE LA RED? `None` = no se toca.
+///
+/// Un producto es HERMANO cuando:
+///   · es de la MISMA categoría y de la MISMA clase de variante (una OLED y una INCELL del mismo
+///     teléfono son dos líneas de repuesto distintas: la red de una no manda sobre la otra);
+///   · su modelo pertenece a la red (los teléfonos de la lista vieja y de la nueva); y
+///   · **su lista era EXACTAMENTE la red vieja** — es decir, el mismo repuesto repartido en varias
+///     fichas (una por teléfono), que es el caso del dueño: la pantalla del Hot 10 Play y la del
+///     Hot 11 Play con la misma lista. Un repuesto que sirve a OTROS teléfonos no se toca.
+///
+/// Entonces: si su modelo sigue en la lista nueva → queda con la lista nueva; si salió → queda **solo
+/// con su modelo** (la red se partió en las dos direcciones).
+pub fn lista_del_hermano(
+    compat_actual: &str,
+    brand: &str,
+    model: &str,
+    variant: &str,
+    nuevos: &[String],
+    red: &BTreeSet<String>,
+    variante_del_cambiado: &str,
+) -> Option<Vec<String>> {
+    if variant_key(variant) != variant_key(variante_del_cambiado) {
+        return None;
+    }
+    let propias: BTreeSet<String> = claves_de_compat(compat_actual, brand).into_iter().collect();
+    // Hermano = su lista pertenecía a ESTA red (vieja + nueva) y no se mete con otros teléfonos.
+    if propias.is_empty() || !propias.is_subset(red) {
+        return None;
+    }
+    let clave_modelo = clave_del_modelo(brand, model);
+    if !red.contains(&clave_modelo) {
+        return None;
+    }
+    let etiqueta = etiqueta_de_clave(compat_actual, brand, &clave_modelo)
+        .or_else(|| etiqueta_de_clave(&nuevos.join(" / "), brand, &clave_modelo))
+        .unwrap_or_else(|| {
+            let t = if brand.trim().is_empty() { model.to_string() } else { format!("{brand} {model}") };
+            canonical_phone(&t, brand).label
+        });
+    let claves_nuevas: BTreeSet<String> = claves_de_compat(&nuevos.join(" / "), brand).into_iter().collect();
+    let lista: Vec<String> = if claves_nuevas.contains(&clave_modelo) {
+        // SIGUE en la red: la lista nueva (que ya lo nombra) — o la lista nueva + él, si por lo que
+        // fuera la lista nueva no lo nombra.
+        let mut l = nuevos.to_vec();
+        if !claves_nuevas.contains(&clave_modelo) {
+            l.push(etiqueta.clone());
+        }
+        l
+    } else {
+        // SALIÓ de la red: la red se partió y este producto queda sirviendo SOLO a su propio teléfono.
+        vec![etiqueta]
+    };
+    let despues: BTreeSet<String> = claves_de_compat(&lista.join(" / "), brand).into_iter().collect();
+    if propias == despues { return None; }
+    Some(lista)
+}
+
+/// F93 (1) — Sincroniza los hermanos de la red después de guardar un producto. Devuelve lo que cambió
+/// (para poder decírselo al dueño: «se actualizaron N fichas de la misma red»).
+pub fn sincronizar_red(conn: &Connection, producto: i64, viejos_texto: &str, nuevos_texto: &str) -> SqlResult<Vec<CambioDeRed>> {
+    let (cat_id, cat_nombre, marca, variante_cambiado): (Option<i64>, String, String, String) = conn.query_row(
+        "SELECT p.category_id, COALESCE(c.name,''), COALESCE(p.brand,''), COALESCE(p.variant,'')
+         FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?1",
+        params![producto],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let red_old: BTreeSet<String> = claves_de_compat(viejos_texto, &marca).into_iter().collect();
+    let red_new: BTreeSet<String> = claves_de_compat(nuevos_texto, &marca).into_iter().collect();
+    if red_old == red_new {
+        return Ok(Vec::new()); // la red no cambió (otro precio, otra ortografía): no hay nada que sincronizar
+    }
+    // La red COMPLETA: los teléfonos que tenía y los que tiene ahora (así la sincronización funciona
+    // en las dos direcciones: quitar un teléfono y volver a agregarlo).
+    let red: BTreeSet<String> = red_old.union(&red_new).cloned().collect();
+    let nuevos: Vec<String> = entradas_de_compat(nuevos_texto);
+
+    // Los candidatos: los repuestos de la MISMA categoría con lista propia.
+    let candidatos: Vec<(i64, String, String, String, String, String, f64, f64, i64, i64, f64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT p.id, COALESCE(p.name,''), COALESCE(p.brand,''), COALESCE(p.model,''), COALESCE(p.variant,''),
+                    COALESCE(p.compatibility,''), COALESCE(p.price_cost,0), COALESCE(p.price_sale,0),
+                    COALESCE(p.stock,0), COALESCE(p.min_stock,0), COALESCE(p.price_usd,0)
+             FROM products p
+             WHERE p.id <> ?1 AND COALESCE(p.compatibility,'') NOT IN ('','[]') AND p.category_id IS ?2
+             ORDER BY p.id",
+        )?;
+        let filas = stmt.query_map(params![producto, cat_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
+        })?;
+        filas.collect::<SqlResult<Vec<_>>>()?
+    };
+
+    let mut cambios: Vec<CambioDeRed> = Vec::new();
+    for (id, name, brand, model, variant, compat, costo, venta, stock, minimo, efectivo) in candidatos {
+        let Some(lista) = lista_del_hermano(&compat, &brand, &model, &variant, &nuevos, &red, &variante_cambiado) else { continue };
+        let json = serde_json::to_string(&lista).unwrap_or_else(|_| "[]".to_string());
+        let n = normalize_fields(&cat_nombre, &brand, &model, &variant, &json);
+        if n.compatibility == compat {
+            continue;
+        }
+        let search = search_text(&name, &n.brand, &n.model, &n.variant, &n.compatibility);
+        conn.execute(
+            "UPDATE products SET brand=?1, model=?2, variant=?3, compatibility=?4, search_text=?5,
+                    updated_at=datetime('now','localtime') WHERE id=?6",
+            params![n.brand, n.model, n.variant, n.compatibility, search, id],
+        )?;
+        cambios.push(CambioDeRed {
+            id,
+            name: name.clone(),
+            antes: entradas_de_compat(&compat).join(" / "),
+            despues: entradas_de_compat(&n.compatibility).join(" / "),
+        });
+        let _ = (costo, venta, stock, minimo, efectivo);
+    }
+    Ok(cambios)
+}
+
+/// Lo que le pasó a un producto HERMANO de la red cuando se guardó otro de la misma red (F93).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CambioDeRed {
+    pub id: i64,
+    pub name: String,
+    /// la lista como estaba (legible: «A / B»)
+    pub antes: String,
+    /// la lista como quedó
+    pub despues: String,
 }
 
 /// Teléfono canónico con la marca IMPUESTA (sin auto-detección): lo usa la regla
@@ -518,28 +748,35 @@ pub fn compat_phones_raw(compatibility: &str, product_brand: &str) -> Vec<(Strin
         if is_junk_entry(&cleaned) {
             continue;
         }
+        // F93 (2) — LA VARIANTE ES DEL REPUESTO, NO DEL TELÉFONO. El local escribe la variante pegada a
+        // la etiqueta («Infinix Gt 20 Pro INCELL», «Infinix Hot 50 Con Marco»): sin esto, el padrón
+        // creaba UN TELÉFONO POR VARIANTE («Gt 20 Pro INCELL» y «Gt 20 Pro ORIGINAL» como dos fichas),
+        // la ficha del teléfono de verdad no existía y el desplegable «Pantalla a instalar» del servicio
+        // quedaba VACÍO para esos modelos (medido: Gt 20 Pro, Hot 50 Pro y Note 30 → 0 pantallas).
+        // El ALIAS sigue siendo el texto CRUDO: buscar «Gt 20 Pro INCELL» encuentra el teléfono.
+        let texto = sin_variante(&cleaned);
         // 1º la FAMILIA comercial: es exclusiva de una marca y manda sobre lo que
         //    diga el texto, incluso si el texto trae otra marca delante
         //    ("Infinix Spark 10C" y "ZTE Spark 10C" son el MISMO Tecno Spark 10C).
         let r = rules();
-        let family = words(&cleaned)
+        let family = words(&texto)
             .into_iter()
             .map(|w| norm(w))
             .find(|t| r.family_brands.contains_key(t));
         let phone = if let Some(family) = family {
             let brand = r.family_brands.get(&family).cloned().unwrap_or_else(|| current.clone());
             // si el texto traía OTRA marca delante, se quita ("Infinix Spark 10C" -> "Spark 10C")
-            let text = match leading_brand_words(&cleaned) {
-                Some(k) if words(&cleaned).len() > k => words(&cleaned).into_iter().skip(k).collect::<Vec<_>>().join(" "),
-                _ => cleaned.clone(),
+            let t = match leading_brand_words(&texto) {
+                Some(k) if words(&texto).len() > k => words(&texto).into_iter().skip(k).collect::<Vec<_>>().join(" "),
+                _ => texto.clone(),
             };
             current = brand.clone();
-            canonical_phone_forced(&text, &brand)
+            canonical_phone_forced(&t, &brand)
         } else {
-            if let Some(explicit) = explicit_brand(&cleaned) {
+            if let Some(explicit) = explicit_brand(&texto) {
                 current = explicit;
             }
-            canonical_phone(&cleaned, &current)
+            canonical_phone(&texto, &current)
         };
         // si el MODELO quedó en puros números es un contador de la lista, no un teléfono
         if is_junk_entry(&phone.model) {
@@ -752,7 +989,17 @@ pub fn normalize_fields(
     let c_model = canonical_model(&model_clean, &brand_out);
 
     // marca CONTEXTUAL entre las entradas de compatibilidad
-    let entries = parse_compat(compatibility);
+    let mut entries = parse_compat(compatibility);
+    // REQ-1 (F86) — EL MODELO ARMA LA COMPATIBILIDAD. Pedido del dueño (2026-10-04): «no debería ir stock
+    // modelo de tlf, y tengo dos campos de compatibilidad, debería ver una … sea funciona en base al
+    // modelo que debería ir». Si la ficha trae MODELO y no trae lista de compatibilidad, la lista se arma
+    // con SU modelo (las alternativas «A30/A50» son DOS teléfonos compatibles: el local las usa como el
+    // mismo repuesto). Antes, con la lista vacía, `compat_out` quedaba vacío y la ficha NO entraba al
+    // padrón: no aparecía en «Modelos» ni en «Repuesto por modelo» y el dueño tenía que escribir el mismo
+    // dato en dos columnas. Sin modelo ni lista NO se inventa nada: la ficha sigue sin compatibilidad.
+    if entries.is_empty() && !c_model.is_empty() {
+        entries = c_model.split(" / ").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
     let mut current_brand = brand_out.clone();
     let mut by_key: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<(String, String)> = Vec::new();
@@ -812,6 +1059,8 @@ pub fn normalize_fields(
     ))
     .join(" ");
 
+    // con la lista derivada del modelo esta rama queda solo para el caso «sin modelo y sin lista»:
+    // ahí se conserva lo que traía la celda (que es vacío) y la ficha sigue sin compatibilidad.
     let compat_out = if entries.is_empty() {
         compatibility.trim().to_string()
     } else {
@@ -829,6 +1078,31 @@ pub fn normalize_fields(
 }
 
 // ---------------------------------------------------- padrón de teléfonos
+
+/// REQ-5 (F86) — ¿La lista de compatibilidad de una ficha incluye a SU PROPIO modelo?
+///
+/// Sirve para AVISAR (no para bloquear) cuando el archivo trae una lista incoherente: la ficha es de un
+/// «Samsung A06» y su compatibilidad dice «Samsung A10 / Samsung A12» — la lista no puede ignorar al
+/// teléfono principal, porque es el que nombra el repuesto que se está cargando.
+/// El modelo se compara por CLAVE de teléfono (misma regla que el padrón: marca + modelo sin las
+/// submarcas «strippables»), así «A06 4G» y «Samsung Galaxy A06 4G» son el mismo teléfono.
+/// F87 — y se compara **sin la VARIANTE/MATERIAL que la etiqueta lleve pegada** (`sin_variante`): el
+/// local escribe la variante dentro de la etiqueta («Infinix Gt 20 Pro INCELL») y el aviso saltaba en
+/// 25 de las 83 filas de su archivo por eso solo. Lo que la regla NO cambia es el aviso que importa:
+/// una lista de VERDAD incoherente (una fila `Tecno Spark 20 Pro` cuya compatibilidad nombra Spark 10,
+/// Spark 10C, Pop 7, Hot 30i…) sigue avisada, porque ahí no hay ninguna etiqueta que sea su modelo.
+/// Sin modelo no hay nada que la lista pueda ignorar: devuelve `true` (no se avisa de más).
+pub fn compat_incluye_modelo(brand: &str, model: &str, compatibility: &str) -> bool {
+    if model.trim().is_empty() {
+        return true;
+    }
+    // la CLAVE del padrón (marca + modelo sin la línea): es la misma que arma el padrón, así «Galaxy
+    // A06» y «Samsung A06» son el mismo teléfono y el aviso no salta de más.
+    let objetivo = phone_registry_key(&canonical_phone(&sin_variante(model), brand));
+    parse_compat(compatibility)
+        .iter()
+        .any(|e| phone_registry_key(&canonical_phone(&sin_variante(e), brand)) == objetivo)
+}
 
 /// Regla del local (2026-09-16): **el taller instala pantallas**, así que el padrón de
 /// teléfonos se arma con las categorías de pantalla: `1` = Pantalla, `18` = Táctil y
@@ -978,6 +1252,21 @@ pub struct PhoneRebuildReport {
     /// entradas de compatibilidad que apuntan al MISMO teléfono (dedupe)
     pub merged_entries: i64,
     pub samples: Vec<CatalogSample>,
+}
+
+/// F93 — ¿los alias guardados del teléfono ya incluyen TODO lo que dice el catálogo? Si falta alguno se
+/// reescribe la fila (y si no falta nada, `rebuild_phones` sigue siendo idempotente: no toca nada).
+fn aliases_nuevos_faltan(conn: &Connection, id: i64, aliases_json: &str) -> bool {
+    let actual: String = conn
+        .query_row("SELECT COALESCE(aliases,'[]') FROM phones WHERE id = ?1", params![id], |r| r.get(0))
+        .unwrap_or_else(|_| "[]".to_string());
+    match (serde_json::from_str::<Vec<String>>(&actual), serde_json::from_str::<Vec<String>>(aliases_json)) {
+        (Ok(a), Ok(b)) => {
+            let set: std::collections::BTreeSet<String> = a.into_iter().collect();
+            b.iter().any(|x| !set.contains(x))
+        }
+        _ => actual != aliases_json,
+    }
 }
 
 /// Reconstruye el padrón de teléfonos (`phones`) desde la compatibilidad del
@@ -1143,6 +1432,15 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
                          VALUES (?1,?2,?3,?4,?5,?6,'catalogo',?7)",
                         params![brand, line, model, display, key, aliases_json, needs_review],
                     )?;
+                    // F93 — EL CÓDIGO DEL TELÉFONO NUEVO, ACÁ MISMO. `init()` numera las filas sin código
+                    // («M-007», el código con el que el local lo dicta y lo busca), pero el padrón se
+                    // reconstruye muchas veces DESPUÉS de `init()`: una fila creada por un guardado (o por
+                    // la puesta al día de F93, que junta las variantes) quedaba sin código hasta el próximo
+                    // arranque. Se numera con su id, sin pisar ningún código existente.
+                    let _ = conn.execute(
+                        "UPDATE phones SET code = 'M-' || printf('%04d', id) WHERE key = ?1 AND (code IS NULL OR code = '')",
+                        params![key],
+                    );
                 }
             }
             Some((id, ex_brand, ex_line, ex_name, ex_source)) => {
@@ -1172,6 +1470,21 @@ pub fn rebuild_phones(conn: &Connection, dry_run: bool) -> SqlResult<PhoneRebuil
                                       needs_review=?7, updated_at=datetime('now','localtime')
                              WHERE id=?6",
                             params![brand, line, model, display, aliases_json, id, needs_review],
+                        )?;
+                    }
+                } else if aliases_nuevos_faltan(conn, *id, &aliases_json) {
+                    // F93 — UNA ORTografía NUEVA DEL MISMO TELÉFONO TIENE QUE QUEDAR ANOTADA.
+                    // Antes los alias solo se escribían cuando cambiaba el NOMBRE (marca/línea/nombre): si
+                    // un repuesto nuevo nombraba al teléfono de otra forma (p. ej. la variante pegada,
+                    // «Infinix Gt 20 Pro ORIGINAL»), ese alias NO se guardaba y `lookup_aliases` —que es
+                    // lo que usa el servicio para encontrar los repuestos de un modelo escrito como lo
+                    // escribe el taller— no lo veía. Solo se reescribe cuando de verdad falta algo: así el
+                    // padrón sigue siendo idempotente (la segunda corrida no toca nada).
+                    report.updated += 1;
+                    if !dry_run {
+                        conn.execute(
+                            "UPDATE phones SET aliases=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+                            params![aliases_json, id],
                         )?;
                     }
                 } else {
@@ -1893,6 +2206,96 @@ mod tests {
         assert_eq!(compat, vec!["Blu G73", "Blu G73L", "Honor X7"]);
     }
 
+    // ── F86/REQ-1: EL MODELO ARMA LA COMPATIBILIDAD (AC-1 y AC-2)
+
+    /// AC-1: un modelo con DOS alternativas («A30/A50») y la compatibilidad vacía deja la lista con los
+    /// DOS teléfonos (son dos teléfonos compatibles para el local, no uno) y `phones` = 2.
+    #[test]
+    fn test_modelo_con_alternativas_arma_la_compatibilidad() {
+        let n = normalize_fields("Pantalla", "Samsung", "A30/A50", "", "");
+        assert_eq!(n.model, "A30", "el principal (el primero) queda en model");
+        assert_eq!(n.phones.len(), 2, "las dos alternativas son DOS teléfonos: {:?}", n.phones);
+        assert_eq!(n.phones, vec!["Samsung A30", "Samsung A50"]);
+        let compat: Vec<String> = serde_json::from_str(&n.compatibility).unwrap();
+        assert_eq!(compat, vec!["Samsung A30", "Samsung A50"], "y la lista queda escrita, no vacía");
+        // el nombre sigue diciendo lo mismo que antes (el modelo entero)
+        assert_eq!(n.name, "Pantalla Samsung A30 / A50");
+    }
+
+    /// AC-2 (la mitad pura): un modelo SIMPLE y la compatibilidad vacía deja UN teléfono, con la marca
+    /// del producto. Antes esta ficha quedaba SIN compatibilidad y no entraba al padrón de Modelos.
+    #[test]
+    fn test_modelo_simple_arma_la_compatibilidad() {
+        let n = normalize_fields("Pantalla", "Samsung", "A06 4G", "", "");
+        assert_eq!(n.phones, vec!["Samsung A06 4G"]);
+        let compat: Vec<String> = serde_json::from_str(&n.compatibility).unwrap();
+        assert_eq!(compat, vec!["Samsung A06 4G"]);
+        // y la marca se INFIERE del modelo cuando la celda de marca viene vacía (misma regla de siempre)
+        let g = normalize_fields("Pantalla", "", "AMAZON FIRE 7", "", "");
+        assert_eq!(g.phones, vec!["Amazon Fire 7"], "el teléfono hereda la marca inferida");
+    }
+
+    /// REQ-1 (el límite): sin modelo NO se inventa una compatibilidad — la lista sigue saliendo vacía.
+    #[test]
+    fn test_sin_modelo_ni_lista_sigue_sin_compatibilidad() {
+        let n = normalize_fields("Pantalla", "Samsung", "", "", "");
+        assert!(n.phones.is_empty(), "sin modelo no hay teléfono que declarar: {:?}", n.phones);
+        assert_eq!(n.compatibility, "", "y la lista queda vacía");
+        // con lista escrita y modelo vacío manda la lista (no se agrega nada)
+        let c = normalize_fields("Pantalla", "Samsung", "", "", r#"["Samsung A10"]"#);
+        assert_eq!(c.phones, vec!["Samsung A10"]);
+    }
+
+    /// REQ-5 (la base del aviso): ¿la lista incluye al modelo? Se compara por CLAVE de teléfono, así
+    /// «A06 4G» y «Samsung Galaxy A06 4G» son el mismo teléfono y el aviso no salta de más.
+    #[test]
+    fn test_compat_incluye_modelo() {
+        assert!(compat_incluye_modelo("Samsung", "A06 4G", r#"["Samsung A06 4G"]"#));
+        assert!(compat_incluye_modelo("Samsung", "Galaxy A06", r#"["Samsung A06"]"#), "misma clave de padrón");
+        assert!(!compat_incluye_modelo("Samsung", "A06 4G", r#"["Samsung A10","Samsung A12"]"#), "lista incoherente");
+        assert!(!compat_incluye_modelo("Samsung", "A06 4G", ""), "lista vacía: no incluye a nadie");
+        assert!(compat_incluye_modelo("Samsung", "", ""), "sin modelo no hay nada que la lista pueda ignorar");
+    }
+
+    /// F87 — el aviso NO puede saltar cuando la etiqueta lleva PEGADA la variante del repuesto. Son las
+    /// filas REALES del archivo del dueño que avisaban en falso (25 de 83): su local escribe
+    /// «Infinix Gt 20 Pro INCELL» y el modelo de la ficha es «Gt 20 Pro».
+    #[test]
+    fn test_compat_incluye_modelo_ignora_la_variante_de_la_etiqueta() {
+        // (a) la etiqueta nombra al modelo con su MATERIAL pegado → NO se avisa
+        assert!(
+            compat_incluye_modelo("Infinix", "Gt 20 Pro", "Infinix Gt 20 Pro INCELL / Infinix Note 40 INCELL"),
+            "«Infinix Gt 20 Pro INCELL» ES el modelo «Gt 20 Pro» del repuesto INCELL"
+        );
+        // (b) la fila REAL incoherente del mismo archivo → SIGUE avisada. Es la `Tecno Spark 20 Pro
+        //     ORIGINAL` cuya lista no nombra a su modelo por ningún lado.
+        assert!(
+            !compat_incluye_modelo(
+                "Tecno",
+                "Spark 20 Pro",
+                "Tecno Spark 10 / Tecno Spark Go 2023 / Infinix Hot 30i / Tecno Pop 7 / Tecno Spark 10C / Infinix Smart 7"
+            ),
+            "ninguna etiqueta de esa lista es el Spark 20 Pro: el aviso tiene que seguir saliendo"
+        );
+        // (c) modelo simple y etiqueta sin variante → NO se avisa (la fila real del Hot 10 Lite)
+        assert!(compat_incluye_modelo("Infinix", "Hot 10 Lite", "Infinix Hot 10 Lite / Infinix Hot 10i"));
+        // (d) etiqueta que nombra a OTRO teléfono de la MISMA marca (con variante pegada, que es
+        //     justo lo que ahora se ignora) → sigue avisando: quitar el material no vuelve
+        //     «cualquier teléfono» igual a «su modelo»
+        assert!(
+            !compat_incluye_modelo("Infinix", "Hot 30i", "Infinix Hot 30 INCELL / Infinix Note 30 INCELL"),
+            "el Hot 30i no está en esa lista"
+        );
+        // y el modelo que TAMBIÉN trae la variante pegada se compara por su teléfono, no por el texto
+        assert!(compat_incluye_modelo("Infinix", "Gt 20 Pro INCELL", "Infinix Gt 20 Pro"));
+        // «Con Marco» es parte de la misma regla de variantes (F53): también se ignora al comparar.
+        // Y viene SOLO, sin material: la fila real del dueño es `Infinix Hot 50` + variante «Con Marco»
+        // con la lista «Infinix Hot 50 Con Marco».
+        assert!(compat_incluye_modelo("Samsung", "A52", "Samsung A52 OLED Con Marco"));
+        assert!(compat_incluye_modelo("Infinix", "Hot 50", "Infinix Hot 50 Con Marco"));
+        assert!(compat_incluye_modelo("Tecno", "Pop 5 Lite", "Tecno Pop 5 Lite Sin Marco"));
+    }
+
     #[test]
     fn test_normalize_fields_infers_brand_from_model() {
         let n = normalize_fields("Táctil Tablet", "", "AMAZON FIRE 7 HD 2019", "", "");
@@ -2266,6 +2669,129 @@ mod tests {
         }
     }
 
+    /// F93 — LA RED DE COMPATIBILIDAD SE SINCRONIZA (el caso textual del dueño, 2026-10-05).
+    ///
+    /// «Si en Producto Infinix Hot 10 Play los modelos compatibles son Hot 10 Play; Hot 11 Play… cuando
+    /// le quito Hot 11 Play, los cambios no surten efecto en módulo-fichas sobre Hot 10 Play sino en el
+    /// otro que se retiró. Es importante que se sincronice en toda la red completa.»
+    #[test]
+    fn test_f93_la_red_de_compatibilidad_se_sincroniza() {
+        let path = std::env::temp_dir().join(format!("registro_f93_red_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = crate::db::Database::new(&path).expect("base de test");
+        let cat = Some(1i64);
+
+        // Los DOS productos de la red: la pantalla de cada teléfono, con la MISMA lista (como el local
+        // la escribe en su archivo).
+        let a = db.add_product("Infinix Hot 10 Play", cat, "Infinix", "Hot 10 Play", "", r#"["Infinix Hot 10 Play","Infinix Hot 11 Play"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+        let b = db.add_product("Infinix Hot 11 Play", cat, "Infinix", "Hot 11 Play", "", r#"["Infinix Hot 11 Play","Infinix Hot 10 Play"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+        // Un TERCER producto que sirve a OTROS teléfonos: no es de esta red y NO se puede tocar.
+        let otro = db.add_product("Infinix Hot 30i", cat, "Infinix", "Hot 30i", "", r#"["Infinix Hot 30i"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+
+        let lista = |id: i64| db.get_product(id).unwrap().unwrap().compatibility.unwrap_or_default();
+        assert_eq!(entradas_de_compat(&lista(a)), vec!["Infinix Hot 10 Play", "Infinix Hot 11 Play"]);
+        assert_eq!(entradas_de_compat(&lista(b)), vec!["Infinix Hot 11 Play", "Infinix Hot 10 Play"]);
+
+        // 1) QUITAR «Infinix Hot 11 Play» de la pantalla del Hot 10 Play
+        let cambios = db.update_product(a, "Infinix Hot 10 Play", cat, "Infinix", "Hot 10 Play", "",
+            r#"["Infinix Hot 10 Play"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+        assert_eq!(cambios.len(), 1, "se sincronizó UNA ficha hermana: {cambios:?}");
+        assert_eq!(cambios[0].id, b);
+        assert_eq!(entradas_de_compat(&lista(a)), vec!["Infinix Hot 10 Play"], "la editada queda como se pidió");
+        assert_eq!(entradas_de_compat(&lista(b)), vec!["Infinix Hot 11 Play"],
+            "el hermano que SALIÓ de la red queda solo con su teléfono (antes seguía sirviendo al Hot 10 Play)");
+        assert_eq!(entradas_de_compat(&lista(otro)), vec!["Infinix Hot 30i"], "un producto de otra red NO se toca");
+
+        // …y las DOS fichas dicen la verdad: cada teléfono ve SOLO su pantalla
+        let repuestos_de = |nombre: &str| -> Vec<i64> {
+            let id: i64 = {
+                let conn = db.conn.lock().unwrap();
+                conn.query_row("SELECT id FROM phones WHERE name = ?1", params![nombre], |r| r.get(0)).unwrap()
+            };
+            let det = db.get_phone_detail(id).unwrap().expect("la ficha existe");
+            let mut ids: Vec<i64> = det.blocks.iter().flat_map(|b| b.items.iter().map(|p| p.id)).collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(repuestos_de("Hot 10 Play"), vec![a], "la ficha del Hot 10 Play ve su pantalla");
+        assert_eq!(repuestos_de("Hot 11 Play"), vec![b], "y la del Hot 11 Play la suya");
+
+        // 2) VOLVER A AGREGARLO: la red se rearma en las DOS direcciones. Cada ficha queda con SU
+        //    teléfono primero (la convención del catálogo: el modelo principal manda), que es
+        //    exactamente como estaban las dos al principio.
+        let cambios = db.update_product(a, "Infinix Hot 10 Play", cat, "Infinix", "Hot 10 Play", "",
+            r#"["Infinix Hot 10 Play","Infinix Hot 11 Play"]"#, 0.0, 0.0, 1, 0, 0.0).unwrap();
+        assert_eq!(cambios.len(), 1, "el hermano vuelve a entrar a la red: {cambios:?}");
+        assert_eq!(entradas_de_compat(&lista(b)), vec!["Infinix Hot 11 Play", "Infinix Hot 10 Play"],
+            "el hermano recupera la red completa (con su propio teléfono primero)");
+        assert_eq!(repuestos_de("Hot 11 Play").len(), 2, "las dos pantallas vuelven a su ficha");
+
+        // 3) GUARDAR SIN CAMBIAR LA RED no toca a nadie (otro precio, otra ortografía)
+        let cambios = db.update_product(a, "Infinix Hot 10 Play", cat, "Infinix", "Hot 10 Play", "",
+            r#"["Hot 11 Play","Infinix Hot 10 Play"]"#, 9.99, 0.0, 1, 0, 0.0).unwrap();
+        assert!(cambios.is_empty(), "la red es la misma: nada que sincronizar ({cambios:?})");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// F93 — LA VARIANTE ES DEL REPUESTO, NO DEL TELÉFONO (medido con el catálogo real del dueño:
+    /// «Infinix Gt 20 Pro INCELL» creaba un teléfono «Gt 20 Pro INCELL» aparte y el desplegable
+    /// «Pantalla a instalar» del servicio quedaba VACÍO para «Gt 20 Pro»).
+    #[test]
+    fn test_f93_la_variante_no_parte_el_telefono() {
+        let path = std::env::temp_dir().join(format!("registro_f93_var_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = crate::db::Database::new(&path).expect("base de test");
+        db.open_day(0.0, 100.0, 0.0).unwrap();
+
+        // La pantalla INCELL y la ORIGINAL del mismo teléfono, escritas como las escribe el local.
+        let incell = db.add_product("Pantalla Gt 20 Pro INCELL", Some(1), "Infinix", "Gt 20 Pro", "INCELL",
+            r#"["Infinix Gt 20 Pro INCELL","Infinix Note 40 INCELL"]"#, 0.0, 5.0, 2, 0, 0.0).unwrap();
+        let original = db.add_product("Pantalla Gt 20 Pro ORIGINAL", Some(1), "Infinix", "Gt 20 Pro", "ORIGINAL",
+            r#"["Infinix Gt 20 Pro ORIGINAL"]"#, 0.0, 8.0, 1, 0, 0.0).unwrap();
+
+        // 1) EL PADRÓN: UN teléfono «Gt 20 Pro», no uno por variante
+        let conn = db.conn.lock().unwrap();
+        let filas: Vec<(String, String)> = conn
+            .prepare("SELECT name, key FROM phones WHERE key LIKE 'infinix|gt 20 pro%' ORDER BY key").unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(filas, vec![("Gt 20 Pro".to_string(), "infinix|gt 20 pro".to_string())],
+            "una sola ficha para el teléfono (antes: «Gt 20 Pro INCELL» y «Gt 20 Pro ORIGINAL»): {filas:?}");
+        // …y la variante sigue viva en el ALIAS, así buscar como lo escribe el local lo encuentra
+        let alias: String = conn.query_row("SELECT aliases FROM phones WHERE key='infinix|gt 20 pro'", [], |r| r.get(0)).unwrap();
+        drop(conn);
+        assert!(alias.contains("Gt 20 Pro INCELL") && alias.contains("Gt 20 Pro ORIGINAL"),
+            "los alias conservan cómo lo escribe el local: {alias}");
+
+        // 2) LA FICHA del teléfono: las DOS pantallas, cada una con su variante
+        let phone_id: i64 = {
+            let c = db.conn.lock().unwrap();
+            c.query_row("SELECT id FROM phones WHERE key='infinix|gt 20 pro'", [], |r| r.get(0)).unwrap()
+        };
+        let mut repuestos: Vec<i64> = db.get_phone_detail(phone_id).unwrap().expect("la ficha existe")
+            .blocks.iter().flat_map(|b| b.items.iter().map(|p| p.id)).collect();
+        repuestos.sort_unstable();
+        let mut esperados = vec![incell, original];
+        esperados.sort_unstable();
+        assert_eq!(repuestos, esperados, "la ficha del Gt 20 Pro tiene las dos pantallas");
+
+        // 3) EL SERVICIO: el desplegable estricto ya las OFRECE (antes: 0 pantallas para este modelo)
+        let exactas = db.find_compatible_screens_exactas("Gt 20 Pro", 20).unwrap();
+        let ids: Vec<i64> = exactas.iter().map(|c| c.product.id).collect();
+        assert!(ids.contains(&incell) && ids.contains(&original),
+            "«Pantalla a instalar» de un Gt 20 Pro ofrece sus dos pantallas: {ids:?}");
+
+        // 4) La pantalla de OTRO teléfono sigue sin entrar (la variante no afloja la coincidencia)
+        let ids_otro: Vec<i64> = db.find_compatible_screens_exactas("Note 40", 20).unwrap().iter().map(|c| c.product.id).collect();
+        assert!(ids_otro.contains(&incell), "el Note 40 INCELL sí sirve al Note 40: {ids_otro:?}");
+        assert!(!ids_otro.contains(&original), "pero la ORIGINAL del Gt 20 Pro no: {ids_otro:?}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Hook manual (no corre por defecto) para limpiar una base concreta sin abrir la app:
     ///   $env:REGISTRO_NORMALIZE_DB="C:\ruta\copia.db"; cargo test -- --ignored test_manual_normalize_db --nocapture
     /// Con `REGISTRO_NORMALIZE_APPLY=1` APLICA (hace respaldo antes); sin la variable solo dry-run.
@@ -2383,6 +2909,11 @@ mod tests {
             assert_eq!(n.model, expect["model"].as_str().unwrap(), "modelo {label}");
             assert_eq!(n.variant, expect["variant"].as_str().unwrap(), "variante {label}");
             assert_eq!(n.name, expect["name"].as_str().unwrap(), "nombre {label}");
+            // F86/REQ-1 — EL MODELO ARMA LA COMPATIBILIDAD: una ficha CON modelo ya no queda con la lista
+            // vacía (antes quedaba en `[]` o `""` y no entraba al padrón). Los tres casos del fixture que
+            // esperaban lista vacía tienen modelo, así que su valor cambió: el twin JS
+            // (`tools/audit_inventory.mjs`, misma regla desde 2026-10-04) regenera el fixture con el valor
+            // nuevo y acá se compara EXACTO contra el archivo, sin ningún valor fijado a mano.
             assert_eq!(n.compatibility, expect["compatibility"].as_str().unwrap(), "compat {label}");
         }
     }

@@ -1,4 +1,7 @@
-const CDP_URL = "http://localhost:9222";
+// Puerto de depuración: 9222 por defecto. `REGISTRO_CDP_PORT` permite apuntar a OTRA instancia —
+// sirve cuando el dueño tiene la app abierta en SU base (puerto 9222) y la verificación tiene que
+// correr contra una copia en una segunda ventana (9223), sin tocar la sesión real.
+const CDP_URL = process.env.REGISTRO_CDP_URL || `http://localhost:${process.env.REGISTRO_CDP_PORT || 9222}`;
 
 const list = await (await fetch(`${CDP_URL}/json/list`)).json();
 const page = list.find((t) => t.type === "page") || list[0];
@@ -96,6 +99,25 @@ const clickXY = async (x, y) => {
 };
 
 /**
+ * Cambia el ANCHO/ALTO de la ventana desde CDP, sin tocar la app.
+ *
+ * Existe para las cosas que solo se pueden medir con el ancho de VERDAD (F85: el inventario no
+ * puede sacar barra horizontal en ningún tamaño, y por debajo de 1024 px la tabla se apila). Un
+ * `matchMedia` falso desde la consola mediría otra cosa: la mitad de la app usa el mismo
+ * `matchMedia` y quedaría mintiendo.
+ */
+const setViewport = async (width, height) => {
+  await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+};
+
+/** Devuelve el control al tamaño real de la ventana (y limpia la emulación). */
+const resetViewport = async () => {
+  await send("Emulation.clearDeviceMetricsOverride", {});
+  await sleep(400);
+};
+
+/**
  * Contesta un diálogo NATIVO del navegador (confirm/alert) que esté bloqueando la página.
  * La app pide confirmación en dos lugares: volver atrás con correcciones y el aviso del barrido
  * cuando la lista parece parcial. Sin esto, la página queda bloqueada y los `evalx` dan timeout.
@@ -163,7 +185,7 @@ export async function escribirEn(sel, texto, intentos = 6) {
   return false;
 }
 
-export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep, handleDialog };
+export { evalx, clickCenter, clickXY, keyNav, typeText, insertText, sleep, handleDialog, setViewport, resetViewport };
 
 // Se ejecuta al importar: ninguna verificación en vivo depende ya de cómo quedó la barra lateral.
 await ensureSidebarExpanded();

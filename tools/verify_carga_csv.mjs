@@ -123,12 +123,22 @@ const idExistente = await invoke('add_product', {
 });
 check('F78 (preparación): hay un producto existente con stock 3 para actualizar', Number(idExistente) > 0, `id ${idExistente}`);
 
+// F88 — DOS CÓDIGOS DISTINTOS NO SON LA MISMA PANTALLA: una ficha creada por la app nace con un código
+// automático (`P-` + su id, medido: P-1048), así que si el archivo trae SU código para esa misma
+// pantalla, el motor la carga como ficha NUEVA en vez de pisar una ficha ajena (es la regla que
+// destrabó el archivo real del dueño: sin ella se perdía el código P-0053). Para medir el camino de
+// ACTUALIZAR, la ficha de prueba lleva el código del archivo — que es como está el catálogo real
+// (71 de las 83 filas del dueño traen código y se cruzan por él).
+const codeFicha = `P-CSV${marca}`;
+const codePuesto = await invoke('set_product_code', { id: idExistente, code: codeFicha }).then(() => true).catch(() => false);
+check('F78 (preparación): la ficha que el archivo va a actualizar lleva el código del archivo', codePuesto, codeFicha);
+
 const CSV_OK = [
   'nombre;categoria;marca;modelo;variante;compatibilidad;costo;venta;efectivo;stock;stock_min;proveedor;codigo;en_uso',
   // DOS filas para la MISMA ficha (mismo código): el stock tiene que SUMAR las dos (3 + 4 + 6 = 13) —
   // era un bloqueante de la revisión adversarial (la segunda fila pisaba el stock de la primera)
-  `${PANTALLA};Pantalla;Genérico;CSV${marca};;;4,50;9,00;8,00;4;1;Cell World;P-CSV${marca};si`,
-  `${PANTALLA};Pantalla;Genérico;CSV${marca};;;4,50;9,00;8,00;6;1;Cell World;P-CSV${marca};si`,
+  `${PANTALLA};Pantalla;Genérico;CSV${marca};;;4,50;9,00;8,00;4;1;Cell World;${codeFicha};si`,
+  `${PANTALLA};Pantalla;Genérico;CSV${marca};;;4,50;9,00;8,00;6;1;Cell World;${codeFicha};si`,
   `${PIN_DE_CARGA};${CATEGORIA_NUEVA};Xiaomi;Redmi 9A;;Redmi 9A / Redmi 9C;0,80;3,00;2,50;5;2;Importadora;;si`,
 ].join('\n');
 
@@ -219,7 +229,17 @@ try {
   const catNueva = await evalx(`(() => {
     const b = document.querySelector('[data-csv-new-categories]');
     const c = b?.querySelector('[data-field="csv-categoria-nueva"]');
-    return c ? { texto: b.innerText.replace(/\\s+/g, ' ').trim().slice(0, 90), marcada: c.checked } : null;
+    if (!c) return null;
+    // El nombre de la categoría va en la ETIQUETA de su casilla. Antes esta comprobación buscaba el
+    // nombre en los primeros 90 caracteres del bloque: cuando F86/F87 agregaron el renglón que
+    // explica «se crean sólo las que dejes tildadas…», el nombre quedó fuera de esa ventana y la
+    // comprobación falló con el producto perfecto (medido 2026-10-05). Medía el largo del encabezado,
+    // no si la categoría está listada.
+    return {
+      texto: (c.closest('label')?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
+      bloque: (b.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160),
+      marcada: c.checked,
+    };
   })()`);
   check('F78: la categoría nueva del archivo se lista y NO viene marcada (la crea solo si la tildás)',
     catNueva?.marcada === false && String(catNueva?.texto).includes(CATEGORIA_NUEVA), JSON.stringify(catNueva));

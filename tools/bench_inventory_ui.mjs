@@ -15,12 +15,10 @@
 //   entrada      → clic en «Inventario» del menú hasta ver la tabla de Productos con datos
 //   productos    → clic en la pestaña Productos
 //   modelos      → clic en la pestaña Modelos (la más cara: KPIs + lista del padrón)
-//   modelo       → clic en «Repuesto por modelo» hasta ver el buscador
-//   consulta     → escribir un modelo hasta ver las sugerencias del buscador
-//   resultado    → elegir el modelo hasta ver la tabla de repuestos compatibles
 //   movimientos  → clic en la pestaña Movimientos
 //   ajustes      → clic en la pestaña Ajustes
 //   volver       → clic en Productos OTRA VEZ en la misma sesión (2ª visita)
+// (F86: las mediciones de la pestaña «Repuesto por modelo» se quitaron con la pestaña.)
 // Cada ronda SALE del módulo (Dashboard) antes de volver a entrar, para que la visita sea
 // «en frío» como la del operario que llega al inventario desde otra pantalla.
 import { evalx, clickCenter, keyNav, typeText, sleep } from './cdp_driver.mjs';
@@ -54,14 +52,6 @@ const READY = {
     const done = /mostrando \\d+–\\d+ de \\d+|sin resultados|\\d+ movimientos/.test(t);
     return busy === 0 && done;
   })()`,
-  buscador: `document.body.innerText.toLowerCase().includes('buscar repuesto por modelo de teléfono')`,
-  sugerencias: `document.querySelectorAll('div.max-h-72 button').length > 0`,
-  compatibles: `(() => {
-    const t = document.body.innerText.toLowerCase();
-    const busy = document.querySelectorAll('table tbody [class*="animate-pulse"]').length + document.querySelectorAll('[data-refreshing]').length;
-    const rows = document.querySelectorAll('table tbody tr').length;
-    return rows > 0 && busy === 0 && /repuestos compatibles/.test(t);
-  })()`,
   ajustes: `document.body.innerText.toLowerCase().includes('precios de costo y venta')`,
 };
 
@@ -89,17 +79,6 @@ const measure = async (clickExpr, readyExpr) => {
   if (!r || r.err) throw new Error(r?.err ?? 'eval sin resultado');
   return r.ms;
 };
-
-/** Escribe un texto en un input de React como lo haría el operario (setter nativo). */
-const typeInto = (sel, text) => evalx(`(() => {
-  const el = document.querySelector(${JSON.stringify(sel)});
-  if (!el) return false;
-  el.focus();
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(el, ${JSON.stringify(text)});
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  return true;
-})()`);
 
 const median = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -140,11 +119,11 @@ for (let round = 1; round <= ROUNDS; round++) {
 
   add('entrada', await measure(SIDEBAR('Inventario'), READY.productos));
   add('modelos', await measure(TAB('Modelos'), READY.modelos));
-  add('modelo', await measure(TAB('Repuesto por modelo'), READY.buscador));
-  // El buscador de modelo: escribir → sugerencias (consulta el padrón) → elegir → repuestos
-  await typeInto('input[placeholder^="Ej: Redmi"]', 'Redmi Note 11');
-  add('consulta', await measure(`document.querySelector('input[placeholder^="Ej: Redmi"]')`, READY.sugerencias));
-  add('resultado', await measure(`document.querySelector('div.max-h-72 button')`, READY.compatibles));
+  // F86 (decisión del dueño, 2026-10-04): «Repuesto por modelo» SE ELIMINÓ, así que sus tres
+  // mediciones (`modelo` / `consulta` / `resultado`) ya no existen. El recorrido equivalente —buscar
+  // un teléfono y ver sus repuestos— vive ahora en «Modelos», que ya se mide arriba (y su búsqueda no
+  // se puede medir con `measure`: esa función exige que el texto de la pantalla CAMBIE, y escribir en
+  // un buscador no cambia la firma).
   add('movimientos', await measure(TAB('Movimientos'), READY.movimientos));
   add('ajustes', await measure(TAB('Ajustes'), READY.ajustes));
   // 2ª visita a Productos EN LA MISMA sesión (con el módulo ya abierto)

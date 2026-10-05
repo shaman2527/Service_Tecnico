@@ -156,6 +156,29 @@ export interface CsvRow {
   match_kind: string;
   shared: number;
   stock_after: number | null;
+  /**
+   * F86 (REQ-2/AC-4) — el stock con el que la ficha QUEDA, calculado por el backend con el modo
+   * elegido y **nunca negativo**: es el número que se va a escribir de verdad. Antes la UI lo
+   * recalculaba por su cuenta y el `clamp` escondía un negativo (el dueño veía «30» y la carga
+   * dejaba −30). Mientras el backend no lo mande, la UI cae en `stock_after` (contrato viejo).
+   */
+  stock_final?: number | null;
+  /**
+   * F86 (REQ-5/AC-8) — la lista de compatibilidad del archivo NO incluye al modelo de la ficha: es
+   * un dato incoherente (una pantalla que dice servir a un teléfono pero cuya lista no lo nombra),
+   * así que el asistente lo avisa por fila en vez de cargarlo callado.
+   */
+  aviso_compat?: boolean;
+  /**
+   * F88 — LA LISTA QUE VA A QUEDAR: los teléfonos donde entra esta pantalla, ya normalizados como los
+   * guarda el catálogo y separados por « / ». Es la del archivo y, si esa celda viene vacía, la que se
+   * arma con SU MODELO (REQ-1/F86) — la MISMA cuenta que hace el aplicar, así que la fila no puede
+   * mostrar una lista distinta de la que se guarda. El dueño la pidió a la vista: «la compatibilidad
+   * así es necesaria para cada modelo tiene que aparecer».
+   */
+  compatibility_final?: string;
+  /** F88 — ¿esa lista la armó el MODELO porque el archivo no traía compatibilidad? */
+  compat_del_modelo?: boolean;
   issues: string[];
   notes: string[];
 }
@@ -170,6 +193,22 @@ export interface CsvPreview {
   columns: CsvColumns;
   known: string[];
   ignored: string[];
+  /**
+   * F86 — los encabezados que el lector NO entendió, **tal cual vienen en el archivo** («STOCK
+   * ACTUAL», «CANT. FÍSICA»…). Es lo que permite decirle al dueño por qué su stock no se cargó en
+   * vez de mostrarle un badge sin detalle. Si el backend no lo manda, se usa `ignored`.
+   */
+  columnas_ignoradas?: string[];
+  /**
+   * F86 — el archivo NO trae ninguna columna que mapee a stock: la carga va a actualizar los datos
+   * pero **no va a tocar el stock**. Es el caso medido de «no me carga el stock en masa».
+   * Si el backend no lo manda, se deduce de `columns.stock === false`.
+   */
+  sin_columna_stock?: boolean;
+  /** F86 — eco del modo con el que se calculó esta vista previa (`sumar` | `reemplazar`): es lo que
+   *  permite saber si el `stock_final` de cada fila sigue valiendo (si el operario cambió el modo
+   *  después de revisar, ese número se calculó con el modo viejo). */
+  mode?: string;
   separator: string;
   total_rows: number;
   new_count: number;
@@ -188,6 +227,12 @@ export interface CsvApplyInput {
   supplier: string;
   file_name: string;
   new_categories: string[];
+  /**
+   * F86 (REQ-3/AC-5) — qué hace la carga con el stock: `sumar` (compras: hoy + archivo, lo de
+   * siempre y el valor por defecto si no se manda) o `reemplazar` (conteo: el archivo ES el
+   * inventario real). Va explícito para que la pantalla y lo que se escribe nunca se separen.
+   */
+  mode?: 'sumar' | 'reemplazar';
 }
 
 export interface CsvReport {
@@ -201,6 +246,13 @@ export interface CsvReport {
   suppliered: number;
   skipped: number;
   backup: string;
+  /** F86: eco del modo con el que se aplicó (para que el informe diga qué se hizo con el stock). */
+  mode?: string;
+  /** F86 (REQ-2/AC-3): fichas que venían en NEGATIVO y la carga dejó en 0 (no las arrastró). */
+  clamped_to_zero?: number;
+  /** F86: el archivo no traía una columna de stock reconocida, así que el stock NO se tocó (el informe
+   *  final tampoco puede mentir sobre eso). */
+  sin_columna_stock?: boolean;
 }
 
 // --- Inventario unificado (2026-09-15) ---
@@ -763,6 +815,51 @@ export interface DailyClosing {
    *  − gastos pagados del cajón (Bs). Los cierres viejos vienen en 0 y se leen igual. */
   drawer_adjust_usd: number;
   drawer_adjust_bs: number;
+}
+
+/**
+ * F92 — QUÉ LE PASÓ AL CIERRE DE UN DÍA CERRADO cuando le entró o salió plata después del cierre
+ * (un cobro retroactivo, la fecha de un pago corregida, un cobro borrado). El backend recalcula el
+ * ESPERADO de ese día con la misma fórmula del cierre y deja el **arqueo contado intacto**; esto es
+ * lo que se le dice al operario para que nunca cambie un arqueo en silencio.
+ */
+export interface AjusteCierre {
+  fecha: string;
+  diferencia_antes: number;
+  diferencia_despues: number;
+  diferencia_usd_antes: number;
+  diferencia_usd: number;
+  diferencia_bs_antes: number;
+  diferencia_bs: number;
+  esperado_usd_antes: number;
+  esperado_usd: number;
+  esperado_bs_antes: number;
+  esperado_bs: number;
+}
+
+/** F92 — el estado de la caja de un día (`estado_del_dia`): a qué caja va un cobro y si ya está cerrada. */
+export interface EstadoDelDia {
+  fecha: string;
+  /** Hay una fila de turno con esa fecha (si no, esa plata no entraría en ningún arqueo). */
+  existe: boolean;
+  /** El turno está cerrado: al anotar/mover un cobro, su cierre se recalcula. */
+  cerrado: boolean;
+  tasa_bcv: number;
+  es_hoy: boolean;
+}
+
+/**
+ * F93 — Un producto HERMANO de la red de compatibilidad que se ajustó solo al guardar otro de la misma
+ * red (el dueño: «es importante que se sincronice en toda la red completa»). Se muestra como aviso:
+ * el cambio de un teléfono se ve en las DOS fichas, no en una sola.
+ */
+export interface CambioDeRed {
+  id: number;
+  name: string;
+  /** la lista como estaba («A / B») */
+  antes: string;
+  /** la lista como quedó */
+  despues: string;
 }
 
 export interface BCVRate {

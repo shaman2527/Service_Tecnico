@@ -355,11 +355,14 @@ function ClientFormDialog({ open, onOpenChange, client, onSaved }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+      {/* F86 (REQ-8/AC-11) — patrón de la casa: en la ventana de 750 px de alto, el formulario
+          (dirección + notas) empujaba el pie con «Guardar» fuera de la pantalla. */}
+      <DialogContent className="sm:max-w-md max-h-[92vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{client ? 'Editar cliente' : 'Nuevo cliente'}</DialogTitle>
         </DialogHeader>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {/* El cuerpo scrolleable es la rejilla de campos; el error queda fijo abajo con el pie. */}
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input placeholder="Nombre *" value={form.name}
             onChange={e => set('name')(e.target.value)} className="sm:col-span-2" />
           <Input placeholder="Teléfono" value={form.phone}
@@ -377,8 +380,8 @@ function ClientFormDialog({ open, onOpenChange, client, onSaved }: {
             className="sm:col-span-2 flex min-h-[70px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
           />
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        <DialogFooter>
+        {error && <p className="shrink-0 text-sm text-destructive">{error}</p>}
+        <DialogFooter className="shrink-0 border-t pt-3">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
           <Button onClick={save} disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</Button>
         </DialogFooter>

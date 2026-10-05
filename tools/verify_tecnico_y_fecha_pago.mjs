@@ -103,8 +103,10 @@ try {
     serviceId: id, amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0,
     zelleReference: '', currency: 'USD', notes: 'prueba sin turno', paymentDate: sinTurno,
   });
+  // F92: el mensaje cambió (ahora dice «no hay ninguna caja» y nombra los últimos días CON caja), pero
+  // la regla es la misma: sin turno, esa plata no entraría en ningún arqueo.
   check('F35: el backend RECHAZA un día sin turno (la plata no queda fuera de toda caja)',
-    /No hay un turno/i.test(String(errSinTurno)), String(errSinTurno).slice(0, 100));
+    /No hay ninguna caja|No hay un turno/i.test(String(errSinTurno)), String(errSinTurno).slice(0, 100));
 
   const errFormato = await invokeErr('add_service_payment', {
     serviceId: id, amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0,

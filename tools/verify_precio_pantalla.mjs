@@ -186,9 +186,19 @@ const modelosRaw = await evalx(`(async () => {
 const listaModelos = JSON.parse(String(modelosRaw ?? '[]'));
 const TOPE_BARRIDO = 120;
 console.log(`· modelos en uso con repuestos: ${listaModelos.length} (se miran los primeros ${TOPE_BARRIDO})`);
+/**
+ * F89 — LAS PANTALLAS QUE LA UI VA A MOSTRAR PARA ESE MODELO.
+ *
+ * Tiene que ser la MISMA consulta que usa el desplegable del servicio
+ * (`find_compatible_screens_exactas`: solo las pantallas cuya compatibilidad NOMBRA al modelo), no la
+ * consulta con parecidos. Medido el 2026-10-05: al endurecerse la regla del servicio (el dueño: «no
+ * puede darme de otro modelo que no es»), este script comparaba la lista de la UI contra la consulta
+ * VIEJA y daba «lista=3 · backend=5» para «Camon 20» — el fixture elegía modelos y precios con una
+ * lista que la pantalla ya no muestra, y los 6 fallos siguientes eran la misma causa.
+ */
 const compatiblesDe = async (modelo) => {
   const raw = await evalx(`(async () => {
-    const r = await window.__TAURI_INTERNALS__.invoke('find_compatible_products', { model: ${JSON.stringify(modelo)}, categoryId: null, limit: 80 });
+    const r = await window.__TAURI_INTERNALS__.invoke('find_compatible_screens_exactas', { model: ${JSON.stringify(modelo)}, limit: 80 });
     return JSON.stringify(r.map(x => ({ id: x.product.id, name: x.product.name, category_id: x.product.category_id,
       price_sale: x.product.price_sale, price_usd: x.product.price_usd, stock: x.product.stock, in_stock: x.in_stock })));
   })()`).catch(() => null);
@@ -406,6 +416,13 @@ check('F67: en efectivo la fila muestra el precio CONTADO (con la lista al lado)
   if (esperadoAuto != null) {
     check('F67: si el modelo ya trae una pantalla elegida con precio, el monto es ESE precio',
       montoAuto === esperadoAuto && fuente === 'pantalla', `monto=${montoAuto} · ficha ${idAuto}=${esperadoAuto} · fuente=${fuente}`);
+  } else if (grupoF1 != null) {
+    // La pantalla elegida existe pero NO tiene precio cargado, y el grupo del modelo SÍ tiene uno solo:
+    // el monto toma ESE (regla del proyecto: «el precio del MODELO sigue funcionando» — F67). Antes esta
+    // rama exigía monto 0 y fallaba con el producto correcto (medido 2026-10-05).
+    check('F67: sin precio en la pantalla elegida, el monto toma el del MODELO (no se queda en 0)',
+      Number(montoAuto) === Number(grupoF1) && fuente === 'modelo',
+      `monto=${montoAuto} · modelo=${grupoF1} · fuente=${fuente} · elegida=${idAuto}`);
   } else {
     check('F67: sin una oferta que tomar, el monto NO se inventa', montoAuto === 0, `monto=${montoAuto} · elegida=${idAuto}`);
   }
@@ -413,9 +430,14 @@ check('F67: en efectivo la fila muestra el precio CONTADO (con la lista al lado)
   // precio único, no puede haber chip): antes esta comparación se hacía con el grupo ya contaminado por
   // el fixture y el `||` la volvía vacua.
   const chip = await leerChipModelo(0);
+  const montoAhora = await leerMonto(0);
+  // El chip NO se ofrece cuando el monto YA es el suyo (regla de F80: no se ofrece un precio ya escrito):
+  // por eso «sin chip» es correcto si el monto es el del grupo o si el grupo no tiene un precio único.
   check('F67: el precio del modelo se ofrece solo si el grupo tiene UN precio, y es ese número',
-    chip == null ? grupoF1 == null : Number(chip) === Number(grupoF1),
-    `botón=${chip} · grupo=${grupoF1}`);
+    chip == null
+      ? (grupoF1 == null || Number(montoAhora) === Number(grupoF1))
+      : Number(chip) === Number(grupoF1),
+    `botón=${chip} · grupo=${grupoF1} · monto=${montoAhora}`);
 }
 
 // ── 6) ELEGIR UNA PANTALLA TOMA SU PRECIO (y la cuenta del efectivo) ──────────────────────────
@@ -540,7 +562,15 @@ check('F67: en efectivo la fila muestra el precio CONTADO (con la lista al lado)
   const montoF2 = await leerMonto(idx);
   check('F67: equipo nuevo, modelo con precio único → el monto se toma solo',
     ok2 && montoF2 === Number(F2.grupo), `«${F2.model}» → monto=${montoF2} · grupo=${F2.grupo}`);
-  check('F67: y el formulario dice de dónde salió', (await leerFuente(idx)) === 'modelo', `fuente=${await leerFuente(idx)}`);
+  // El rótulo tiene que decir DE DÓNDE salió el precio. Con el grupo de precio único puede venir del
+  // MODELO o de la pantalla que el sistema eligió sola (si esa pantalla tiene stock y su precio es el
+  // mismo del grupo): las dos fuentes son honestas. Lo que NO se acepta es un rótulo vacío o una fuente
+  // que no corresponda al número (medido 2026-10-05: con la lista estricta del servicio, «A35E» sí tiene
+  // una pantalla con stock y el monto pasa a declararse «de la pantalla», con el mismo número del grupo).
+  const fuenteF2 = await leerFuente(idx);
+  check('F67: y el formulario dice de dónde salió',
+    (fuenteF2 === 'modelo' && montoF2 === Number(F2.grupo)) || (fuenteF2 === 'pantalla' && montoF2 === Number(F2.grupo)),
+    `fuente=${fuenteF2} · monto=${montoF2} · grupo=${F2.grupo}`);
 
   const ok3 = await elegirModelo(idx, F3.model);
   await sleep(1800);

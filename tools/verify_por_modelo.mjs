@@ -10,8 +10,10 @@
 //   2. En la vista «Por modelo» **UN teléfono es UNA fila**, con su código `M-…`, y sus VARIANTES
 //      como chips ADENTRO (no como modelos distintos): los chips y el conteo coinciden con las
 //      fichas compatibles que dice la base.
-//   3. El **stock total** y el **rango de precios** de la fila coinciden con la suma/min/max de las
-//      fichas de ese teléfono (calculado con `node:sqlite` sobre los ids que devuelve el backend).
+//   3. El **rango de precios** de la fila coincide con el min/max de las fichas de ese teléfono
+//      (calculado con `node:sqlite` sobre los ids que devuelve el backend). OJO (F86/AC-9): la fila
+//      YA NO muestra ningún «stock» del teléfono — ese número era la suma del stock de sus repuestos
+//      compatibles y el mismo repuesto cuenta en varios modelos.
 //   4. El check «lo uso» de la fila coincide con `phones.in_use` y al pulsarlo cambia SOLO eso.
 //   5. Al desplegar la fila se ven sus repuestos con **código, variante, precio, costo y stock**
 //      (cada uno comparado contra la base) y se puede fijar la **pantalla de referencia** del modelo
@@ -153,11 +155,15 @@ if (objetivo) {
     chips.length >= 2 && chips.every(c => objetivo.variantesBase.includes(c)) && objetivo.variantesBase.every(v => chips.includes(v)),
     `chips=${JSON.stringify(chips)} · base=${JSON.stringify(objetivo.variantesBase)}`);
 
-  const stockCelda = Number(String(f?.celdas?.[5] ?? '').replace(/[^\d-]/g, ''));
-  check('F52: el STOCK de la fila es la suma de sus repuestos (contra la base)',
-    stockCelda === Number(objetivo.agg.stock), `pantalla=${stockCelda} · base=${objetivo.agg.stock}`);
+  // F86 (REQ-6/AC-9): el «stock» del MODELO se eliminó de esta tabla. Ese número era la SUMA del
+  // stock de sus repuestos compatibles —y el mismo repuesto cuenta en varios modelos—, así que no
+  // era un stock del teléfono. La expectativa nueva es que NO exista esa columna (y, por lo tanto,
+  // que la fila tenga una celda menos).
+  const encabezados = await evalx(`[...document.querySelectorAll('table thead th')].map(th => th.innerText.replace(/\\s+/g, ' ').trim())`);
+  check('F86: la tabla «Por modelo» ya NO tiene columna «Stock» del teléfono',
+    !(encabezados ?? []).some(h => /^stock$/i.test(h)), `encabezados=${(encabezados ?? []).join(' | ')}`);
   const repuestosCelda = Number(f?.celdas?.[4] ?? '');
-  check('F52: la fila dice cuántos repuestos tiene (contra la base)',
+  check('F52/F86: la fila dice cuántos repuestos tiene (contra la base)',
     repuestosCelda === Number(objetivo.agg.n), `pantalla=${repuestosCelda} · base=${objetivo.agg.n}`);
   const esperadoPrecio = Number(objetivo.agg.pmin) === Number(objetivo.agg.pmax)
     ? `$${Number(objetivo.agg.pmax).toFixed(2)}`

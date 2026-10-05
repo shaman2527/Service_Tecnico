@@ -331,7 +331,11 @@ if (elegido) {
   const textoPantalla = await evalx(`(() => {
     const l = [...document.querySelectorAll('[role="dialog"] label')].find(x => /Pantalla a instalar/.test(x.innerText || ''));
     const cont = l?.parentElement;
-    const activa = cont?.querySelector('div.overflow-y-auto button.bg-primary\\\\/10') ?? null;
+    // F93 (arreglo de la PRUEBA, no del producto): desde F80 la fila de la pantalla dejó de ser UN
+    // botón (lleva el lápiz al lado) y la marca de «elegida» quedó en el envoltorio, no en el botón:
+    // buscar la clase bg-primary/10 en el BUTTON daba null con la pantalla BIEN elegida. El gancho
+    // honesto es data-screen-elegida="1", que existe justamente para esto.
+    const activa = cont?.querySelector('[data-screen-option][data-screen-elegida="1"]') ?? null;
     return JSON.stringify({ activa: activa ? activa.innerText.replace(/\\s+/g, ' ').trim() : null, seccion: /Al entregar se descuenta del inventario/.test(document.querySelector('[role="dialog"]')?.innerText ?? '') });
   })()`);
   const tp = JSON.parse(textoPantalla ?? '{}');

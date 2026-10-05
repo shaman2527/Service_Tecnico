@@ -352,6 +352,14 @@ pub fn lookup_aliases(conn: &Connection, text: &str) -> SqlResult<Vec<String>> {
     Ok(out)
 }
 
+/// REQ-7 (RETIRADO) — NOTA PARA EL FUTURO: acá vivía un `lookup_registry_keys` que devolvía las claves
+/// del padrón equivalentes a un texto libre, para filtrar «Repuesto por modelo» por el MISMO vínculo que
+/// usa `build_index` en vez de por una coincidencia de texto. La pestaña «Repuesto por modelo» se ELIMINÓ
+/// (decisión del dueño) y con ella el parámetro `incluir_parecidas` de `find_compatible_products`: no
+/// queda consumidor, así que no se agrega código nuevo. Lo que SÍ queda y es la fuente única del vínculo
+/// teléfono ↔ repuesto es `build_index` + `merged_stats` (ver el test de equivalencia de compatibilidad
+/// al final de este módulo).
+
 /// Marca de la ficha del PADRÓN a la que corresponde un texto libre (nombre comercial,
 /// modelo, clave o alias). La usa el servicio para no ofrecer —ni elegir sola— la pantalla
 /// de OTRA marca cuando el modelo coincide por texto (p. ej. «Honor 10 Lite» con una
@@ -937,6 +945,92 @@ mod tests {
         let by_stock = get_phones(&conn, &mut crate::cache::CatalogCache::default(), None, "", false, false, false, "stock", "desc", 50, 0).unwrap();
         assert!(by_stock.items[0].stock >= by_stock.items[1].stock);
 
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// F86 — LA COMPATIBILIDAD DEL MODELO ES LA DEL PRODUCTO (reclamo del dueño: «repuesto de modelo no
+    /// está reflejando la compatibilidad: tiene que ser la misma de producto»).
+    ///
+    /// El vínculo teléfono ↔ repuesto tiene UNA sola regla, y es la compatibilidad del PRODUCTO: cada
+    /// entrada se canoniza y se pasa a la CLAVE del padrón (`phone_registry_key(canonical_phone(entrada,
+    /// marca))`, la misma cuenta que `rebuild_phones` usa para crear la fila). Los alias son el único
+    /// puente (sirven para que renombrar un teléfono no le haga perder sus repuestos). NO es una
+    /// coincidencia de texto: por eso el repuesto de otra marca que «se parece» no aparece.
+    ///
+    /// Caso medido: el padrón guarda el modelo canónico (`apple|iphone 11 pro`) y la compatibilidad del
+    /// repuesto trae la etiqueta CORTA («Apple 11 Pro»). Son el MISMO teléfono.
+    #[test]
+    fn test_repuestos_por_modelo_salen_de_la_compatibilidad_del_producto() {
+        let (db, path) = setup("compat_producto");
+        // 1) la etiqueta corta «Apple 11 Pro» en la compatibilidad del repuesto (el caso medido)
+        db.add_product("Pantalla iPhone 11 Pro", Some(1), "Apple", "iPhone 11 Pro", "", r#"["Apple 11 Pro"]"#, 10.0, 25.0, 2, 0, 0.0).unwrap();
+        // 2) el par «se parece pero es otro teléfono» (F25: «10 Lite» cruzaba Honor con Infinix)
+        db.add_product("Pantalla Honor 10 Lite", Some(1), "Honor", "10 Lite", "", r#"["Honor 10 Lite"]"#, 4.0, 12.0, 1, 0, 0.0).unwrap();
+        db.add_product("Pantalla Infinix Hot 10 Lite", Some(1), "Infinix", "Hot 10 Lite", "", r#"["Infinix Hot 10 Lite"]"#, 5.0, 14.0, 3, 0, 0.0).unwrap();
+
+        // la regla, escrita: la etiqueta corta y el nombre canónico dan la MISMA clave de padrón
+        assert_eq!(
+            phone_registry_key(&crate::catalog::canonical_phone("Apple 11 Pro", "Apple")),
+            phone_registry_key(&crate::catalog::canonical_phone("iPhone 11 Pro", "Apple")),
+            "«Apple 11 Pro» y «Apple iPhone 11 Pro» son el mismo teléfono"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let uno = |brand: &str| {
+            let page = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some(brand), "", false, false, false, "nombre", "asc", 50, 0).unwrap();
+            assert_eq!(page.total, 1, "{brand} debería tener UNA ficha: {:?}", page.items.iter().map(|p| &p.name).collect::<Vec<_>>());
+            let row = page.items[0].clone();
+            let detail = get_phone_detail(&conn, &mut crate::cache::CatalogCache::default(), row.id).unwrap().unwrap();
+            let nombres: Vec<String> = detail.blocks.iter().flat_map(|b| b.items.iter().map(|p| p.name.clone())).collect();
+            (row, detail.phone.products, detail.phone.stock, nombres)
+        };
+
+        // APPLE: el repuesto aparece por la compatibilidad del producto (etiqueta corta incluida)
+        let (apple, n, stock, nombres) = uno("Apple");
+        assert_eq!(apple.key, "apple|iphone 11 pro", "clave canónica del padrón");
+        assert_eq!(apple.name, "iPhone 11 Pro", "nombre comercial");
+        assert_eq!(n, 1, "un repuesto: {:?}", nombres);
+        assert_eq!(stock, 2);
+        assert_eq!(nombres, vec!["Pantalla iPhone 11 Pro"]);
+
+        // HONOR: solo su repuesto (el «10 Lite» de Infinix NO se cuela, aunque el texto se parezca)
+        let (honor, _, _, nombres_honor) = uno("Honor");
+        assert_eq!(nombres_honor, vec!["Pantalla Honor 10 Lite"], "otra marca fuera: {:?}", nombres_honor);
+        // y al revés: la ficha del Infinix tiene solo el suyo
+        let (_, _, _, nombres_infinix) = uno("Infinix");
+        assert_eq!(nombres_infinix, vec!["Pantalla Infinix Hot 10 Lite"]);
+        assert_ne!(honor.key, "infinix|hot 10 lite", "cada teléfono con SU clave");
+
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// F86/REQ-1 — Una ficha cargada SOLO con modelo entra al padrón (AC-2): con la compatibilidad vacía,
+    /// `normalize_fields` la arma con su modelo, así que `rebuild_phones` (que corre dentro de
+    /// `add_product`) crea el teléfono. Antes esta ficha no aparecía ni en Modelos ni en Por modelo.
+    #[test]
+    fn test_ficha_solo_con_modelo_entra_al_padron() {
+        let (db, path) = setup("solo_modelo");
+        // SIN compatibilidad y SIN variante: solo marca + modelo
+        let pid = db.add_product("Táctil Samsung A30", Some(1), "Samsung", "A30/A50", "", "", 4.0, 9.0, 3, 0, 0.0).unwrap();
+        let prod = db.get_product(pid).unwrap().unwrap();
+        assert_eq!(
+            prod.compatibility.as_deref(),
+            Some(r#"["Samsung A30","Samsung A50"]"#),
+            "la compatibilidad se armó con el MODELO"
+        );
+        assert_eq!(prod.model.as_deref(), Some("A30"), "y el principal queda en model");
+
+        let conn = db.conn.lock().unwrap();
+        // el padrón lo cuenta: las DOS alternativas son dos teléfonos del taller
+        for m in ["A30", "A50"] {
+            let page = get_phones(&conn, &mut crate::cache::CatalogCache::default(), Some("Samsung"), m, false, false, false, "nombre", "asc", 50, 0).unwrap();
+            assert_eq!(page.total, 1, "el teléfono «{m}» tiene que existir en el padrón");
+            assert_eq!(page.items[0].products, 1, "y con su repuesto");
+        }
         drop(conn);
         drop(db);
         let _ = std::fs::remove_file(&path);

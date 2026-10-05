@@ -79,7 +79,11 @@ export function useCompatibleProducts(model: string, enabled = true) {
     let alive = true;
     setLoading(true);
     const t = setTimeout(() => {
-      api.findCompatibleProducts(q, null, 80)
+      // F89 — la lista del modelo son SOLO las pantallas cuya compatibilidad lo nombra: pedido del dueño
+      // («cada modelo comparte la misma compatibilidad… no puede darme de otro modelo que no es»). Antes
+      // entraban las de OTRO teléfono por coincidencia parcial (para «Spark 7 Pro» ofrecía la pantalla de
+      // un Google 7 Pro, de un Realme 7 Pro y de un Redmi Note 7 Pro).
+      api.findCompatibleScreensExactas(q, 80)
         .then(r => { if (alive) { setCandidates(r); setResuelto(q); } })
         .catch(() => { if (alive) { setCandidates([]); setResuelto(q); } })
         .finally(() => { if (alive) setLoading(false); });

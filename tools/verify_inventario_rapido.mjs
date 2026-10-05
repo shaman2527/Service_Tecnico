@@ -165,27 +165,24 @@ check('Modelos: el padrón coincide con la base (no quedó un número viejo)',
 const restos = contar('phones') - 1136;
 if (restos > 0) console.log(`NOTA: el padrón de esta copia tiene ${restos} ficha(s) de teléfono de productos borrados (el rebuild del padrón no las limpia: hallazgo aparte, no de esta feature)`);
 
-// --- el buscador de repuestos sigue respondiendo con datos ---
-await abrirTab('Repuesto por modelo');
-await waitFor(`!!document.querySelector('input[placeholder^="Ej: Redmi"]')`);
+// --- el padrón sigue respondiendo con datos ---
+// F86 (decisión del dueño, 2026-10-04): la pestaña «Repuesto por modelo» SE ELIMINÓ (tenía tres
+// vistas de lo mismo). Su contenido vive en la FICHA del teléfono, dentro de «Modelos» — que es lo
+// que ya cubren `verify_models_tab.mjs` y `verify_por_modelo.mjs`. Acá se comprueba lo que reemplaza
+// a ese recorrido: buscar un teléfono en «Modelos» trae sus filas del padrón.
+await abrirTab('Modelos');
+await waitFor(`!!document.querySelector('input[placeholder^="Buscar por teléfono"]')`);
 await evalx(`(() => {
-  const el = document.querySelector('input[placeholder^="Ej: Redmi"]');
+  const el = document.querySelector('input[placeholder^="Buscar por teléfono"]');
   el.focus();
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
   setter.call(el, 'Redmi Note 11');
   el.dispatchEvent(new Event('input', { bubbles: true }));
   return true;
 })()`);
-const hayOpciones = await waitFor(`document.querySelectorAll('div.max-h-72 button').length > 0`, 12000);
-const opciones = await evalx(`document.querySelectorAll('div.max-h-72 button').length`);
-check('Repuesto por modelo: el buscador ofrece modelos del padrón', hayOpciones && opciones > 0, `${opciones} sugerencias`);
-if (hayOpciones) {
-  await clickCenter(`document.querySelector('div.max-h-72 button')`);
-  const hayTabla = await waitFor(
-    `document.querySelectorAll('table tbody tr').length > 0 && /repuestos compatibles/.test(document.body.innerText)`, 12000);
-  const filas = await evalx(`document.querySelectorAll('table tbody tr').length`);
-  check('Repuesto por modelo: aparecen los repuestos compatibles', hayTabla && filas > 0, `filas=${filas}`);
-}
+const hayFilas = await waitFor(`document.querySelectorAll('table tbody tr').length > 0`, 12000);
+const filas = await evalx(`document.querySelectorAll('table tbody tr').length`);
+check('Modelos: buscar un teléfono trae sus filas del padrón', hayFilas && filas > 0, `filas=${filas}`);
 
 const fallos = results.filter(r => !r.ok);
 console.log(`\n${results.length - fallos.length}/${results.length} ${fallos.length ? 'CON FALLOS' : 'OK'}`);

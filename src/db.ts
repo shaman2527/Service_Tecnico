@@ -11,7 +11,8 @@ import type {
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
   LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup,
   CsvPreview, CsvApplyInput, CsvReport,
-  AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, TaxConfig
+  AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, TaxConfig,
+  AjusteCierre, EstadoDelDia, CambioDeRed
 } from './types';
 import type {
   Respaldo, EstadoRespaldo
@@ -116,10 +117,15 @@ export const api = {
       name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock, priceUsd
     }),
 
+  /**
+   * F93 — Guarda la ficha del producto y devuelve los **hermanos de la red** que se ajustaron solos:
+   * si de esta pantalla se quita (o se agrega) un teléfono, las otras pantallas del MISMO par de
+   * teléfonos se sincronizan, así el cambio se ve en las dos fichas y no en una sola.
+   */
   updateProduct: (id: number, name: string, categoryId: number | null, brand: string, model: string,
     variant: string, compatibility: string, priceCost: number, priceSale: number,
     stock: number, minStock: number, priceUsd: number = 0) =>
-    tauriInvoke<void>('update_product', {
+    tauriInvoke<CambioDeRed[]>('update_product', {
       id, name, categoryId, brand, model, variant, compatibility, priceCost, priceSale, stock, minStock, priceUsd
     }),
 
@@ -188,6 +194,15 @@ export const api = {
       mock<ScreenCandidate[]>([])),
   findCompatibleProducts: (model: string, categoryId: number | null = null, limit: number = 0) =>
     tauriInvoke<ScreenCandidate[]>('find_compatible_products', { model, categoryId, limit }).catch(() =>
+      mock<ScreenCandidate[]>([])),
+  /**
+   * F89 — LAS PANTALLAS DE ESE MODELO, y de ningún otro: solo las que su **compatibilidad nombra**
+   * (sin los parecidos de otro teléfono que entraban por coincidencia parcial: «Google 7 Pro» para
+   * «Spark 7 Pro»). Es la consulta del desplegable «Pantalla a instalar» del servicio y del asistente
+   * de cierre; la búsqueda LIBRE («buscar otra pantalla») sigue existiendo y usa otra consulta.
+   */
+  findCompatibleScreensExactas: (model: string, limit: number = 0) =>
+    tauriInvoke<ScreenCandidate[]>('find_compatible_screens_exactas', { model, limit }).catch(() =>
       mock<ScreenCandidate[]>([])),
   getInventoryMovementsPage: (productId: number | null = null, movementType: string | null = null,
     reason: string | null = null, fromDate: string | null = null, toDate: string | null = null,
@@ -258,9 +273,14 @@ export const api = {
 
   // --- F78: carga masiva de inventario en CSV ---
   // La vista previa NO escribe (cruza el archivo contra el catálogo y dice nuevo/existente con el
-  // diff); el aplicar es del DUEÑO, hace respaldo y el stock se SUMA a lo que ya hay.
-  previewInventoryCsv: (text: string) =>
-    tauriInvoke<CsvPreview>('preview_inventory_csv', { text }),
+  // diff); el aplicar es del DUEÑO, hace respaldo y toca el stock según el MODO elegido (F86).
+  /**
+   * F86 (REQ-3/AC-4) — el MODO viaja también en la vista previa: la pantalla muestra, por fila, el
+   * stock con el que la ficha QUEDA (`stock_final`), y ese número sólo puede calcularlo el backend,
+   * que es el que después escribe. Se manda siempre explícito (nunca `undefined`).
+   */
+  previewInventoryCsv: (text: string, mode: 'sumar' | 'reemplazar') =>
+    tauriInvoke<CsvPreview>('preview_inventory_csv', { text, mode }),
   applyInventoryCsv: (input: CsvApplyInput) =>
     tauriInvoke<CsvReport>('apply_inventory_csv', { input }),
   /** El catálogo en CSV (mismo formato de la plantilla): exportar → editar en Excel → reimportar. */
@@ -369,9 +389,17 @@ export const api = {
     notes: string = '', paymentDate: string = '') =>
     tauriInvoke<number>('add_service_payment', { serviceId, amount, paymentMethod, bankFeePercent, zelleReference, currency, notes, paymentDate }),
 
-  /** F35: corregir la fecha de un pago ya anotado (mueve la plata a la caja del día correcto). */
+  /**
+   * F35: corregir la fecha de un pago ya anotado (mueve la plata a la caja del día correcto).
+   * F92: devuelve los cierres que se **recalcularon** por el movimiento (los días cerrados que
+   * recibieron o perdieron la plata), para poder decírselo al operario.
+   */
   updateServicePaymentDate: (id: number, date: string) =>
-    tauriInvoke<void>('update_service_payment_date', { id, date }),
+    tauriInvoke<AjusteCierre[]>('update_service_payment_date', { id, date }),
+
+  /** F92 — el estado de la caja de un día: `{ existe, cerrado, tasa_bcv, es_hoy }`. */
+  estadoDelDia: (fecha: string) =>
+    tauriInvoke<EstadoDelDia>('estado_del_dia', { fecha }),
 
   deleteServicePayment: (id: number) =>
     tauriInvoke<void>('delete_service_payment', { id }),

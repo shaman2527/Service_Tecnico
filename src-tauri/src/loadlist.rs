@@ -767,7 +767,12 @@ mod tests {
         db.add_product("Pantalla Tecno Spark 8P", Some(1), "Tecno", "Spark 8P", "", r#"["Tecno Spark 8P"]"#, 4.0, 9.0, 0, 0, 0.0).unwrap();
         // dos pantallas que la lista NO menciona: una con stock (se barre) y una en faltante
         db.add_product("Pantalla Samsung A10", Some(1), "Samsung", "A10", "", r#"["Samsung A10"]"#, 4.0, 9.0, 6, 0, 0.0).unwrap();
-        db.add_product("Pantalla Samsung J7", Some(1), "Samsung", "J7", "", r#"["Samsung J7"]"#, 4.0, 9.0, -2, 0, 0.0).unwrap();
+        // La ficha en FALTANTE nace del camino LEGÍTIMO (nace en 0 y el stock baja por un movimiento real
+        // de salida): F86/AC-13 prohíbe escribir un negativo a mano en la ficha, no que exista (una
+        // entrega con faltante lo deja en −2 y eso tiene que verse). `add_inventory_movement` AJUSTA el
+        // stock (ver `db.rs`, test de movimientos).
+        let j7 = db.add_product("Pantalla Samsung J7", Some(1), "Samsung", "J7", "", r#"["Samsung J7"]"#, 4.0, 9.0, 0, 0, 0.0).unwrap();
+        db.add_inventory_movement(j7, "salida", 2, "Ajuste de prueba (faltante)", "").unwrap();
         // una sola ficha para el 13C: la lista la nombra de dos maneras («13C» y «Redmi 13C»)
         db.add_product("Pantalla Xiaomi Redmi 13C", Some(1), "Xiaomi", "Redmi 13C", "", r#"["Redmi 13C"]"#, 5.0, 13.0, 0, 0, 0.0).unwrap();
         // una batería: NO debe entrar en el cruce de pantallas

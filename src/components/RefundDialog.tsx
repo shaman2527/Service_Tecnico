@@ -8,6 +8,8 @@ import { api } from '../db';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { methodCurrency, currencySymbol, isFinalized } from '@/lib/utils';
+// F92: el dinero se maneja con 2 decimales (la MISMA regla que el backend y el diálogo de pago).
+import { round2 } from '@/lib/payment-math';
 // F36: el tope de la devolución es POR MONEDA (lo que netamente entró en ella), sin tasas.
 // F42: además, la devolución vuelve POR EL MÉTODO POR EL QUE ENTRÓ la plata (el del formulario no
 // sirve: es sólo lo que se esperaba cobrar).
@@ -176,8 +178,10 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
           </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm font-medium">Monto a devolver ({refundIsBs ? 'Bs.' : '$'})</label>
-            <Input type="number" step={refundIsBs ? 1 : 0.01} min={0.01} value={refundAmount}
-              onChange={e => { amountTouched.current = true; setRefundAmount(Number(e.target.value)); }} />
+            {/* F92 — las dos monedas con 2 decimales (un monto en Bs. con `step=1` redondeaba la
+                devolución a bolívares enteros y el cliente perdía los centavos). */}
+            <Input type="number" step={0.01} min={0.01} value={refundAmount} data-field="refund-monto"
+              onChange={e => { amountTouched.current = true; setRefundAmount(round2(Number(e.target.value))); }} />
             {refundIsBs && disponible > 0 && (
               <p className="text-xs text-muted-foreground">
                 Se devuelven <strong>{capLabel}</strong> como máximo: es lo que entró en bolívares.

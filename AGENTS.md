@@ -1760,3 +1760,361 @@ Al probar con datos reales apareció que **una base con NULL en `sales.client_na
 6. **Una prueba que deja el wizard abierto ensucia la corrida siguiente** (el `smoke integral` murió con exit 1 por eso): la verificación nueva termina con `location.reload()` y comprueba `diálogos === 0`, contando **también** los `[role="alertdialog"]`.
 
 
+
+---
+
+## F85 — EL INVENTARIO SE VE ENTERO DE FRENTE (sin scroll lateral y con el «en uso» de interruptor) — 2026-10-04, MODO DEV
+
+Pedido del dueño: «necesito que responsive se vea toda la parte de inventario… **no quiero tener que scrollear a los lados** para poder visualizar todo de frente, sea más profesional y bonita», y de la columna de estado, «que sea más profesional» (las «casillas»).
+
+### Qué se hizo
+
+- **`table-fixed` + `colgroup` con porcentajes (100 %) + `overflow-hidden` por celda.** La tabla mide EXACTAMENTE lo que mide su tarjeta: la barra horizontal **no puede** aparecer. Antes pedía ~1.500 px (celdas `p-3`, anchos fijos `w-24`/`w-32` y un `max-w-[320px]` en compatibilidad), así que en cualquier ventana normal había que moverse a los lados para ver el stock. Hay **dos repartos** porque la columna «Costo» solo existe en la sesión del dueño (F68): si su porcentaje se quedara en la lista, la sesión de caja no llenaría el ancho.
+- **Debajo de 1024 px la MISMA tabla se APILA** (`grid` de dos columnas dentro del `<tr>`, una ficha por repuesto, cada celda con su rótulo y su valor, el nombre arriba y las acciones al pie). El ancho se lee con `matchMedia` (`src/lib/use-media.ts`, `useMediaQuery`/`useVentanaAngosta`), así que el cambio es **en vivo** (ensanchar vuelve solo a la tabla, sin recargar).
+- **UNA sola copia del marcado.** No se duplica la lista: los rótulos apilados se **renderizan condicionalmente** (`angosta && <Rotulo>…</Rotulo>`), de modo que en la tabla normal el `innerText` de las celdas sigue siendo el dato pelado. Es lo que sostiene `verify_inventory_load` (lee `td[2]`) y `verify_por_modelo` (compara el texto de `[data-variant]` contra la base).
+- **`src/components/ui/switch.tsx` (NUEVO):** el «en uso» deja de ser un texto «✓ Sí» / «—» y pasa a ser un **interruptor** (`<button role="switch">` con `aria-checked`), con recorrido de 150 ms y una curva `ease-out` fuerte, encogido al mantener pulsado (respuesta al toque) y un `after` de 36 × 36 como área táctil sin agrandar el dibujo. **Sin dependencias nuevas**: el proyecto no tiene `@radix-ui/react-switch` y una app que se instala en PCs de tienda no se merece una instalación por esto. Conserva `data-in-use` / `data-in-use-state`.
+- **Micro-tipografía medida, no elegida a ojo.** Encabezados de 11 px (antes heredaban los 14 px de la tabla) y **la flecha de ordenar solo se ve al pasar por encima** (y siempre en la columna que manda): con la flecha fija, a 1024 px el hueco de 14 px cortaba «Variante» y «Categoría» («Var…», «Cat…»). Se midió columna por columna hasta que **ningún rótulo** se cortó a 847 px.
+- **La celda del producto en DOS renglones:** el nombre arriba (es el dato que se busca) y el código + «repetido» + proveedor abajo. En un solo renglón, con el nombre largo y los dos avisos, quedaba «PANTALLA OLED S…».
+- **El proveedor solo cuando hay sitio** (`@container` en la tarjeta + `@4xl:flex`): en la ventana de 1200 no cabe, en una maximizada sí.
+- **Bug de paso, arreglado:** con la sesión de CAJA la celda de «Costo» se pintaba **igual** aunque su encabezado (`verCosto`) no existía → doce celdas contra once encabezados y **todas las columnas corridas una posición**.
+
+### Herramienta nueva de DEV
+
+- **`tools/cdp_driver.mjs` gana `setViewport(w, h)` y `resetViewport()`** (por CDP, `Emulation.setDeviceMetricsOverride`): hay cosas que solo se pueden medir con el ancho de VERDAD. Un `matchMedia` falso desde la consola mediría otra cosa (media app usa el mismo `matchMedia`).
+
+### Verificación
+
+- **EN VIVO `node tools/verify_inventario_responsive.mjs` (NUEVA) 25/25**, sobre el componente real con la ventana cambiada de verdad: a **1200** (la que trae la app), **1366** y **1920** la tabla **no saca barra horizontal** (caja = tabla, desborde 0), los rótulos se leen enteros y están **todas** las columnas del pedido; los contratos de las otras pruebas siguen en pie (`td[2]` = categoría, `[data-variant]` dentro de la fila con la variante exacta, los 10 encabezados ordenables con su `aria-sort`, el «en uso» como `role="switch"` con estado); a **900** (el mínimo de la app) la tabla **se apila**, con el rótulo de cada dato y un interruptor por fila; y al ensanchar **vuelve sola** a la tabla normal.
+- **La herramienta aborta con un mensaje claro si el inventario está vacío** (`exit 2`): sin fichas no hay nada que medir y, sin esa guarda, las comprobaciones fallaban culpando a la tabla (medido en modo navegador, donde el mock del catálogo viene vacío: **7 FAIL que en realidad eran «no hay datos»**).
+- **`npx tsc -b` 0 · `npx oxlint` 0 errores (0 avisos en los archivos tocados) · `npm run build` ✓.**
+
+### Lecciones (para las próximas)
+
+1. **`table-fixed` es la única forma de prometer «nunca hay scroll lateral»**: con `table-layout: auto` la tabla se estira con el contenido y los porcentajes del `colgroup` se vuelven una sugerencia que el navegador reparte a su gusto (medido: columnas 20 % más angostas que lo pedido y encabezados cortados).
+2. **El `innerText` de una celda es un contrato de las otras pruebas.** Los rótulos de la vista apilada se pintan con React (no con `::before`) **solo** cuando la ventana es angosta: si se pintaran siempre, `verify_inventory_load` leería «Categoría Pantalla» donde espera «Pantalla».
+3. **Un rótulo de encabezado no mide lo que uno cree**: entre el texto y el borde de la columna hay 8 px de la celda, 4 del botón y 12 de la flecha. Con 11 columnas eso son ~250 px de adorno: por eso la flecha se reserva solo cuando la columna manda.
+4. **Medir con navegador propio antes de dar por buena una tabla** (aquí se hizo con Chrome *headless* y el CSS compilado, y después con la app real por CDP): el ojo ve «se ve bien» donde la medición ve «Categoría: caja 24 / contenido 48».
+
+---
+
+## F86 — LA CARGA MASIVA QUE HACE LO QUE DICE (y el inventario que sale del MODELO) — 2026-10-04, MODO DEV
+
+Pedido del dueño (textual): «revise la lógica de inventario de producto y modelos, estoy cargando una data masiva, me está cargando el producto −30 por ejemplo… **no debería ir stock modelo de tlf**, y **tengo dos campos de compatibilidad, debería ver una**, y que descuente de producto la nueva carga las compatibilidades, sea **funciona en base al modelo** que debería ir. **Para cada modelo revisá si tiene que arreglarlo**». Después: «**stock en producto NO está cargando en masa**», «**respuesto de modelo no está reflejando la compatibilidad: tiene que ser la misma de producto**», «la data de repuesto también debería ver eso. Se carga la actualización pero **debería ser más intuitivo**», «en Repuesto por modelo no sé por qué se está cargando ahí, **no debería**» y «**el modal de cada sección debería verse, no salirse de la pantalla, que no te deja ver los botones**». Cierre: «revisá que inventario esté funcional todo, **quitar cosa innecesaria**».
+
+### El diagnóstico, medido (dos auditorías de solo lectura + mediciones en la app real)
+
+| Síntoma del dueño | Causa real (archivo:línea) |
+|---|---|
+| «me carga el producto −30» | **Ninguna carga lo creaba**: el CSV **arrastraba** un negativo previo (ficha en −60 + archivo 30 = **−30**, `csvload.rs:1428-1438`) y la **vista previa lo escondía** con `clamp(0)` (`:862`) mientras el apply escribía el negativo. Los negativos nacen en venta sin stock (`db.rs:3740-3747`), entrega con faltante (`db.rs:4159-4176/4225-4238`), movimiento manual (`db.rs:5991-6002`) y el formulario, que dejaba **teclear «−30»** (`ProductForm.tsx:211-212` + `db.rs:3551-3554`). |
+| «stock en producto NO está cargando en masa» | El asistente sólo reconocía `stock, cantidad, cant, unidades, existencia`: un Excel con **«STOCK ACTUAL» / «CANT. FÍSICA» / «QTY»** era **ignorado en silencio** (el aviso de columnas ignoradas vivía en un `title`). |
+| «no debería ir stock modelo de tlf» | El padrón `phones` **no tiene stock**: lo que se veía era la **suma del stock de sus repuestos compatibles** (`phones.rs:211-233`) y el mismo repuesto cuenta en varios modelos → número irreal (y −1 en la cara). |
+| «dos campos de compatibilidad, debería ver una» | `products.model` (teléfono **principal**) y `products.compatibility` (la **lista**), y `rebuild_phones` lee **sólo la lista** (`catalog.rs:1035`): con la celda vacía la ficha **no entraba al padrón**. Además el alias **«modelos» (plural) llenaba la compatibilidad** (`csvload.rs:96-98`) y **la plantilla repetía el mismo dato en las dos columnas** (`:1739-1741`). |
+| «en Repuesto por modelo no debería estar eso» | Esa pestaña listaba también coincidencias **parciales** y **de otra marca** (el gate de marca sólo ordenaba, `db.rs:3197-3220`), y era la TERCERA forma de ver «por modelo». |
+| «el modal se sale y no deja ver los botones» | **Medido en la app real**: con la ventana mínima (900×600) el formulario de producto medía **760 px**, quedaba en `top −80 / bottom 680` y **los dos botones** (Cancelar/Guardar) terminaban en `bottom 655`, **fuera de la pantalla**, con `maxHeight: none` y `overflow: visible` → **sin scroll no había forma de llegar a ellos**. |
+| El otro «−30» posible | El **conteo físico**: el barrido venía **marcado por defecto** y a cada pantalla que no estaba en la lista le escribía un movimiento de **SALIDA** por lo que tenía (una con 30 → salida 30) sin decirlo (`loadlist.rs:717-748`, `LoadInventoryDialog.tsx:47`). |
+
+### Decisiones CONFIRMADAS con el dueño
+
+| # | Decisión |
+|---|---|
+| D1 | El stock de la carga CSV **se elige en el asistente**: «Sumar (compras)» (por defecto) o «Reemplazar (el archivo es la verdad)». |
+| D2 | **EL MODELO MANDA**: si la ficha no trae lista de compatibilidad, la lista se arma con SU modelo (una sola cosa que llenar). |
+| D3 | El «stock» del modelo **se quita del todo** de «Modelos» y de «Por modelo». |
+| D4 | La pestaña **«Repuesto por modelo» SE ELIMINA** (había tres vistas de lo mismo): queda `Productos | Modelos | Movimientos | Ajustes`, y el atajo «por modelo» abre **Modelos** con ese teléfono buscado. |
+| D5 | El encabezado de stock que no se reconoce se dice **en la cara**, no en un globito. |
+
+### Qué se hizo (Rust + UI; CERO migraciones, CERO columnas nuevas)
+
+- **`catalog.rs:763` — el modelo arma la compatibilidad.** Si la lista viene vacía y hay modelo, la lista es el modelo (`A30/A50` = **dos** teléfonos). Sin modelo ni lista no se inventa nada. `catalog.rs:853` — `compat_incluye_modelo()` (compara por `phone_registry_key`) para el aviso.
+- **`csvload.rs:62-96` — una sola cuenta del stock**: `stock_final_de(hoy, archivo, modo)` usada por el preview (`:965`) y por el apply (`:1620`). Reglas: celda **vacía = no se toca** (en los dos modos), sumar = hoy+archivo, reemplazar = el del archivo, y **nunca negativo** (si da negativo queda en **0** y se cuenta en `clamped_to_zero`). Se fue el `clamp` que mentía en el preview. La rama del movimiento de **salida** quedó viva: en «reemplazar» el stock baja de verdad.
+- **`csvload.rs:151/1918` — alias y plantilla**: «modelos» pasa a llenar el **modelo**; la plantilla ya no repite el dato y explica en 3 líneas que el padrón sale del modelo y que la lista es «también le sirve a».
+- **`csvload.rs:162-166/615/620` — encabezados de tienda**: +25 alias de stock (`stockactual, cantfisica, qty, disponible…`) y +4 de mínimo, `columnas_ignoradas` y `sin_columna_stock` para que el asistente pueda decirlo.
+- **`csvload.rs:583/588/1027` — aviso por fila**: `stock_final` (el número REAL) y `aviso_compat` (la lista del archivo no nombra al modelo). Es aviso, no bloqueo.
+- **`db.rs:3427` — `validar_stock_manual`** en `add_product`/`update_product` (y en `add_purchase_order`): el stock negativo **se rechaza** con el motivo («el stock baja solo por un movimiento real»). El formulario lo dice **a la vista** antes de mandar (`ProductForm.tsx:96-110/244-250`).
+- **La compatibilidad del modelo = la del producto**, fijada por test en `phones.rs` (los repuestos de un modelo salen de la compatibilidad del producto, con los alias como único puente): «Apple 11 Pro» aparece en la ficha de `apple|iphone 11 pro`; uno de otra marca que sólo se parece, NO.
+- **UI**: «Modelo — teléfono principal» («éste manda: de este modelo sale la compatibilidad») y el segundo campo renombrado **«También le sirve a»**; el asistente con **selector de modo**, «hoy → queda» con el número del backend, el badge de compatibilidad incoherente, el **Alert de columna de stock no reconocida** con los encabezados reales, el pie que dice TODO (crear/actualizar/dejar/eliminar/unidades/en negativo→0) y la columna «Lo uso»; el **conteo físico** con la confirmación **siempre** que el barrido vaya a tocar fichas y el número real de fichas/unidades que salen; **stock del teléfono eliminado** de «Modelos» y «Por modelo»; `ByModelTab.tsx` **borrado**; los botones de capa que quedaban mintiendo (fila de Modelos y ficha del teléfono) **quitados**; `Help.tsx` al día.
+- **`ui/dialog.tsx:41`** — red de seguridad (`max-h-[92vh] overflow-y-auto`) para los 38 diálogos + el patrón de la casa (header y pie fijos, cuerpo scrolleable) en el formulario de producto, «Editar esta pantalla» y los 9 de más tráfico.
+- **Paridad cerrada**: el espejo JS (`tools/audit_inventory.mjs`) aplica la misma regla REQ-1 y los `canonical_fixtures.json` se regeneraron (3 de 18 casos cambiaron de valor): el test de paridad compara **contra el archivo**, sin valores fijados a mano.
+
+### Herramientas nuevas
+
+- **`tools/audit_modelos.mjs`** (solo lectura) — «para cada modelo revisá si tiene que arreglarlo»: fichas con modelo y sin compatibilidad, fichas cuya lista **ignora su propio modelo**, teléfonos nombrados que no están en el padrón, teléfonos **sin ningún repuesto** y los faltantes reales. Medido en la base del taller: **0** fichas sin compatibilidad · **1** incoherente (#53: modelo «Spark Go 2024» con una lista de Infinix/Tecno) · **1** teléfono sin repuesto (M-0650 «Samsung Galaxy M») · **2** fichas en −1.
+- **`tools/verify_f86_carga.mjs` (NUEVA, EN VIVO)** — 20 comprobaciones sobre la app real, con **una carga de verdad** (reproduce el caso «−60 + 30 ⇒ 0» con un movimiento real de salida, no escribiendo un negativo a mano). Escribe: **correr siempre sobre una COPIA**.
+- **`tools/prueba-f86-carga.csv`** — el archivo de la carga de prueba (una ficha normal, una que venía en faltante, una **sólo con modelo** y una con la lista **incoherente**).
+
+### Verificación
+
+- **`cargo test --lib` → 199 passed · 0 failed · 8 ignored** (14 tests nuevos) · `cargo build --lib` sin avisos.
+- **EN VIVO, sobre una COPIA de la base del taller y con el binario nuevo** (la base real quedó intacta: 964 fichas / 0 ventas):
+  `verify_f86_carga` **20/20** · `verify_carga_csv` **33/33** · `verify_inventory_load` **31/31** · `verify_models_tab` **23/23** · `verify_por_modelo` **27/27** · `verify_inventario_rapido` **9/9** · `verify_uso_modelos` **38/38** · `verify_orden_columnas` **12/12** · `verify_inventario_responsive` **25/25** · **`verify_smoke_integral` 110/110 · 0 fallos**.
+- `npx tsc -b` **0** · `npx oxlint` **0 errores** (los 30 avisos son el baseline del repo) · `npm run build` ✓ · `cargo build` ✓.
+- **La medición del modal, antes y después**: antes 760 px de alto con una ventana de 600 → botones en `bottom 655`, fuera y sin scroll; ahora el diálogo mide 658 px en una ventana de 715 y el **pie queda adentro** (comprobado en vivo).
+
+### Lecciones (para las próximas)
+
+1. **Tres verificaciones estaban mintiendo y se descubrieron al correrlas de verdad**: `verify_models_tab` comparaba `Number("sin repuestos")` (NaN) y fallaba por datos, no por la app; `verify_uso_modelos` contaba **botones** en la lista de pantallas cuando cada fila tiene DOS desde F80 (elegir + lápiz) → venía fallando desde F80 culpando al filtro de «en uso»; y `verify_smoke_integral` identificaba la fila por el **texto de la celda de compatibilidad**, que desde el rediseño responsive muestra **un chip + «+N»** (el teléfono buscado puede estar en el «+N»). Las tres se arreglaron para medir lo que dicen medir.
+2. **Los botones de icono rompen las pruebas que buscan texto**: las acciones de la fila del inventario ya no dicen «Editar»; el significado vive en `aria-label`/`title` y las verificaciones tienen que buscarlo ahí.
+3. **Una comprobación que no se puede correr no es una comprobación**: el humo integral fallaba en cascada por una **precondición** (la copia no tenía el día abierto) — abrir el día (`open_day`) antes de correrlo es parte del procedimiento.
+4. **El espejo JS de una regla de Rust hay que actualizarlo en el mismo cambio**: si no, `--gen-fixtures` escribe la expectativa vieja y el test de paridad falla (o peor: alguien lo «arregla» fijando el valor a mano y la paridad deja de existir).
+5. **Comparar el modelo del padrón con el texto de la compatibilidad por `LIKE` da falsos positivos**: el padrón guarda el modelo canónico («iphone 11 pro») y la compatibilidad la etiqueta corta («Apple 11 Pro»); el puente son los `aliases` (medido: el chequeo ingenuo contaba 50 teléfonos «sin repuestos» cuando es 1). Queda en `tools/progress/patterns.md`.
+
+---
+
+## F87 — LA CARGA MASIVA, REDISEÑADA (sin avisos falsos, con los códigos del local y la revisión que se lee de frente) — 2026-10-05, MODO DEV
+
+Pedido del dueño (con **su archivo de prueba** en la mano): «**mejorame diseño de la carga CSV masiva, el modal sea más intuitivo para que sea más responsive y organizada. Usá la skill shadcn.** Los errores/compatibilidades que no están en la base de datos: los productos nuevos no existen y las compatibilidades, si no existen, **agregarlo o mejorar eso por sus modelos**».
+
+### Lo que se MIDIÓ con su archivo real (83 filas, `tools/prueba-carga-catalogo.csv`) antes de tocar nada
+
+| Medición | Antes | Después |
+|---|---|---|
+| Avisos «la compatibilidad no incluye a su propio modelo» | **25 de 83 → casi todos FALSOS** | **4, y los 4 de verdad** (líneas 30, 61, 62 y 81 del archivo) |
+| Códigos recuperados (`P-0207`, `P-1036`…) | **0** (se perdían las 71 que el archivo trae) | **71 de 71** |
+| Paso «Revisar» | **2371 px dentro de una caja de 1213 → SCROLL LATERAL** (18 columnas; «Avisos» y «Qué hacer» fuera de la pantalla) | **1213 = 1213 a 1366 y 1085 = 1085 a 1200** (9 columnas, desborde 0) |
+
+### Qué se hizo (Rust + UI; cero migraciones, cero columnas nuevas)
+
+- **`catalog.rs` — el aviso de compatibilidad dejó de mentir.** `compat_incluye_modelo` ignora la **variante/material pegada a la etiqueta** (misma regla que `variant_in_text`/F53, no una nueva): el local escribe `Infinix Gt 20 Pro INCELL` con modelo `Gt 20 Pro` + variante `INCELL`, y eso **es** su modelo. Sigue avisando lo que de verdad es incoherente (`Tecno Spark 20 Pro ORIGINAL` con una lista de Spark 10 / Go 2023 / Pop 7…). Test `test_f87_archivo_real_del_dueno`, que **afirma las 4 líneas exactas** sobre el archivo del dueño.
+- **`csvload.rs` — los códigos del local se rescatan.** Si el archivo **no trae columna de código**, se recupera el código **pegado al nombre** (`…Hot 10 LiteP-0211`) y viaja como `row.code`, contado en `codigos_recuperados`. Si trae columna de código, esa manda. **Ojo con el número**: el archivo tiene **83 filas pero sólo 71 traen código** — en 12 su Excel no tiene código y el asistente **no se lo inventa**.
+- **`csvload.rs` — `columnas_repetidas`** (`["Producto"]`): el encabezado que se descartaba **en silencio** (mapeaba al mismo campo que `NOMBRE`) ahora se informa, y el asistente lo dice en un `Alert` (`data-csv-aviso="codigos"`, `data-csv-codigos-recuperados`): «Descarté la columna «Producto»… de la columna del nombre saqué **71 códigos pegados**».
+- **`src/components/inventory/CsvRevisionTable.tsx` (NUEVO)** — el paso «Revisar» es **una fila = una decisión**: 9 columnas con `table-fixed` + `colgroup` (el criterio de `ProductsTab`, truncado con `title`, `overflow-hidden` por celda), los **avisos pegados al nombre** (segunda columna: era la última de 18), el **código** en su campo por fila y el detalle secundario (marca, modelo, variante, compatibilidad, mínimo, «lo uso», proveedor) **desplegable por fila** con «Ver ficha». Por debajo de **1100 px la MISMA tabla se apila** (`useVentanaAngosta`), con el rótulo de cada dato. Conectada en `LoadCsvDialog` para **las dos pestañas** (Nuevos / Ya existen).
+- **REQ-9 cumplido: ningún `data-*` ni `aria-label` se renombró** — las verificaciones existentes siguen verdes (ver abajo).
+
+### Verificación
+
+- **`cargo test --lib` 205/205** (8 ignorados; **6 tests nuevos** de F87) · `cargo build` ✓ · `npx tsc -b` 0 · `npx oxlint` 0 errores · `npm run build` ✓.
+- **EN VIVO `node tools/verify_f87_carga_catalogo.mjs` (NUEVA, SOLO LEE — no aplica la carga) 16/16** con su archivo, sobre una **copia** de la base del taller y el binario nuevo: **83 filas** en el paso Revisar (69 «Ya existen» + 14 «Nuevos»), **sin scroll lateral** a 1366×715 y a 1200, **apilada y sin scroll** a 1099 y 900, **71/71 códigos del archivo en pantalla** (ninguno perdido, ninguno inventado), **4/4 avisos visibles sin arrastrar** y exactamente los 4 de verdad, el modo del stock + el resumen + el aplicar intactos, y el aviso que dice de dónde salieron los códigos.
+- **Regresiones sobre la copia:** `verify_carga_csv` **33/33** · `verify_f86_carga` **20/20**.
+- **La base del taller NO se tocó**: mismo hash de `registro.db` y su `-wal`/`-shm` intactos (el último acceso fue la lectura de `snapshot_db.mjs` a las 00:25; la app corrió todo el tiempo con `REGISTRO_DB` a la copia).
+
+### Lecciones (costaron dos corridas en rojo con el producto perfecto)
+
+1. **El gancho estable manda sobre el texto del botón**: el paso «Archivo» se llama «**Revisar el archivo**» (`data-action="csv-revisar"`) y la prueba buscaba `/^Revisar$/i` — no avanzaba de paso. Se apunta al `data-*` y el texto queda como respaldo.
+2. **El paso «Revisar» tiene DOS pestañas** (`revisar()` abre la que tiene fichas del catálogo): una comprobación que solo mire la pestaña abierta dice «faltan 14 filas» con la app correcta. Las 83 filas son la **suma** (69 + 14).
+3. **Para armar la expectativa de un dato PEGADO no sirve el patrón genérico sobre la línea entera**: como el código va pegado al nombre, `…Hot 10 LiteP-0211` devuelve **`teP-0211`** (el regex arranca en la última letra del nombre). Se ancla al **final de la celda** y a la forma del local (`P-####`). Lo mismo con `…ORIGINALP-0744` → `ALP-0744`.
+4. **Una comprobación que busca texto en un PREFIJO recortado mide el largo del encabezado, no el dato**: `verify_carga_csv` buscaba el nombre de la categoría nueva en los primeros **90 caracteres** del bloque y el renglón explicativo que agregó F86/F87 lo empujó fuera (32/33 con el producto perfecto). Ahora lee la **etiqueta de la casilla**.
+5. **Un fixture viejo se dice, no se disimula**: `verify_carga_aplica` (F78) da por hecho que el cruce deja **una** línea sin resolver y que el catálogo tiene una pantalla «Acasonor» (**medido: 0 fichas con ese texto**); con la lista física actual el backend responde «**48 líneas de la lista sin pantalla asignada (151 unidades)**» y no deja aplicar, **con razón**. Se arregló el script (término derivado de la línea, espera del aviso del barrido —el clic se perdía y fallaban 5 comprobaciones culpando al producto—, y **aborto con exit 2 diciendo el motivo**), pero **rehacer su fixture es trabajo aparte**. Mismo criterio que `verify_carga_csv`, que ya aborta si falta `REGISTRO_DB`.
+6. **El botón de arranque de la app estaba bloqueado por el sandbox**: `npm run build` (vite hace `spawn` con stdio por pipe) y `cargo build` (ejecutar `rustc.exe`) fallan con **EPERM / «Acceso denegado»** bajo el sandbox de archivos; con el permiso amplio compilan normal. No es un problema del proyecto: es el entorno.
+
+---
+
+## F88 — LA CARGA MASIVA DEJA DE FRENARSE SOLA (y la compatibilidad se ve por fila) — 2026-10-05, MODO DEV
+
+Pedido del dueño (mirando su app): «p- etc no aparece no importa; **la compatibilidad así es necesaria para cada modelo tiene que aparecer**; se está corrigiendo también **la data que tengo en producto**» + «revisa las columnas, tiene sus compatibilidad por modelos, debería salir así… y **cargarlos en base para ese modelo**».
+
+### El bloqueante que apareció MIDIENDO (no estaba reportado): su archivo no se podía aplicar
+
+Con **su archivo real** (83 filas) la carga entera se frenaba con:
+
+> Línea 40 — el código «P-1031» ya es de la ficha #1031: cambiá el código o marcá «actualizar esa ficha». No se cargó nada.
+
+**No era un choque de sus datos: lo provocaba el propio sistema.** `csvload.rs` le regalaba a cada ficha nueva un código `P-` + su **id**; la primera ficha nueva nació con id **1031** → se quedó con `P-1031`… y esa misma carga traía `P-1031` para **otra** pantalla (`Infinix Smart 8`). El operario no tenía forma de arreglarlo sin tocar SUS códigos.
+
+### Los tres arreglos
+
+1. **El código automático no le roba el código a ninguna fila del archivo** (`csvload.rs`): busca el primer `P-####` **libre** —ni entre los códigos que el archivo va a escribir (se calculan **antes** del bucle) ni entre los que ya tiene el catálogo— y si no hay ninguno, la ficha queda **sin** código. Test `test_f88_el_codigo_automatico_no_le_roba_el_codigo_al_archivo` (comprobado que **falla** con la regla vieja: «Línea 3 — el código «P-0002» ya es de la ficha #2»).
+2. **Dos códigos distintos no son la misma pantalla** (`csvload.rs`, matching): la fila «Infinix Hot 40i» (código `P-0053`) caía en la ficha **#53** *por código* y la fila «Tecno Spark Go 2024» (código `P-1033`) caía en esa **misma** #53 *por identidad* (marca+modelo: el catálogo tenía una ficha fusionada «Tecno Infinix Go 2024 / Infinix Hot 40i / Spark 20»). La última pisaba a la primera y **el código `P-0053` desaparecía del catálogo**. Ahora, si la fila trae un código y la ficha del cruce tiene **otro**, la fila se **crea** con su código (y la fila lo dice en sus notas). Test `test_f88_dos_codigos_distintos_no_son_la_misma_pantalla`.
+3. **La lista que va a quedar, a la vista en cada fila** (Rust + UI): el preview devuelve **`compatibility_final`** (los teléfonos donde entra la pantalla, normalizados, con la **misma** `finales()` que aplica la carga: la del archivo o, con la celda vacía, la que arma su **MODELO**) y **`compat_del_modelo`**, que distingue los **dos** casos de la celda vacía: la lista la arma el modelo (ficha nueva) o **se conserva la que la ficha ya tenía** (regla F78). En la fila (`CsvRevisionTable.tsx`): la lista truncada con su `title`, un chip con **cuántos teléfonos** sirve esa pantalla, la marca **«del modelo»** cuando corresponde y un aviso ámbar si no queda ninguno («no entra al padrón de Modelos»). El detalle por fila sigue teniendo el campo editable para agregarle modelos.
+
+### Verificación
+
+- **EN VIVO `node tools/verify_f88_carga_compatibilidad.mjs` (NUEVA) 14/14** (escribe: aplicar su archivo sobre una **copia**): la carga **se aplica**; `P-1031` queda en «Infinix Smart 8» y la ficha sin código recibe `P-1032` (no le roban el de otra); **ningún código del archivo se pierde** (`P-0053` sigue en su ficha, corregida con la compatibilidad del archivo); ninguna ficha con código repetido; el padrón asocia la pantalla a **los 8 teléfonos** de su lista y el servicio la ofrece a cada uno; la revisión muestra la lista y el conteo en las 67 filas.
+- Regresiones: `verify_carga_csv` **33/33** · `verify_f86_carga` **20/20** · `verify_f87_carga_catalogo` **16/16** · `cargo test --lib` **209/209**.
+- **La base REAL del taller quedó intacta** (mismo hash de `registro.db`; todo corrió con `REGISTRO_DB` a la copia y la copia se borró).
+- **Efecto medido para el dueño**: para «Hot 30i» el servicio pasó de **1** pantalla a **7** en cuanto su archivo se pudo cargar (la lista coincide con las compatibilidades de los productos) — ver F89.
+
+### Lecciones
+
+1. **Un mensaje de error puede acusar al operario de algo que hizo el sistema.** «El código P-1031 ya es de la ficha #1031» era literalmente cierto y completamente inútil: la ficha #1031 la había creado esa misma carga, dos filas antes, con un código inventado. Antes de mandar a alguien a «cambiar el código», hay que preguntarse **quién escribió ese código**.
+2. **Un id y un código no son lo mismo**: el código del local es una **etiqueta**, y derivarlo del id (o de cualquier contador) lo pone en colisión con las etiquetas reales del archivo. La etiqueta se busca libre, no se calcula.
+3. **«Celda vacía» tiene dos significados y la UI tiene que distinguirlos**: la lista se arma con el modelo (ficha nueva) o se conserva la que ya estaba (F78). Un solo booleano mal puesto hace que la pantalla mienta sobre de dónde salió la compatibilidad.
+
+---
+
+## F89 — EL SERVICIO OFRECE LAS PANTALLAS DE ESE MODELO, Y DE NINGÚN OTRO — 2026-10-05, MODO DEV
+
+Pedido del dueño: «el renglón de **pantalla a instalar** del servicio debe coincidir, esa lista con las compatibilidades del producto… estoy observando que **no coinciden**: ejemplo **hot 30i tengo 6 pantalla compatible** y cuando veo la lista solamente me aparece hot 30i, las demás no las veo» + «**cualquier modelo que yo toque de esa red de compatibilidad tiene que reflejarme esa misma red**, son compatibles, así aplica para los otros modelos» + «**no puede darme de otro modelo que no es**».
+
+### Dos causas, las dos reales y las dos medidas
+
+1. **Su catálogo estaba desactualizado porque su archivo NO SE PODÍA CARGAR** (F88). Medido en su base: para «Hot 30i» el servicio ofrecía **1** pantalla (P-1025) porque sólo una ficha nombraba ese teléfono. **Con su archivo aplicado la misma consulta devuelve 7** (Hot 30i, Spark Go 2022, Smart 7, Pop 7, Spark 10, Spark 10C, Spark 20 Pro ORIGINAL). La lista coincide con las compatibilidades **en cuanto su data está cargada**.
+2. **La consulta traía pantallas de OTRO teléfono.** `find_compatible_products` aceptaba coincidencias **prefijo** y **parcial**, y para «Spark 7 Pro» devolvía **7** pantallas de las cuales **4 eran de OTRO modelo**: `Google 7 Pro (OLED)`, `Realme 7 Pro` (×2) y `Redmi Note 7 / 7 Plus / 7 Pro` — porque «7 Pro» es una **parte** de «Spark 7 Pro». Para «Camon 17» ofrecía la del `Camon 17 Pro`.
+
+### Qué se hizo
+
+- **Rust:** `Database::find_compatible_screens_exactas(model, limit)` = solo la compatibilidad que **nombra** al modelo (calidad «exacta», con la marca ya normalizada fuera: «Hot 30i» = «Infinix Hot 30i»). `find_compatible_products` **conserva** su comportamiento (lo usan otras superficies y los tests), y el motor es UNO (`compatibles(..., solo_exactas)`).
+- **Comando `find_compatible_screens_exactas`** + `api.findCompatibleScreensExactas` (db.ts), y los **dos** consumidores del servicio pasan por ahí: el desplegable **«Pantalla a instalar»** del wizard y de la edición (`ScreenPicker.tsx`) y el **asistente de cierre** (`CierreServiceDialog.tsx`). La **búsqueda libre** («buscar otra pantalla», F65c) **no** se toca: sigue existiendo y marca la elegida como «buscada».
+- **Fix medido en vivo, del mismo pedido:** al **cambiar de modelo**, la pantalla elegida del modelo **anterior** seguía puesta y con ella su precio (equipo en «A35E» = $15, se cambia a «Camon 17» y el monto quedaba en **15** en vez de **35**). Ahora, cuando los candidatos ya son de ESTE modelo y la pantalla elegida no está entre ellos, **se suelta** (igual que F65c hacía con la buscada a mano).
+- **Test Rust `test_f89_el_servicio_ofrece_solo_las_pantallas_de_ese_modelo`**: las dos mitades — los 7 textos de la lista del Hot 30i reciben **esa** pantalla, y para «Spark 7 Pro» **no** aparece ninguna de Google/Realme/Redmi (comprobando además que la consulta **vieja** sí las traía, para que el test no sea vacuo).
+
+### Verificación
+
+- **EN VIVO `node tools/verify_f89_pantallas_del_modelo.mjs` (NUEVA, SOLO LEE) 6/6** sobre su catálogo **con su archivo cargado**: cada teléfono de la lista recibe la pantalla; **tocar CUALQUIERA de los 7 modelos de la red devuelve EXACTAMENTE el mismo conjunto de pantallas** `[53,1038,1039,1041,1042,1043,1046]` (el único que no, «Infinix Hot 40», aparece en UNA lista y no en las otras: es **su** dato, y ahí la oferta correcta es la que su lista dice); la lista estricta no trae ninguna pantalla que la consulta con parecidos marque como prefijo/parcial; y el **bundle** que usa la app llama al comando estricto.
+- Regresiones del servicio: **`verify_servicio_cierre` 18/18** · **`verify_precio_pantalla` 55/55** (su fixture se actualizó al contrato nuevo: compara la UI contra la consulta **estricta** y respeta las reglas documentadas de F67 —el precio del MODELO como respaldo, y el chip que **no** se ofrece si el monto ya es el suyo—; antes daba 40/46 y dos de esos fallos eran porque **la copia no tenía el día abierto**, que es una precondición: hay que `open_day` antes de correrlo).
+
+### Lecciones
+
+1. **Una coincidencia de texto no es una compatibilidad.** «Parcial por palabra completa» parecía prudente y traía la pantalla de un **Google 7 Pro** para un **Tecno Spark 7 Pro**. Si el vínculo se puede leer de los datos (la lista de compatibilidad), la oferta se calcula con ESE vínculo y con nada más.
+2. **La lista del servicio es una PROMESA de compatibilidad**: todo lo que aparece ahí puede terminar instalado y descontado del inventario. Ofrecer de más no es «dar opciones», es ofrecer el repuesto equivocado.
+3. **Mirar el catálogo viejo y el archivo del dueño juntos fue lo que resolvió el reporte**: lo que él veía («solo me aparece hot 30i») era **data desactualizada** (su archivo no entraba) y, al mismo tiempo, la consulta sí tenía un defecto real (los parecidos). Los dos había que arreglarlos, y sólo se distinguen midiendo.
+4. **Una comprobación que busca su fixture con otra consulta de la que usa la UI miente en cuanto la regla cambia**: `verify_precio_pantalla` elegía modelos y precios con la consulta con parecidos y comparaba contra la UI estricta («lista=3 · backend=5»). El fixture tiene que pedir lo mismo que la pantalla.
+5. **Una lista de compatibilidad PEGADA POR ERROR mete pantallas ajenas en un teléfono, y el asistente ya lo avisa.** El dueño preguntó «del modelo hot 30i, ¿de dónde me estás sacando Tecno Spark 20 Pro?»: el servicio lo ofrecía porque **esa ficha traía la lista del grupo del Hot 30i** (`Infinix Hot 30i / Infinix Smart 7 / Tecno Pop 7 / Tecno Spark 10 / Tecno Spark 10C / Tecno Spark Go 2023`) **sin nombrar su propio modelo** — exactamente el caso del badge ámbar de F86/F87. Medido en su base: eran **2 intrusas** (`P-0744 Tecno Spark 20 Pro ORIGINAL` y `P-0768 Tecno Spark Go 2022`) y además **1 ficha del grupo con la lista incompleta** (`P-0769 Tecno Spark Go 2023`, que decía solo ella misma y por eso NO aparecía para el Hot 30i aunque el dueño la tenía escrita en su lista). **Corrección aplicada a la base del taller** (por el MISMO camino de la carga, con precio/stock vacíos = no se tocan): las 2 intrusas quedan con SU modelo y la incompleta recibe la red. Resultado medido: `hot 30i` y `spark go 2023` devuelven **las mismas 6 pantallas** (la red simétrica que él pide: «cualquier modelo que yo toque de esa red tiene que reflejarme esa misma red») y `spark 20 pro` / `spark go 2022` vuelven a las suyas. **Regla para el dueño:** si su Excel vuelve a traer esas listas pegadas, el error vuelve — las 3 filas corregidas son `Tecno Spark 20 Pro ORIGINAL` → `Tecno Spark 20 Pro`, `Tecno Spark Go 2022` → `Tecno Spark Go 2022` y `Tecno Spark Go 2023` → la red completa.
+
+---
+
+## F90 — LA FICHA DEL TELÉFONO VIVE DEL CAMPO DE COMPATIBILIDAD DEL PRODUCTO — 2026-10-05, MODO DEV
+
+Pedido del dueño (con las dos pantallas en la mano: la ficha del teléfono «Hot 30i» con sus 6 repuestos y el formulario «Editar: Infinix Hot 30i» con su campo «También le sirve a»): «**en la edición de producto, si yo le quito cualquiera de esto… en la vista de la ficha debe eliminarse; si yo agrego algo acá también debe actualizarse en la ficha. Quiero centralizar las actualizaciones de ficha de compatibilidades en el campo de compatibilidades de producto**».
+
+### Lo que se midió antes de tocar nada
+
+1. **El backend ya propagaba bien.** `update_product` reconstruye el padrón (`rebuild_phones`) y el detalle del teléfono se calcula **desde la compatibilidad de los productos**: quitándole «Tecno Pop 7» a la compatibilidad del Hot 30i, la ficha del Pop 7 bajó de **6 a 5** repuestos y al volver a agregarlo volvió a **6** (medido por IPC).
+2. **Lo que faltaba era la UI:** `PhoneDetailDialog.tsx` pedía el detalle **una sola vez al abrirse** (`useEffect` con `[phoneId]`) y **no escuchaba el BUS DE DATOS** del proyecto (`useDataVersion`, F76) que sí refresca a todas las pestañas del inventario. Con la ficha abierta, cualquier escritura (editar un producto desde el otro diálogo, cargar el CSV, vender) la dejaba mostrando la lista vieja.
+
+### Qué se hizo (una línea, sin backend ni datos)
+
+- `PhoneDetailDialog.tsx`: el efecto de carga depende también de **`useDataVersion()`**. Es la **única vista de SOLO LECTURA del padrón**, así que ahora ve reflejado lo que se acaba de guardar — la ficha *es* el campo de compatibilidad del producto, visto desde el teléfono.
+
+### Verificación
+
+- **EN VIVO `node tools/verify_f90_ficha_compatibilidad.mjs` (NUEVA) 4/4**, por el **camino real del formulario** (escribe sobre una copia y **devuelve el estado**): Inventario → Productos → lápiz de «Infinix Hot 30i» → se le **quita** «Tecno Pop 7» del campo de compatibilidad → Guardar → Inventario → Modelos → «Pop 7» → **Ficha**: los 6 repuestos bajan a **5** y el repuesto «Infinix Hot 30i» **desaparece** de la ficha; al **volver a agregarlo** y guardar, la ficha vuelve a **6** y el repuesto **reaparece**; y al terminar la compatibilidad queda **exactamente como estaba**. **Corrida también contra el binario RELEASE** (`target\release\registro.exe`): 4/4 igual.
+- **Medido además (2ª vuelta, pedido del dueño «modo unitario o masivo»), con su caso textual:** quitar «Tecno Spark 10C» del producto → la ficha del Spark 10C baja de **6 a 5** repuestos y el repuesto desaparece (y la **lista de Modelos** pasa de 6 a 5 en su fila) · **un solo guardado con DOS cambios** (quitar «Tecno Pop 7» + agregar «Tecno Spark Go 2022») → la ficha del Pop 7 queda **sin** el repuesto y la del Spark Go 2022 **con** él · y **agregar un teléfono que NO existe en el padrón** («Xiaomi Sonda F90 Nuevo») → el teléfono **se crea solo** (fila nueva, marca Xiaomi, 1 repuesto) y **su ficha lista la pantalla**; al quitarlo de la compatibilidad el teléfono desaparece del padrón.
+- **Los DOS editores de producto pasan por la misma puerta** (`api.updateProduct` → `rebuild_phones` + aviso al bus): el lápiz de **Inventario → Productos** (`ProductForm`) y el lápiz del **wizard de servicio** (`EditarProductoDialog`, que también edita la compatibilidad).
+- Regresión: **`verify_models_tab` 23/23** (esa prueba abre la ficha y cuenta sus filas por categoría) · `tsc -b` 0 · `oxlint` 0 errores · `npm run build` ✓ · `cargo build` ✓ · `cargo build --release` ✓.
+
+### Herramienta nueva para el dueño (y la causa de un «no funciona»)
+
+- **`ABRIR-APP-NUEVA.cmd`** (raíz del proyecto): abre el binario **nuevo** con `REGISTRO_DB` a **la base del taller** (`%LOCALAPPDATA%\Registro Servicio Tecnico\registro.db`, la misma de su acceso directo). Existe porque **el binario de desarrollo resuelve su carpeta de datos junto al `.exe`** (`src-tauri\target\debug\registro.db`) y **la app INSTALADA (0.4.10) no tiene F85–F90**: el dueño probaba en la instalada y no veía nada de lo nuevo — «en mis pruebas no veo que aparece esa funcionalidad». **Regla para la próxima: cuando el dueño diga «no me funciona» sobre algo recién hecho, lo PRIMERO es preguntar/verificar QUÉ binario está abriendo** (y con qué base: hay dos `registro.db` en juego).
+
+### Lecciones de prueba (no del producto)
+
+1. **Escribir por `window.__TAURI_INTERNALS__.invoke('update_product', …)` SALTEa el bus de datos**: el aviso lo emite el wrapper de `src/db.ts`. Una prueba que quiera medir el refresco en vivo **tiene que pasar por el formulario/`api`** — la primera versión de esta verificación falló «en vivo» por eso, con el producto funcionando.
+2. **En la fila de «Modelos» hay DOS botones** («Ficha» y «Corregir»): apuntar al primero abría el rename (falso «la ficha no abre»). Se apunta por **texto exacto**.
+3. El padrón devuelve el nombre del teléfono en **`name`**, no en `label`.
+
+
+## F91 — LA COMPATIBILIDAD SE EDITA CON LA LISTA DE MODELOS (se fue el campo de texto) — 2026-10-05, MODO DEV
+
+Pedido del dueño, después de tres vueltas sobre el mismo tema: «**viendo que la solicitud es muy compleja para ti, quiero que incorpores/sustituyas la compatibilidad de producto [el campo «También le sirve a»]… que es solo un campo, y me agregues allí los MODELOS-FICHA donde tú estás manejando la verdadera compatibilidad de productos. Y en carga masiva, si lo detecta así [Infinix Hot 30i / Infinix Smart 7 / Tecno Pop 7 / Tecno Spark 10 / Tecno Spark 10C / Tecno Spark Go 2023], lo cargue en módulo-ficha. Quiero unificar producto y que pueda editar (agregar o eliminar los modelos compatibles, creando la sección que falta)… DEJÁ INACTIVO EL CAMPO COMPATIBILIDADES Y SUSTITUILO POR LA LISTA DE MODELOS COMPATIBLES.**»
+
+### El diagnóstico en una línea
+
+El dato NUNCA estuvo duplicado: **la compatibilidad del producto ES el padrón de Modelos** (F88/F89/F90 lo probaron). Lo que sobraba era **la forma de escribirlo**: un campo de texto libre («Redmi Note 11 / Note 11S / …») donde el dueño tenía que acordarse de la ortografía exacta del teléfono, sin ver la lista real ni poder quitar uno con un clic. F91 **no cambia el dato ni el backend**: cambia el editor por **la lista del padrón**.
+
+### Qué se hizo
+
+- **`src/components/CompatModelPicker.tsx` (NUEVO)** — el editor único de compatibilidad: **un chip por teléfono** con su **✕** para quitarlo, un **buscador del padrón** (`getPhoneModelsInUse`, el mismo que usa el formulario de servicio) que muestra cada teléfono con su **código y cuántos repuestos** tiene, **Enter** agrega el primero de la lista (o lo escrito), y si el teléfono **no existe** aparece **«Crear «X»»**: al guardar, el backend crea su ficha en el padrón (`rebuild_phones`). El valor guardado sigue siendo **el mismo texto `A / B / C`** de siempre: `normalize_fields`, la reconstrucción del padrón, la ficha del teléfono, el desplegable «Pantalla a instalar» del servicio y la carga masiva **no se tocaron**.
+- **`etiquetaConMarca(label, brand)`** — la etiqueta canónica `Marca Modelo`. **Por qué existe (medido):** el padrón devuelve el NOMBRE en `label` y la marca aparte, y a los Tecno los nombra sin marca («Pop 7», «Spark 10C»); al guardar, el backend canoniza («Tecno Pop 7»). Sin esto el chip decía «Pop 7» y la ficha guardaba «Tecno Pop 7» — **el mismo teléfono escrito de dos formas en la misma pantalla**. Ahora la opción del buscador y el chip dicen **exactamente lo que se va a guardar** (la marca se antepone solo si el nombre no la trae).
+- **`ProductForm.tsx` y `EditarProductoDialog.tsx`**: el `<Textarea>` «También le sirve a» (y su vista previa) **se fueron**; en su lugar va el selector. Los dos editores de producto (el lápiz de Inventario → Productos y el lápiz del wizard de servicio) usan **el mismo componente**.
+- **`CsvRevisionTable.tsx`** (revisión de la carga masiva, paso «Revisar» → «Ver ficha»): el campo de texto «Compatibilidad (separados por /)» también es ahora **el mismo selector** (prop `compacto`: sin rótulo ni explicación, porque el `Dato` que lo envuelve ya los pone). **Con esto no queda en la app ningún lugar donde la compatibilidad se escriba a mano.**
+- **Nada de backend, nada de datos**: cero migraciones, cero comandos nuevos, cero escrituras fuera de las que ya hacía guardar un producto.
+
+### Verificación (todo EN VIVO por CDP, sobre COPIA, con el estado devuelto)
+
+- **`node tools/verify_f91_compat_modelos.mjs` (NUEVA) 5/5** — el editor del producto con sus **6 chips** y **sin campo de texto** (AC-1) · quitar «Tecno Spark 10C» con el **✕** y guardar → la ficha de ese teléfono baja de **6 a 5** repuestos y el repuesto **desaparece** (AC-2) · volver a agregarlo **buscándolo en el padrón** → la ficha vuelve a **6** (AC-3) · **crear** un modelo que no existía («Sonda F91 Nueva») → queda en el padrón con **su ficha listando el repuesto** (AC-4) · y al quitarlo **no queda ningún residuo** (compatibilidad idéntica a la de partida y **0 teléfonos de prueba** en el padrón) (AC-5).
+- **Regresiones verdes en la misma corrida**: `verify_f90_ficha_compatibilidad` **4/4** (reescrita para manejar el NUEVO editor: quita por chip y agrega eligiendo del padrón; la primera versión medía el `<textarea>` que ya no existe), `verify_f89_pantallas_del_modelo` **6/6**, `verify_f88_carga_compatibilidad` **14/14** (AC-5 actualizado: el detalle del archivo trae el **selector** con **7 chips** y **cero** campos de texto), `verify_f87_carga_catalogo` **16/16**, `verify_models_tab` **23/23**, `verify_servicio_cierre` **18/18**, `verify_precio_pantalla` **55/55**, `verify_carga_csv` **34/34**.
+- `tsc -b` 0 · `oxlint` 0 errores (32 avisos, los mismos del proyecto) · `npm run build` ✓ · `cargo build` ✓ · `cargo build --release` ✓.
+
+### Lecciones (de prueba, no del producto)
+
+1. **Un `\/` dentro de un template literal de JS se come el resto de la línea.** En `verify_f91` el chequeo del «campo de texto viejo» usaba `/\/|tel[eé]fono/i` **dentro** de un backtick: la barra escapada se convierte en `/`, el texto evaluado queda `//|tel…` — un **comentario** — y el error que sale es un `SyntaxError: missing ) after argument list` que no apunta al regex. Regla: en código que viaja dentro de un template literal, **nunca** un regex literal con `/`; usar una comparación por texto.
+2. **El buscador del padrón matchea por MODELO, no por «Marca Modelo»**: buscar «Tecno Pop 7» devuelve «Pop 5 Lite», «Pop 6 Pro», «Pop 7» (y el primero NO es el que uno quiere) → las pruebas buscan por el modelo y **verifican que la opción elegida sea la esperada**; si no, fallan en vez de agregar un teléfono equivocado.
+3. **El backend canoniza con la marca**: una prueba que compare el chip ANTES de guardar con la lista guardada va a ver «Pop 7» vs «Tecno Pop 7» — es la misma cosa (y es lo que arregló `etiquetaConMarca` en la UI).
+4. **Una prueba que escribe tiene que limpiar su precondición**: si una corrida anterior se corta, el teléfono de prueba queda en el padrón y el botón «Crear» **no aparece** (el teléfono ya existe) → la verificación limpia primero y **verifica que la precondición se cumple** antes de medir la creación.
+5. **`verify_carga_csv` (F78) tenía una fixture que la regla de F88 volvió imposible:** creaba la ficha a actualizar con `add_product` y esperaba que el archivo la pisara por identidad con SU código… pero **toda ficha creada por la app nace con un código automático** (`P-` + su id, medido P-1048) y F88 dice que **dos códigos distintos no son la misma pantalla** → el archivo creaba una ficha nueva (3 por crear / 0 a actualizar). La fixture ahora le pone a la ficha de prueba **el código del archivo** (`set_product_code`), que es como está el catálogo real del dueño (71 de sus 83 filas traen código y se cruzan por él). El comportamiento del motor es el correcto y está documentado: cuando la fila trae un código y la ficha que coincide tiene otro, la fila se carga como **NUEVA** y **la fila lo dice** en sus notas.
+
+
+## F92 — LA FECHA DEL PAGO YA NO SE BLOQUEA POR EL CIERRE (y el cierre de esos días se actualiza) + EL DINERO SON 2 DECIMALES — 2026-10-05, MODO DEV
+
+Pedido del dueño, textual: «**quiero que quites el bloqueo que le tienes a la edición de la fecha de cualquier pago cuando mandan un pago cancelado después del cierre. Hay clientes que pagan y envían el pago días anteriores y cuando uno quiere editar la fecha no deja editarla porque dice que ya se hizo el cierre. HAY QUE ACTUALIZAR EL CIERRE DE ESOS DÍAS. Si agrego el pago hoy siendo otro día no refleja la realidad.** Y además cuando pagan deja 2 decimales… porque observo que redondeas, eso corrígelo en la zona de agregar pagos o **cualquier otro lugar que maneje redondeos: se acepta solo 2 decimales**.»
+
+### Parte A — el día CERRADO deja de ser un muro
+
+**La regla vieja (F35) era:** el día de la fecha del pago tenía que estar **ABIERTO**; si estaba cerrado, el error decía *«El día 2026-09-28 ya está CERRADO: su cierre ya se calculó y no cambia solo. En Libro Diario → Cierres, pulsá el botón ↺ de ese día para abrirlo, anotá el pago y volvé a cerrarlo»* (y mover un pago **desde** un día cerrado también se rechazaba). El motivo era bueno —no dejar un arqueo guardado mintiendo— pero el remedio caía sobre el operario en el peor momento: el cliente avisa **después** que pagó días atrás, y el mostrador no puede reabrir la caja de la semana pasada para anotar un cobro.
+
+**Lo que se hizo:** el día cerrado **se acepta** y **su cierre se recalcula solo**, contra el **mismo arqueo contado**.
+
+- **`payment_date_ok` devuelve `DiaDePago { fecha, cerrado }`** (antes un `String`): vacío = hoy; no futura; formato `AAAA-MM-DD` y calendario real; **el día tiene que tener turno** (si no, la plata no entraría en ningún arqueo y el error ahora **lista los últimos días que sí tienen caja**, marcando cuál está abierto); y **cerrado → se acepta con `cerrado = true`**.
+- **`payment_date_movable` se ELIMINÓ**: su único trabajo era bloquear el día de origen cerrado — exactamente lo que el dueño pidió quitar.
+- **`recalcular_cierre_cerrado(fecha) -> Option<AjusteCierre>`** (nuevo): lee el **arqueo guardado** del día, recomputa los totales con la misma fórmula del cierre (`cuentas_del_cierre`, extraída de `close_day` para que **haya una sola implementación**), y actualiza **el esperado, la diferencia y los totales** — **el conteo del cajón NO se toca** (un arqueo es un hecho, no un cálculo). También corrige el **asiento de cierre del libro de plata** (mismo movimiento, no uno nuevo) y devuelve antes/después por moneda para poder **decirlo**.
+- **Se llama en los TRES caminos que mueven plata de un pago**: `add_service_payment` (cobro retroactivo), `update_service_payment_date` (los **dos** días: origen y destino) y `delete_service_payment` (borrar un cobro de un día cerrado también lo descuadraba). **Nunca rompe el guardado**: si el recálculo falla, la plata queda anotada y se devuelve el aviso con el remedio (↺ → volver a cerrar).
+- **La UI lo dice ANTES y DESPUÉS.** Comando nuevo **`estado_del_dia(fecha)`** → `{ existe, cerrado, tasa_bcv, es_hoy }`: el diálogo de pago consulta el día elegido y muestra el aviso que corresponde — *«El 28/09/2026 ya está cerrado: el cobro entra en esa caja y su **cierre se actualiza** (el arqueo que contaste no se toca; solo cambia lo que el sistema esperaba)»* (antes este caso decía «ese día tiene que estar abierto en Libro Diario»), *«El 28/09/2026 no tiene caja (turno)… elegí un día con caja»* (rojo, y el guardado queda apagado) o el ámbar de siempre para un día abierto que no es hoy. Al guardar, un toast confirma; al **corregir la fecha**, el toast dice qué cierre se actualizó y **cómo se movió la diferencia por moneda** (`Diferencia $: 0.00 → 15.50`).
+- **`update_service_payment_date` devuelve `Vec<AjusteCierre>`** (antes `()`), y el bridge `api.updateServicePaymentDate` está tipado igual.
+
+### Parte B — el dinero son 2 decimales (la regla, en una sola definición por lado)
+
+Pedido: «cuando pagan deja 2 decimales… se acepta solo 2 decimales». Se midió **qué** redondeaba mal (los dos casos eran reales y de plata):
+
+1. **`paid_amount` se guardaba con 4 decimales** (regla D3 del 2026-08-18, que sacó el ruido flotante `60.000323284571245` pero dejó `60.0003`). Un cliente que pagaba **los Bs. exactos de su saldo** dejaba un **centavo fantasma**: `amount = 60`, `paid_amount = 60.0003` → el mostrador veía «pagó de más» sin que nadie hubiera pagado de más. Ahora `recalc_paid_amount` usa **`round2`** y ese caso da `60.00`: la orden queda **cancelada**.
+2. **Los Bs. se redondeaban a ENTERO** en el cobro (`Math.round` en `finalAmount`, `convertAmount`, `suggestAmount`, `saldoChipValue` y en la equivalencia del saldo): con la tasa del día, **$20 = 14.973,20 Bs.** y el sistema cobraba **14.973** — hasta **0,99 Bs. por cobro** que después no cuadraban en la caja del día. Igual en la devolución (`step=1` en el campo).
+
+**Qué se hizo:** `round2` en **el backend** (`db::round2`, half-up y **simétrico** para las devoluciones negativas) y en **el frontend** (`payment-math.round2`, con `Math.sign` para que no difiera de Rust en los negativos) aplicado en: `paid_amount`, monto/comisión/neto de los cobros, devoluciones, ventas (`add_sale_tax`), los totales y la diferencia del cierre, la equivalencia del saldo (`order-balance`) y los campos de monto de los diálogos de **pago** y **devolución** (`step=0.01`, valor redondeado al teclear, y el diálogo de pago muestra **«Se va a guardar $X.XX (dólares, moneda del método)»** debajo del campo).
+
+**La única excepción, a propósito:** **una VENTA en bolívares se sigue cobrando al bolívar entero** (`Sales.tsx`, decisión F39: «no existen centavos de bolívar en la calle»; el monto se redondea UNA vez y ese mismo número se muestra y se guarda). No viola la regla —0 decimales es «no más de 2»— y está documentado.
+
+### Verificación
+
+- **Rust: `cargo test --lib` 209/209** (8 ignorados). Tests nuevos/reescritos: `test_payment_date_lands_on_the_right_day` (reescrito para F92: un día se **abre y se cierra de verdad** con `close_day` y el cajón contado en 0; un cobro posterior fechado en ese día **entra**, el cierre pasa de −15 a −20 con el **arqueo intacto**, el asiento del libro se corrige, y **mover** ese pago a hoy devuelve el cierre a −15 con `AjusteCierre` diciendo antes/después) y `test_paid_rounded` (reescrito: Bs 46.399 @ 773,3125 = **$60.00**, no 60.0003 ni ruido; un monto en Bs. **conserva sus centavos** (12.345,67); comisión 3,5% de 33,33 = **1,17** con `neto + comisión = monto` exacto). Ajustados por la regla nueva: `test_all_operations` (0,25 en vez de 0,2469), `test_daily_totals_currency` (grand_total a centavos) y `test_service_refund`.
+- **Puro: `node tools/payment_math_test.ts` 404/404** (reescrito: la paridad con el código viejo se conserva **como documentación de lo que se arregló** —mide la diferencia que F92 elimina, p. ej. 14.973,20 vs 14.973— y la matriz completa verifica la regla nueva) · `money_test` 107/107 · `pos_cuadre_test` 66/66 (la paridad «lo que se muestra = lo que se cobra» ahora con centavos) · `arqueo_test` 49/49 · `refund_math_test` 45/45 · `iva_test` 60/60 · `wizard_cobro_test` 60/60 · `discount_test` 21/21 · `screen_price_test` 45/45 · `receipt_acuerdo_test` 92/92.
+- **EN VIVO `node tools/verify_f92_fecha_pago_cierre.mjs` (NUEVA) 11/11**, sobre una copia y con el estado devuelto: el diálogo dice «cerrado → su cierre se actualiza» y **no bloquea** el guardado (AC-1/AC-2) · un cobro de $15,50 fechado en el día cerrado **entra en esa caja** y el cierre pasa de esperado $0,00/diferencia $0,00 a **$15,50 / −$15,50** (AC-3/AC-4) · **el arqueo contado no se toca** y el día **sigue cerrado** (AC-5/AC-6) · corregir la fecha de ese pago **desde** el día cerrado se permite y el cierre vuelve a su valor de partida (AC-7/AC-8) · un cobro de **Bs. 12.345,67** se guarda **tal cual** y el abonado queda con 2 decimales (AC-9/AC-10) · y la prueba **no deja residuos** (AC-11).
+- **Regresiones en vivo verdes**: `verify_servicio_cierre` 18/18 · `verify_precio_pantalla` 55/55 · `verify_tecnico_y_fecha_pago` **41/41** (su chequeo del «día sin turno» se actualizó al mensaje nuevo) · `verify_turno_viejo` **43/43** (igual: ahora exige que el rechazo nombre la fecha y los días **con** caja) · `verify_recordatorios` 69/69 · `verify_arqueo_f69` 39/39 · `verify_cobro_en_wizard` 81/81 · `verify_descuento` 15/15 · `verify_devolucion_metodo` 7/7 · `verify_metodos_en_cobros` 16/16 · `verify_wizard_metodos` 18/18.
+- `tsc -b` 0 · `oxlint` 0 errores · `npm run build` ✓ · `cargo build` ✓ · `cargo build --release` ✓.
+
+### Bug de plata que apareció en el camino (y se arregló): la fecha elegida se revertía sola
+
+Midiendo en vivo, la fecha que el operario elige en «Fecha del pago» **podía volver a HOY**: el diálogo la inicializa con el turno abierto en una promesa (`getActiveDay`), y si esa respuesta llegaba **después** de que el operario tocara el campo, se la pisaba — el cobro entraba en la caja equivocada sin que nadie lo viera. Es el mismo patrón que F38 ya había resuelto para el monto y la moneda: ahora hay un **`dateTouched`** y la carga del turno **nunca** pisa una fecha elegida a mano. (La verificación lo destapó porque medía el campo después de escribirlo: la primera corrida guardó el pago en HOY y el cierre del día cerrado no se movió.)
+
+### Lecciones
+
+1. **Un día cerrado no es «solo lectura»: es una foto que hay que volver a revelar.** La regla vieja (rechazar) protegía el arqueo pero castigaba al operario; la nueva lo protege **recalculando el esperado y dejando el conteo intacto** — y **diciéndolo**. Lo que nunca se hace es cambiar un arqueo en silencio.
+2. **Una fórmula de cierre, un solo lugar.** Al extraer `cuentas_del_cierre` de `close_day` (con el fondo de caja y los gastos del cajón de F69 adentro) el recálculo **no puede** divergir del cierre original; duplicar esa aritmética habría dejado dos verdades.
+3. **Redondear «a 4 decimales» no es más preciso: es un centavo fantasma en la cara del cliente.** La regla D3 había arreglado el ruido flotante y dejado el problema de negocio; con 2 decimales los dos se resuelven de una.
+4. **Las pruebas tienen que esperar a que la pantalla esté LISTA, no solo presente:** el campo de fecha existía pero su estado todavía no había llegado; medir antes de eso guardaba el cobro en otro día (y con eso la prueba mentía sobre el producto). Se espera el `data-estado-dia` antes de tocar la fecha.
+5. **`REGISTRO_CDP_PORT`** (nuevo en `tools/cdp_driver.mjs`): cuando el dueño tiene **su** app abierta en su base (puerto 9222), las verificaciones corren en una **segunda instancia** (9223, otra carpeta de WebView2 y `REGISTRO_DB` a la copia) sin poder tocar su sesión. Es la forma segura de trabajar con la app del local abierta.
+
+
+## F93 — LA RED DE COMPATIBILIDAD SE SINCRONIZA (y las variantes no parten el teléfono) — 2026-10-05, MODO DEV
+
+Pedido del dueño, textual: «si yo selecciono en Producto **Infinix Hot 10 Play** los modelos compatibles son Infinix Hot 10 Play; Infinix Hot 11 Play. En módulo-fichas debe verse también los dos. Pero cuando en Producto el Infinix Hot 10 Play le quito Infinix Hot 11 Play quedando solo Hot 10 Play, **los cambios no surten efecto en módulo-fichas sobre Infinix Hot 10 Play sino en el otro que se retiró** (Hot 11 Play). Es importante que **se sincronice en toda la red completa**, es el deber ser. **Punto importante: las variantes permitir que entren en la compatibilidad**.»
+
+### Lo que se midió antes de tocar nada (los dos problemas eran reales)
+
+1. **La red se rompía en UNA sola dirección (reproducido con su catálogo).** El producto #212 «Infinix Hot 10 Play» tenía la lista `[Hot 10 Play, Hot 11 Play]` y el #1031 «Infinix Hot 11 Play» **la misma lista** (son las dos pantallas del mismo par de teléfonos). Al quitarle «Hot 11 Play» al #212: la ficha del **Hot 11 Play** perdía el #212 (correcto) y la del **Hot 10 Play** seguía mostrando el #1031 → **el vínculo quedaba roto de un solo lado**, que es exactamente lo que él vio.
+2. **Las variantes partían el teléfono en dos fichas.** 76 productos del catálogo tienen la compatibilidad con la variante PEGADA a la etiqueta («Infinix Gt 20 Pro INCELL», «Infinix Hot 50 Con Marco») — así lo escribe su Excel. El padrón creaba **un teléfono por variante**: «Gt 20 Pro INCELL» y «Gt 20 Pro ORIGINAL» como DOS fichas (23 filas medidas), la ficha del teléfono de verdad no existía y **el desplegable «Pantalla a instalar» del servicio quedaba VACÍO para esos modelos**: medido, `Gt 20 Pro` → **0 pantallas**, `Hot 50 Pro` → **0**, `Note 30` → **0** (con las pantallas cargadas y con stock). F87 ya había decidido que «Infinix Gt 20 Pro INCELL» **es** el modelo «Gt 20 Pro» del repuesto INCELL, pero esa decisión no había llegado al padrón.
+
+### Qué se hizo
+
+**A. LA RED SE SINCRONIZA (`catalog.rs::sincronizar_red` + `lista_del_hermano`, llamada desde `update_product`).** Al guardar un producto, los **hermanos de la red** se ajustan solos. Hermano = producto de la **misma categoría** y la **misma clase de variante** (`variant_key`: INCELL cuenta como la genérica) cuyo modelo pertenece a la red **y cuya lista era exactamente esa red** (así no se toca una pantalla que sirve a otros teléfonos). Entonces:
+
+- si su modelo **sigue** en la lista nueva → queda con la lista nueva (que ya lo nombra);
+- si **salió** → queda **solo con su propio teléfono** (la red se parte en las dos direcciones).
+
+Funciona en los dos sentidos: quitar un teléfono parte la red, y volver a agregarlo la rearma en las dos fichas. La operación devuelve **`Vec<CambioDeRed>`** (id, nombre, lista antes y después) y los dos diálogos de producto muestran un aviso: *«Se sincronizó la red: 1 ficha más — «Infinix Hot 11 Play»: Infinix Hot 11 Play / Infinix Hot 10 Play → Infinix Hot 11 Play»*. Guardar **sin** cambiar la red (otro precio, otra ortografía) no toca a nadie.
+
+**B. LA VARIANTE ES DEL REPUESTO, NO DEL TELÉFONO (`catalog.rs::compat_phones_raw`).** El padrón y el índice de fichas quitan la variante para **identificar** al teléfono (la MISMA regla `sin_variante` que F87 usa para el aviso de la carga masiva) y la variante sigue viva donde corresponde: en la fila del repuesto (su columna `variant`, que la ficha muestra con `partLabel`) y en los **alias** del teléfono. Además:
+
+- **la búsqueda del selector de modelo ahora mira los ALIAS** (`get_phone_models_filtered`): escribir «Gt 20 Pro INCELL» encuentra «Gt 20 Pro», como lo escribe el local;
+- **los alias que faltaban se guardan** (`aliases_nuevos_faltan`): antes solo se reescribían cuando cambiaba el NOMBRE, así que una ortografía nueva del mismo teléfono se perdía (y con ella la búsqueda por esa forma); sigue siendo idempotente (si no falta ninguno, no toca nada);
+- **una fila nueva del padrón nace con su código** (`M-####`): `init()` solo numera al arrancar, así que las filas creadas por un guardado (o por la puesta al día) quedaban **sin código** hasta el próximo inicio — lo cazó `verify_modelos_f53`;
+- **puesta al día UNA sola vez** (`settings.phones_variantes_f93`): al abrir la versión nueva, el padrón se reconstruye una vez para juntar las fichas por variante (medido con su base: **1086 → 1040 teléfonos**, 23 → **0** nombres con variante, `Gt 20 Pro` queda como UNA ficha con los alias de las dos variantes). `rebuild_phones` **nunca** toca las filas `source='manual'` (un teléfono renombrado o fusionado por el taller queda igual).
+  - **TRAMPA (costó un cuelgue):** dentro de `init()` la conexión YA está bloqueada; llamar a `self.get_setting(...)`/`self.set_setting(...)` (que toman el candado) es un **DEADLOCK** y la app arranca colgada sin decir nada. Se lee/escribe `settings` con la conexión que ya se tiene (`get_setting_sin_lock`).
+
+### Verificación
+
+- **Rust: `cargo test --lib` 211/211** (8 ignorados), con los dos nuevos: `test_f93_la_red_de_compatibilidad_se_sincroniza` (el caso del dueño con sus dos productos: quitar → el hermano queda solo con su teléfono y **la ficha del que QUEDA cambia**; volver a agregar → las dos fichas recuperan la red; un producto de otra red **no se toca**; guardar sin cambiar la red no toca nada) y `test_f93_la_variante_no_parte_el_telefono` (una sola ficha «Gt 20 Pro» con las dos pantallas dentro, los alias conservados, y el desplegable estricto del servicio ofreciéndolas — antes 0).
+- **EN VIVO `node tools/verify_f93_red_compat.mjs` (NUEVA) 11/11** sobre una copia y devolviendo el estado: el caso textual del dueño (quitar «Infinix Hot 11 Play» del #212 cambia **las dos** fichas: `[212,1031] → [212]` y `→ [1031]`), la respuesta del backend nombrando la ficha hermana ajustada, el producto de otra red intacto, la red que se rearma al volver a agregarlo, **0 teléfonos con la variante en el nombre**, la ficha del «Gt 20 Pro» con sus pantallas, el desplegable del servicio con **5 pantallas** (antes 0) y la búsqueda por «Gt 20 Pro INCELL» encontrando el teléfono.
+- **Regresiones verdes en la misma corrida**: `verify_models_tab` **23/23** (con el padrón ya fusionado: 1040 teléfonos / 156 por revisar), `verify_f89` 6/6, `verify_f90` **4/4**, `verify_f91` 5/5, `verify_f92` 11/11, `verify_f88` 14/14, `verify_f87` 16/16, `verify_carga_csv` 34/34, `verify_por_modelo` 27/27, `verify_uso_modelos` 38/38, `verify_modelos_f53` **24/24**, `verify_phones_edit` 9/9, `verify_phones_write` **9/9**, `verify_modelo_legible` 13/13, `verify_compat_pantalla` 12/12, `verify_service_screen_stock` 6/6, `verify_pantalla_agotada` 16/16, `verify_editar_producto_wizard` **54/54**, `verify_servicio_cierre` 18/18, `verify_precio_pantalla` 55/55, `verify_recordatorios` 69/69.
+- **Pruebas que estaban VIEJAS y se arreglaron (eran de la prueba, no del producto):** `verify_modelos_f53` leía la pantalla elegida por la clase del **botón** (`button.bg-primary/10`), pero desde F80 la fila dejó de ser un botón (lleva el lápiz al lado) y la marca quedó en el envoltorio → ahora usa `data-screen-elegida="1"`; `verify_phones_write` elegía la marca «Genérico» con un clic por coordenadas y con la lista de marcas más larga la opción queda fuera de la vista → ahora escribe la marca y confirma con Enter; `verify_editar_producto_wizard` leía `[data-field="prod-compat"]`, el campo de texto que **F91 reemplazó por la lista de modelos** → ahora lee los chips; `verify_f90` comparaba el conteo exacto de la ficha, que con F93 baja más porque **la red entera se sincroniza** → ahora mide que el repuesto desaparezca y que la ficha baje. **`verify_etiquetas_alias` (5/11) queda con fallas por DATOS**: su copy no tiene servicios con tipo «Garantía»/«Venta»/«flex power», así que los grupos F58/F59 del selector no se renderizan (no es F93).
+- `tsc -b` 0 · `oxlint` 0 errores · `npm run build` ✓ · `cargo build` ✓ · `cargo build --release` ✓.
+
+### Lecciones
+
+1. **Una «red» que se edita desde un solo lado miente en el otro.** El arreglo no fue tocar la ficha: fue **sincronizar la lista en todos los productos de la misma red**, con un criterio conservador (misma categoría, misma clase de variante, lista idéntica a la red) para no arrastrar repuestos que sirven a otros teléfonos.
+2. **Lo que el local escribe pegado (la variante) no puede cambiar la IDENTIDAD del teléfono.** F87 ya lo había resuelto para el aviso de la carga; el padrón seguía partiendo el teléfono en dos. Ahora hay UNA ficha por teléfono y la variante vive en la fila del repuesto y en los alias.
+3. **Un dato derivado que se reconstruye tiene que numerarse solo.** Las filas nuevas del padrón nacían sin código porque el `M-####` solo se asignaba en `init()`: cualquier guardado posterior dejaba teléfonos sin código (lo cazó una verificación vieja: F53).
+4. **Los tests también envejecen:** cuatro verificaciones fallaban por selectores/expectativas de features anteriores (F80 movió la marca de elegida, F91 cambió el campo de compatibilidad, la lista de marcas creció). Ninguna era un defecto del producto, y las cuatro se arreglaron midiendo el DOM real antes de tocar nada.
+
+
+
+
+
