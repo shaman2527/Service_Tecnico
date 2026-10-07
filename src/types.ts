@@ -818,6 +818,44 @@ export interface DailyClosing {
 }
 
 /**
+ * F40 — LA CONCILIACIÓN DE UN DÍA: el LIBRO DE PLATA (`cash_movements`) contra el ORIGEN de la plata
+ * (`sales` + `service_payments`), método por método. Las dos partes se miden NETAS de comisión (es lo
+ * que de verdad entró) y sólo con movimientos de plata cobrada. `diferencia = libro − origen`: 0 es que
+ * las dos fuentes cuentan lo mismo. Es de SOLO LECTURA: no toca la caja.
+ */
+export interface LineaConciliacion {
+  metodo: string;
+  moneda: 'USD' | 'VES';
+  libro: number;
+  origen: number;
+  diferencia: number;
+  /** Cuántos COBROS reales (`sales`/`service_payments`) tiene la línea. */
+  movimientos: number;
+  /** Cuántos ASIENTOS del libro (originales + espejos `*_anulado`) componen esos cobros. */
+  asientos: number;
+}
+
+/** F40 — una entrega que la caja PRESUME (entregada sin ningún cobro): no está en el libro porque no es
+ *  un movimiento de plata, y se informa aparte para que un día normal no parezca descuadrado. */
+export interface PresuncionConciliacion {
+  metodo: string;
+  moneda: 'USD' | 'VES';
+  monto: number;
+  ordenes: number;
+}
+
+export interface ConciliacionDia {
+  fecha: string;
+  lineas: LineaConciliacion[];
+  presunciones: PresuncionConciliacion[];
+  /** true = HAY cobros y ninguna línea tiene diferencia fuera de la tolerancia (un día sin cobros no
+   *  «cuadra»: no hay nada que conciliar, y la tarjeta lo dice en vez de mostrar un verde vacío). */
+  cuadra: boolean;
+  /** Lo que hay que decirle al operario (diferencias reales y entregas sin cobro). */
+  avisos: string[];
+}
+
+/**
  * F92 — QUÉ LE PASÓ AL CIERRE DE UN DÍA CERRADO cuando le entró o salió plata después del cierre
  * (un cobro retroactivo, la fecha de un pago corregida, un cobro borrado). El backend recalcula el
  * ESPERADO de ese día con la misma fórmula del cierre y deja el **arqueo contado intacto**; esto es

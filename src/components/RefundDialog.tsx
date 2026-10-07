@@ -7,7 +7,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { api } from '../db';
 // F31: selector de método de pago compartido (3 favoritos a un toque + el resto en un desplegable)
 import { PaymentMethodPicker } from './PaymentMethodPicker';
-import { methodCurrency, currencySymbol, isFinalized } from '@/lib/utils';
+import { methodCurrency, currencySymbol, isFinalized, localDate } from '@/lib/utils';
+// F83: la devolución se anota en la caja del TURNO ABIERTO (no se elige): se dice ANTES de confirmar.
+import { cajaDeLaDevolucion, shiftPending } from '@/lib/day-shift';
+import { TurnoViejoBanner } from './TurnoViejoBanner';
 // F92: el dinero se maneja con 2 decimales (la MISMA regla que el backend y el diálogo de pago).
 import { round2 } from '@/lib/payment-math';
 // F36: el tope de la devolución es POR MONEDA (lo que netamente entró en ella), sin tasas.
@@ -19,12 +22,16 @@ import {
 } from '@/lib/refund-math';
 import type { Service, ServicePayment } from '../types';
 
-export default function RefundDialog({ service, open, onOpenChange, onSaved, dayOpen }: {
+export default function RefundDialog({ service, open, onOpenChange, onSaved, dayOpen, onGoToLedger, puedeCerrarCaja = true }: {
   service: Service | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onSaved?: () => void;
   dayOpen?: boolean | null;
+  /** F83: lleva al Libro Diario → Cierres (el remedio cuando la caja abierta es de otro día). */
+  onGoToLedger?: () => void;
+  /** F83: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel. */
+  puedeCerrarCaja?: boolean;
 }) {
   const [refundAmount, setRefundAmount] = useState(0);
   const [refundMethod, setRefundMethod] = useState('Divisas (USD Cash)');
@@ -35,6 +42,27 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
   const [saving, setSaving] = useState(false);
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [confirmNoMoney, setConfirmNoMoney] = useState(false);
+  /**
+   * F83 — A QUÉ CAJA VA ESTA DEVOLUCIÓN. `add_service_refund` fecha la devolución con el `close_date`
+   * del turno ABIERTO (la plata sale del cajón que se está trabajando: invariante F36/F69) y hasta F83
+   * el operario no tenía forma de saberlo: con la caja del 21/09 abierta y hoy 27/09, una devolución de
+   * hoy entraba al arqueo del 21/09 en silencio. Decisión del backlog (opción (a)): **informar, no
+   * bloquear** — se muestra la caja que la va a recibir y, si no es la de hoy, el remedio exacto.
+   */
+  const [fechaTurno, setFechaTurno] = useState<string | null>(null);
+  /**
+   * REVISIÓN ADVERSARIAL (MENOR, 2026-10-06): `fechaTurno = null` significa DOS cosas distintas —«no
+   * hay ninguna caja abierta» y «todavía no se sabe / la lectura falló»— y era también el estado
+   * INICIAL, así que el diálogo podía afirmar «No hay ninguna caja abierta: hay que abrir el día»
+   * mientras el padre consideraba el día abierto (`Services` hace fail-open en su propio `catch`).
+   * Con esto el bloque no dice nada hasta tener respuesta: informar mal es peor que no informar.
+   */
+  const [turnoConsultado, setTurnoConsultado] = useState(false);
+  // F83 + REVISIÓN ADVERSARIAL: el texto del bloque `refund-caja` también sabe si la sesión puede
+  // CERRAR el día (el rol caja no puede: `close_day` es del dueño y no ve la pestaña Cierres). Antes
+  // este bloque le ordenaba «Cerrá esa caja…» mientras el cartel de arriba le decía «pedile al dueño».
+  const cajaDevolucion = cajaDeLaDevolucion(fechaTurno, localDate(), { puedeCerrar: puedeCerrarCaja });
+  const turnoViejo = shiftPending(fechaTurno, localDate());
   const amountTouched = useRef(false);
   /** F42: si el operario ya eligió el método a mano, no se le pisa al llegar los pagos */
   const methodTouched = useRef(false);
@@ -65,6 +93,11 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
     let alive = true;
     // F42: los movimientos son los que dicen por dónde entró la plata (y en qué moneda)
     api.getServicePayments(service.id).then(p => { if (alive) setPagos(p); }).catch(() => { if (alive) setPagos([]); });
+    // F83: la caja que va a recibir la devolución (la del turno ABIERTO; se dice, no se elige)
+    setTurnoConsultado(false);
+    api.getActiveDay()
+      .then(d => { if (alive) { setFechaTurno(d?.close_date ?? null); setTurnoConsultado(true); } })
+      .catch(() => { if (alive) { setFechaTurno(null); setTurnoConsultado(true); } });
     // El método del FORMULARIO sólo queda como respaldo hasta que lleguen los pagos: en cuanto se
     // sabe por dónde entró la plata, el diálogo PROPONE ese método (`refundMethodDefault`).
     setRefundMethod(service.payment_method ?? 'Divisas (USD Cash)');
@@ -157,7 +190,28 @@ export default function RefundDialog({ service, open, onOpenChange, onSaved, day
         <DialogHeader className="shrink-0">
           <DialogTitle>Devolución {service ? `· ${service.order_num}` : ''}</DialogTitle>
         </DialogHeader>
+        {/* F83 — el cartel de la caja del día anterior sin cerrar (el MISMO de F82): acá no bloquea
+            —informar es la decisión de F83— pero trae el botón con el remedio a un toque. */}
+        {turnoConsultado && turnoViejo.stale && (
+          <TurnoViejoBanner turno={turnoViejo} onGoToLedger={onGoToLedger} puedeCerrar={puedeCerrarCaja} className="shrink-0" />
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto flex flex-col gap-4 pr-1">
+          {/* F83 — A QUÉ CAJA VA ESTA DEVOLUCIÓN. La fecha la pone el backend (la del turno ABIERTO:
+              la plata sale del cajón que se está trabajando) y el operario NO la elige, así que tiene
+              que verla ANTES de confirmar. Con la caja de hoy es un dato más; con la caja de otro día es
+              un aviso fuerte con el remedio (informar, no bloquear: opción (a) de la feature).
+              Sólo se dibuja cuando la lectura del turno YA contestó: en el primer render (y si la
+              lectura falla) no se afirma nada sobre la caja. */}
+          {turnoConsultado && (
+          <div data-field="refund-caja" data-caja={cajaDevolucion.fecha || 'sin-caja'}
+            data-es-hoy={cajaDevolucion.esHoy ? 'si' : 'no'}
+            className={cajaDevolucion.aviso
+              ? 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 flex items-start gap-2'
+              : 'rounded-md border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground'}>
+            {cajaDevolucion.aviso && <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />}
+            <span>{cajaDevolucion.texto}</span>
+          </div>
+          )}
           <div className="text-sm flex flex-col gap-1 rounded-md bg-muted/60 px-3 py-2">
             <p>Cliente: <strong>{service?.client ?? '-'}</strong> {service?.model ? `· ${service.model}` : ''}</p>
             <p>Total: <strong>${(service?.amount ?? 0).toFixed(2)}</strong></p>

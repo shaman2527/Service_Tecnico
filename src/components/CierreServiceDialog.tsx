@@ -27,9 +27,9 @@ import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { firePolicyReminders } from './policy-actions';
 import { deliverReminders } from '@/lib/reminders';
 import { photoOutIsCurrent } from '@/lib/service-guide';
-// F82 — la caja del día anterior sin cerrar (regla pura con pruebas): bloquea el COBRO al entregar.
-import { shiftPending } from '@/lib/day-shift';
-import { TurnoViejoBanner } from './TurnoViejoBanner';
+// F82 → F94 — la caja del día anterior sin cerrar (regla pura con pruebas): ya NO bloquea el cobro al
+// entregar, solo lo AVISA (la plata del cobro entra en la caja de hoy).
+import { shiftPending, fechaLegible } from '@/lib/day-shift';
 
 // F30 — ASISTENTE DE CIERRE: entregar un equipo rápido y sin pensar.
 //
@@ -45,7 +45,7 @@ import { TurnoViejoBanner } from './TurnoViejoBanner';
 const esFinal = (status?: string | null) =>
   ['Entregado', 'Cancelado', 'Devuelto', 'Cancelado / Devuelto'].includes(status ?? '');
 
-export default function CierreServiceDialog({ service, open, onOpenChange, onSaved, onPrint, dayOpen, puedeCerrarCaja = true }: {
+export default function CierreServiceDialog({ service, open, onOpenChange, onSaved, onPrint, dayOpen }: {
   service: Service | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -53,7 +53,8 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   /** abre el recibo de esa orden (lo maneja Services.tsx) */
   onPrint?: (s: Service) => void;
   dayOpen?: boolean | null;
-  /** F82: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel. */
+  /** F94 — `puedeCerrarCaja` ya no se usa acá (el cobro no se bloquea por la caja); se conserva en la
+   *  firma para no tocar a los llamadores. */
   puedeCerrarCaja?: boolean;
 }) {
   const [svc, setSvc] = useState<Service | null>(service);
@@ -72,12 +73,20 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   // cobro
   const [methods, setMethods] = useState<{ id: number; name: string }[]>([]);
   const [tasaBcv, setTasaBcv] = useState(0);
-  /** Fecha del turno abierto: su caja es la que recibe el cobro al entregar (F35). */
-  const [diaTurno, setDiaTurno] = useState('');
   /**
-   * F82 — SI EL TURNO ABIERTO ES DE OTRO DÍA: el cobro de hoy caería en la caja de ayer. Con el
-   * turno viejo se puede ENTREGAR igual (la entrega no es plata y hay saldo con motivo), pero el
-   * COBRO se bloquea y el cartel dice qué cerrar.
+   * F35 → F94 — LA FECHA DEL COBRO AL ENTREGAR ES **HOY**, que es cuando el cliente está pagando.
+   *
+   * Antes se usaba la fecha del TURNO ABIERTO (`diaTurno`) como workaround: si el turno quedó abierto de
+   * otro día, hoy no tenía fila en `daily_closings` y el abono se rechazaba, así que el operario quedaba
+   * sin poder cobrar ni entregar (F35). Con F94 la caja del día del cobro **se crea sola** si no existe
+   * (cerrada, arqueo 0, con la tasa conocida), así que la fecha puede decir la verdad: la plata entra en
+   * la caja de HOY —la de la entrega, que es la que el Libro Diario presume ese día— y no en la de un
+   * turno viejo. `diaTurno` queda solo para el aviso de la caja vieja.
+   */
+  /**
+   * F82 → F94 — SI EL TURNO ABIERTO ES DE OTRO DÍA, el cobro YA NO SE BLOQUEA: entra en la caja de hoy
+   * (que se le crea si hace falta). El cartel de la caja vieja sigue avisando para FACTURAR (ventas y
+   * órdenes), que es donde el turno viejo sí frena.
    */
   const [fechaTurno, setFechaTurno] = useState<string | null>(null);
   const turnoViejo = shiftPending(fechaTurno, localDate());
@@ -94,8 +103,9 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
     setSvc(service);
     setScreenId(service?.screen_product_id ?? null);
     setScreenConfirm(false);
-    setPayMethod(service?.payment_method ?? 'Divisas (USD Cash)');
-    setPayCur(methodCurrency(service?.payment_method ?? 'Divisas (USD Cash)'));
+    // F37 (H3): un método VACÍO no es un método — se cae al del local (si no, el cobro nace sin método).
+    setPayMethod(service?.payment_method?.trim() || 'Divisas (USD Cash)');
+    setPayCur(methodCurrency(service?.payment_method?.trim() || 'Divisas (USD Cash)'));
     setPayAmount(0);
     // Si la orden ya venía con un método del Punto, la comisión arranca en el valor por defecto
     // (antes quedaba en 0 y el neto del Punto salía sin comisión → descuadre al liquidar)
@@ -121,8 +131,7 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
     api.getActiveDay().then(d => {
       if (!alive) return;
       setTasaBcv(d?.tasa_bcv ?? 0);
-      setDiaTurno(d?.close_date ?? '');
-      setFechaTurno(d?.close_date ?? null);   // F82: para saber si el turno es de otro día
+      setFechaTurno(d?.close_date ?? null);   // F82/F94: para saber si el turno abierto es de OTRO día
     }).catch(() => {});
     // F38: los movimientos reales dicen en qué moneda se viene cobrando (para el saldo en Bs.)
     api.getServicePayments(service.id).then(p => { if (alive) setMovimientos(p); }).catch(() => { if (alive) setMovimientos([]); });
@@ -203,18 +212,16 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
   // GATES (los mismos que Pago / Abono, no una copia simplificada):
   //  · con un monto escrito, el monto FINAL tiene que ser > 0 — si no, el cobro se perdería
   //    en silencio (p.ej. campo en Bs. con un método en $ y la tasa del día en 0);
-  //  · con el día CERRADO no se puede cobrar (el backend lo rechaza igual, pero no se avisa
-  //    después de apretar el botón);
-  //  · un método en bolívares exige tasa BCV.
+  //  · un método en bolívares exige una tasa BCV conocida (sin tasa, el abono se valuaría 1:1);
+  //  · F94: la caja YA NO ES UN GATE. Antes el cobro se bloqueaba con el día cerrado o con la caja
+  //    vieja abierta, y el operario quedaba sin poder cobrar ni entregar; ahora el cobro entra en la
+  //    caja de HOY y, si hoy no tiene caja, el backend se la crea (cerrada, arqueo 0).
   const cobroImposible = payAmount > 0 && payAmountFinal <= 0;
   // «Sin candidatas» NO es lo mismo que «no hace falta pantalla»: mientras carga, o si la consulta
   // falló, o si el modelo realmente no tiene pantallas, el cierre con screen null se iría al
   // matching legacy del backend y descontaría OTRO bin. Se avisa y no se cierra solo por eso.
   const sinPantallas = necesitaPantalla && !cargandoPantallas && candidatos.length === 0 && screenId == null;
   const puedeCerrar = pantallaOk && !faltaMotivo && !cobroImposible && !cargandoPantallas
-    && (payAmount <= 0 || dayOpen !== false)
-    // F82: un cobro es plata de HOY — con la caja de ayer abierta se bloquea el cobro, no la entrega.
-    && (payAmount <= 0 || !turnoViejo.stale)
     && (tasaBcv > 0 || !payIsBs || payAmount <= 0);
   // F32: ¿ya está la foto de SALIDA de la entrega de ESTA orden? (se compara con su fecha de
   // entrega; si el equipo se reabrió y se entrega de nuevo, la foto vieja no cuenta)
@@ -243,10 +250,12 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
       //    Tiene su PROPIO catch: si el cobro falla, no se entrega y se dice la verdad.
       if (faltaCobrar) {
         try {
-          // F35: el cobro al entregar entra en la caja del TURNO ABIERTO (no en «hoy» a ciegas: si el
-          // turno quedó abierto de otro día, hoy no tiene fila en daily_closings y el abono se
-          // rechazaría, dejando al operario sin poder cobrar NI entregar).
-          await api.addServicePayment(svc.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, 'Cobro al entregar', diaTurno);
+          // F94: el cobro al entregar es de HOY (es cuando el cliente paga y cuando el Libro Diario
+          // presume el ingreso de la entrega). Antes se fechaba con el turno abierto porque «hoy no
+          // tiene fila en daily_closings y el abono se rechazaría»: eso ya no pasa — si hoy no tiene
+          // caja, el backend se la crea (cerrada, arqueo 0, con la tasa conocida) y la plata entra en
+          // la caja de HOY, no en la de un turno viejo.
+          await api.addServicePayment(svc.id, payAmountFinal, payMethod, payFee, payZelle, payCurrency, 'Cobro al entregar', localDate());
           cobroOk = true;
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
@@ -319,9 +328,10 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
           </div>
         </DialogHeader>
 
-        {/* F82: si la caja del día anterior quedó abierta, el COBRO de esta entrega se bloquea (la
-            entrega sigue disponible con saldo y motivo). El aviso sale al abrir el asistente. */}
-        {turnoViejo.stale && <TurnoViejoBanner turno={turnoViejo} className="shrink-0" puedeCerrar={puedeCerrarCaja} />}
+        {/* F94 — acá ya no va el cartel que BLOQUEABA el cobro con la caja vieja: el cobro entra en la
+            caja de hoy (se le crea si no la tiene). El aviso queda dentro del bloque del cobro, junto al
+            monto, diciendo a qué caja va; el cartel de la caja vieja sigue en Dashboard/Ventas/Servicio
+            Técnico, que es donde sí frena FACTURAR. */}
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-3">
           {/* qué está y qué falta (P1: los faltantes se ven ANTES, no al guardar) */}
@@ -479,9 +489,12 @@ export default function CierreServiceDialog({ service, open, onOpenChange, onSav
                   : <>Cobrado ({shortMethodLabel(svc.payment_method)}) — podés registrar otro cobro si hace falta</>}
               </span>
 
-              {dayOpen === false && (
-                <span className="text-[11px] text-destructive">
-                  El día está cerrado: para cobrar abrí el día en Libro Diario (podés entregar con saldo y motivo).
+              {/* F94 — el cobro ya no se bloquea por la caja: solo se AVISA a qué caja entra. */}
+              {(dayOpen === false || turnoViejo.stale) && (
+                <span className="text-[11px] text-amber-700" data-field="aviso-cobro-sin-caja">
+                  {turnoViejo.stale
+                    ? <>La caja del <strong>{fechaLegible(turnoViejo.fechaTurno ?? '')}</strong> sigue abierta: este cobro de HOY entra en la caja de hoy, no en la vieja (para facturar ventas y órdenes sí hay que cerrarla).</>
+                    : <>El día no está abierto: el cobro de HOY entra igual y se le crea su caja con el arqueo en 0 (queda «sin contar» en Libro Diario → Cierres).</>}
                 </span>
               )}
 

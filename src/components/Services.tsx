@@ -1725,6 +1725,8 @@ export default function Services({ role = 'owner', onGoToLedger }: {
         open={!!refundFor}
         onOpenChange={(o) => { if (!o) setRefundFor(null); }}
         dayOpen={dayOpen}
+        onGoToLedger={onGoToLedger}
+        puedeCerrarCaja={ab.closeDay}
         onSaved={refrescar}
       />
 
@@ -4567,8 +4569,12 @@ function ServiceForm({ service, statuses, dayOpen, turnoViejo, onClose, onSaved,
                   <p className="text-sm font-semibold flex items-center gap-2">
                     <Banknote className="size-4 text-emerald-600" /> Pagos y Abonos
                   </p>
-                  <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)} disabled={dayOpen === false || turnoViejo.stale}
-                    title={turnoViejo.stale ? turnoViejoTexto(turnoViejo) : undefined}>
+                  {/* F94 — UN COBRO YA NO SE BLOQUEA POR LA CAJA: la plata del abono entra en la caja
+                      del DÍA QUE SE ELIGE (y si ese día no tenía caja, el sistema se la crea). Antes
+                      este botón se apagaba con el día cerrado o con la caja vieja abierta y el
+                      mostrador no podía anotar un cobro atrasado. El cartel de arriba sigue avisando
+                      para FACTURAR (ventas y órdenes), que es donde el turno viejo sí bloquea. */}
+                  <Button variant="outline" size="sm" onClick={() => setShowPayDialog(true)}>
                     <Plus className="size-3.5" /> Registrar Pago / Abono
                   </Button>
                 </div>

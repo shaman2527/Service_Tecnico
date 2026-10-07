@@ -89,3 +89,70 @@ export function shiftPending(fechaTurno: string | null | undefined, hoy: string)
 export function turnoViejoTexto(t: TurnoViejo): string {
   return t.stale ? `${t.message} ${t.remedy}` : '';
 }
+
+/**
+ * F83 — A QUÉ CAJA VA UNA DEVOLUCIÓN (y decirlo ANTES de hacerla).
+ *
+ * La devolución es la ÚNICA escritura de dinero que no elige fecha: se anota en la caja del **turno
+ * abierto** (`add_service_refund`), porque la plata sale del cajón que se está trabajando (invariante
+ * de F36/F69). Con la caja del 21/09 abierta y hoy 27/09, una devolución hecha HOY entra al arqueo del
+ * 21/09 — y hasta F83 el operario no tenía forma de saberlo: `RefundDialog` no consultaba el turno, no
+ * mostraba el cartel de F82 y no había ningún campo de fecha.
+ *
+ * Decisión (la opción (a) del backlog): **informar, no bloquear**. La devolución sigue saliendo del
+ * cajón abierto —es la regla del local— pero el mostrador lo VE antes de confirmar, con el remedio si
+ * lo que quiere es que salga de la caja de hoy.
+ *
+ * Regla PURA (sin React): `node tools/day_shift_test.ts`.
+ */
+export interface CajaDeLaDevolucion {
+  /** Fecha de la caja que va a recibir la devolución (`''` = no hay ninguna caja abierta). */
+  fecha: string;
+  /** ¿Es la caja de HOY? */
+  esHoy: boolean;
+  /** true = hay que avisar fuerte (no hay caja, o la caja no es la de hoy). */
+  aviso: boolean;
+  /** La línea para el operario, con las fechas en formato del local. */
+  texto: string;
+}
+
+/** ¿La sesión actual puede CERRAR el día? Cerrar es del DUEÑO (`close_day` → `require_owner`) y la
+ *  pestaña Cierres ni existe para la caja: el remedio tiene que decir la verdad de QUIÉN lo hace. */
+export interface OpcionesCajaDeLaDevolucion {
+  /** `false` = la sesión no puede cerrar el día (rol caja): el remedio se pide, no se ordena. */
+  puedeCerrar?: boolean;
+}
+
+export function cajaDeLaDevolucion(
+  fechaTurno: string | null | undefined,
+  hoy: string,
+  opciones: OpcionesCajaDeLaDevolucion = {},
+): CajaDeLaDevolucion {
+  const puedeCerrar = opciones.puedeCerrar !== false;
+  const turno = soloFecha(fechaTurno);
+  const dia = soloFecha(hoy) ?? '';
+  if (!turno) {
+    return {
+      fecha: '', esHoy: false, aviso: true,
+      texto: 'No hay ninguna caja abierta: la devolución sale del cajón, así que hay que abrir el día (Libro Diario → «Abrir Día») antes de devolver plata.',
+    };
+  }
+  if (turno === dia) {
+    return {
+      fecha: turno, esHoy: true, aviso: false,
+      texto: `Esta devolución se anota en la CAJA DE HOY (${fechaLegible(turno)}): es la plata que sale del cajón y baja el efectivo esperado de ese día.`,
+    };
+  }
+  // REVISIÓN ADVERSARIAL (MAYOR, 2026-10-06): acá se le decía «Cerrá esa caja en Libro Diario →
+  // Cierres» a CUALQUIER sesión, y el rol `caja` NO puede cerrar (close_day exige dueño y la pestaña
+  // Cierres no se le dibuja): el mismo diálogo le daba dos órdenes contradictorias —el cartel de arriba
+  // «pedile al dueño» y este bloque «cerrala vos»— y la mandaba a una acción imposible. Es el M1 de F82
+  // reintroducido. Ahora el texto depende de si la sesión puede cerrar.
+  const remedio = puedeCerrar
+    ? `Si querés que salga de la caja de hoy, ${REMEDIO_TURNO_VIEJO}`
+    : `Cerrar esa caja es del DUEÑO: pedile que la cierre (es la del ${fechaLegible(turno)}) y después abra el día de hoy. La devolución se anota igual en esa caja.`;
+  return {
+    fecha: turno, esHoy: false, aviso: true,
+    texto: `OJO: esta devolución se va a anotar en la caja del ${fechaLegible(turno)}, que es la que está ABIERTA — NO en la de hoy (${fechaLegible(dia)}). ${remedio}`,
+  };
+}

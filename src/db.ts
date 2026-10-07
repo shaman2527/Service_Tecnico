@@ -11,7 +11,7 @@ import type {
   PhoneBrandRow, PhonePage, PhoneDetail, RenamePreview,
   LoadPreview, LoadRow, LoadReport, LoadCandidate, UpdateBackup,
   CsvPreview, CsvApplyInput, CsvReport,
-  AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, TaxConfig,
+  AppUser, SessionUser, CashMovement, CashMovementByUser, DrawerAdjust, ConciliacionDia, TaxConfig,
   AjusteCierre, EstadoDelDia, CambioDeRed
 } from './types';
 import type {
@@ -482,6 +482,15 @@ export const api = {
       return mock<DrawerAdjust>({
         fondo_usd: 0, gastos_usd: 0, gastos_bs: 0, devoluciones_usd: 0, devoluciones_bs: 0, sin_metodo: 0,
       });
+    }),
+
+  /** F40 — la conciliación del día: el libro de plata contra el origen, método por método (solo lectura).
+   *  En Tauri el error NO se traga: una conciliación vacía se leería como «cuadra» sin haber comparado
+   *  nada (misma lección que `getDrawerAdjustments`). */
+  conciliacionDelDia: (fecha: string) =>
+    tauriInvoke<ConciliacionDia>('conciliacion_del_dia', { fecha }).catch(e => {
+      if (isTauri) throw e;
+      return mock<ConciliacionDia>({ fecha, lineas: [], presunciones: [], cuadra: true, avisos: [] });
     }),
 
   getExpenses: (startDate: string, endDate: string) =>

@@ -206,7 +206,7 @@ check('FAIL-CLOSED: no entró ninguna venta ni ninguna orden a la caja vieja',
   ventasAntes === ventasDespues && serviciosAntes === serviciosDespues,
   `ventas ${ventasAntes}→${ventasDespues} · servicios ${serviciosAntes}→${serviciosDespues}`);
 
-// ── 5) El COBRO: la fecha arranca HOY y el botón está apagado con el motivo ─────────────────────
+// ── 5) El COBRO: la fecha arranca HOY y el guardado YA NO SE BLOQUEA (F94) ───────────────────────
 await irA('Servicio Técnico');
 const hayPago = await waitFor(`[...document.querySelectorAll('button')].some(b => (b.textContent || '').includes('Pago / Abono'))`, 12000);
 if (hayPago) {
@@ -214,13 +214,16 @@ if (hayPago) {
   const abrio = await waitFor(`/Registrar Pago \\/ Abono/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 10000);
   check('el diálogo de Pago / Abono abre para revisar el cobro', abrio);
   if (abrio) {
-    check('el cobro avisa de la caja vieja (el cartel está dentro del diálogo)',
-      await evalx(`!!document.querySelector('[role="dialog"] [data-field="turno-viejo"]')`));
     const fechaCampo = await evalx(`document.querySelector('[role="dialog"] input[data-field="pay-fecha"]')?.value ?? null`);
     check('la «Fecha del pago» arranca en HOY (no en la caja vieja: el cobro de hoy no cae en ayer)',
       String(fechaCampo).slice(0, 10) === hoyDB, `fecha=${fechaCampo} · hoy=${hoyDB}`);
-    check('«Guardar Pago» está apagado y explica por qué',
-      await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Guardar Pago/.test(x.innerText || '')); return !!b && b.disabled; })()`)
+    // F94 — LA REGLA CAMBIÓ A PROPÓSITO: antes este botón estaba APAGADO (el cobro de hoy se rechazaba
+    // porque hoy no tenía caja). Ahora el abono de hoy ENTRA en la caja de hoy (el sistema se la crea,
+    // cerrada y sin contar) y lo que se conserva es el AVISO: a qué caja va y qué sigue bloqueando.
+    await evalx(`(() => { const i = document.querySelector('[role="dialog"] [data-field="pay-monto"]'); if (i) { const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; s.call(i, '2'); i.dispatchEvent(new Event('input', { bubbles: true })); } return true; })()`);
+    await sleep(800);
+    check('F94: «Guardar Pago» está HABILITADO con la caja vieja abierta (el abono de hoy entra en la caja de HOY)',
+      await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Guardar Pago/.test(x.innerText || '')); return !!b && !b.disabled; })()`)
       && await evalx(`!!document.querySelector('[data-field="aviso-turno-viejo-pago"]')`));
     await keyNav('Escape', 'Escape', 27);
     await sleep(600);
@@ -229,23 +232,33 @@ if (hayPago) {
   check('hay una orden para abrir el cobro (la copia tiene órdenes)', false, 'sin botones Pago / Abono');
 }
 
-const errPagoHoy = await invokeErr('add_service_payment', {
+// F94 — el abono de HOY con la caja vieja abierta: se ANOTA, y en la caja de HOY (no en la vieja). La
+// protección de F82 sigue viva (facturar sigue gateado, arriba), lo que cambió es que un cobro real ya
+// no se pierde.
+// OJO (2ª corrida sobre la MISMA copia): «lo cobrado de hoy» NO es $1 — la caja que se crea toma el
+// TOTAL del día, que puede traer la plata que dejaron las otras verificaciones (medido: $96). Lo que
+// prueba que la plata quedó en la caja de HOY es (a) el DÍA del asiento del libro —la verdad de
+// máquina: dónde se contó esa plata— y (b) que el total de hoy la incluya. Antes se comparaba contra
+// 1 y la prueba fallaba con el producto perfecto en cuanto la copia traía plata del día.
+const pagoHoy = await invokeErr('add_service_payment', {
   // Una orden FINALIZADA (Entregado/Devuelto/Cancelado) rechaza el pago por SU estado, no por la caja:
   // el sujeto de prueba tiene que ser una orden ACTIVA (lo encontró la 2ª corrida).
   serviceId: Number(uno("SELECT id FROM services WHERE status NOT IN ('Devuelto','Cancelado','Cancelado / Devuelto','Entregado') ORDER BY id DESC LIMIT 1")?.id ?? 0),
   amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0, zelleReference: '',
-  currency: 'USD', notes: 'prueba F82', paymentDate: hoyDB,
+  currency: 'USD', notes: 'prueba F94 pago de hoy', paymentDate: hoyDB,
 });
-check('el backend RECHAZA un abono fechado HOY con la caja de ayer abierta', !!errPagoHoy, String(errPagoHoy).slice(0, 110));
-// El MOTIVO importa: sin mirar el mensaje, un rechazo por «la orden está Devuelto» o «no existe»
-// pasaría como si fuera el gate de la caja (hallazgo menor de la revisión adversarial).
-check('…y lo rechaza POR LA CAJA (no por otra razón: nombra el día sin turno y los días que SÍ tienen caja)',
-  // F92: el mensaje ahora dice «no hay ninguna caja (turno) con la fecha X» y lista los últimos días con
-  // caja (marcando cuál está abierto). Sigue nombrando la fecha pedida y a qué caja se puede anotar.
-  new RegExp(hoyDB).test(String(errPagoHoy))
-  && /No hay ninguna caja|turno de caja/i.test(String(errPagoHoy))
-  && /días con caja|turno abierto/i.test(String(errPagoHoy)),
-  String(errPagoHoy).slice(0, 140));
+const cajaDeHoy = uno("SELECT close_date, is_closed, (opened_at IS NULL) AS sin_abrir, COALESCE(usd_cash_total,0) AS cobrado FROM daily_closings WHERE close_date = ?1", hoyDB);
+const pagoQuedo = uno("SELECT COUNT(*) AS n FROM service_payments WHERE date(payment_date) = ?1 AND notes = 'prueba F94 pago de hoy'", hoyDB);
+check('F94: el backend ACEPTA un abono fechado HOY con la caja vieja abierta',
+  !pagoHoy && Number(pagoQuedo?.n ?? 0) === 1, `error=${String(pagoHoy).slice(0, 90)} · pagos=${pagoQuedo?.n}`);
+const asientoDelPago = uno("SELECT day FROM cash_movements WHERE payment_id = (SELECT id FROM service_payments WHERE notes = 'prueba F94 pago de hoy' ORDER BY id DESC LIMIT 1) ORDER BY id DESC LIMIT 1");
+check('F94: y la plata quedó en la caja de HOY, creada por el sistema (cerrada, sin abrir, sin contar)',
+  cajaDeHoy?.close_date === hoyDB && Number(cajaDeHoy?.is_closed) === 1 && Number(cajaDeHoy?.sin_abrir) === 1
+  && Number(cajaDeHoy?.cobrado ?? 0) >= 1 - 0.011 && String(asientoDelPago?.day ?? '') === hoyDB,
+  `caja=${JSON.stringify(cajaDeHoy)} · día del asiento=${asientoDelPago?.day ?? 'NO'} (tiene que ser ${hoyDB})`);
+// Se limpia el pago de prueba (la caja de hoy queda: es la que el propio flujo creó).
+const idPagoHoy = uno("SELECT id FROM service_payments WHERE notes = 'prueba F94 pago de hoy' ORDER BY id DESC LIMIT 1");
+if (idPagoHoy?.id) await invoke('delete_service_payment', { id: idPagoHoy.id }).catch(() => {});
 
 // ── 6) EL REMEDIO, COMPLETADO POR LA UI (que es lo que pidió el dueño) ───────────────────────────
 await irA('Libro Diario');

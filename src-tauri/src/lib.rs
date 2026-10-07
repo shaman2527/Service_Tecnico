@@ -141,6 +141,7 @@ commands::get_sales_stats,
             commands::get_cash_movements_by_user,
             // F69 — el arqueo del cajón cuenta los gastos/retiros y el fondo de caja
             commands::get_drawer_adjustments,
+            commands::conciliacion_del_dia,
             commands::get_pago_movil_detail,
             commands::export_daily_report,
             commands::export_daily_report_xlsx,

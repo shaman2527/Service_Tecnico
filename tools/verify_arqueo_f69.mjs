@@ -349,6 +349,11 @@ const irAlLibro = async () => {
   const entro = await entrar('Caja 1', '2468');
   check('F69: la caja entra con SU PIN', entro);
   await irAlLibro();
+  // OJO: el encabezado del turno se llena con una lectura ASÍNCRONA (`refreshActiveDay`). Si el
+  // módulo ya estaba cargado (el dueño acaba de usarlo), «Diario» aparece antes de que esa lectura
+  // vuelva y la comprobación medía `activeDay = null` → «explicado=false» con el producto perfecto.
+  // Se espera a que el encabezado esté (cualquiera de las dos ramas) antes de mirar.
+  await waitFor(`!!document.querySelector('[data-field="cierre-solo-dueno"]') || !!document.querySelector('[data-action="cerrar-dia"]')`, 12000);
   const sinCerrar = !(await evalx(`!!document.querySelector('[data-action="cerrar-dia"]')`));
   const explicado = await evalx(`!!document.querySelector('[data-field="cierre-solo-dueno"]')`);
   check('F69: la caja NO tiene el botón «Cerrar Día» (es del dueño) y se le dice el camino',

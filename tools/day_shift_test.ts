@@ -9,7 +9,7 @@
 // Uso:  node tools/day_shift_test.ts
 
 import {
-  shiftPending, fechaLegible, soloFecha, turnoViejoTexto,
+  shiftPending, fechaLegible, soloFecha, turnoViejoTexto, cajaDeLaDevolucion,
   AVISO_TURNO_VIEJO, REMEDIO_TURNO_VIEJO,
 } from '../src/lib/day-shift.ts';
 
@@ -84,6 +84,62 @@ const HOY = '2026-09-27';
   }
   ok('el mensaje NO aparece cuando no hay problema (nunca un banner vacío)', shiftPending(HOY, HOY).message === '');
   ok('y turnoViejoTexto de un turno normal es vacío', turnoViejoTexto(shiftPending(HOY, HOY)) === '');
+}
+
+// ── F83: A QUÉ CAJA VA UNA DEVOLUCIÓN (informar, no bloquear) ────────────────────────────────────
+// La devolución se anota en la caja del TURNO ABIERTO (invariante F36/F69: la plata sale del cajón que
+// se trabaja). Con la caja del 21/09 abierta y hoy 27/09 el operario no tenía forma de saberlo; esta
+// regla es la que le dice DÓNDE va la plata antes de confirmar (opción (a) del backlog: avisar, no
+// bloquear).
+{
+  // 1) La caja de HOY: informa sin alarmar
+  const deHoy = cajaDeLaDevolucion(HOY, HOY);
+  ok('con la caja de hoy: es la caja de hoy', deHoy.esHoy === true && deHoy.fecha === HOY);
+  ok('con la caja de hoy: no hay aviso fuerte', deHoy.aviso === false);
+  ok('con la caja de hoy: el texto la nombra y dice que sale del cajón',
+    deHoy.texto.includes('CAJA DE HOY') && deHoy.texto.includes(fechaLegible(HOY)) && /sale del cajón/i.test(deHoy.texto));
+
+  // 2) La caja es de OTRO día: avisa fuerte, nombra las DOS fechas y trae el remedio real
+  const viejo = cajaDeLaDevolucion('2026-09-21', HOY);
+  ok('con la caja vieja: avisa', viejo.aviso === true && viejo.esHoy === false);
+  ok('con la caja vieja: la fecha es la del turno abierto', viejo.fecha === '2026-09-21');
+  ok('con la caja vieja: nombra las DOS fechas (la de la caja y la de hoy)',
+    viejo.texto.includes(fechaLegible('2026-09-21')) && viejo.texto.includes(fechaLegible(HOY)));
+  ok('con la caja vieja: dice que NO es la de hoy', /NO en la de hoy/i.test(viejo.texto));
+  ok('con la caja vieja: trae el remedio exacto (cerrar esa caja y abrir hoy)',
+    viejo.texto.includes(REMEDIO_TURNO_VIEJO));
+
+  // 3) Sin ninguna caja abierta: la devolución no tiene de dónde salir (el gate de siempre la bloquea)
+  for (const v of [null, undefined, '']) {
+    const sin = cajaDeLaDevolucion(v as string | null, HOY);
+    ok(`sin caja abierta (${JSON.stringify(v)}): avisa y manda a abrir el día`,
+      sin.aviso === true && sin.esHoy === false && sin.fecha === '' && /abrir el día/i.test(sin.texto));
+  }
+
+  // 4) Las fechas que vienen con hora (`close_date`/`payment_date` reales) se leen bien y NO se corren
+  //    un día (la trampa de `new Date` en UTC-4 que ya mordió a este proyecto)
+  const conHora = cajaDeLaDevolucion('2026-09-21 02:45:42', HOY);
+  ok('una fecha con hora se lee como su día', conHora.fecha === '2026-09-21' && conHora.texto.includes('21/09/2026'));
+  const hoyConHora = cajaDeLaDevolucion('2026-09-27 23:59:59', HOY);
+  ok('y la caja de hoy con hora sigue siendo la de hoy', hoyConHora.esHoy === true);
+
+  // 5) EL ROL: cerrar el día es del DUEÑO (`close_day` → require_owner) y la pestaña Cierres no se le
+  //    dibuja a la caja. El texto de «a qué caja va» NO puede ordenarle una acción imposible — es el
+  //    MAYOR que encontró la revisión adversarial (el M1 de F82 reintroducido dentro del mismo diálogo:
+  //    el cartel de arriba decía «pedile al dueño» y este bloque «cerrala vos»).
+  const cajera = cajaDeLaDevolucion('2026-09-21', HOY, { puedeCerrar: false });
+  ok('sesión que NO puede cerrar: el texto NO le ordena cerrar la caja',
+    !cajera.texto.includes(REMEDIO_TURNO_VIEJO) && !/Cerrá esa caja/i.test(cajera.texto));
+  ok('sesión que NO puede cerrar: le dice que se lo pida al dueño, nombrando la caja',
+    /pedile que la cierre/i.test(cajera.texto) && cajera.texto.includes(fechaLegible('2026-09-21')));
+  ok('sesión que NO puede cerrar: sigue diciendo a qué caja va la plata y que sale igual',
+    /NO en la de hoy/i.test(cajera.texto) && /se anota igual/i.test(cajera.texto));
+  ok('el DUEÑO (puedeCerrar por defecto) sigue recibiendo el remedio completo',
+    cajaDeLaDevolucion('2026-09-21', HOY).texto.includes(REMEDIO_TURNO_VIEJO)
+    && cajaDeLaDevolucion('2026-09-21', HOY, { puedeCerrar: true }).texto.includes(REMEDIO_TURNO_VIEJO));
+  ok('el rol sólo cambia la rama «otro día»: con la caja de hoy y sin caja el texto es el mismo',
+    cajaDeLaDevolucion(HOY, HOY, { puedeCerrar: false }).texto === deHoy.texto
+    && cajaDeLaDevolucion(null, HOY, { puedeCerrar: false }).texto === cajaDeLaDevolucion(null, HOY).texto);
 }
 
 console.log(`\nday_shift_test: ${checks - failures}/${checks} OK${failures ? ` — ${failures} FALLAN` : ''}`);

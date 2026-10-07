@@ -9,7 +9,9 @@
 //
 // ESCRIBE Y LIMPIA: crea UNA orden de prueba, le asigna un técnico, registra un abono de $1 y lo
 // borra, y al final borra la orden. NO toca el día (aborta si no hay turno abierto), no cierra días
-// ni toca la tasa.
+// ni toca la tasa. F94: además anota (y borra) un abono de $1 fechado 400 días atrás para comprobar
+// que un día pasado sin caja ya se puede anotar — esa comprobación deja la CAJA CREADA para ese día
+// (es la fila que la regla bajo prueba crea), así que corré esto sobre una COPIA.
 //
 // Uso:  node tools/verify_tecnico_y_fecha_pago.mjs     (app de dev abierta + CDP en 9222)
 
@@ -98,15 +100,29 @@ try {
   });
   check('F35: el backend RECHAZA un pago con fecha futura', /no puede ser futura/i.test(String(errFuturo)), String(errFuturo).slice(0, 90));
 
+  // F94 (2026-10-06) — LA REGLA CAMBIÓ: un día PASADO sin caja ya NO se rechaza (se le crea la caja
+  // para que la plata tenga su arqueo). Antes esta comprobación exigía el rechazo; ahora exige lo
+  // contrario, y el rechazo que queda se prueba con HOY sin caja (que no se puede simular acá sin
+  // tocar el turno del local) y con la FECHA FUTURA de arriba. La cobertura completa de F94 está en
+  // tools/verify_f94_abono_retroactivo.mjs (sobre una COPIA, porque escribe).
   const sinTurno = await evalx(`(() => { const d = new Date(); d.setDate(d.getDate()-400); const p = n => String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); })()`);
-  const errSinTurno = await invokeErr('add_service_payment', {
+  const pidSinTurno = await invoke('add_service_payment', {
     serviceId: id, amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0,
-    zelleReference: '', currency: 'USD', notes: 'prueba sin turno', paymentDate: sinTurno,
-  });
-  // F92: el mensaje cambió (ahora dice «no hay ninguna caja» y nombra los últimos días CON caja), pero
-  // la regla es la misma: sin turno, esa plata no entraría en ningún arqueo.
-  check('F35: el backend RECHAZA un día sin turno (la plata no queda fuera de toda caja)',
-    /No hay ninguna caja|No hay un turno/i.test(String(errSinTurno)), String(errSinTurno).slice(0, 100));
+    zelleReference: '', currency: 'USD', notes: 'prueba F94 día sin caja', paymentDate: sinTurno,
+  }).catch(e => String(e));
+  const cajaCreada = await invoke('get_daily_closings')
+    .then(cs => (cs ?? []).find(c => c.close_date === sinTurno) ?? null).catch(() => null);
+  // OJO con el tipo: `is_closed` llega a JS como BOOLEANO (el struct lo serializa true/false) — comparar
+  // con `=== 1` da false SIEMPRE y hace que la comprobación falle con el producto perfecto (le pasó a la
+  // rama de «día cerrado» de este mismo script, que por eso decía «no hay cierres» con la copia llena).
+  const estaCerrada = cajaCreada ? (cajaCreada.is_closed === true || Number(cajaCreada.is_closed) === 1) : false;
+  check('F94: un abono de un día pasado SIN caja se anota y se le crea su caja (cerrada, arqueo 0)',
+    typeof pidSinTurno === 'number' && !!cajaCreada && estaCerrada
+    && Math.abs(Number(cajaCreada.actual_cash_usd ?? 0)) < 1e-9,
+    `pago=${pidSinTurno} · caja=${cajaCreada ? `${cajaCreada.close_date} cerrada=${cajaCreada.is_closed} contado=${cajaCreada.actual_cash_usd}` : 'NO'}`);
+  // Limpieza: el abono de $1 se borra (la caja creada para ese día de 400 días atrás queda: es la
+  // fila que la propia regla bajo prueba crea, y esta prueba corre sobre una COPIA).
+  if (typeof pidSinTurno === 'number') await invoke('delete_service_payment', { id: pidSinTurno }).catch(() => {});
 
   const errFormato = await invokeErr('add_service_payment', {
     serviceId: id, amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0,
@@ -114,18 +130,23 @@ try {
   });
   check('F35: el backend RECHAZA una fecha mal formada', /AAAA-MM-DD/i.test(String(errFormato)), String(errFormato).slice(0, 90));
 
-  // Un día CERRADO (si la copia tiene alguno) tiene que explicar el camino real (↺ en Cierres)
+  // Un día CERRADO: F92 cambió la regla (antes había que abrirlo con ↺; ahora el cobro entra en esa
+  // caja y su cierre SE ACTUALIZA). Acá se comprueba que el día cerrado ya no frena el abono; el
+  // detalle del recálculo del cierre está en tools/verify_f92_fecha_pago_cierre.mjs (11/11).
   const cierres = await invoke('get_daily_closings').catch(() => []);
-  const cerrado = (cierres ?? []).find(c => c.is_closed === 1 && c.close_date !== hoy);
+  // `is_closed` llega como booleano a JS: con `=== 1` esta rama decía «no hay días cerrados» aunque la
+  // copia tuviera varios (comprobación que mentía por el tipo, no por los datos).
+  const cerrado = (cierres ?? []).find(c => (c.is_closed === true || Number(c.is_closed) === 1) && c.close_date !== hoy);
   if (cerrado) {
-    const errCerrado = await invokeErr('add_service_payment', {
+    const pidCerrado = await invoke('add_service_payment', {
       serviceId: id, amount: 1, paymentMethod: 'Divisas (USD Cash)', bankFeePercent: 0,
-      zelleReference: '', currency: 'USD', notes: 'prueba día cerrado', paymentDate: cerrado.close_date,
-    });
-    check('F35: un día CERRADO se rechaza diciendo cómo abrirlo (↺ en Libro Diario → Cierres)',
-      /ya está CERRADO/i.test(String(errCerrado)) && /Cierres/i.test(String(errCerrado)), String(errCerrado).slice(0, 120));
+      zelleReference: '', currency: 'USD', notes: 'prueba F92 día cerrado', paymentDate: cerrado.close_date,
+    }).catch(e => String(e));
+    check('F92: un día CERRADO ya no frena el abono (entra en su caja y su cierre se actualiza)',
+      typeof pidCerrado === 'number', `día ${cerrado.close_date} · pago=${pidCerrado}`);
+    if (typeof pidCerrado === 'number') await invoke('delete_service_payment', { id: pidCerrado }).catch(() => {});
   } else {
-    check('F35: no hay días cerrados en la copia para probar esa guarda (se omite)', true, 'sin cierres');
+    check('F92: no hay días cerrados en la copia para probar esa guarda (se omite)', true, 'sin cierres');
   }
 
   // ── 3) UI de Servicio Técnico: tarjeta + técnico rápido (F34) y diálogo de abono (F35) ─────

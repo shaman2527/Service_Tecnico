@@ -636,6 +636,13 @@ pub fn get_drawer_adjustments(db: State<Database>, date: String) -> Result<crate
     db.drawer_adjustments(&date).map_err(|e| e.to_string())
 }
 
+/// F40 — LA CONCILIACIÓN DEL DÍA: el LIBRO DE PLATA contra el ORIGEN de la plata, método por método.
+/// Es de SOLO LECTURA (la foto para auditar por qué un número es el que es) y no toca la caja.
+#[tauri::command]
+pub fn conciliacion_del_dia(db: State<Database>, fecha: String) -> Result<crate::db::ConciliacionDia, String> {
+    db.conciliacion_del_dia(&fecha).map_err(|e| e.to_string())
+}
+
 /// F69 (revisión adversarial) — los GASTOS DEL NEGOCIO (alquiler, sueldos, retiros del dueño) son del
 /// dueño: la pestaña Gastos y la de Salud ya eran suyas, pero el listado se podía pedir por IPC desde
 /// una sesión de caja. Lo que la caja necesita para su arqueo es el **agregado del cajón**

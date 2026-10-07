@@ -383,7 +383,9 @@ function SaleForm({ methods, dayOpen, turnoViejo, onClose, onSaved }: {
   const [quantity, setQuantity] = useState(1);
   const [price, setPrice] = useState(0);
   const [discount, setDiscount] = useState(0);
-  const [method, setMethod] = useState(methods[0]?.name ?? '');
+  // F37 (H3): si la lista de métodos no llegó (IPC caído o arranque en frío) el campo NO queda vacío:
+  // una venta sin método se guardaría con la moneda que eligiera la UI y el cajón la contaría mal.
+  const [method, setMethod] = useState(methods[0]?.name?.trim() || 'Divisas (USD Cash)');
   const [clientName, setClientName] = useState('');
   const [clientCi, setClientCi] = useState('');
   const [clientId, setClientId] = useState<number | null>(null);

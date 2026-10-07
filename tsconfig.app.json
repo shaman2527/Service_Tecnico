@@ -6,6 +6,8 @@
     "module": "esnext",
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
+    /* F37: la moneda de los métodos de pago vive en tools/payment_methods.json (fuente única con Rust) */
+    "resolveJsonModule": true,
     "skipLibCheck": true,
 
     /* Bundler mode */

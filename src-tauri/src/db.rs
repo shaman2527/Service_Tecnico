@@ -1,6 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, params, Result as SqlResult};
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -684,6 +685,49 @@ pub struct Expense {
     pub method: String,
 }
 
+/// F40 — UNA LÍNEA DE LA CONCILIACIÓN: el LIBRO DE PLATA contra el ORIGEN, para un método y su moneda.
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct LineaConciliacion {
+    pub metodo: String,
+    /// `"USD"` | `"VES"`
+    pub moneda: String,
+    /// Lo que dice el LIBRO (`cash_movements`), neto del día
+    pub libro: f64,
+    /// Lo que dicen las tablas de origen (`sales` + `service_payments`), neto
+    pub origen: f64,
+    /// `libro − origen`: 0 = las dos fuentes cuentan lo mismo
+    pub diferencia: f64,
+    /// **Cuántos COBROS** hay en la línea: las filas reales de `sales`/`service_payments` (lo que el
+    /// dueño cuenta como «movimientos»). Antes era `max(asientos del libro, cobros)` — un número que no
+    /// era ni una cosa ni la otra: la revisión adversarial midió una línea que decía «Mov. 11» para
+    /// **1 venta** (11 filas de libro, entre originales y espejos) y otra con «Mov. 12» y origen 0.
+    pub movimientos: i64,
+    /// Cuántos **ASIENTOS** del libro componen la línea (originales + espejos `*_anulado`).
+    pub asientos: i64,
+}
+
+/// F40 — UNA ENTREGA SIN COBRO: la caja la PRESUME (es plata que el sistema espera) y no tiene asiento
+/// en el libro. Se informa aparte porque no es un movimiento de plata.
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct PresuncionConciliacion {
+    pub metodo: String,
+    pub moneda: String,
+    pub monto: f64,
+    pub ordenes: i64,
+}
+
+/// F40 — LA CONCILIACIÓN DE UN DÍA completa (la que devuelve el comando).
+#[derive(Clone, Debug, serde::Serialize, Default)]
+pub struct ConciliacionDia {
+    pub fecha: String,
+    pub lineas: Vec<LineaConciliacion>,
+    pub presunciones: Vec<PresuncionConciliacion>,
+    /// true = TODAS las líneas cuadran (ninguna diferencia fuera de la tolerancia)
+    pub cuadra: bool,
+    /// Lo que hay que decirle al operario (diferencias reales y entregas sin cobro)
+    pub avisos: Vec<String>,
+}
+
 /// F69 — LO QUE AJUSTA EL ARQUEO, leído del LIBRO DE PLATA del día (una sola fuente):
 /// los gastos y las devoluciones pagados DEL CAJÓN bajan el efectivo esperado; los que salieron por
 /// banco/otros no lo tocan. Es la respuesta al hallazgo principal de la auditoría de entrega: pagar
@@ -713,12 +757,27 @@ pub struct DrawerAdjust {
 /// ya se hizo el cierre… **hay que actualizar el cierre de esos días**. Si agrego el pago hoy siendo
 /// otro día no refleja la realidad.» Así que un día CERRADO se acepta: el cobro entra en la caja de
 /// ESE día y su cierre se **recalcula** (`recalcular_cierre_cerrado`) contra el mismo arqueo contado.
+///
+/// **F94 (2026-10-06) — Y SI ESE DÍA NO TIENE CAJA, SE LE CREA.** El dueño volvió con el mismo tema,
+/// ahora con el bloqueo que quedaba: «cuando vas a colocar un pago, un abono que se hizo unos días
+/// anteriores, déjalo colocar». Medido en la base del taller: los únicos turnos eran el del 21/09
+/// (abierto hacía 15 días) y el del 17/09, así que **cualquier** abono fechado en otro día caía en un
+/// día sin turno y el backend lo rechazaba («No hay ninguna caja (turno) con la fecha X»): el mostrador
+/// no podía anotar la plata del día en que de verdad entró. Ahora un día **PASADO** sin caja se acepta y
+/// se le crea su caja (cerrada, arqueo 0, con la tasa conocida) para que la plata tenga arqueo propio.
+/// **HOY sin caja sigue rechazado**: la caja de hoy se abre a propósito (Libro Diario → «Abrir Día»), y
+/// crear una caja cerrada de hoy dejaría al dueño sin poder abrir el día (F69: abrir un día ya cerrado
+/// está prohibido). Ver `crear_caja_del_dia`.
 #[derive(Clone, Debug, serde::Serialize, Default)]
 pub struct DiaDePago {
     /// `YYYY-MM-DD`
     pub fecha: String,
     /// true = ese día ya tenía su cierre hecho: al guardar, ese cierre se actualiza.
     pub cerrado: bool,
+    /// F94 — true = ese día NUNCA se abrió la caja en el sistema y se le va a **crear** para que la
+    /// plata tenga su arqueo (día pasado). El cajón de ese día queda sin contar (arqueo 0) y la
+    /// pantalla de Cierres lo muestra con el remedio real: ↺ reabrirlo, contar y volver a cerrarlo.
+    pub caja_creada: bool,
 }
 
 /// F92 — QUÉ LE PASÓ AL CIERRE DE UN DÍA CERRADO cuando le entró/salió plata después del cierre.
@@ -1007,6 +1066,18 @@ pub fn round2(v: f64) -> f64 {
 /// Un monto en dólares para los MENSAJES (`$12.34`), el mismo formato que muestra la UI.
 fn fmt_usd_plano(v: f64) -> String {
     format!("${:.2}", round2(v))
+}
+
+/// Un monto en la MONEDA de la línea para los MENSAJES: `$12.34` en dólares y `Bs. 4.050,00` en
+/// bolívares, con el **signo ANTES de la moneda** (`-$10.00` / `-Bs. 10,00`) — el MISMO formato que
+/// muestra la pantalla (F40). La corrida en vivo lo encontró: el aviso de la conciliación imprimía
+/// `$` también para los bolívares, así que la cifra de la línea («Bs. 10,00») y la del aviso
+/// («$10.00») no coincidían — dos números iguales con el signo equivocado es justo lo que hace
+/// desconfiar del dato.
+fn fmt_monto(v: f64, moneda: &str) -> String {
+    let signo = if v < 0.0 { "-" } else { "" };
+    let abs = round2(v.abs());
+    if moneda == "VES" { format!("{}Bs. {}", signo, fmt_miles(abs)) } else { format!("{}{}", signo, fmt_usd_plano(abs)) }
 }
 
 pub struct Database {
@@ -2373,7 +2444,7 @@ impl Database {
         // Migration: pagos con método Bs registrados como USD (bug moneda del frontend).
         // La moneda SIEMPRE se deriva del método: Efectivo Bs/Pago Móvil/Transf Bs/Punto (Bs) → VES.
         if conn.prepare("SELECT id FROM service_payments LIMIT 1").is_ok() {
-            for m in BS_METHODS {
+            for m in metodos_en_bs() {
                 let _ = conn.execute(
                     "UPDATE service_payments SET currency='VES' WHERE payment_method=?1 AND (currency IS NULL OR currency='USD')",
                     params![m],
@@ -2428,7 +2499,7 @@ impl Database {
             let _ = conn.execute("ALTER TABLE daily_closings ADD COLUMN pos_settled_bs REAL DEFAULT 0", []);
         }
         // Corrección de moneda histórica: ventas/servicios con método Bs guardados como USD (bug frontend viejo)
-        for m in BS_METHODS {
+        for m in metodos_en_bs() {
             let _ = conn.execute(
                 "UPDATE sales SET currency='VES' WHERE payment_method=?1 AND (currency IS NULL OR currency='USD')",
                 params![m],
@@ -3961,6 +4032,11 @@ impl Database {
         if quantity <= 0 || unit_price < 0.0 || total < 0.0 {
             return Err(day_shift_error("Cantidad y montos deben ser positivos."));
         }
+        // F37 — un método que el sistema no conoce no se cobra (no se sabría en qué moneda contarlo).
+        // H6 (revisión adversarial): se valida y se GUARDA recortado (« Pago Móvil » no sumaría al
+        // bolsillo del Pago Móvil: compute_daily_totals compara por nombre exacto).
+        validar_metodo_de_pago(payment_method)?;
+        let payment_method = payment_method.trim();
         // F92 — el dinero de una venta también son 2 decimales (monto, comisión y neto): es lo que
         // suma la caja del día y lo que queda en el libro de plata.
         let total = round2(total);
@@ -3972,6 +4048,12 @@ impl Database {
         // hubiera CUALQUIER turno abierto, así que una venta de hoy entraba en la caja de ayer.
         let hoy_venta = self.today_local(&conn)?;
         self.require_open_day_para(&conn, &hoy_venta)?;
+        // F37 — LA MONEDA DE UNA VENTA TAMBIÉN SE DERIVA DEL MÉTODO (manda el método, no lo que mande la
+        // UI). Antes la venta guardaba el `currency` recibido tal cual y la única red era la MIGRACIÓN de
+        // arranque: una venta nueva con la moneda cruzada quedaba mal hasta el próximo reinicio (y en el
+        // medio la caja la contaba en la moneda equivocada). Es la misma regla que ya usaban los abonos y
+        // las devoluciones (`normalize_payment_currency`).
+        let currency = normalize_payment_currency(payment_method, currency);
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO sales (product_id, product_name, quantity, unit_price, total, payment_method, client_name, client_id, notes, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, discount_amount, iva_rate, iva_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
@@ -4670,12 +4752,20 @@ impl Database {
         if amount <= 0.0 {
             return Err(day_shift_error("El monto del pago debe ser mayor a 0. Para devolver dinero usá «Devolución»."));
         }
+        // F37 — método desconocido = moneda desconocida: no se cobra (fail-closed). H6: se guarda el
+        // nombre recortado (el match por método del arqueo y de los totales es por nombre exacto).
+        validar_metodo_de_pago(payment_method)?;
+        let payment_method = payment_method.trim();
         // F92 — EL DINERO SON 2 DECIMALES: lo que se guarda (y lo que suma la caja) es el monto
         // redondeado a centavos, con su comisión y su neto. Un `amount` con más decimales dejaría
         // un residuo fantasma en el saldo de la orden.
         let amount = round2(amount);
         let conn = self.conn.lock().unwrap();
-        self.require_open_day(&conn)?;
+        // F94 — ACÁ YA NO SE EXIGE «ALGÚN TURNO ABIERTO»: la regla del cobro es la fecha DEL PAGO
+        // (`payment_date_ok`). Antes este gate ciego a la fecha rechazaba un abono de días anteriores
+        // aunque su día tuviera caja («Debe abrir el día…») y el dueño pidió lo contrario («un abono
+        // que se hizo unos días anteriores, déjalo colocar»). Lo que el gate protegía se conserva, más
+        // preciso: sin caja para ESA fecha no se anota (y a un día pasado sin caja se le crea la suya).
         // Una orden devuelta o cancelada no acepta más pagos (antes esto solo existía en la UI).
         let estado: Option<String> = conn.query_row(
             "SELECT status FROM services WHERE id = ?1", params![service_id], |r| r.get(0),
@@ -4688,15 +4778,25 @@ impl Database {
         let fecha = dia.fecha.clone();
         // La moneda se deriva del método (un pago por Pago Móvil/Efectivo Bs/Transf Bs SIEMPRE es Bs)
         let currency = normalize_payment_currency(payment_method, currency);
+        // F94 — la caja que se le va a crear a un día pasado necesita su tasa ANTES de validar el pago
+        // en Bs: si no, un abono en bolívares de un día sin caja se rechazaría por «día sin tasa» y el
+        // bloqueo volvería por la puerta de atrás (en Venezuela el abono típico es en Bs.).
+        let tasa_de_la_caja = if dia.caja_creada { self.tasa_conocida_para(&conn, &fecha)? } else { 0.0 };
         // Gate anti-corrupción: un pago Bs sin tasa BCV se convertiría a 1:1 en paid_amount.
         // La tasa que manda es la DEL DÍA DEL PAGO (recalc_paid_amount usa la misma).
-        if currency == "VES" && !self.has_bcv_rate_for_date(&conn, &fecha)? {
+        let hay_tasa = self.has_bcv_rate_for_date(&conn, &fecha)? || tasa_de_la_caja > 0.0;
+        if currency == "VES" && !hay_tasa {
             let extra = if dia.cerrado {
                 format!(" Ese día ({} ) ya está cerrado: pasá por Libro Diario → Cierres, ↺ para abrirlo, cargá la tasa y volvé a cerrarlo.", fecha)
             } else {
                 " Actualizala en Libro Diario (botón \"Actualizar día\" o abrí esa fecha con su tasa) antes de registrar pagos en bolívares.".to_string()
             };
             return Err(day_shift_error(&format!("El día {} no tiene tasa BCV (está en 0).{}", fecha, extra)));
+        }
+        // F94 — el día pasado sin caja recibe LA SUYA (cerrada, arqueo 0). Se crea ANTES del movimiento
+        // para que el asiento del libro y el recálculo del cierre encuentren la fila.
+        if dia.caja_creada {
+            self.crear_caja_del_dia(&conn, &fecha, tasa_de_la_caja)?;
         }
         let bank_fee_amount = if bank_fee_percent > 0.0 { round2(amount * bank_fee_percent / 100.0) } else { 0.0 };
         let net_amount = round2(amount - bank_fee_amount);
@@ -4774,8 +4874,15 @@ impl Database {
         let dia = self.payment_date_ok(&conn, payment_date)?;
         let hacia = dia.fecha.clone();
         let desde = desde.unwrap_or_default();
-        if currency.as_deref() == Some("VES") && !self.has_bcv_rate_for_date(&conn, &hacia)? {
+        // F94 — mover un cobro a un día PASADO que nunca tuvo caja: se le crea (igual que al anotarlo),
+        // y su tasa conocida es la que decide si un abono en Bs se puede valuar.
+        let tasa_de_la_caja = if dia.caja_creada { self.tasa_conocida_para(&conn, &hacia)? } else { 0.0 };
+        let hay_tasa = self.has_bcv_rate_for_date(&conn, &hacia)? || tasa_de_la_caja > 0.0;
+        if currency.as_deref() == Some("VES") && !hay_tasa {
             return Err(day_shift_error(&format!("El día {} no tiene tasa BCV (está en 0): sin tasa, un abono en Bs se convertiría 1:1. Cargá la tasa de ese día en Libro Diario.", hacia)));
+        }
+        if dia.caja_creada {
+            self.crear_caja_del_dia(&conn, &hacia, tasa_de_la_caja)?;
         }
         // La fecha se guarda con la HORA si el pago es de HOY (el mostrador usa esa hora para cuadrar
         // contra el banco) y solo con la fecha si es retroactiva: la hora real del cobro de ese día es
@@ -4852,6 +4959,10 @@ impl Database {
         if amount <= 0.0 {
             return Err(day_shift_error("El monto a devolver debe ser mayor a 0."));
         }
+        // F37 — método desconocido = moneda desconocida: no se devuelve por ahí (fail-closed). H6: se
+        // guarda el nombre recortado (el gate de F42 compara por método exacto).
+        validar_metodo_de_pago(payment_method)?;
+        let payment_method = payment_method.trim();
         // F92 — el dinero son 2 decimales: la devolución se anota a centavos (el tope de abajo sigue
         // comparándose contra lo que entró, así que redondear hacia arriba nunca deja devolver de más).
         let amount = round2(amount);
@@ -5609,10 +5720,15 @@ impl Database {
             params![date], |r| r.get(0),
         ).optional()?.unwrap_or(0.0);
         let mut stmt = conn.prepare(
+            // `devolucion_anulado` FALTABA (revisión adversarial de F40, MENOR): es el espejo que
+            // `reverse_book_entry` escribe al borrar una devolución. Sin él, «Devuelto hoy del cajón»
+            // seguía mostrando una devolución que ya no existe (no movía el esperado ni la diferencia
+            // —esos salen de `service_payments`— pero el número informativo mentía). El barrido es el
+            // mismo que se hizo en `conciliacion_del_dia`: cada original con su espejo.
             "SELECT type, method, currency, COALESCE(SUM(amount*sign),0)
              FROM cash_movements
              WHERE day = ?1
-               AND type IN ('gasto','gasto_anulado','devolucion','abono_anulado')
+               AND type IN ('gasto','gasto_anulado','devolucion','devolucion_anulado','abono_anulado')
              GROUP BY type, method, currency",
         )?;
         let filas = stmt.query_map(params![date], |r| {
@@ -5656,18 +5772,23 @@ impl Database {
         }
         let metodo = method.trim();
         if !metodo.is_empty() {
-            // Un método declarado tiene que ser uno de los del sistema: si no, la moneda del gasto
-            // podría no coincidir con el cajón que se descuenta (misma regla que los cobros).
-            let conocido: bool = self.conn.lock().unwrap()
-                .query_row("SELECT EXISTS(SELECT 1 FROM payment_methods WHERE name=?1)", params![metodo], |r| r.get(0))
-                .unwrap_or(false);
-            if !conocido {
-                return Err(day_shift_error(&format!(
-                    "«{}» no es un método de pago del sistema. Elegí de dónde salió la plata (o dejalo sin declarar).",
-                    metodo
-                )));
-            }
+            // F37 — el método declarado dice DE DÓNDE SALIÓ la plata y en qué MONEDA, así que tiene que
+            // ser uno de los del sistema (la misma regla que los cobros, con la lista compartida en
+            // `tools/payment_methods.json`). Antes se validaba contra la tabla `payment_methods`, que
+            // guarda solo el NOMBRE: un método agregado ahí sin moneda dejaba el gasto sin poder
+            // interpretarse. Vacío = «sin declarar» (permitido: el arqueo lo avisa y no lo descuenta).
+            validar_metodo_de_pago(metodo).map_err(|e| day_shift_error(&format!(
+                "{} Si no sabés de dónde salió la plata, dejalo sin declarar.", e
+            )))?;
         }
+        // F37 (revisión adversarial, H1) — LA MONEDA DE UN GASTO DEL CAJÓN TAMBIÉN SALE DEL MÉTODO.
+        // Antes la moneda la elegía la UI (un desplegable INDEPENDIENTE del método) y el ajuste del
+        // cajón decide el BOLSILLO por la moneda del libro (`gastos_usd` vs `gastos_bs`): con «Monto
+        // 5.000 + Moneda $ + Salió de: Efectivo Bs» el esperado en DÓLARES bajaba 5.000 y los bolívares
+        // que de verdad salieron del cajón NO se descontaban («faltan Bs. 5.000» en el arqueo).
+        // «Efectivo Bs» cobra en bolívares y «Divisas (USD Cash)» en dólares: no hay nada que elegir.
+        // El gasto SIN declarar conserva la moneda elegida (no hay método del que derivarla).
+        let cur = if metodo.is_empty() { cur } else { normalize_payment_currency(metodo, cur) };
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO expenses (expense_date, category, amount, currency, notes, method) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -6702,6 +6823,155 @@ impl Database {
         self.compute_daily_totals(&conn, start_date, end_date)
     }
 
+    /// F40 — LA CONCILIACIÓN DE UN DÍA: **el LIBRO DE PLATA contra el ORIGEN de la plata**.
+    ///
+    /// Por qué existe (el pedido del dueño para el estándar POS): los totales del día se arman sumando
+    /// `sales` + `service_payments` (+ las entregas que la caja presume) en `compute_daily_totals`, y en
+    /// paralelo CADA write-point de dinero anota su movimiento en `cash_movements` (F68/F40). Son dos
+    /// caminos que tienen que decir LO MISMO: si un movimiento no quedó en el libro, el arqueo y el libro
+    /// cuentan historias distintas y no hay forma de saber cuál es la buena. Esta función compara los dos,
+    /// método por método, y devuelve la diferencia a la vista — es la foto que el dueño pidió para poder
+    /// preguntar «¿por qué este número?».
+    ///
+    /// REGLAS de la comparación (las dos partes se miden igual, si no la diferencia sería un artefacto):
+    ///   · **neto de comisión** en las dos partes (el libro guarda el neto; el origen se lee con
+    ///     `COALESCE(net_amount, total)`), que es lo que de verdad entró a la caja o al banco;
+    ///   · sólo movimientos de PLATA COBRADA (`venta`, `abono` y sus anulados, `devolucion`): la
+    ///     apertura, el cierre y los gastos viven en el libro pero no son cobros (los gastos tienen su
+    ///     propia pestaña y su ajuste del cajón);
+    ///   · las **entregas sin ningún cobro** (lo que la caja PRESUME) se informan APARTE: no son un
+    ///     movimiento de plata y todavía no tienen asiento en el libro — mezclarlas acá haría que un día
+    ///     normal pareciera descuadrado. Son, además, el paso que falta para que los totales puedan
+    ///     leerse SÓLO del libro (fase 2 de F40).
+    pub fn conciliacion_del_dia(&self, fecha: &str) -> SqlResult<ConciliacionDia> {
+        // REVISIÓN ADVERSARIAL (MENOR, 2026-10-06): la fecha se VALIDA antes de consultar. Con `fecha`
+        // vacía (el dueño puede borrar el `<input type="date">`) o con un formato raro, `date('')` es
+        // NULL y `day=''` no matchea nada, así que las dos partes quedaban vacías y la pantalla decía
+        // **«Cuadra»** con el cuerpo diciendo «ese día no tiene cobros»: un verde que no significa nada.
+        // Ahora un formato inválido es un error explícito (la UI muestra `conc-error`).
+        let fecha = fecha.trim();
+        let forma_valida = fecha.len() == 10
+            && fecha.as_bytes()[4] == b'-' && fecha.as_bytes()[7] == b'-'
+            && fecha.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+        if !forma_valida {
+            return Err(day_shift_error(
+                "Para conciliar hace falta un día con formato AAAA-MM-DD (por ejemplo 2026-10-06).",
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        // 1) EL LIBRO: neto por método y moneda de los movimientos de cobro de ese día.
+        // La lista de tipos tiene que ser EXACTAMENTE la de los movimientos que produce una fila de
+        // `sales`/`service_payments`: los cuatro originales (`venta`, `abono`, `devolucion` —que es un
+        // pago NEGATIVO—) **y sus cuatro espejos** (`*_anulado`, que `reverse_book_entry` escribe al
+        // anular una venta o al borrar un cobro/una devolución/una orden). Faltaba
+        // `devolucion_anulado`: al borrar una devolución, el ORIGEN pierde su fila negativa (queda en 0)
+        // y el libro se quedaba con el −Bs. 1000 de la devolución — la pantalla acusaba una diferencia
+        // que no existía. LO ENCONTRÓ LA CORRIDA EN VIVO: la propia prueba de F40 se ABORTÓ al medir el
+        // estado de partida de la copia («Efectivo Bs: libro −1000 vs origen 0») después de que las
+        // otras verificaciones borraran sus devoluciones. Los `gasto`/`gasto_anulado` NO van acá: un
+        // gasto no es un cobro y no tiene fila en el origen (tiene su pestaña y su ajuste del cajón).
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(method,''), COALESCE(currency,'USD'), COALESCE(SUM(amount * sign),0), COUNT(*)
+             FROM cash_movements
+             WHERE day = ?1 AND type IN ('venta','venta_anulada','abono','abono_anulado','devolucion','devolucion_anulado')
+             GROUP BY 1, 2",
+        )?;
+        let mut libro: std::collections::HashMap<(String, String), (f64, i64)> = std::collections::HashMap::new();
+        let filas = stmt.query_map(params![fecha], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+        })?;
+        for f in filas {
+            let (m, c, neto, n) = f?;
+            libro.insert((m, c), (neto, n));
+        }
+        // 2) EL ORIGEN: la misma cuenta, leída de las tablas que la producen
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(payment_method,''), COALESCE(currency,'USD'), COALESCE(SUM(CAST(COALESCE(net_amount, total) AS REAL)),0), COUNT(*)
+               FROM sales WHERE date(date) = ?1 AND voided_at IS NULL GROUP BY 1, 2
+             UNION ALL
+             SELECT COALESCE(payment_method,''), COALESCE(currency,'USD'), COALESCE(SUM(CAST(COALESCE(net_amount, amount) AS REAL)),0), COUNT(*)
+               FROM service_payments WHERE date(payment_date) = ?1 GROUP BY 1, 2",
+        )?;
+        let mut origen: std::collections::HashMap<(String, String), (f64, i64)> = std::collections::HashMap::new();
+        let filas = stmt.query_map(params![fecha], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+        })?;
+        for f in filas {
+            let (m, c, neto, n) = f?;
+            let e = origen.entry((m, c)).or_insert((0.0, 0));
+            e.0 += neto;
+            e.1 += n;
+        }
+        // 3) El merge: una línea por método/moneda que aparezca en CUALQUIERA de las dos partes
+        let mut claves: Vec<(String, String)> = libro.keys().chain(origen.keys()).cloned().collect();
+        claves.sort();
+        claves.dedup();
+        let mut lineas: Vec<LineaConciliacion> = Vec::new();
+        for (metodo, moneda) in claves {
+            let (l, nl) = libro.get(&(metodo.clone(), moneda.clone())).copied().unwrap_or((0.0, 0));
+            let (o, no) = origen.get(&(metodo.clone(), moneda.clone())).copied().unwrap_or((0.0, 0));
+            lineas.push(LineaConciliacion {
+                metodo, moneda,
+                libro: round2(l), origen: round2(o), diferencia: round2(l - o),
+                // Los dos conteos, cada uno con su nombre: `movimientos` = cobros reales (lo que el
+                // dueño cuenta), `asientos` = filas del libro. `max()` mezclaba las dos cosas.
+                movimientos: no, asientos: nl,
+            });
+        }
+        // 4) LAS ENTREGAS SIN COBRO (lo que la caja PRESUME): se informan aparte.
+        // La MONEDA y el MONTO se leen como los lee el total del día (`compute_daily_totals`, regla
+        // F39): la moneda sale del MÉTODO y un monto en Bs. se convierte por la tasa del día — si no,
+        // una entrega de $20 cobrada por «Efectivo Bs» se informaba como «Bs. 20,00» cuando la caja
+        // presume Bs. 20 × tasa (lo midió la revisión adversarial).
+        let tasa_del_dia: f64 = conn.query_row(
+            "SELECT COALESCE(tasa_bcv,0) FROM daily_closings WHERE close_date = ?1",
+            params![fecha], |r| r.get(0),
+        ).optional()?.unwrap_or(0.0);
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(payment_method,''), COALESCE(SUM(CAST(COALESCE(net_amount, amount) AS REAL)),0), COUNT(*)
+             FROM services
+             WHERE status = 'Entregado' AND date(date_out) = ?1
+               AND NOT EXISTS (SELECT 1 FROM service_payments sp WHERE sp.service_id = services.id)
+             GROUP BY 1",
+        )?;
+        let filas = stmt.query_map(params![fecha], |r| {
+            let metodo: String = r.get(0)?;
+            let bruto: f64 = r.get(1)?;
+            let ordenes: i64 = r.get(2)?;
+            // La moneda manda el método (fuente única): sin método conocido se informa en USD, que es
+            // el mismo fallback documentado del resto del sistema.
+            let moneda = moneda_del_metodo(&metodo).unwrap_or("USD").to_string();
+            let monto = if moneda == "VES" && tasa_del_dia > 0.0 { bruto * tasa_del_dia } else { bruto };
+            Ok(PresuncionConciliacion { metodo, moneda, monto: round2(monto), ordenes })
+        })?;
+        let presunciones: Vec<PresuncionConciliacion> = filas.collect::<Result<Vec<_>, _>>()?;
+
+        let con_diferencia: Vec<&LineaConciliacion> = lineas.iter()
+            .filter(|l| l.diferencia.abs() > 0.005)
+            .collect();
+        let mut avisos: Vec<String> = Vec::new();
+        for l in &con_diferencia {
+            avisos.push(format!(
+                "{} ({}): el libro dice {} y el origen dice {} — diferencia {}.",
+                l.metodo, if l.moneda == "VES" { "Bs." } else { "$" },
+                fmt_monto(l.libro, &l.moneda), fmt_monto(l.origen, &l.moneda), fmt_monto(l.diferencia, &l.moneda)
+            ));
+        }
+        if !presunciones.is_empty() {
+            let total: i64 = presunciones.iter().map(|p| p.ordenes).sum();
+            avisos.push(format!(
+                "{total} entrega(s) del día sin ningún cobro registrado: la caja las PRESUME (es plata que el sistema espera) y todavía no tienen asiento en el libro. Si el cliente ya pagó, anotá el cobro en la orden."
+            ));
+        }
+        Ok(ConciliacionDia {
+            fecha: fecha.to_string(),
+            cuadra: con_diferencia.is_empty() && !lineas.is_empty(),
+            lineas,
+            presunciones,
+            avisos,
+        })
+    }
+
     // --- Settings / PIN ---
     //
     // El PIN NUNCA se guarda en texto plano: se guarda su HASH (PBKDF2-HMAC-SHA256 con sal
@@ -7724,7 +7994,7 @@ impl Database {
         // Reabrir un día es del DUEÑO y tiene su camino explícito: Libro Diario → Cierres → ↺.
         let hoy_cerrado: Option<i64> = conn
             .query_row(
-                "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=1",
+                "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=1 AND opened_at IS NOT NULL",
                 params![today], |r| r.get(0),
             )
             .optional()?;
@@ -7734,6 +8004,18 @@ impl Database {
                  el dueño lo reabre desde Libro Diario → Cierres (botón ↺), se anota y se vuelve a cerrar."
             )));
         }
+        // F94 — LA EXCEPCIÓN, ANGOSTA Y CON MOTIVO: se puede ABRIR un día de hoy que esté «cerrado»
+        // porque lo creó el SISTEMA al anotarle un cobro (nunca se abrió: `opened_at IS NULL`, arqueo
+        // sin contar). Sin esto, anotar un abono de hoy dejaba al dueño SIN PODER ABRIR EL DÍA (F69
+        // prohíbe reabrir un día cerrado) — el bloqueo se movía en vez de resolverse. Un cierre con
+        // arqueo CONTADO sigue intocable (arriba): el conteo es un hecho, no un cálculo.
+        let hoy_auto: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM daily_closings WHERE close_date=?1 AND is_closed=1 AND opened_at IS NULL",
+                params![today], |r| r.get(0),
+            )
+            .optional()?;
+        let abre_caja_del_sistema = hoy_auto.is_some();
         let open_date: Option<String> = conn.query_row(
             "SELECT close_date FROM daily_closings WHERE is_closed=0 ORDER BY close_date DESC LIMIT 1",
             [], |r| r.get(0),
@@ -7768,9 +8050,11 @@ impl Database {
                 note: "Apertura del día (fondo de caja)",
                 when: Some(&today),
             })?;
+            self.nota_de_caja_del_sistema(&conn, &today, abre_caja_del_sistema)?;
             return Ok(id);
         }
-        // (El día de hoy ya cerrado se rechazó arriba: acá sólo se llega con un día nuevo o sin turno.)
+        // (El día de hoy ya cerrado CON ARQUEO CONTADO se rechazó arriba; acá se llega con un día
+        //  nuevo, sin turno, o con una caja que creó el propio sistema al anotarle un cobro — F94.)
         conn.execute(
             "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
              VALUES (?1,?2,?3,?4,datetime('now','localtime'),0)
@@ -7796,7 +8080,28 @@ impl Database {
             note: "Apertura del día (fondo de caja)",
                 when: Some(&today),
         })?;
+        self.nota_de_caja_del_sistema(&conn, &today, abre_caja_del_sistema)?;
         Ok(id)
+    }
+
+    /// F94 — LA NOTA DE UNA CAJA QUE CREÓ EL SISTEMA, cuando el día se abre DESPUÉS.
+    ///
+    /// La fila que nace al anotarle un cobro a un día sin caja dice «el cajón quedó SIN CONTAR: reabrí
+    /// el día con ↺…». Si el operario después abre el día por el camino normal (Libro Diario → «Abrir
+    /// Día»), esa nota quedaría mintiendo. Se reemplaza por lo que ahora es verdad: la caja la creó el
+    /// sistema y **al cerrar el día hay que contar el cajón** (las líneas del arqueo empiezan en 0).
+    fn nota_de_caja_del_sistema(&self, conn: &Connection, fecha: &str, aplica: bool) -> SqlResult<()> {
+        if !aplica {
+            return Ok(());
+        }
+        conn.execute(
+            "UPDATE daily_closings SET notes=?2 WHERE close_date=?1",
+            params![fecha,
+                "La caja de este día la creó el sistema al anotarle un cobro (ese día todavía no se \
+                 había abierto). El día se abrió después: AL CERRARLO HAY QUE CONTAR EL CAJÓN — las \
+                 líneas del arqueo empiezan en 0 y no se dan por buenas solas."],
+        )?;
+        Ok(())
     }
 
     /// «¿HAY UN TURNO ABIERTO, CUALQUIERA?» — el gate HISTÓRICO, ciego a la fecha.
@@ -7805,9 +8110,13 @@ impl Database {
     /// (`add_service_refund`): se fecha con el `close_date` del turno ABIERTO —la plata sale del cajón
     /// que se está trabajando; invariante de F36/F69— así que «el turno abierto» ya es su fecha.
     /// **(2)** El pedido a proveedor (`add_purchase_order`): mercancía que entra, no mueve caja.
-    /// **(3)** El cobro (`add_service_payment`) lo conserva como gate de EXISTENCIA a propósito: su
-    /// regla de fecha la aplica `payment_date_ok` justo después, con su mensaje propio (el orden se
-    /// mantiene para no cambiar los textos que ya están fijados por pruebas).
+    ///
+    /// F94 (2026-10-06): **el COBRO ya NO pasa por acá.** Lo hacía como gate de existencia, pero eso
+    /// rechazaba un abono de días anteriores aunque su día tuviera caja («Debe abrir el día…») y el
+    /// dueño pidió lo contrario («un abono que se hizo unos días anteriores, déjalo colocar»). La
+    /// regla del cobro es `payment_date_ok`, que es **por fecha** y hoy sabe crearle la caja a un día
+    /// pasado que no la tenía. Lo que este gate protegía se conserva, más preciso: sin caja para ESA
+    /// fecha (y siendo HOY) el cobro sigue rechazado con su mensaje propio.
     ///
     /// Todo lo que se fecha HOY (venta, orden de servicio) pasa por `require_open_day_para`, que es la
     /// regla del dueño: «si no cerré la caja del día anterior, que me diga que tengo que cerrarla
@@ -7867,6 +8176,8 @@ impl Database {
     /// (F36: la devolución ya NO usa un gate «¿hoy tiene tasa?»: se compara por moneda y valúa el
     /// neto con `ves_rate_for_net`, así que devolver todo lo cobrado en Bs funciona aunque hoy no
     /// haya tasa.)
+    /// (F94: el cobro de un día pasado SIN caja tampoco se rechaza por acá: la caja que se le crea
+    /// nace con la tasa conocida —`tasa_conocida_para`— y ESA es la que se consulta.)
     fn has_bcv_rate_for_date(&self, conn: &rusqlite::Connection, date: &str) -> SqlResult<bool> {
         let ok: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM daily_closings WHERE close_date = ?1 AND tasa_bcv > 0)",
@@ -7900,7 +8211,8 @@ impl Database {
         let hoy: String = conn.query_row("SELECT date('now','localtime')", [], |r| r.get(0))?;
         if date.is_empty() {
             let cerrado = self.dia_esta_cerrado(conn, &hoy)?;
-            return Ok(DiaDePago { fecha: hoy, cerrado });
+            // Fecha vacía = HOY: nunca se le crea la caja (la de hoy se abre a propósito).
+            return Ok(DiaDePago { fecha: hoy, cerrado, caja_creada: false });
         }
         // Formato: exactamente YYYY-MM-DD (el input date del navegador lo manda así).
         if date.len() != 10 || !date.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }) {
@@ -7920,30 +8232,64 @@ impl Database {
             params![date], |r| r.get(0),
         ).optional()?;
         match cerrado {
+            Some(1) => Ok(DiaDePago { fecha: date.to_string(), cerrado: true, caja_creada: false }),
+            Some(_) => Ok(DiaDePago { fecha: date.to_string(), cerrado: false, caja_creada: false }),
             None => {
-                // Sin turno no hay caja: se nombran los últimos días con turno para que el operario
-                // elija uno real en vez de pelear con el campo de fecha.
-                let mut stmt = conn.prepare(
-                    "SELECT close_date, is_closed FROM daily_closings ORDER BY close_date DESC LIMIT 3",
-                )?;
-                let dias: Vec<String> = stmt
-                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-                    .filter_map(|f| f.ok())
-                    .map(|(f, c)| if c == 0 { format!("{f} (abierto)") } else { f })
-                    .collect();
-                let pista = if dias.is_empty() {
-                    "Todavía no hay ningún turno de caja en el sistema.".to_string()
-                } else {
-                    format!(" Los últimos días con caja son: {}.", dias.join(", "))
-                };
-                Err(day_shift_error(&format!(
-                    "No hay ninguna caja (turno) con la fecha {}: esa plata no entraría en ningún arqueo.{}",
-                    date, pista
-                )))
+                // F94 — UN DÍA SIN CAJA YA NO FRENA EL COBRO, **NI SIQUIERA HOY**: se le crea su caja
+                // (ver `crear_caja_del_dia`) y la plata entra ahí. El caso medido en la base del taller:
+                // el único turno abierto era el del 21/09, así que un abono del 25/09 —o de HOY— no
+                // tenía dónde entrar y el mostrador no podía anotar la plata del día en que de verdad
+                // entró. (Antes de F94-b HOY se rechazaba para no dejar al dueño sin poder «Abrir Día»;
+                // eso lo resuelve `open_day`, que ahora sí sabe abrir una caja que el SISTEMA creó.)
+                Ok(DiaDePago { fecha: date.to_string(), cerrado: true, caja_creada: true })
             }
-            Some(1) => Ok(DiaDePago { fecha: date.to_string(), cerrado: true }),
-            _ => Ok(DiaDePago { fecha: date.to_string(), cerrado: false }),
         }
+    }
+
+    /// F94 — LA TASA CONOCIDA PARA UN DÍA QUE NO TIENE CAJA.
+    ///
+    /// La caja que se le crea a un día pasado necesita una tasa para que: (1) un abono en bolívares de
+    /// ese día se pueda valuar (si no, se rechazaría por «día sin tasa» y el bloqueo volvería por la
+    /// puerta de atrás) y (2) la equivalencia en USD de ese día use algo real. Se usa la MISMA cadena
+    /// que el resto de la app cuando un día no tiene tasa: la última tasa conocida **hasta ese día** y,
+    /// si no hay ninguna anterior, la última que haya en el sistema. 0 = no hay ninguna (entonces un
+    /// abono en Bs de ese día sigue rechazado, con su mensaje).
+    fn tasa_conocida_para(&self, conn: &Connection, fecha: &str) -> SqlResult<f64> {
+        let antes: Option<f64> = conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE close_date <= ?1 AND tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            params![fecha], |r| r.get(0),
+        ).optional()?;
+        if let Some(t) = antes {
+            if t > 0.0 {
+                return Ok(t);
+            }
+        }
+        Ok(conn.query_row(
+            "SELECT tasa_bcv FROM daily_closings WHERE tasa_bcv > 0 ORDER BY close_date DESC LIMIT 1",
+            [], |r| r.get(0),
+        ).optional()?.unwrap_or(0.0))
+    }
+
+    /// F94 — LA CAJA DE UN DÍA PASADO QUE NUNCA SE ABIÓ, creada al anotarle un cobro.
+    ///
+    /// Nace **CERRADA y con el arqueo en 0** a propósito, y eso es lo que la hace honesta:
+    ///   · **cerrada** — un turno ABIERTO de un día viejo bloquearía facturar hoy (F82) y el dueño
+    ///     quedaría encerrado por anotar un abono; y abrir un día ya cerrado está prohibido (F69);
+    ///   · **arqueo en 0** — nadie contó ese cajón (el día ni se abrió), así que la diferencia va a
+    ///     decir la verdad: «faltan $X» con la marca «sin contar» en Libro Diario → Cierres, y el
+    ///     remedio real: ↺ reabrir ESE día, contar el cajón y volver a cerrarlo.
+    /// La `notes` lo deja escrito para que en unos meses se entienda de dónde salió esa fila.
+    fn crear_caja_del_dia(&self, conn: &Connection, fecha: &str, tasa: f64) -> SqlResult<()> {
+        conn.execute(
+            "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, is_closed, closed_at, notes)
+             VALUES (?1, 0, ?2, 0, 1, datetime('now','localtime'), ?3)
+             ON CONFLICT(close_date) DO NOTHING",
+            params![fecha, tasa,
+                "Caja creada automáticamente al anotar un cobro de este día (ese día no se abrió la caja \
+                 en el sistema). El cajón quedó SIN CONTAR: reabrí el día con ↺ en Libro Diario → Cierres, \
+                 contá el cajón y volvé a cerrarlo."],
+        )?;
+        Ok(())
     }
 
     /// F92 — ¿ese día ya tiene su cierre hecho? (para saber si hay que recalcularlo).
@@ -7967,12 +8313,21 @@ impl Database {
             "SELECT is_closed, COALESCE(tasa_bcv,0) FROM daily_closings WHERE close_date = ?1 ORDER BY id DESC LIMIT 1",
             params![fecha], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
+        let es_hoy = fecha == hoy;
+        // F94 — un día SIN fila todavía no tiene caja, pero el cobro se puede anotar (se le crea, HOY
+        // incluido): se informa la tasa con la que va a nacer esa caja (la última conocida) para que el
+        // diálogo convierta con el MISMO número que el backend va a usar, en vez de mostrar 0 y parecer
+        // roto.
+        let tasa_bcv = match fila {
+            Some((_, t)) => t,
+            None => self.tasa_conocida_para(&conn, &fecha).unwrap_or(0.0),
+        };
         Ok(EstadoDelDia {
-            es_hoy: fecha == hoy,
+            es_hoy,
             fecha,
             existe: fila.is_some(),
             cerrado: fila.map(|f| f.0 == 1).unwrap_or(false),
-            tasa_bcv: fila.map(|f| f.1).unwrap_or(0.0),
+            tasa_bcv,
         })
     }
 
@@ -8534,20 +8889,98 @@ fn check_pin(pin: &str, stored: &str) -> Option<bool> {
     }
 }
 
-// Métodos de pago en bolívares (la moneda SIEMPRE se deriva del método, no del servicio)
-const BS_METHODS: [&str; 5] = ["Efectivo Bs", "Pago Móvil", "Pago Movil", "Transferencia Bs", "Punto de Venta (Bs)"];
+/// F37 — LA MONEDA DE CADA MÉTODO VIVE EN **UN SOLO ARCHIVO** (`tools/payment_methods.json`), el mismo
+/// que importa el frontend (`src/lib/utils.ts`). Antes había dos adivinanzas distintas: el frontend
+/// trataba como BOLÍVARES a todo método que no dijera «USD»/«Zelle»/«$» (`isBsMethod` heurístico) y el
+/// backend, para un método que no estaba en su lista, **conservaba la moneda que le mandaran**. Un método
+/// propio del local («Binance», «PayPal») se guardaba como Bs y la caja lo contaba en bolívares (el total
+/// del día en Bs se inflaba y se le aplicaba la conversión a un método que no es en Bs).
+const METODOS_PAGO_JSON: &str = include_str!("../../tools/payment_methods.json");
 
-fn is_bs_method(method: &str) -> bool {
-    BS_METHODS.iter().any(|m| method.trim() == *m)
+/// El mapa canónico `método → moneda` (`"USD"` | `"VES"`), leído una sola vez del archivo compartido.
+///
+/// F37 (revisión adversarial, H5): **una entrada mal escrita NO se descarta en silencio.** Antes el
+/// `filter_map` se saltaba cualquier entrada sin `moneda`, y el frontend la registraba como USD: el
+/// backend decía «método desconocido, se rechaza» y la UI «conocido, en dólares». Ahora el archivo se
+/// valida entero (nombre no vacío, moneda USD/VES) y un error **rompe el arranque con un mensaje claro**
+/// en vez de dejar la app con una lista distinta a la del frontend. Las guardas que lo cazan ANTES de
+/// empaquetar: `cargo test --lib`, `node tools/payment_methods_test.ts` y el chequeo nuevo de
+/// `tools/release_gate.mjs`.
+fn metodos_canonicos() -> &'static HashMap<String, String> {
+    static METODOS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    METODOS.get_or_init(|| {
+        let raw: serde_json::Value = serde_json::from_str(METODOS_PAGO_JSON)
+            .expect("tools/payment_methods.json inválido (JSON mal formado)");
+        let lista = raw["metodos"]
+            .as_array()
+            .expect("tools/payment_methods.json: falta la lista «metodos»");
+        let mut mapa = HashMap::with_capacity(lista.len());
+        for m in lista {
+            let nombre = m["nombre"]
+                .as_str()
+                .expect("tools/payment_methods.json: hay una entrada sin «nombre»")
+                .trim();
+            let moneda = m["moneda"]
+                .as_str()
+                .unwrap_or_else(|| panic!("tools/payment_methods.json: «{nombre}» no dice su «moneda»"));
+            assert!(!nombre.is_empty(), "tools/payment_methods.json: hay una entrada con el nombre vacío");
+            assert!(moneda == "USD" || moneda == "VES",
+                "tools/payment_methods.json: moneda inválida «{moneda}» en «{nombre}» (solo USD o VES)");
+            let antes = mapa.insert(nombre.to_string(), moneda.to_string());
+            assert!(antes.is_none(), "tools/payment_methods.json: el método «{nombre}» está repetido");
+        }
+        mapa
+    })
 }
 
-// Devuelve la moneda correcta para el método; si el método no es reconocido, conserva la pasada.
-fn normalize_payment_currency<'a>(method: &str, currency: &'a str) -> &'a str {
-    if is_bs_method(method) { return "VES"; }
-    if method.trim() == "Divisas (USD Cash)" || method.trim() == "Transferencia Zelle" || method.trim() == "Punto de Venta ($)" {
-        return "USD";
+/// La moneda canónica del método, o `None` si el sistema NO lo conoce (método inventado o de datos
+/// viejos). `None` es la señal de «no se puede saber»: el cobro se rechaza y las lecturas conservan la
+/// moneda guardada (nunca se la reescribe).
+fn moneda_del_metodo(method: &str) -> Option<&'static str> {
+    metodos_canonicos().get(method.trim()).map(|m| m.as_str())
+}
+
+/// Los métodos que cobran en bolívares (los usa la migración de moneda histórica).
+fn metodos_en_bs() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = metodos_canonicos()
+        .iter()
+        .filter(|(_, m)| m.as_str() == "VES")
+        .map(|(n, _)| n.as_str())
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// F37 — UN MÉTODO DESCONOCIDO **NO SE COBRA** (fail-closed).
+///
+/// El invariante del proyecto es «la moneda SIEMPRE se deriva del método» (nunca de lo que mande la UI).
+/// Con un método que no está en la lista compartida esa derivación es imposible, y aceptar la moneda que
+/// venga es exactamente el bug que F37 cierra: plata contada en la moneda equivocada. Se rechaza con el
+/// camino para resolverlo (agregarlo al archivo con su moneda) en vez de guardar un dato que después
+/// nadie puede interpretar. Los cobros con método VACÍO siguen permitidos: son el histórico (`''`).
+fn validar_metodo_de_pago(method: &str) -> SqlResult<()> {
+    if method.trim().is_empty() || moneda_del_metodo(method).is_some() {
+        return Ok(());
     }
-    if currency.is_empty() { "USD" } else { currency }
+    let mut conocidos: Vec<&str> = metodos_canonicos().keys().map(|k| k.as_str()).collect();
+    conocidos.sort_unstable();
+    Err(day_shift_error(&format!(
+        "«{}» no es un método de pago del sistema: no se puede saber si cobra en dólares o en bolívares, y \
+         la caja lo contaría en la moneda equivocada. Elegí uno de los métodos del sistema ({}).",
+        method.trim(),
+        conocidos.join(", ")
+    )))
+}
+
+// Devuelve la moneda correcta para el método; si el método no es reconocido, conserva la pasada (son
+// datos VIEJOS: reescribirles la moneda sería inventar; los cobros NUEVOS con un método desconocido ya
+// no llegan acá porque `validar_metodo_de_pago` los rechaza antes).
+fn normalize_payment_currency<'a>(method: &str, currency: &'a str) -> &'a str {
+    match moneda_del_metodo(method) {
+        Some("VES") => "VES",
+        Some(_) => "USD",
+        None => if currency.is_empty() { "USD" } else { currency },
+    }
 }
 
 // Escapa un campo CSV: si contiene ';' o '"' o salto de línea → comillas dobles con comillas internas duplicadas
@@ -10254,6 +10687,628 @@ mod tests {
         assert!(c.difference.abs() < 1e-9,
             "una orden devuelta entera no puede dejar «faltante» en el cajón: diferencia={}", c.difference);
         assert_eq!(c.usd_cash_total, 0.0, "el neto por método ya trae la devolución");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// PEDIDO DEL DUEÑO (2026-10-05, textual): «revisá que los gastos no se sumen a las ventas, eso es
+    /// independiente, revisá la lógica — creo que la otra vez, en gasto, se sumó».
+    ///
+    /// ESTE TEST FIJA LA INDEPENDENCIA: anotar un gasto NO puede mover NINGÚN número de ventas,
+    /// ingresos ni utilidad. El gasto toca UN solo número —el **esperado del cajón**, y sólo cuando se
+    /// pagó DEL cajón (`Divisas (USD Cash)` / `Efectivo Bs`, regla F69)— y acá se comprueba que ése es
+    /// el único efecto que tiene, en todas las superficies que muestran plata cobrada.
+    ///
+    /// Los gastos están elegidos como CANARIOS: **$999 por Zelle** y **Bs. 500.000 por Pago Móvil**. Si
+    /// alguna vez se vuelven a enganchar los gastos en el libro de ventas (por método o por moneda),
+    /// esos dos números saltan a la vista de inmediato.
+    #[test]
+    fn test_los_gastos_no_se_suman_a_las_ventas() {
+        let test_path = PathBuf::from("test_gastos_independientes.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // Un día de verdad: fondo de caja $50, tasa 40, una venta en divisas, una venta en Bs. por Pago
+        // Móvil, una en efectivo Bs. y un abono de servicio en divisas → $150 y Bs. 5.000 cobrados.
+        db.open_day(50.0, 40.0, 45.0).unwrap();
+        db.add_sale(None, "Pantalla A", 1, 100.0, 100.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        db.add_sale(None, "Pantalla B", 1, 100.0, 4000.0, "Pago Móvil", "C2", None, "", 0.0, "", "VES", 0.0).unwrap();
+        db.add_sale(None, "Pantalla C", 1, 100.0, 1000.0, "Efectivo Bs", "C3", None, "", 0.0, "", "VES", 0.0).unwrap();
+        let sid = db.add_service("ORD-GTO-1", "Ana", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 50.0, "Divisas (USD Cash)", 0.0, "", "USD", "", "").unwrap();
+
+        // FOTO DE TODO LO QUE ES «VENTAS» ANTES DE ANOTAR UN SOLO GASTO.
+        let ventas_antes = db.get_daily_totals(&today, &today).unwrap().remove(0);
+        let resumen_antes = db.get_day_summary(&today).unwrap();
+        let dash_antes = db.get_dashboard_analytics().unwrap();
+        let utilidad_antes = db.get_profit_summary(&today, &today).unwrap();
+
+        // LOS GASTOS: dos que salen del cajón y tres que no (banco / sin declarar).
+        db.add_expense(&today, "Compra de repuestos", 20.0, "USD", "mensajero", "Divisas (USD Cash)").unwrap();
+        db.add_expense(&today, "Otro", 500.0, "VES", "flete", "Efectivo Bs").unwrap();
+        db.add_expense(&today, "Servicios", 999.0, "USD", "canario: pagado por banco", "Transferencia Zelle").unwrap();
+        db.add_expense(&today, "Otro", 500000.0, "VES", "canario: pagado por banco", "Pago Móvil").unwrap();
+        db.add_expense(&today, "Otro", 77.0, "USD", "sin declarar", "").unwrap();
+
+        // ── 1) LAS VENTAS NO SE MOVIERON NI UN CENTAVO ───────────────────────────────────────────
+        let ventas_despues = db.get_daily_totals(&today, &today).unwrap().remove(0);
+        assert_eq!(ventas_despues.grand_usd, ventas_antes.grand_usd,
+            "un gasto de $999 pagado por Zelle NO puede entrar al total en dólares del día");
+        assert_eq!(ventas_despues.grand_bs, ventas_antes.grand_bs,
+            "ni un gasto de Bs. 500.000 al total en bolívares");
+        assert_eq!(ventas_despues.grand_total, ventas_antes.grand_total,
+            "ni al equivalente en USD del «Total General»");
+        assert_eq!(ventas_despues.usd_cash_total, ventas_antes.usd_cash_total, "el efectivo cobrado no cambia");
+        assert_eq!(ventas_despues.pago_movil_total, ventas_antes.pago_movil_total,
+            "el Pago Móvil COBRADO no cambia (el gasto dice de dónde salió la plata, no cuánto se cobró)");
+        assert_eq!(ventas_despues.zelle_total, ventas_antes.zelle_total, "el Zelle cobrado no cambia");
+        assert_eq!(ventas_despues.cash_bs, ventas_antes.cash_bs, "el efectivo en Bs. cobrado no cambia");
+        assert_eq!(ventas_despues.pos_net, ventas_antes.pos_net, "el Punto no cambia");
+
+        let resumen_despues = db.get_day_summary(&today).unwrap();
+        assert_eq!(resumen_despues.sales_usd, resumen_antes.sales_usd, "«Ventas del día» ($) no cambia");
+        assert_eq!(resumen_despues.sales_bs, resumen_antes.sales_bs, "«Ventas del día» (Bs.) no cambia");
+        assert_eq!(resumen_despues.payments_usd, resumen_antes.payments_usd, "«Cobrado servicios» no cambia");
+        assert_eq!(resumen_despues.payments_bs, resumen_antes.payments_bs);
+
+        let dash_despues = db.get_dashboard_analytics().unwrap();
+        assert_eq!(dash_despues.today_usd, dash_antes.today_usd, "el Dashboard de hoy dice lo mismo");
+        assert_eq!(dash_despues.today_bs, dash_antes.today_bs);
+        assert_eq!(dash_despues.service_income_today_usd, dash_antes.service_income_today_usd);
+
+        // La utilidad bruta es ingresos − costo de MERCANCÍA: un gasto no es costo de la mercancía
+        // (los gastos del negocio viven en su propia pestaña, con su propio total).
+        let utilidad_despues = db.get_profit_summary(&today, &today).unwrap();
+        assert_eq!(utilidad_despues.income_usd, utilidad_antes.income_usd, "los ingresos no cambian");
+        assert_eq!(utilidad_despues.sales_income_usd, utilidad_antes.sales_income_usd);
+        assert_eq!(utilidad_despues.cost_usd, utilidad_antes.cost_usd, "un gasto no es costo de mercancía");
+        assert_eq!(utilidad_despues.profit_usd, utilidad_antes.profit_usd, "la utilidad bruta no cambia");
+
+        // ── 2) EL ÚNICO NÚMERO QUE EL GASTO TOCA: EL CAJÓN (F69) ──────────────────────────────────
+        let adj = db.drawer_adjustments(&today).unwrap();
+        assert_eq!(adj.gastos_usd, 20.0, "sólo el gasto pagado DEL cajón en divisas baja el esperado");
+        assert_eq!(adj.gastos_bs, 500.0, "y el pagado del cajón en bolívares");
+        assert_eq!(adj.sin_metodo, 1, "el gasto sin declarar se cuenta aparte para avisarlo");
+        assert_eq!(adj.fondo_usd, 50.0, "el fondo de caja sigue sumando");
+
+        // Cierre contando exactamente lo que la regla dice: ($150 cobrados + $50 de fondo − $20 de
+        // gasto) = $180 contados, y (Bs. 1.000 de efectivo − Bs. 500 de gasto) + Bs. 4.000 de Pago
+        // Móvil = Bs. 4.500 → el día cuadra. Ojo: el gasto del cajón sale del EFECTIVO, no del banco.
+        let close_id = db.close_day(&today, "gastos independientes de las ventas", 0.0, 40.0, 45.0,
+            180.0, 500.0, 0.0, 0.0, 0.0, 4000.0, 0.0, 0.0, 0.0).unwrap();
+        let c = db.get_daily_closings().unwrap().into_iter().find(|x| x.id == close_id).unwrap();
+        assert!(c.difference.abs() < 1e-9,
+            "un día perfecto con gastos pagados del cajón cuadra: diferencia={}", c.difference);
+        assert_eq!(c.total_usd, 150.0, "el cierre guarda lo COBRADO en USD, sin los gastos");
+        assert_eq!(c.total_bs, 5000.0, "y lo cobrado en Bs., sin los gastos");
+        assert_eq!(c.grand_total, 275.0,
+            "el «Total General del día» es 150 + 5.000/40: los gastos NO lo bajan (bajan el cajón)");
+        assert_eq!(c.drawer_adjust_usd, 30.0, "fondo 50 − gastos 20: el ajuste del cajón, aparte");
+        assert_eq!(c.drawer_adjust_bs, -500.0, "los gastos en Bs. del cajón, en negativo y aparte");
+        assert_eq!(c.usd_cash_total, 150.0, "las columnas crudas del día no se maquillan");
+        assert_eq!(c.pago_movil_total, 4000.0, "y el Pago Móvil sigue siendo lo cobrado");
+        assert_eq!(c.cash_bs, 1000.0, "ni el efectivo Bs. cobrado se toca por un gasto del cajón");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F94 — EL ABONO DE DÍAS ANTERIORES SE PUEDE COLOCAR AUNQUE ESE DÍA NO TENGA CAJA.
+    ///
+    /// Pedido del dueño (2026-10-06): «cuando vas a colocar un pago, un abono que se hizo unos días
+    /// anteriores, déjalo colocar». MEDIDO en su base: los únicos turnos eran el del 21/09 (abierto
+    /// hacía 15 días) y el del 17/09, así que cualquier otro día caía en «No hay ninguna caja (turno)
+    /// con la fecha X» y el mostrador no podía anotar la plata del día en que entró.
+    ///
+    /// La regla que queda:
+    ///   · día PASADO sin caja → se anota y se le CREA su caja (cerrada, arqueo 0, tasa conocida);
+    ///   · día con caja (abierta o cerrada) → como en F92 (el cerrado se recalcula);
+    ///   · HOY sin caja → sigue rechazado (la caja de hoy se abre a propósito: crear una cerrada de hoy
+    ///     dejaría al dueño sin poder abrir el día — F69);
+    ///   · futuro → rechazado; y sin NINGUNA tasa conocida, un abono en Bs sigue rechazado.
+    /// Nada de esto exige que haya un turno abierto: la regla es la fecha DEL PAGO.
+    #[test]
+    fn test_f94_abono_de_dias_anteriores_sin_caja() {
+        let test_path = PathBuf::from("test_f94_abono_sin_caja.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let (hoy, hace5, hace8, manana): (String, String, String, String) = {
+            let conn = db.conn.lock().unwrap();
+            let q = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+            (
+                q("SELECT date('now','localtime')"),
+                q("SELECT date('now','localtime','-5 day')"),
+                q("SELECT date('now','localtime','-8 day')"),
+                q("SELECT date('now','localtime','+1 day')"),
+            )
+        };
+        // El día de hoy ABIERTO (con tasa) para poder crear la orden; los días retroactivos NO tienen
+        // ninguna fila en `daily_closings`: es exactamente el estado de la base del taller.
+        db.open_day(0.0, 50.0, 55.0).unwrap();
+        let sid = db.add_service("DEV-F94", "Cliente", "0412-9", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 100.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+
+        // ── 1) EL ABONO DE HACE 5 DÍAS (día sin caja): SE ANOTA Y SE LE CREA LA CAJA ───────────────
+        let pid = db.add_service_payment(sid, 20.0, "Divisas (USD Cash)", 0.0, "", "USD",
+            "el cliente pagó ese día", &hace5).unwrap();
+        let fecha: String = db.conn.lock().unwrap()
+            .query_row("SELECT date(payment_date) FROM service_payments WHERE id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(fecha, hace5, "el cobro entra en el día en que de verdad entró la plata");
+
+        let caja: (i64, f64, f64, String) = db.conn.lock().unwrap().query_row(
+            "SELECT is_closed, COALESCE(actual_cash_usd,0), COALESCE(tasa_bcv,0), COALESCE(notes,'')
+             FROM daily_closings WHERE close_date=?1", params![hace5],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(caja.0, 1, "la caja creada nace CERRADA: un turno ABIERTO de un día viejo bloquearía facturar hoy (F82)");
+        assert!(caja.1.abs() < 1e-9, "nadie contó ese cajón: el arqueo queda en 0 (no se inventa un conteo)");
+        assert!((caja.2 - 50.0).abs() < 1e-9, "hereda la última tasa conocida (la del día abierto): {}", caja.2);
+        assert!(caja.3.contains("Caja creada automáticamente"),
+            "la fila dice de dónde salió (si no, en Cierres parece un cierre fantasma): {}", caja.3);
+
+        // El día entra al libro con su monto, y su cierre explica lo que pasó: esperado $20, contado 0.
+        let t = db.get_daily_totals(&hace5, &hace5).unwrap();
+        assert_eq!(t[0].usd_cash_total, 20.0, "la caja de ese día ve el abono");
+        let (esperado, diferencia): (f64, f64) = db.conn.lock().unwrap().query_row(
+            "SELECT COALESCE(total_usd,0), COALESCE(difference,0) FROM daily_closings WHERE close_date=?1",
+            params![hace5], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert!((esperado - 20.0).abs() < 1e-9, "el cierre ve lo que el sistema esperaba: {esperado}");
+        assert!((diferencia + 20.0).abs() < 1e-9,
+            "y la diferencia dice la verdad («faltan $20» = nadie contó ese cajón): {diferencia}");
+        let paid: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid - 20.0).abs() < 1e-9, "la orden queda abonada: {paid}");
+        let dia_libro: String = db.conn.lock().unwrap()
+            .query_row("SELECT day FROM cash_movements WHERE payment_id=?1", params![pid], |r| r.get(0)).unwrap();
+        assert_eq!(dia_libro, hace5, "el asiento del libro queda en el día del pago (una sola fuente)");
+
+        // ── 2) UN ABONO EN Bs DE OTRO DÍA SIN CAJA: también entra, valuado con la tasa heredada ────
+        let pid_bs = db.add_service_payment(sid, 2500.0, "Efectivo Bs", 0.0, "", "USD",
+            "abono en Bs de ese día", &hace8).unwrap();
+        let paid_bs: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid_bs - 70.0).abs() < 0.5,
+            "Bs. 2.500 a la tasa heredada (50) = $50 → abonado $70 (no se convierte 1:1): {paid_bs}");
+        let tasa_caja_bs: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT COALESCE(tasa_bcv,0) FROM daily_closings WHERE close_date=?1", params![hace8], |r| r.get(0)).unwrap();
+        assert!(tasa_caja_bs > 0.0, "la caja creada para un abono en Bs lleva su tasa: {tasa_caja_bs}");
+        assert!(pid_bs > 0);
+
+        // ── 3) SIN NINGUNA TASA CONOCIDA, un abono en Bs de un día sin caja sigue rechazado ─────────
+        //    (y sin dejar una caja vacía colgando: la validación va ANTES de crearla)
+        let hace3: String = db.conn.lock().unwrap()
+            .query_row("SELECT date('now','localtime','-3 day')", [], |r| r.get(0)).unwrap();
+        db.conn.lock().unwrap().execute("UPDATE daily_closings SET tasa_bcv = 0", []).unwrap();
+        let err = db.add_service_payment(sid, 100.0, "Efectivo Bs", 0.0, "", "USD", "", &hace3).unwrap_err().to_string();
+        assert!(err.contains("no tiene tasa BCV"), "Bs sin tasa conocida se rechaza: {err}");
+        let creada: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM daily_closings WHERE close_date=?1", params![hace3], |r| r.get(0)).unwrap();
+        assert_eq!(creada, 0, "un cobro rechazado NO deja una caja creada atrás");
+
+        // ── 4) FECHA FUTURA sigue rechazada ────────────────────────────────────────────────────────
+        let err = db.add_service_payment(sid, 1.0, "Divisas (USD Cash)", 0.0, "", "USD", "", &manana).unwrap_err().to_string();
+        assert!(err.contains("no puede ser futura"), "futuro rechazado: {err}");
+
+        // ── 5) HOY SIN CAJA: **TAMBIÉN SE ANOTA** (F94-b). El dueño pidió «no tenga bloqueante» y el
+        //    caso real es el suyo: un solo turno abierto (el del 21/09) ⇒ hoy no tiene caja. Antes esto
+        //    se rechazaba para no dejar al dueño sin poder «Abrir Día» (una caja cerrada de hoy bloquea
+        //    el ritual); eso lo resuelve `open_day`, que ahora sí abre una caja que creó el SISTEMA.
+        //    El caso completo vive en `test_f94_abono_de_hoy_sin_caja_y_abrir_el_dia`.
+        db.conn.lock().unwrap().execute("DELETE FROM daily_closings WHERE close_date = ?1", params![hoy]).unwrap();
+        let pid_hoy = db.add_service_payment(sid, 1.0, "Divisas (USD Cash)", 0.0, "", "USD", "cobro de hoy", &hoy).unwrap();
+        assert!(pid_hoy > 0, "un abono de HOY sin caja abierta se anota (F94-b)");
+        let (hoy_creada, hoy_cerrada): (i64, i64) = db.conn.lock().unwrap().query_row(
+            "SELECT COUNT(*), COALESCE(MAX(is_closed),0) FROM daily_closings WHERE close_date=?1", params![hoy],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(hoy_creada, 1, "se le creó la caja de HOY (una sola fila)");
+        assert_eq!(hoy_cerrada, 1, "y nace cerrada, con el arqueo sin contar");
+
+        // ── 6) Y SIN NINGÚN TURNO ABIERTO, el día pasado sin caja se sigue pudiendo anotar ──────────
+        //    (antes el gate ciego `require_open_day` lo rechazaba: «Debe abrir el día…»)
+        let hace2: String = db.conn.lock().unwrap()
+            .query_row("SELECT date('now','localtime','-2 day')", [], |r| r.get(0)).unwrap();
+        let pid_final = db.add_service_payment(sid, 10.0, "Divisas (USD Cash)", 0.0, "", "USD", "otro día", &hace2).unwrap();
+        assert!(pid_final > 0, "sin ningún turno abierto, la plata de un día pasado se anota igual");
+
+        // ── 7) Corregir la FECHA de un cobro hacia un día pasado sin caja tampoco se frena ──────────
+        let ajustes = db.update_service_payment_date(pid_final, &hace8).unwrap();
+        assert!(!ajustes.is_empty(), "el día de destino (recién creado, cerrado) se recalcula y se dice");
+        let fecha_movida: String = db.conn.lock().unwrap()
+            .query_row("SELECT date(payment_date) FROM service_payments WHERE id=?1", params![pid_final], |r| r.get(0)).unwrap();
+        assert_eq!(fecha_movida, hace8, "el cobro se movió al día elegido");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F94-b — UN ABONO DE **HOY** SIN CAJA ABIERTA SE ANOTA, Y DESPUÉS EL DÍA SE ABRE IGUAL.
+    ///
+    /// Es el caso real del taller (medido): el único turno abierto era el del 21/09 y hoy es otro día,
+    /// así que HOY no tenía caja y el cobro se rechazaba («No hay ninguna caja (turno) con la fecha X»).
+    /// F94 metió la plata de los días PASADOS; faltaba hoy, y el motivo para no hacerlo era bueno: una
+    /// caja CERRADA de hoy dejaba al dueño sin poder pulsar «Abrir Día» (F69 prohíbe reabrir un día
+    /// cerrado con su arqueo). Por eso la caja que crea el sistema nace con `opened_at IS NULL` —nunca
+    /// se abrió— y `open_day` la abre: el ritual del día no se pierde, solo se completa después.
+    ///
+    /// Lo que este test fija, en orden:
+    ///   1. con la caja vieja abierta y hoy sin caja, el cobro de HOY **entra** (y en la caja de HOY,
+    ///      no en la vieja: la protección de F82 sigue viva);
+    ///   2. esa caja la crea el sistema: cerrada, arqueo 0, `opened_at IS NULL`, con la tasa conocida;
+    ///   3. **facturar sigue gateado** (una venta de hoy se rechaza mientras la caja vieja esté abierta);
+    ///   4. cerrada la caja vieja, **«Abrir Día» funciona**: abre ESA fila (mismo id), carga fondo y
+    ///      tasa, y el cobro ya anotado sigue ahí;
+    ///   5. y un cierre CON ARQUEO CONTADO sigue siendo intocable (F69): `open_day` lo rechaza.
+    #[test]
+    fn test_f94_abono_de_hoy_sin_caja_y_abrir_el_dia() {
+        let test_path = PathBuf::from("test_f94_abono_hoy.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let (hoy, ayer): (String, String) = {
+            let conn = db.conn.lock().unwrap();
+            (
+                conn.query_row("SELECT date('now','localtime')", [], |r| r.get(0)).unwrap(),
+                conn.query_row("SELECT date('now','localtime','-1 day')", [], |r| r.get(0)).unwrap(),
+            )
+        };
+        // 0) Se abre el día de hoy para poder crear la orden (F82: una orden es de HOY).
+        let id_hoy_abierto = db.open_day(0.0, 50.0, 55.0).unwrap();
+        let sid = db.add_service("DEV-F94B", "Cliente", "0412-9", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 100.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+        // …y se deja el escenario del taller: HOY sin caja y un turno VIEJO abierto (el del 21/09).
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM daily_closings WHERE close_date=?1", params![hoy]).unwrap();
+            conn.execute(
+                "INSERT INTO daily_closings (close_date, initial_cash_usd, tasa_bcv, tasa_eur, opened_at, is_closed)
+                 VALUES (?1, 0, 50, 55, datetime('now','localtime','-1 day'), 0)",
+                params![ayer],
+            ).unwrap();
+        }
+        assert!(id_hoy_abierto > 0);
+
+        // 1) EL COBRO DE HOY ENTRA (y en la caja de HOY, no en la del turno viejo).
+        let pid = db.add_service_payment(sid, 20.0, "Divisas (USD Cash)", 0.0, "", "USD",
+            "el cliente pagó hoy", &hoy).unwrap();
+        assert!(pid > 0, "el cobro de hoy se anota aunque hoy no tuviera caja");
+        let t_hoy = db.get_daily_totals(&hoy, &hoy).unwrap();
+        assert_eq!(t_hoy[0].usd_cash_total, 20.0, "la caja de HOY ve el cobro");
+        assert!(db.get_daily_totals(&ayer, &ayer).unwrap().is_empty(),
+            "y NO se anotó en la caja vieja (la protección de F82 sigue viva: la plata es de hoy)");
+        let caja_vieja: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT COALESCE(usd_cash_total,0) FROM daily_closings WHERE close_date=?1", params![ayer], |r| r.get(0)).unwrap();
+        assert!(caja_vieja.abs() < 1e-9, "el turno viejo (abierto) sigue en 0: el abono no cayó ahí");
+
+        // 2) LA CAJA DE HOY LA CREÓ EL SISTEMA: cerrada, sin contar, sin abrir y con la tasa conocida.
+        let (id_auto, cerrada, abierta_alguna_vez, contado, tasa, notas): (i64, i64, i64, f64, f64, String) =
+            db.conn.lock().unwrap().query_row(
+                "SELECT id, is_closed, (opened_at IS NOT NULL), COALESCE(actual_cash_usd,0), COALESCE(tasa_bcv,0), COALESCE(notes,'')
+                 FROM daily_closings WHERE close_date=?1", params![hoy],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            ).unwrap();
+        assert_eq!(cerrada, 1, "nace cerrada (si no, sería un segundo turno abierto)");
+        assert_eq!(abierta_alguna_vez, 0, "y con opened_at NULL: la creó el sistema, no el operario");
+        assert!(contado.abs() < 1e-9, "arqueo sin contar (nadie contó ese cajón)");
+        assert!((tasa - 50.0).abs() < 1e-9, "hereda la última tasa conocida: {tasa}");
+        assert!(notas.contains("Caja creada automáticamente"), "la nota dice de dónde salió: {notas}");
+
+        // 3) FACTURAR SIGUE GATEADO (F82 intacto): la venta de hoy no puede entrar en la caja vieja.
+        let err = db.add_sale(None, "Pantalla X", 1, 10.0, 10.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0)
+            .unwrap_err().to_string();
+        assert!(err.contains(&ayer) && err.contains("sigue ABIERTA"),
+            "una venta de hoy con la caja vieja abierta se rechaza nombrando las dos fechas: {err}");
+
+        // 4) EL REMEDIO: se cierra la caja vieja y «Abrir Día» ABRE ESA MISMA FILA (la del sistema).
+        db.close_day(&ayer, "cierre del turno viejo", 0.0, 50.0, 55.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let id_abierto = db.open_day(30.0, 60.0, 66.0).unwrap();
+        assert_eq!(id_abierto, id_auto, "«Abrir Día» abre la MISMA fila (su id no cambia: no se pierde nada)");
+        let (cerrada2, abierta2, fondo, tasa2, contado2): (i64, i64, f64, f64, f64) = db.conn.lock().unwrap().query_row(
+            "SELECT is_closed, (opened_at IS NOT NULL), COALESCE(initial_cash_usd,0), COALESCE(tasa_bcv,0), COALESCE(actual_cash_usd,0)
+             FROM daily_closings WHERE close_date=?1", params![hoy],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).unwrap();
+        assert_eq!(cerrada2, 0, "el día de hoy queda ABIERTO");
+        assert_eq!(abierta2, 1, "y con su apertura estampada (ya no es una caja del sistema)");
+        assert!((fondo - 30.0).abs() < 1e-9 && (tasa2 - 60.0).abs() < 1e-9, "con el fondo y la tasa que cargó el operario");
+        assert!(contado2.abs() < 1e-9, "el arqueo sigue sin contar (nadie lo tocó)");
+        let t_hoy2 = db.get_daily_totals(&hoy, &hoy).unwrap();
+        assert_eq!(t_hoy2[0].usd_cash_total, 20.0, "el cobro ya anotado sigue en su día");
+        let paid: f64 = db.conn.lock().unwrap()
+            .query_row("SELECT paid_amount FROM services WHERE id=?1", params![sid], |r| r.get(0)).unwrap();
+        assert!((paid - 20.0).abs() < 1e-9, "y la orden sigue abonada: {paid}");
+        // …y ahora sí se puede facturar el día de hoy.
+        db.add_sale(None, "Pantalla X", 1, 10.0, 10.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+
+        // 5) UN CIERRE CON ARQUEO CONTADO SIGUE SIENDO INTOCABLE (F69): `open_day` lo rechaza.
+        db.close_day(&hoy, "cierre contado de hoy", 0.0, 60.0, 66.0, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let err = db.open_day(0.0, 60.0, 66.0).unwrap_err().to_string();
+        assert!(err.contains("ya está CERRADO con su arqueo"), "un cierre contado no se reabre con «Abrir Día»: {err}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F37 — UN MÉTODO QUE EL SISTEMA NO CONOCE **NO SE COBRA** (la moneda no se adivina).
+    ///
+    /// El invariante del proyecto es «la moneda SIEMPRE se deriva del método». Antes había dos
+    /// adivinanzas: el frontend daba por BOLÍVARES todo método que no dijera «USD»/«Zelle»/«$» y el
+    /// backend, para un método fuera de su lista, **conservaba la moneda que le mandaran** — así un
+    /// método propio del local («Binance», «PayPal») quedaba guardado como Bs y la caja lo contaba en
+    /// bolívares (el total del día en Bs se inflaba y se le aplicaba una conversión que no le
+    /// correspondía). Ahora la moneda vive en `tools/payment_methods.json` y lo desconocido se rechaza
+    /// en las CUATRO puertas de plata, sin escribir nada.
+    #[test]
+    fn test_f37_metodo_desconocido_no_se_cobra() {
+        let test_path = PathBuf::from("test_f37_metodos.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let hoy = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 50.0, 55.0).unwrap();
+        let sid = db.add_service("DEV-F37", "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 100.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+
+        // 1) Venta con un método inventado → rechazada y el mensaje NOMBRA el método
+        let err = db.add_sale(None, "Pantalla X", 1, 10.0, 10.0, "Binance", "C1", None, "", 0.0, "", "USD", 0.0)
+            .unwrap_err().to_string();
+        assert!(err.contains("Binance") && err.contains("no es un método de pago del sistema"), "venta: {err}");
+        // 2) Abono
+        let err = db.add_service_payment(sid, 10.0, "PayPal", 0.0, "", "USD", "", "").unwrap_err().to_string();
+        assert!(err.contains("PayPal"), "abono: {err}");
+        // 3) Devolución
+        let err = db.add_service_refund(sid, 1.0, "Binance", "", "USD", "").unwrap_err().to_string();
+        assert!(err.contains("Binance"), "devolución: {err}");
+        // 4) Gasto declarando de dónde salió la plata
+        let err = db.add_expense(&hoy, "Otro", 1.0, "USD", "", "Binance").unwrap_err().to_string();
+        assert!(err.contains("Binance") && err.contains("sin declarar"), "gasto: {err}");
+
+        // FAIL-CLOSED DE VERDAD: no quedó nada escrito (ni una fila con moneda inventada)
+        let n = |sql: &str| -> i64 { db.conn.lock().unwrap().query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT COUNT(*) FROM sales"), 0, "ninguna venta con método desconocido");
+        assert_eq!(n("SELECT COUNT(*) FROM service_payments"), 0, "ningún abono con método desconocido");
+        assert_eq!(n("SELECT COUNT(*) FROM expenses"), 0, "ningún gasto con método desconocido");
+
+        // 2) LOS DEL SISTEMA SIGUEN FUNCIONANDO, y la moneda se DERIVA del método (manda el método, no lo
+        //    que mande la UI: es el invariante que F37 refuerza).
+        db.add_sale(None, "Pantalla X", 1, 10.0, 10.0, "Pago Móvil", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        let cur_venta: String = db.conn.lock().unwrap()
+            .query_row("SELECT currency FROM sales ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(cur_venta, "VES", "«Pago Móvil» es en bolívares aunque la UI haya mandado USD");
+        db.add_service_payment(sid, 5.0, "Transferencia Zelle", 0.0, "", "VES", "", "").unwrap();
+        let cur_pago: String = db.conn.lock().unwrap()
+            .query_row("SELECT currency FROM service_payments ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(cur_pago, "USD", "«Transferencia Zelle» es en dólares aunque la UI haya mandado VES");
+        // El gasto SIN declarar sigue permitido (es el histórico: el arqueo lo avisa y no lo descuenta)
+        db.add_expense(&hoy, "Otro", 2.0, "USD", "sin declarar", "").unwrap();
+        // Y los alias de datos viejos también se aceptan (su moneda está en la fuente única)
+        db.add_expense(&hoy, "Otro", 3.0, "USD", "alias viejo", "Pago Movil").unwrap();
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F37 — TODO MÉTODO QUE LA BASE OFRECE TIENE QUE ESTAR EN LA FUENTE ÚNICA.
+    ///
+    /// El selector de la UI lista la tabla `payment_methods` (lo que siembra `init()`): si alguien agrega
+    /// un método ahí sin agregarlo a `tools/payment_methods.json`, la app lo OFRECERÍA y el backend lo
+    /// RECHAZARÍA al cobrar. Este test cierra esa grieta por el lado del sistema.
+    #[test]
+    fn test_f37_los_metodos_sembrados_estan_en_la_fuente_unica() {
+        let test_path = PathBuf::from("test_f37_sembrados.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let nombres: Vec<String> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT name FROM payment_methods ORDER BY id").unwrap();
+            let filas = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            filas.filter_map(|r| r.ok()).collect()
+        };
+        assert!(nombres.len() >= 7, "la base siembra los métodos del sistema: {nombres:?}");
+        for n in &nombres {
+            assert!(moneda_del_metodo(n).is_some(),
+                "el método «{n}» que siembra la base NO está en tools/payment_methods.json: la UI lo ofrecería y el cobro se rechazaría");
+        }
+        // La clasificación de los que deciden el cajón y los bancos (lo que la caja cuenta por moneda)
+        assert_eq!(moneda_del_metodo("Efectivo Bs"), Some("VES"));
+        assert_eq!(moneda_del_metodo("Divisas (USD Cash)"), Some("USD"));
+        assert_eq!(moneda_del_metodo("Pago Móvil"), Some("VES"));
+        assert_eq!(moneda_del_metodo("Transferencia Zelle"), Some("USD"));
+        assert_eq!(moneda_del_metodo("Punto de Venta (Bs)"), Some("VES"));
+        assert_eq!(moneda_del_metodo("Punto de Venta ($)"), Some("USD"));
+        assert_eq!(moneda_del_metodo("Transferencia Bs"), Some("VES"));
+        assert_eq!(moneda_del_metodo("Gaveta"), None, "un método que no está no tiene moneda");
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F37 (revisión adversarial) — **LA MONEDA SALE DEL MÉTODO EN TODAS LAS PUERTAS**, no solo en las
+    /// que ya lo hacían.
+    ///
+    /// Tres hallazgos del revisor, los tres con plata de por medio:
+    ///  · **H1 (MAYOR): el GASTO** era la única puerta donde la moneda la elegía la UI con un desplegable
+    ///    independiente del método, y el ajuste del cajón decide el BOLSILLO por la moneda del libro
+    ///    (`gastos_usd` vs `gastos_bs`): «Monto 5.000 + Moneda $ + Salió de: Efectivo Bs» descontaba
+    ///    5.000 DÓLARES del esperado y NO descontaba los bolívares que salieron del cajón.
+    ///  · **H6: el nombre se guardaba CRUDO** aunque se validaba recortado: « Pago Móvil » pasaba la
+    ///    validación y después no sumaba al bolsillo del Pago Móvil (los totales comparan por nombre
+    ///    exacto) — caía en el efectivo.
+    ///  · **H2: «Punto de Venta» a secas es AMBIGUO** (el local lo usa para el de $ y para el de Bs) y su
+    ///    moneda alimentaba la migración de moneda histórica, que reescribe filas guardadas y recalcula
+    ///    cierres cerrados: adivinar ahí mueve plata de un bolsillo a otro. No está en la fuente única.
+    #[test]
+    fn test_f37_la_moneda_sale_del_metodo_en_todas_las_puertas() {
+        let test_path = PathBuf::from("test_f37_moneda_metodo.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let hoy = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 50.0, 55.0).unwrap();
+
+        // ── H1: la moneda del GASTO sale del método (es lo que decide el bolsillo del cajón) ────────
+        let id1 = db.add_expense(&hoy, "Otro", 5000.0, "USD", "cajón en Bs", "Efectivo Bs").unwrap();
+        let cur1: String = db.conn.lock().unwrap()
+            .query_row("SELECT currency FROM expenses WHERE id=?1", params![id1], |r| r.get(0)).unwrap();
+        assert_eq!(cur1, "VES", "«Efectivo Bs» cobra en bolívares aunque la UI haya mandado USD");
+        let adj = db.drawer_adjustments(&hoy).unwrap();
+        assert_eq!(adj.gastos_bs, 5000.0, "y baja el bolsillo de BOLÍVARES del cajón: {adj:?}");
+        assert_eq!(adj.gastos_usd, 0.0, "no toca el de dólares");
+        // El reverso: un gasto del cajón en divisas declarado como Bs desde la UI
+        let id2 = db.add_expense(&hoy, "Otro", 20.0, "VES", "cajón en $", "Divisas (USD Cash)").unwrap();
+        let cur2: String = db.conn.lock().unwrap()
+            .query_row("SELECT currency FROM expenses WHERE id=?1", params![id2], |r| r.get(0)).unwrap();
+        assert_eq!(cur2, "USD", "«Divisas (USD Cash)» es en dólares aunque la UI haya mandado VES");
+        let adj2 = db.drawer_adjustments(&hoy).unwrap();
+        assert_eq!(adj2.gastos_usd, 20.0, "y baja el bolsillo de DÓLARES: {adj2:?}");
+        // El gasto SIN declarar conserva la moneda elegida (no hay método del que derivarla)
+        let id3 = db.add_expense(&hoy, "Otro", 7.0, "VES", "sin declarar", "").unwrap();
+        let cur3: String = db.conn.lock().unwrap()
+            .query_row("SELECT currency FROM expenses WHERE id=?1", params![id3], |r| r.get(0)).unwrap();
+        assert_eq!(cur3, "VES", "sin método, la moneda es la que se declaró");
+
+        // ── H6: el nombre se guarda RECORTADO (si no, no suma al bolsillo de su método) ─────────────
+        db.add_sale(None, "Pantalla X", 1, 10.0, 1000.0, "  Pago Móvil  ", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        let metodo_venta: String = db.conn.lock().unwrap()
+            .query_row("SELECT payment_method FROM sales ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(metodo_venta, "Pago Móvil", "la venta guarda el nombre recortado");
+        let t = db.get_daily_totals(&hoy, &hoy).unwrap();
+        assert_eq!(t[0].pago_movil_total, 1000.0, "y el día lo cuenta en el Pago Móvil (no en el efectivo)");
+        assert_eq!(t[0].cash_bs, 0.0, "no cae al efectivo en Bs por el espacio de más");
+        let sid = db.add_service("DEV-F37B", "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 50.0, "Divisas (USD Cash)", "", 0.0, "", "USD",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 10.0, " Efectivo Bs ", 0.0, "", "USD", "", "").unwrap();
+        let metodo_pago: String = db.conn.lock().unwrap()
+            .query_row("SELECT payment_method FROM service_payments ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(metodo_pago, "Efectivo Bs", "el abono también se guarda recortado");
+
+        // ── H2: el alias ambiguo NO está en la fuente única (y por eso no toca las migraciones) ─────
+        assert_eq!(moneda_del_metodo("Punto de Venta"), None,
+            "«Punto de Venta» a secas es ambiguo (puede ser $ o Bs): si estuviera acá, la migración de moneda histórica reescribiría filas adivinando el bolsillo");
+        assert!(!metodos_en_bs().contains(&"Punto de Venta"),
+            "y no entra en la lista que reescribe la moneda de los datos viejos: {:?}", metodos_en_bs());
+        assert_eq!(moneda_del_metodo("Punto de Venta ($)"), Some("USD"));
+        assert_eq!(moneda_del_metodo("Punto de Venta (Bs)"), Some("VES"));
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F40 — LA CONCILIACIÓN DEL DÍA: el LIBRO DE PLATA contra el ORIGEN, método por método.
+    ///
+    /// Lo que se juega: los totales del día salen de `sales` + `service_payments` (+ lo que la caja
+    /// presume) y en paralelo cada write-point anota su movimiento en `cash_movements`. Si las dos
+    /// fuentes se separan, el arqueo y el libro cuentan historias distintas. Este test fija que (1) un día
+    /// normal CUADRA (las dos partes netas, método por método) y (2) el detector ENCUENTRA una diferencia
+    /// real cuando hay plata cobrada sin asiento en el libro (una fila vieja o un write-point que se
+    /// olvidó de anotar) — que es exactamente para lo que existe la pantalla.
+    #[test]
+    fn test_f40_conciliacion_del_dia() {
+        let test_path = PathBuf::from("test_f40_conciliacion.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+        let hoy = chrono::Local::now().format("%Y-%m-%d").to_string();
+        db.open_day(0.0, 50.0, 55.0).unwrap();
+
+        // Un día con las tres cosas que mueven plata: una venta, un abono y una devolución.
+        db.add_sale(None, "Pantalla A", 1, 100.0, 100.0, "Divisas (USD Cash)", "C1", None, "", 0.0, "", "USD", 0.0).unwrap();
+        let sid = db.add_service("DEV-F40", "Cliente", "0412-1", "Samsung A15", "Rota",
+            "Cambio pantalla", "[\"Cambio pantalla\"]", 50.0, "Pago Móvil", "", 0.0, "", "VES",
+            "", "", "", None, "", None, "", None, 0.0).unwrap();
+        db.add_service_payment(sid, 4000.0, "Pago Móvil", 0.0, "", "VES", "", "").unwrap();
+        db.add_service_refund(sid, 1000.0, "Pago Móvil", "", "VES", "devolución de prueba").unwrap();
+        // …y una entrega SIN cobro: la caja la PRESUME y no es un movimiento de plata (se informa aparte)
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO services (order_num, client, model, amount, payment_method, currency, status, date_in, date_out)
+             VALUES ('DEV-F40-P', 'Cliente 2', 'Samsung A05', 30.0, 'Divisas (USD Cash)', 'USD', 'Entregado', ?1, ?1)",
+            params![hoy],
+        ).unwrap();
+        // La segunda presumida va por un método en BOLÍVARES y con la moneda del método CRUZADA a
+        // propósito: es la trampa que midió la revisión adversarial (la entrega se informaba con el
+        // `currency` crudo de la fila, sin derivarlo del método ni pasar por la tasa).
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO services (order_num, client, model, amount, payment_method, currency, status, date_in, date_out)
+             VALUES ('DEV-F40-P2', 'Cliente 3', 'Samsung A06', 20.0, 'Efectivo Bs', 'USD', 'Entregado', ?1, ?1)",
+            params![hoy],
+        ).unwrap();
+
+        let c1 = db.conciliacion_del_dia(&hoy).unwrap();
+        assert!(c1.cuadra, "un día normal CUADRA (libro y origen dicen lo mismo): {:?}", c1.lineas);
+        assert_eq!(c1.lineas.len(), 2, "dos métodos con cobros: {:?}", c1.lineas);
+        for l in &c1.lineas {
+            assert!(l.diferencia.abs() < 1e-9, "{}: libro {} vs origen {}", l.metodo, l.libro, l.origen);
+            assert!(l.libro.abs() > 0.005, "la línea de {} tiene plata: {}", l.metodo, l.libro);
+        }
+        let divisas = c1.lineas.iter().find(|l| l.metodo == "Divisas (USD Cash)").expect("la venta en dólares");
+        assert!((divisas.libro - 100.0).abs() < 1e-9 && divisas.moneda == "USD", "{divisas:?}");
+        let pm = c1.lineas.iter().find(|l| l.metodo == "Pago Móvil").expect("el abono en Bs.");
+        assert!((pm.libro - 3000.0).abs() < 1e-9 && pm.moneda == "VES", "abono 4000 − devolución 1000 = 3000: {pm:?}");
+        // LOS DOS CONTESTOS, cada uno con su nombre: `movimientos` son los COBROS reales (lo que el
+        // dueño cuenta) y `asientos` las filas del libro. Antes era `max(libro, origen)` y la pantalla
+        // imprimía «Mov. 11» para 1 venta (revisión adversarial). El abono + su devolución son 2 cobros
+        // y 2 asientos; la venta, 1 y 1.
+        assert_eq!((divisas.movimientos, divisas.asientos), (1, 1), "1 venta = 1 cobro y 1 asiento: {divisas:?}");
+        assert_eq!((pm.movimientos, pm.asientos), (2, 2), "abono + devolución = 2 cobros y 2 asientos: {pm:?}");
+        assert_eq!(c1.presunciones.len(), 2, "las dos entregas sin cobro se informan aparte: {:?}", c1.presunciones);
+        let pres_usd = c1.presunciones.iter().find(|p| p.metodo == "Divisas (USD Cash)").expect("la entrega en $");
+        assert_eq!(pres_usd.ordenes, 1);
+        assert!(pres_usd.moneda == "USD" && (pres_usd.monto - 30.0).abs() < 1e-9, "{pres_usd:?}");
+        // La de Bs. se informa en Bs. CON LA TASA DEL DÍA (50 en este test), no con el `currency` crudo
+        // de la fila (que acá está cruzado a propósito): es la misma cuenta que hace el total del día.
+        let pres_bs = c1.presunciones.iter().find(|p| p.metodo == "Efectivo Bs").expect("la entrega en Bs.");
+        assert!(pres_bs.moneda == "VES" && (pres_bs.monto - 20.0 * 50.0).abs() < 1e-9,
+            "20 por «Efectivo Bs» son Bs. 1.000 a la tasa del día: {pres_bs:?}");
+        assert!(c1.avisos.iter().any(|a| a.contains("PRESUME")), "el aviso habla de la entrega sin cobro: {:?}", c1.avisos);
+
+        // LA FECHA SE VALIDA: con '' o con basura las dos partes quedan vacías y la pantalla diría
+        // «Cuadra» sin haber comparado nada (revisión adversarial, MENOR). Ahora es un error explícito.
+        for mala in ["", "   ", "06/10/2026", "2026-10-06 12:00:00", "2026-1-6"] {
+            assert!(db.conciliacion_del_dia(mala).is_err(), "«{mala}» no es un día válido y tiene que rechazarse");
+        }
+        assert!(db.conciliacion_del_dia(&hoy).is_ok());
+
+        // EL DETECTOR: una fila de plata cobrada SIN asiento en el libro (una base vieja, o un
+        // write-point que se olvidó de anotar) tiene que verse — si no, la pantalla sería decorativa.
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO sales (product_name, quantity, unit_price, total, payment_method, currency, date)
+             VALUES ('Venta fantasma', 1, 10.0, 10.0, 'Transferencia Bs', 'VES', ?1)",
+            params![hoy],
+        ).unwrap();
+        let c2 = db.conciliacion_del_dia(&hoy).unwrap();
+        assert!(!c2.cuadra, "con una venta sin asiento en el libro NO cuadra");
+        let fantasma = c2.lineas.iter().find(|l| l.metodo == "Transferencia Bs").expect("la línea de la venta fantasma");
+        assert!((fantasma.libro - 0.0).abs() < 1e-9 && (fantasma.origen - 10.0).abs() < 1e-9, "{fantasma:?}");
+        assert!((fantasma.diferencia + 10.0).abs() < 1e-9, "libro − origen = −10: {fantasma:?}");
+        assert!(c2.avisos.iter().any(|a| a.contains("Transferencia Bs")),
+            "el aviso NOMBRA el método con diferencia: {:?}", c2.avisos);
+        // …y las cifras van en la MONEDA de la línea: el aviso de una línea en bolívares dice
+        // «Bs. 10,00», no «$10.00» (lo encontró la corrida en vivo: la tabla y el aviso mostraban
+        // el mismo número con signos distintos).
+        let aviso_bs = c2.avisos.iter().find(|a| a.contains("Transferencia Bs")).unwrap();
+        assert!(aviso_bs.contains("Bs. 10,00"), "el aviso habla en bolívares: {aviso_bs}");
+        assert!(!aviso_bs.contains("$10.00"), "el aviso NO pone signo de dólar a una cifra en Bs.: {aviso_bs}");
+        assert!(aviso_bs.contains("diferencia -Bs. 10,00"),
+            "el signo va ANTES de la moneda, igual que en la pantalla: {aviso_bs}");
+
+        // BORRAR UNA DEVOLUCIÓN no puede dejar el día «descuadrado» para siempre: el origen pierde su
+        // fila NEGATIVA y el libro recibe el espejo `devolucion_anulado`, que tiene que contar igual.
+        // (Lo encontró la corrida EN VIVO: la prueba de F40 se abortó al medir la copia después de que
+        // otras verificaciones borraran sus devoluciones — «Efectivo Bs: libro −1000 vs origen 0».)
+        db.conn.lock().unwrap().execute("DELETE FROM sales WHERE product_name = 'Venta fantasma'", []).unwrap();
+        let devolucion_id: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT id FROM service_payments WHERE service_id = ?1 AND amount < 0", params![sid], |r| r.get(0))
+            .expect("la devolución de prueba");
+        db.delete_service_payment(devolucion_id).unwrap();
+        let c3 = db.conciliacion_del_dia(&hoy).unwrap();
+        assert!(c3.cuadra, "borrar la devolución deja el día CUADRADO (su espejo cuenta en el libro): {:?}", c3.lineas);
+        let pm3 = c3.lineas.iter().find(|l| l.metodo == "Pago Móvil").expect("la línea del abono en Bs.");
+        assert!((pm3.libro - 4000.0).abs() < 1e-9 && (pm3.origen - 4000.0).abs() < 1e-9,
+            "abono 4000 con la devolución borrada (espejo +1000 incluido): {pm3:?}");
+
         drop(db);
         let _ = std::fs::remove_file(&test_path);
     }
@@ -13054,9 +14109,13 @@ discount_amount: 0.0,
         assert!((ajustes[0].esperado_usd - 15.0).abs() < 1e-9);
         assert!((diferencia(&cerrado) + 15.0).abs() < 1e-9, "el cierre guardado volvió a −15");
 
-        // 6) DÍA SIN TURNO → rechazado (la plata quedaría fuera de toda caja)
-        let err = db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", &sin_turno).unwrap_err().to_string();
-        assert!(err.contains("No hay ninguna caja"), "día sin turno rechazado: {err}");
+        // 6) DÍA PASADO SIN TURNO → F94: SE ACEPTA y se le CREA la caja (antes se rechazaba con «No hay
+        //    ninguna caja (turno) con la fecha X», y con la base del taller —un solo turno abierto— eso
+        //    dejaba al mostrador sin poder anotar la plata del día en que de verdad entró). El caso
+        //    completo (caja creada, arqueo sin contar, abono en Bs, HOY sin caja todavía rechazado) vive
+        //    en `test_f94_abono_de_dias_anteriores_sin_caja`; acá se deja el cambio de regla escrito.
+        assert!(db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", &sin_turno).is_ok(),
+            "un día pasado sin caja ya se puede anotar (se le crea la caja): F94");
 
         // 7) Formato inválido y pago inexistente
         assert!(db.add_service_payment(sid, 5.0, "Divisas (USD Cash)", 0.0, "", "USD", "", "17/09/2026").unwrap_err()

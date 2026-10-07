@@ -1,0 +1,15 @@
+{
+  "_comment": "FUENTE ÚNICA de la moneda de cada método de pago. La leen el backend Rust (include_str! en db.rs) y el frontend (import en src/lib/utils.ts). REGLAS: (1) un método que no esté acá NO se puede cobrar (el backend lo rechaza) porque no se sabría si cobra en dólares o en bolívares; (2) la MONEDA que se declara acá es la que usan los bolsillos de la caja (arqueo, totales por moneda) y la migración de moneda histórica — por eso NO se listan nombres AMBIGUOS: «Punto de Venta» a secas se usa en el local tanto para el de $ como para el de Bs, así que adivinarlo movería plata de un bolsillo a otro (para el Punto están «Punto de Venta ($)» y «Punto de Venta (Bs)»); (3) si el local agrega un método, se toca SOLO este archivo y hay que agregarlo TAMBIÉN a la tabla `payment_methods` para que aparezca en el selector.",
+  "version": 1,
+  "metodos": [
+    { "nombre": "Divisas (USD Cash)", "moneda": "USD" },
+    { "nombre": "Pago Móvil", "moneda": "VES" },
+    { "nombre": "Pago Movil", "moneda": "VES" },
+    { "nombre": "Punto de Venta ($)", "moneda": "USD" },
+    { "nombre": "Punto de Venta (Bs)", "moneda": "VES" },
+    { "nombre": "Transferencia Zelle", "moneda": "USD" },
+    { "nombre": "Zelle", "moneda": "USD" },
+    { "nombre": "Transferencia Bs", "moneda": "VES" },
+    { "nombre": "Efectivo Bs", "moneda": "VES" }
+  ]
+}

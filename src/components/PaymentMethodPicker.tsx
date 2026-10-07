@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { cn, currencySymbol, methodCurrency, shortMethodLabel } from '@/lib/utils';
+import { cn, currencySymbol, methodCurrency, shortMethodLabel, esMetodoConocido } from '@/lib/utils';
 // Las reglas puras (favoritos + cómo se parte la lista) viven en un módulo sin React para poder
 // probarlas sin navegador (`tools/method_picker_test.ts`).
 import { splitMethods, simboloSiAporta, type PaymentMethod } from '@/lib/payment-methods';
@@ -26,7 +26,20 @@ export function PaymentMethodPicker({ methods, value, onChange, size = 'md', dis
   disabled?: boolean;
   className?: string;
 }) {
-  const { fav, resto } = useMemo(() => splitMethods(methods), [methods]);
+  /**
+   * F37 (revisión adversarial, H4) — NO SE OFRECE UN MÉTODO QUE EL BACKEND VA A RECHAZAR.
+   *
+   * La lista viene de la tabla `payment_methods` (que un respaldo importado puede traer con nombres que
+   * no están en la fuente única `tools/payment_methods.json`): ofrecerlos terminaba en un cobro
+   * rechazado al guardar. Se filtran, PERO el valor ya elegido nunca se esconde (una orden vieja con un
+   * método desconocido tiene que poder abrirse y verse tal cual: el que decide es el operario).
+   */
+  const conocidos = useMemo(() => {
+    const lista = methods.filter(m => esMetodoConocido(m.name));
+    const actual = methods.find(m => m.name === value);
+    return actual && !esMetodoConocido(actual.name) ? [...lista, actual] : lista;
+  }, [methods, value]);
+  const { fav, resto } = useMemo(() => splitMethods(conocidos), [conocidos]);
   const esFavorito = fav.some(m => m.name === value);
   const esDelResto = !esFavorito && !!value && resto.some(m => m.name === value);
 

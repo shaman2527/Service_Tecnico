@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import {
   Activity, BookOpen, CheckCircle2, Clock, CreditCard, Download, Landmark, Lock, Package,
   Play, Plus, PiggyBank, Receipt, RefreshCw, RotateCcw, DollarSign, TrendingUp, Smartphone,
-  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye, Undo2, Users, Percent,
+  Banknote, Globe, ArrowRightLeft, Trash2, Wallet, Pencil, AlertTriangle, Search, X, Eye, Undo2, Users, Percent, Scale,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,9 +17,9 @@ import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, A
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import MoneyInput from '@/components/ui/money-input';
 import { api } from '../db';
-import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult, DrawerAdjust } from '../types';
+import type { DailyTotals, DailyClosing, PagoMovilDetail, DaySummary, Expense, ProfitSummary, ReceivablesSummary, InventoryValue, PaymentSearchResult, DrawerAdjust, ConciliacionDia } from '../types';
 import { EXPENSE_CATEGORIES } from '../types';
-import { localDate, addDays, cn } from '@/lib/utils';
+import { localDate, addDays, cn, methodCurrency } from '@/lib/utils';
 // F68: el libro de plata (quién hizo cada movimiento) y el alta de personas (Master / Caja).
 import UsuariosDialog from './UsuariosDialog';
 import type { CashMovement, CashMovementByUser } from '../types';
@@ -318,6 +318,14 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
   const [expWarning, setExpWarning] = useState<string | null>(null);
   const [expenseMsg, setExpenseMsg] = useState<string | null>(null);
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null);
+  /**
+   * F40 — LA CONCILIACIÓN: el libro de plata contra las ventas y los abonos del día, método por método.
+   * Es de SOLO LECTURA y no depende del rango de la pantalla (la caja cuadra por DÍA), así que tiene su
+   * propia fecha: arranca en hoy y se puede mirar cualquier día.
+   */
+  const [concFecha, setConcFecha] = useState(() => localDate());
+  const [conciliacion, setConciliacion] = useState<ConciliacionDia | null>(null);
+  const [concError, setConcError] = useState<string | null>(null);
   // Pestaña Pagos: búsqueda y drill-down
   const [payMethodFilter, setPayMethodFilter] = useState('');
   const [payClientFilter, setPayClientFilter] = useState('');
@@ -456,6 +464,21 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
   useEffect(() => { loadClosings(); }, [activeDay, dataVersion]);
   useEffect(() => { if (tab === 'gastos') loadExpenses(); }, [tab, startDate, endDate, dataVersion]);
   useEffect(() => { if (tab === 'salud') loadSalud(); }, [tab, startDate, endDate, dataVersion]);
+  // F40 — la conciliación del día elegido (solo lectura; el error NO se traga: una conciliación vacía se
+  // leería como «cuadra» sin haber comparado nada).
+  useEffect(() => {
+    if (tab !== 'movimientos' || !isOwner) return;
+    let alive = true;
+    setConcError(null);
+    // REVISIÓN ADVERSARIAL (MENOR, 2026-10-06): se limpia lo que había ANTES de pedir el día nuevo.
+    // Sin esto, al cambiar la fecha la tarjeta seguía mostrando el día anterior (badge «Cuadra»
+    // incluido) hasta que llegaba el IPC: se leía el veredicto de otro día bajo la fecha nueva.
+    setConciliacion(null);
+    api.conciliacionDelDia(concFecha)
+      .then(c => { if (alive) setConciliacion(c); })
+      .catch(e => { if (alive) { setConciliacion(null); setConcError(e instanceof Error ? e.message : String(e)); } });
+    return () => { alive = false; };
+  }, [tab, isOwner, concFecha, dataVersion]);
 
   /**
    * F68 — el LIBRO DE PLATA del rango. El backend ya limita lo que devuelve según la sesión: una
@@ -825,7 +848,15 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
   });
   const diffBs = diffCierre.bs;
   const diffUsd = diffCierre.usd;
-  const hoyCerrado = !activeDay && closings.some(c => c.close_date === today);
+  /**
+   * F69 → F94 — ¿HOY ya está cerrado de verdad? Solo cuenta un cierre **con arqueo contado** (con
+   * `opened_at`: alguien abrió el día y lo cerró). Una caja que creó el SISTEMA al anotarle un cobro
+   * (`opened_at` NULL, arqueo en 0) NO es un cierre del operario: si contara como tal, el botón «Abrir
+   * Día» desaparecería y el dueño quedaría sin forma de abrir su día desde la pantalla.
+   */
+  const cierreContadoDeHoy = closings.find(c => c.close_date === today && !!c.opened_at);
+  const cajaDelSistemaHoy = !activeDay && !cierreContadoDeHoy && closings.some(c => c.close_date === today);
+  const hoyCerrado = !activeDay && !!cierreContadoDeHoy;
   const pagoMovilTotal = pagoMovilList.reduce((a, p) => a + p.amount, 0);
   // F39: la liquidación del Punto también cuadra POR MONEDA (misma regla pura que el arqueo).
   // (El Punto que se declara al CERRAR el día ya no tiene una resta propia: es una línea más del arqueo
@@ -964,6 +995,15 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
                 <p className="text-xs text-amber-700/80" data-field="dia-cerrado-hoy">
                   Hoy ya está cerrado con su arqueo: si hay que anotar algo de hoy, el dueño lo reabre en
                   Libro Diario → Cierres (botón ↺), se anota y se vuelve a cerrar.
+                </p>
+              )}
+              {/* F94: la caja de hoy la creó el sistema al anotarle un cobro (nadie la abrió). «Abrir
+                  Día» la completa: se carga el fondo y la tasa y la plata ya anotada se queda en su día. */}
+              {cajaDelSistemaHoy && (
+                <p className="text-xs text-amber-700/80" data-field="caja-del-sistema-hoy">
+                  La caja de hoy la creó el sistema al anotarle un cobro (nadie contó ese cajón todavía).
+                  Podés <strong>Abrir Día</strong> igual: se le carga el fondo y la tasa, y el cobro ya
+                  anotado se queda en este día.
                 </p>
               )}
             </div>
@@ -1623,6 +1663,98 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
             </Button>
           </div>
 
+          {isOwner && (
+            /* F40 — LA CONCILIACIÓN DEL DÍA (solo lectura): el LIBRO DE PLATA contra el ORIGEN de la
+               plata, método por método. Es la pantalla que contesta «¿por qué este número?» y, de paso,
+               la red que avisa si un movimiento no quedó anotado en el libro (o si hay una entrega que
+               la caja presume y nadie cobró). */
+            <Card data-panel="conciliacion">
+              <CardHeader className="pb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                      <Scale className="size-4" /> Conciliación del día
+                      {/* El badge sólo con cobros: sin líneas el cuerpo dice «no hay nada que
+                          conciliar», y un «Cuadra» verde al lado se contradiría (revisión adversarial). */}
+                      {conciliacion && conciliacion.lineas.length > 0 && (
+                        <Badge variant={conciliacion.cuadra ? 'default' : 'destructive'}
+                          className={conciliacion.cuadra ? 'bg-success' : ''}
+                          data-field="conciliacion-estado">
+                          {conciliacion.cuadra ? 'Cuadra' : 'Con diferencias'}
+                        </Badge>
+                      )}
+                    </CardTitle>
+                    <CardDescription className="text-xs">
+                      El libro de plata (lo que se anotó al cobrar) contra las ventas y los abonos de ese día —
+                      las dos partes NETAS de comisión, que es lo que de verdad entró.
+                    </CardDescription>
+                  </div>
+                  <Input type="date" value={concFecha} onChange={e => setConcFecha(e.target.value)}
+                    className="w-40" data-field="conc-fecha" aria-label="Día a conciliar" />
+                </div>
+              </CardHeader>
+              <CardContent className="pb-3">
+                {concError ? (
+                  <p className="text-sm text-danger" data-field="conc-error">{concError}</p>
+                ) : !conciliacion ? (
+                  <p className="text-sm text-muted-foreground">Leyendo el día…</p>
+                ) : conciliacion.lineas.length === 0 ? (
+                  <p className="text-sm text-muted-foreground" data-field="conc-vacio">
+                    Ese día no tiene cobros (ni ventas ni abonos): no hay nada que conciliar.
+                  </p>
+                ) : (
+                  <div className="rounded-md border overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Método</TableHead>
+                          <TableHead className="text-right">Libro</TableHead>
+                          <TableHead className="text-right">Ventas y abonos</TableHead>
+                          <TableHead className="text-right">Diferencia</TableHead>
+                          <TableHead className="text-right">Mov.</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {conciliacion.lineas.map((l, i) => (
+                          <TableRow key={`${l.metodo}-${l.moneda}-${i}`} data-conc-linea={l.metodo}>
+                            <TableCell className="text-sm">
+                              {l.metodo || '(sin método)'}
+                              <span className="ml-1 text-[11px] text-muted-foreground">{l.moneda === 'VES' ? 'Bs.' : '$'}</span>
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">{formatoMoneda(l.libro, l.moneda)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{formatoMoneda(l.origen, l.moneda)}</TableCell>
+                            <TableCell className={`text-right tabular-nums font-medium ${Math.abs(l.diferencia) > 0.005 ? 'text-danger' : 'text-success'}`}>
+                              {Math.abs(l.diferencia) > 0.005 ? formatoMoneda(l.diferencia, l.moneda) : '—'}
+                            </TableCell>
+                            {/* Los COBROS (lo que el dueño cuenta), no el mayor de las dos partes:
+                                el detalle de cuántos asientos tiene el libro va en el title. */}
+                            <TableCell className="text-right tabular-nums text-muted-foreground"
+                              title={`${l.movimientos} cobro(s) · ${l.asientos} asiento(s) en el libro`}>
+                              {l.movimientos}
+                              {l.asientos !== l.movimientos && (
+                                <span className="ml-1 text-[10px]">({l.asientos})</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+                {conciliacion && conciliacion.presunciones.length > 0 && (
+                  <p className="mt-2 text-[11px] text-muted-foreground" data-field="conc-presunciones">
+                    La caja PRESUME {conciliacion.presunciones.reduce((a, p) => a + p.ordenes, 0)} entrega(s) de ese día
+                    sin ningún cobro registrado ({conciliacion.presunciones.map(p => `${p.metodo || '(sin método)'} ${formatoMoneda(p.monto, p.moneda)}`).join(' · ')}):
+                    es plata que el sistema espera y todavía no tiene asiento en el libro.
+                  </p>
+                )}
+                {conciliacion?.avisos.map((a, i) => (
+                  <p key={i} className="mt-2 text-xs text-warning" data-field="conc-aviso">{a}</p>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
           {isOwner && porPersona.length > 0 && (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               {porPersona.map(p => (
@@ -1893,7 +2025,19 @@ export default function DailyLedger({ role = 'owner', focusTab }: {
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">¿De dónde salió la plata?</label>
               <select className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
-                data-field="exp-metodo" value={expMethod} onChange={e => setExpMethod(e.target.value)}>
+                data-field="exp-metodo" value={expMethod}
+                onChange={e => {
+                  const m = e.target.value;
+                  setExpMethod(m);
+                  // F37 (revisión adversarial, H1) — LA MONEDA LA MANDA EL MÉTODO: el ajuste del cajón
+                  // decide el BOLSILLO por la moneda del gasto (`gastos_usd` vs `gastos_bs`), así que
+                  // «Monto 5.000 + Moneda $ + Salió de: Efectivo Bs» descontaba 5.000 DÓLARES del
+                  // esperado y dejaba los bolívares que salieron del cajón sin descontar. El backend ya
+                  // deriva la moneda del método; acá el desplegable se sincroniza para que el operario
+                  // vea lo mismo (y para que el aviso de abajo diga la verdad). «Sin declarar» conserva
+                  // la moneda que eligió: no hay método del que derivarla.
+                  if (m.trim()) setExpCurrency(methodCurrency(m));
+                }}>
                 <option value="">Sin declarar (no baja el cajón)</option>
                 {PAYMENT_METHODS.filter(Boolean).map(m => <option key={m} value={m}>{m}</option>)}
               </select>

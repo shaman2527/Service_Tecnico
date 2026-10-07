@@ -22,16 +22,18 @@ import { PaymentMethodPicker } from './PaymentMethodPicker';
 import { orderBalance, balanceLabel } from '@/lib/order-balance';
 // F82 — la caja del día anterior sin cerrar: la regla pura decide si el abono se puede guardar hoy.
 import { shiftPending, turnoViejoTexto, fechaLegible } from '@/lib/day-shift';
-import { TurnoViejoBanner } from './TurnoViejoBanner';
 import type { AjusteCierre, EstadoDelDia, Service, ServicePayment } from '../types';
 
-export default function PaymentDialog({ service, open, onOpenChange, onSaved, dayOpen, puedeCerrarCaja = true }: {
+export default function PaymentDialog({ service, open, onOpenChange, onSaved }: {
   service: Service | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onSaved?: () => void;
+  /** F94 — `dayOpen` y `puedeCerrarCaja` ya NO se usan acá: el abono no se bloquea por la caja (se le
+   *  crea la del día elegido si no la tiene). Se conservan en la firma para no tocar a los llamadores
+   *  —Services.tsx y el asistente de cierre siguen pasándolos— y porque el cartel de la caja vieja los
+   *  sigue usando en sus pantallas. */
   dayOpen?: boolean | null;
-  /** F82: ¿esta sesión puede cerrar el día? (cerrar es del dueño) — lo dice el cartel. */
   puedeCerrarCaja?: boolean;
 }) {
   const [payments, setPayments] = useState<ServicePayment[]>([]);
@@ -70,11 +72,28 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const [estadoDia, setEstadoDia] = useState<EstadoDelDia | null>(null);
   const turnoViejo = shiftPending(fechaTurno, localDate());
   /**
-   * F82 — ¿el abono está bloqueado por la caja vieja? Solo cuando la fecha elegida es HOY y el turno
-   * abierto es de otro día (el backend lo rechaza: no hay turno de esa fecha). Elegir A PROPÓSITO la
-   * fecha del turno abierto sigue permitido: es el camino retroactivo de F35.
+   * F94 — UN ABONO NO SE BLOQUEA POR LA CAJA (el pedido del dueño fue «un abono que se hizo unos días
+   * anteriores, déjalo colocar» + «no tenga bloqueante»).
+   *
+   * La plata entra en la caja del **DÍA QUE SE ELIGE** y, si ese día no tiene caja, el sistema **se la
+   * crea** (cerrada, con el arqueo en 0) — hoy incluido. Antes había dos bloqueos acá: `dayOpen ===
+   * false` («Debe abrir el día…») y la caja vieja abierta con la fecha de hoy (F82), y los dos dejaban
+   * al mostrador sin poder anotar un cobro que existió de verdad.
+   *
+   * Lo que SÍ sigue bloqueando: monto ≤ 0, una orden finalizada (Devuelto/Cancelado) y un abono en Bs
+   * **sin ninguna tasa conocida** (se convertiría 1:1 y corrompería el saldo de la orden).
    */
-  const pagoBloqueadoPorTurno = turnoViejo.stale && payDate.slice(0, 10) === localDate();
+  const esFechaDeHoy = payDate.slice(0, 10) === localDate();
+  const diaSinCaja = !!estadoDia && !estadoDia.existe;
+  /** El turno abierto es de OTRO día: este abono de hoy NO entra ahí (entra en la caja de hoy). */
+  const cajaViejaAbierta = turnoViejo.stale && esFechaDeHoy;
+  /**
+   * F94 — LA TASA DEL DÍA DEL PAGO (no la de hoy). El backend valúa un abono con la tasa de SU día
+   * (`recalc_paid_amount` + `has_bcv_rate_for_date`), así que el diálogo tiene que convertir con la
+   * misma: si no, el «se va a guardar Bs. X» y el abono acreditado no coincidirían. Para un día sin
+   * caja, `estado_del_dia` ya devuelve la tasa con la que nacerá esa caja.
+   */
+  const tasaDelPago = estadoDia ? estadoDia.tasa_bcv : tasaBcv;
   // Si el usuario tecleó el monto a mano, no se re-sugiere
   const payTouched = useRef(false);
   // Si el usuario cambió el toggle $/Bs. a mano, no se le pisa la elección (F38)
@@ -95,7 +114,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
 
   // Conversión de moneda del CAMPO (toggle): Bs entero, $ 2 decimales. Sin tasa no
   // hay conversión segura → devuelve el valor sin cambios (el Alert ámbar lo avisa).
-  const convertTo = (value: number, to: 'USD' | 'VES'): number => convertAmount(value, payCur, to, tasaBcv);
+  const convertTo = (value: number, to: 'USD' | 'VES'): number => convertAmount(value, payCur, to, tasaDelPago);
 
   // Cambiar la moneda del campo convierte el valor SIN cambiar su significado:
   // $5 → Bs. 3.744 al pasar a Bs.; Bs. 5.000 → $6.68 al pasar a $.
@@ -107,7 +126,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   };
 
   // Monto FINAL a guardar: SIEMPRE en la moneda del MÉTODO (el campo puede estar en $ o Bs.).
-  const payAmountFinal = finalAmount(payAmount, payCur, payCurrency, tasaBcv);
+  const payAmountFinal = finalAmount(payAmount, payCur, payCurrency, tasaDelPago);
 
   // Chips de abono rápido en la moneda del CAMPO: $5/$10/$15/$20 o Bs. 5.000/10.000/15.000/20.000
   // ("5 mil", "10 mil" — lo que dice el cliente).
@@ -121,8 +140,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   const suggestAmount = useCallback(() => {
     if (!service) return 0;
     const saldo = service.amount - (service.paid_amount ?? 0);
-    return suggestPaymentAmount(saldo, service.amount, payCur, tasaBcv);
-  }, [service, payCur, tasaBcv]);
+    return suggestPaymentAmount(saldo, service.amount, payCur, tasaDelPago);
+  }, [service, payCur, tasaDelPago]);
 
   // Cargar pagos + tasa al abrir con un servicio
   useEffect(() => {
@@ -153,7 +172,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
       if (!dateTouched.current) setPayDate(turno.stale ? localDate() : (d?.close_date ?? localDate()));
     }).catch(() => {});
     // Inicializar el form con el método del servicio (el toggle sigue la moneda del método)
-    setPayMethod(service.payment_method ?? 'Divisas (USD Cash)');
+    // F37 (revisión adversarial, H3): ?? '' NO atrapa el string vacío y una orden vieja con el método en blanco dejaba el selector SIN método (y el guardado habilitado): la fila nacía con método '' y la moneda que eligiera la UI. Se cae al método por defecto del local.
+    setPayMethod(service.payment_method?.trim() || 'Divisas (USD Cash)');
     setPayCur(methodCurrency(service.payment_method));
     setPayFee(service.payment_method?.includes('Punto') ? DEFAULT_PUNTO_FEE : 0);
     setPayZelle('');
@@ -189,7 +209,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   // Re-sugerir el monto cuando cambia el método, la moneda del campo, la tasa o se abre (solo si no se tocó a mano)
   useEffect(() => {
     if (open && !payTouched.current) setPayAmount(suggestAmount());
-  }, [open, service, payMethod, payCur, tasaBcv, suggestAmount]);
+  }, [open, service, payMethod, payCur, tasaDelPago, suggestAmount]);
 
   // F92 — el estado de la caja del día ELEGIDO: se consulta al abrir y cada vez que cambia la fecha.
   useEffect(() => {
@@ -240,7 +260,11 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
     if (!ok) return;
     // F92 — si el cobro cayó en un día ya CERRADO, su cierre se acaba de recalcular: se dice (el
     // operario tiene que saber que el arqueo de ESE día cambió, aunque el día esté cerrado).
-    if (estadoDia?.cerrado) {
+    // F94 — y si ese día NO tenía caja, se le acaba de crear: se dice también, con el remedio para
+    // contar el cajón de ese día (si no, la fila nueva aparecería en Cierres sin explicación).
+    if (diaSinCaja && !esFechaDeHoy) {
+      toast.success(`Cobro anotado en el ${fechaLegible(payDate.slice(0, 10))}: ese día no tenía caja y se le creó con el arqueo en 0 (sin contar). Reabrilo con ↺ en Libro Diario → Cierres para contarlo.`);
+    } else if (estadoDia?.cerrado) {
       toast.success(`Cobro anotado en la caja del ${fechaLegible(estadoDia.fecha)} (ese día estaba cerrado: su cierre se actualizó con este cobro).`);
     }
     // El pago YA se guardó: si el refresco falla, el diálogo se cierra igual (antes quedaba abierto
@@ -282,8 +306,8 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
   // cliente va a entregar). El $ sigue siendo la verdad contable y NO se revalúa.
   const saldoTexto = balanceLabel(orderBalance(service?.amount ?? 0, abonadoUsd, payments, tasaBcv));
 
-  // Valor del chip "Todo el saldo" en la moneda del CAMPO (Bs → saldo × tasa BCV)
-  const saldoChip = saldoChipValue(saldoUsd, payCur, tasaBcv);
+  // Valor del chip "Todo el saldo" en la moneda del CAMPO (Bs → saldo × tasa BCV del día del pago)
+  const saldoChip = saldoChipValue(saldoUsd, payCur, tasaDelPago);
 
   // Comisión del Punto de Venta (las mismas cuentas que usa el asistente de cierre)
   const punto = puntoCommission(payAmountFinal, payFee);
@@ -298,9 +322,10 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
         <DialogHeader className="shrink-0">
           <DialogTitle>Registrar Pago / Abono {service ? `· ${service.order_num}` : ''}</DialogTitle>
         </DialogHeader>
-        {/* F82: la caja del día anterior sin cerrar. Se ve ANTES de escribir el monto, y solo si el
-            problema afecta a ESTE abono (fecha de hoy con el turno abierto de otro día). */}
-        {pagoBloqueadoPorTurno && <TurnoViejoBanner turno={turnoViejo} className="shrink-0" puedeCerrar={puedeCerrarCaja} />}
+        {/* F94 — acá YA NO va el cartel bloqueante de la caja vieja (F82): el abono entra en la caja del
+            día elegido y, si no la tiene, el sistema se la crea. El aviso ámbar del campo de fecha lo
+            explica sin frenar el guardado; el cartel de la caja vieja sigue en Dashboard/Ventas/Servicio
+            Técnico, que es donde bloquea FACTURAR (ventas y órdenes). */}
         <div className="min-h-0 flex-1 overflow-y-auto flex flex-col gap-4 pr-1">
           <div className="text-sm flex flex-col gap-1 rounded-md bg-muted/60 px-3 py-2">
             <p>Total: <strong>${(service?.amount ?? 0).toFixed(2)}</strong></p>
@@ -357,7 +382,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                   : `$${payAmountFinal.toFixed(2)}`}</strong> ({payIsBs ? 'bolívares' : 'dólares'}, moneda del método).
               </p>
             )}
-            {tasaBcv <= 0 && (payIsBs || payCur === 'VES') && (
+            {tasaDelPago <= 0 && (payIsBs || payCur === 'VES') && (
               <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
                 <AlertTriangle className="size-4" />
                 <AlertDescription className="text-xs text-amber-800">
@@ -367,29 +392,29 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 </AlertDescription>
               </Alert>
             )}
-            {payCur === 'VES' && tasaBcv > 0 && payAmount > 0 && (
+            {payCur === 'VES' && tasaDelPago > 0 && payAmount > 0 && (
               <p className="text-xs text-muted-foreground">
-                ≈ ${(payAmount / tasaBcv).toFixed(2)} (tasa BCV {tasaBcv.toFixed(2)})
+                ≈ ${(payAmount / tasaDelPago).toFixed(2)} (tasa BCV {tasaDelPago.toFixed(2)})
               </p>
             )}
-            {payCur === 'USD' && tasaBcv > 0 && payAmount > 0 && (
+            {payCur === 'USD' && tasaDelPago > 0 && payAmount > 0 && (
               <p className="text-xs text-muted-foreground">
-                ≈ Bs. {round2(payAmount * tasaBcv).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV {tasaBcv.toFixed(2)})
+                ≈ Bs. {round2(payAmount * tasaDelPago).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (tasa BCV {tasaDelPago.toFixed(2)})
               </p>
             )}
-            {payIsBs && payCur === 'USD' && tasaBcv > 0 && payAmount > 0 && (
+            {payIsBs && payCur === 'USD' && tasaDelPago > 0 && payAmount > 0 && (
               <p className="text-xs text-muted-foreground">
-                Se abonarán <strong>Bs. {payAmountFinal.toLocaleString('es-VE')}</strong> (tasa BCV {tasaBcv.toFixed(2)})
+                Se abonarán <strong>Bs. {payAmountFinal.toLocaleString('es-VE')}</strong> (tasa BCV {tasaDelPago.toFixed(2)})
               </p>
             )}
-            {!payIsBs && payCur === 'VES' && tasaBcv > 0 && payAmount > 0 && (
+            {!payIsBs && payCur === 'VES' && tasaDelPago > 0 && payAmount > 0 && (
               <p className="text-xs text-muted-foreground">
-                Se abonarán <strong>${payAmountFinal.toFixed(2)}</strong> (tasa BCV {tasaBcv.toFixed(2)})
+                Se abonarán <strong>${payAmountFinal.toFixed(2)}</strong> (tasa BCV {tasaDelPago.toFixed(2)})
               </p>
             )}
-            {payIsBs && saldoUsd > 0.005 && tasaBcv > 0 && (
+            {payIsBs && saldoUsd > 0.005 && tasaDelPago > 0 && (
               <p className="text-xs text-muted-foreground">
-                Saldo pendiente ≈ <strong>Bs. {round2(saldoUsd * tasaBcv).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> (tasa BCV {tasaBcv.toFixed(2)})
+                Saldo pendiente ≈ <strong>Bs. {round2(saldoUsd * tasaDelPago).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> (tasa BCV {tasaDelPago.toFixed(2)})
               </p>
             )}
             {/* F38: cobrar MÁS que el saldo deja un excedente a favor del cliente. No se bloquea (puede
@@ -397,14 +422,14 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 Cubre también la orden YA SALDADA (saldo ≤ 0): ahí cualquier monto es excedente, y antes
                 no avisaba nada — se registraba un cobro de más sin que nadie lo viera. */}
             {!isFinalized(service?.status) && payAmount > 0
-              && convertAmount(payAmount, payCur, 'USD', tasaBcv) > saldoUsd + 0.005 && (
+              && convertAmount(payAmount, payCur, 'USD', tasaDelPago) > saldoUsd + 0.005 && (
               <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning" data-field="aviso-excedente">
                 <AlertTriangle className="size-4" />
                 <AlertDescription className="text-xs text-amber-800">
                   {saldoUsd > 0.005
                     ? <>Se está cobrando más que el saldo: quedaría a favor del cliente{' '}</>
                     : <>Esta orden ya está cancelada: todo lo que cobres queda a favor del cliente{' '}</>}
-                  <strong>${(convertAmount(payAmount, payCur, 'USD', tasaBcv) - Math.max(0, saldoUsd)).toFixed(2)}</strong>.
+                  <strong>${(convertAmount(payAmount, payCur, 'USD', tasaDelPago) - Math.max(0, saldoUsd)).toFixed(2)}</strong>.
                   Revisá el monto si fue un error de tipeo.
                 </AlertDescription>
               </Alert>
@@ -425,7 +450,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 // SIN TASA no hay conversión posible: se deja el campo como está (no se borra lo
                 // tecleado ni se le cambia el rótulo) y Guardar queda bloqueado porque el monto
                 // final en la moneda del método da 0.
-                if (nextCur !== payCur && tasaBcv > 0) {
+                if (nextCur !== payCur && tasaDelPago > 0) {
                   setPayAmount(convertTo(payAmount, nextCur));
                   setPayCur(nextCur);
                 }
@@ -466,12 +491,24 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 El turno abierto es el <strong>{diaTurno.split('-').reverse().join('/')}</strong>: el abono entra en esa caja.
               </p>
             )}
-            {estadoDia && !estadoDia.existe && payDate !== diaTurno && (
-              <Alert className="border-destructive/40 bg-destructive/10 py-2.5 [&>svg]:text-destructive">
+            {diaSinCaja && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
                 <AlertTriangle className="size-4" />
-                <AlertDescription className="text-xs" data-field="aviso-dia-sin-caja">
-                  El <strong>{fechaLegible(payDate.slice(0, 10))}</strong> no tiene caja (turno) en el sistema: esa plata no
-                  entraría en ningún arqueo. Elegí un día con caja.
+                <AlertDescription className="text-xs text-amber-800" data-field="aviso-dia-sin-caja">
+                  {esFechaDeHoy ? 'Hoy' : `El ${fechaLegible(payDate.slice(0, 10))}`} no tiene caja abierta en el
+                  sistema: al guardar, el abono entra en <strong>{esFechaDeHoy ? 'el día de hoy' : 'ese día'}</strong> y
+                  se le crea su caja. El cajón de ese día queda <strong>sin contar</strong> (arqueo en 0), así que en
+                  Libro Diario → Cierres vas a verlo con su diferencia: reabrilo con ↺ para contar y volver a cerrarlo.
+                </AlertDescription>
+              </Alert>
+            )}
+            {cajaViejaAbierta && (
+              <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
+                <AlertTriangle className="size-4" />
+                <AlertDescription className="text-xs text-amber-800" data-field="aviso-turno-viejo-pago">
+                  La caja del <strong>{fechaLegible(turnoViejo.fechaTurno ?? '')}</strong> sigue ABIERTA: este abono es
+                  de HOY y <strong>NO entra ahí</strong> (entra en la caja de hoy). El cartel de la caja vieja sigue
+                  valiendo para <strong>facturar ventas y órdenes</strong>, no para anotar un cobro.
                 </AlertDescription>
               </Alert>
             )}
@@ -485,7 +522,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
                 </AlertDescription>
               </Alert>
             )}
-            {payDate !== (diaTurno || localDate()) && !estadoDia?.cerrado && estadoDia?.existe && !pagoBloqueadoPorTurno && (
+            {payDate !== (diaTurno || localDate()) && !estadoDia?.cerrado && estadoDia?.existe && !cajaViejaAbierta && (
               <Alert className="border-amber-500/40 bg-amber-500/10 py-2.5 [&>svg]:text-warning">
                 <AlertTriangle className="size-4" />
                 <AlertDescription className="text-xs text-amber-800">
@@ -565,10 +602,13 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
             </div>
           )}
           {payError && <p className="text-sm text-danger">{payError}</p>}
-          {/* F82: el motivo del botón apagado, dicho (nunca un botón gris sin explicación). */}
-          {pagoBloqueadoPorTurno && (
-            <p className="text-xs text-danger" data-field="aviso-turno-viejo-pago">
-              {turnoViejoTexto(turnoViejo)} Si el cobro fue realmente del {fechaLegible(turnoViejo.fechaTurno)}, elegí esa fecha en «Fecha del pago».
+          {/* F94 — el aviso de la caja vieja ya no explica un botón apagado (no hay botón apagado):
+              dice a dónde va la plata y qué sigue bloqueando de verdad (facturar ventas y órdenes). */}
+          {cajaViejaAbierta && (
+            <p className="text-xs text-amber-700" data-field="aviso-turno-viejo-pago">
+              La caja del <strong>{fechaLegible(turnoViejo.fechaTurno)}</strong> sigue abierta, pero este cobro de hoy
+              entra en la <strong>caja de hoy</strong> (no en la vieja). Para <strong>facturar</strong> ventas y órdenes
+              sí hay que cerrar esa caja: {turnoViejoTexto(turnoViejo)}
             </p>
           )}
         </div>
@@ -579,7 +619,7 @@ export default function PaymentDialog({ service, open, onOpenChange, onSaved, da
               <Printer className="size-4" /> Imprimir orden
             </Button>
           )}
-          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || dayOpen === false || (payIsBs && tasaBcv <= 0) || isFinalized(service?.status) || pagoBloqueadoPorTurno}>
+          <Button onClick={doAddPayment} title="Ctrl+Enter" disabled={savingPay || payAmount <= 0 || payAmountFinal <= 0 || (payIsBs && tasaDelPago <= 0) || isFinalized(service?.status)}>
             {savingPay ? 'Guardando...' : 'Guardar Pago'}
           </Button>
         </DialogFooter>

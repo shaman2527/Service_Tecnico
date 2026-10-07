@@ -204,6 +204,49 @@ if (pw && pw.value) warn(`la plantilla trae impresora de Windows «${pw.value}»
 const pl = q("SELECT value FROM settings WHERE key='printer_business_line'", 'nombre de negocio');
 if (pl && pl.value) warn(`la plantilla trae un nombre de negocio: «${pl.value}»`, 'revisá que sea el correcto');
 
+// 7b) F37 — LA MONEDA DE LOS MÉTODOS DE PAGO. Dos comprobaciones que antes no existían en ningún gate:
+//     (a) `tools/payment_methods.json` (la FUENTE ÚNICA que leen Rust y el frontend) tiene que estar
+//         bien formado: si se edita mal, el backend PANIQUEA AL ARRANCAR (la app se cierra sin ventana,
+//         porque el release no tiene consola) — mejor que lo diga acá;
+//     (b) la plantilla que se empaqueta no puede OFRECER un método que la fuente única no conozca: el
+//         selector lo mostraría y el backend rechazaría el cobro.
+//     (La lista puede venir de un respaldo importado, por eso se valida la base REAL que viaja.)
+try {
+  const fuente = JSON.parse(readFileSync(join(ROOT, 'tools', 'payment_methods.json'), 'utf-8'));
+  const lista = Array.isArray(fuente?.metodos) ? fuente.metodos : null;
+  if (!lista || lista.length === 0) {
+    fail('tools/payment_methods.json no tiene la lista «metodos»',
+      'el backend no puede derivar la moneda de ningún método de pago (y el arranque falla).');
+  } else {
+    const malas = lista.filter(m => m?.moneda !== 'USD' && m?.moneda !== 'VES');
+    const sinNombre = lista.filter(m => !String(m?.nombre ?? '').trim());
+    const nombres = lista.map(m => String(m?.nombre ?? '').trim());
+    const repetidos = nombres.filter((n, i) => nombres.indexOf(n) !== i);
+    if (malas.length) fail('tools/payment_methods.json tiene métodos con una moneda que no es USD ni VES',
+      `entradas: ${malas.map(m => `${m?.nombre ?? '?'}=${m?.moneda ?? 'sin moneda'}`).join(', ')}`);
+    if (sinNombre.length) fail('tools/payment_methods.json tiene entradas sin nombre', `${sinNombre.length} entrada(s)`);
+    if (repetidos.length) fail('tools/payment_methods.json tiene métodos repetidos', repetidos.join(', '));
+    const SEMBRADOS = ['Divisas (USD Cash)', 'Pago Móvil', 'Punto de Venta ($)', 'Punto de Venta (Bs)', 'Transferencia Zelle', 'Transferencia Bs', 'Efectivo Bs'];
+    const faltan = SEMBRADOS.filter(n => !nombres.includes(n));
+    if (faltan.length) fail('la fuente única de métodos no tiene los que siembra la base',
+      `faltan: ${faltan.join(', ')} (esos métodos no se podrían cobrar)`);
+    if (!malas.length && !sinNombre.length && !repetidos.length && !faltan.length) {
+      pass(`métodos de pago: ${nombres.length} en la fuente única (${nombres.filter(n => lista.find(m => m.nombre === n)?.moneda === 'VES').length} en Bs)`,
+        'la leen el backend y el frontend (tools/payment_methods.json)');
+    }
+    // (b) la plantilla empaquetada no puede ofrecer un método desconocido
+    const filas = (() => { try { return db.prepare('SELECT name FROM payment_methods ORDER BY name').all(); } catch { return null; } })();
+    if (filas) {
+      const desconocidos = filas.map(f => String(f.name)).filter(n => !nombres.includes(n));
+      if (desconocidos.length) fail('la plantilla ofrece métodos que el backend rechazaría',
+        `${desconocidos.join(', ')} — están en la tabla payment_methods pero no en tools/payment_methods.json: el selector los mostraría y el cobro fallaría. Agregalos al archivo (con su moneda) o sacalos de la base.`);
+      else pass(`métodos de la plantilla: ${filas.length} (todos con moneda conocida)`, 'el selector no puede ofrecer algo que el backend rechace');
+    }
+  }
+} catch (e) {
+  fail('no pude leer/parsear tools/payment_methods.json', `el backend no podría derivar la moneda (${String(e.message ?? e).slice(0, 120)})`);
+}
+
 // 8) HIGIENE DEL REPO — un archivo gigante versionado impide publicar: GitHub rechaza un push con un
 //    archivo de más de 100 MB, y aunque pase, el repo público queda inflado para siempre.
 //    Caso real (2026-09-18): `tools/progress/patterns.md` había llegado a 310 MB porque el

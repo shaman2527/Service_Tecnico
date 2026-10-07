@@ -50,6 +50,18 @@ try {
   check('el mensaje dice por dónde ENTRÓ', err.includes('Pago Móvil'), err.slice(0, 160));
 
   // --- el DIÁLOGO propone el método real (y no avisa de nada raro) ---
+  // OJO (lección F90, costó una corrida en rojo): escribir por `__TAURI_INTERNALS__.invoke` **saltea el
+  // bus de datos** de `src/db.ts`, así que la LISTA no se entera de la orden recién creada y la tarjeta
+  // no existe en pantalla aunque esté en la base. Se recarga (el camino real del mostrador al abrir la
+  // app) antes de buscar la tarjeta.
+  await evalx(`location.reload(); 'ok'`).catch(() => {});
+  await sleep(3500);
+  if (await evalx(`!!document.querySelector('input[placeholder="PIN de 4 dígitos"]')`)) {
+    await clickCenter(`document.querySelector('input[placeholder="PIN de 4 dígitos"]')`);
+    await typeText('1234');
+    await keyNav('Enter', 'Enter', 13);
+    await sleep(3000);
+  }
   await clickCenter(`[...document.querySelectorAll('aside button')].find(b => b.innerText.trim().startsWith('Servicio Técnico'))`);
   await waitFor(`document.body.innerText.includes('ZZ Prueba F42')`, 15000);
   const abierto = await evalx(`(() => {

@@ -21,15 +21,42 @@ export function initialsOf(name: string | null | undefined): string {
   return parts.slice(0, 2).map(p => p[0].toUpperCase()).join('') || '?';
 }
 
-// Métodos de pago en bolívares: Efectivo Bs, Pago Móvil, Transferencia Bs, Punto de Venta (Bs)
-export function isBsMethod(m: string | null | undefined): boolean {
-  if (!m) return false;
-  if (m.includes('USD') || m.includes('Zelle') || m.includes('$')) return false;
-  return true;
+// F37 — LA MONEDA DE CADA MÉTODO DE PAGO SALE DE **UN SOLO ARCHIVO COMPARTIDO** con el backend
+// (`tools/payment_methods.json`, el mismo que lee `db.rs` con `include_str!`). Antes acá había una
+// HEURÍSTICA: todo método que no dijera «USD»/«Zelle»/«$» se daba por BOLÍVARES, así que un método
+// propio del local («Binance», «PayPal») se mostraba y se guardaba como Bs — y la caja lo contaba en
+// bolívares. Ahora: si el archivo dice VES es Bs; si dice USD es dólar; y **un método que no está en el
+// archivo NO se puede cobrar** (el backend lo rechaza: no se sabría en qué moneda contarlo).
+import metodosDePago from '../../tools/payment_methods.json' with { type: 'json' }
+
+/** `método → moneda` desde la fuente única. */
+const MONEDA_POR_METODO = new Map<string, 'USD' | 'VES'>(
+  (metodosDePago.metodos ?? []).map(m => [m.nombre.trim(), m.moneda === 'VES' ? 'VES' : 'USD'] as const),
+)
+
+/** ¿El sistema conoce este método (y por lo tanto sabe en qué moneda cobra)? */
+export function esMetodoConocido(m: string | null | undefined): boolean {
+  return MONEDA_POR_METODO.has((m ?? '').trim())
 }
 
+/** La moneda canónica del método, o `null` si el sistema no lo conoce. */
+export function monedaDelMetodo(m: string | null | undefined): 'USD' | 'VES' | null {
+  return MONEDA_POR_METODO.get((m ?? '').trim()) ?? null
+}
+
+export function isBsMethod(m: string | null | undefined): boolean {
+  return monedaDelMetodo(m) === 'VES';
+}
+
+/** Moneda con la que se muestra/guarda un cobro. Un método CONOCIDO manda siempre; uno desconocido (dato
+ *  viejo) se lee como dólares, que es el fallback del backend — nunca se inventa que es Bs. */
 export function methodCurrency(m: string | null | undefined): 'USD' | 'VES' {
-  return isBsMethod(m) ? 'VES' : 'USD';
+  return monedaDelMetodo(m) ?? 'USD';
+}
+
+/** Los nombres de los métodos del sistema, para listas y mensajes. */
+export function nombresDeMetodos(): string[] {
+  return [...MONEDA_POR_METODO.keys()];
 }
 
 export function currencySymbol(c: string | null | undefined): string {
