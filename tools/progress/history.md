@@ -1041,3 +1041,22 @@ y escribir «perez» ahora encuentra a «Pérez» (antes: 0 resultados).
 «2» en el monto cuando el campo estaba en Bs. (Bs. 2 = $0,00 → el botón se apaga por un motivo legítimo)
 y `verify_alta_limpia_filtros` buscaba el cliente en los primeros 60 caracteres de la tarjeta, que con una
 orden CON SALDO quedan ocupados por el banner «SIN PAGAR · Falta $…». Las dos fallaban por el DATO.
+
+## RELEASE PUBLICADA — v0.4.13 (2026-11-12)
+
+**Publicada en GitHub** (`shaman2527/Service_Tecnico`, tag `v0.4.13`) con el instalador firmado y el
+`latest.json` del updater. Endpoint verificado: `releases/latest/download/latest.json` sirve
+**version 0.4.13** con firma, y el setup descarga (HTTP 200, 7,09 MB).
+
+- **Instalador:** `instaladores\Registro Servicio Tecnico_0.4.13_x64-setup.exe` (+ `.sig`)
+- **`Registro.exe` del árbol:** actualizado (18,78 MB, firma de la build del 12/11)
+- **Commits:** `b28d88e` (release 0.4.13: F96) y `14b1fed` (bump de versión), subidos a `origin/main`.
+- **Qué trae:** el buscador de Servicio Técnico que responde en el acto (F96) — ver §16.
+- **OJO para la próxima vez:** `tools/release.ps1` construye, firma, arma el `latest.json` y copia a
+  `instaladores\`, pero **el paso de `gh release create` se saltó** («gh no autenticado») aunque `gh auth
+  status` sí devolvía 0 a mano: su chequeo (`gh auth status 2>$null | Out-Null` + `$LASTEXITCODE`, con
+  `$ErrorActionPreference = 'Stop'`) no es fiable en un shell no interactivo. La release se publicó a mano
+  con el mismo comando que el script imprime. **Al cerrar una release, correr el `gh release create` a mano
+  y verificar el endpoint `releases/latest/download/latest.json`.**
+- **La PC del taller sigue con la 0.4.12 instalada**: al abrir la app el aviso de actualización la ofrece, o
+  se corre el instalador de `instaladores\`. Los datos del local no se tocan en ninguno de los dos caminos.
