@@ -110,6 +110,29 @@ body {
   * { @apply border-border; }
 }
 
+/*
+ * F96 — LA TARJETA QUE NO SE VE NO SE PINTA.
+ * Con cientos de órdenes la lista se dibuja ENTERA en cada cambio de filtro (1400 tarjetas): el
+ * navegador gasta el tiempo en maquetar y pintar tarjetas que nadie está mirando, y eso es lo que
+ * hacía que escribir en el buscador se sintiera pesado. `content-visibility: auto` le dice que se
+ * salte ese trabajo para las que están fuera de la pantalla; `contain-intrinsic-size` le da una
+ * altura estimada para que la barra de scroll no salte (el `auto` hace que, una vez medida de
+ * verdad, el navegador recuerde su altura real). No cambia NADA de lo que se ve: una tarjeta que
+ * entra en pantalla se pinta en el acto.
+ *
+ * OJO al escribir verificaciones en vivo: una tarjeta fuera de la pantalla tiene su subárbol
+ * «saltado», así que su `innerText` puede volver vacío o parcial. Para contar/leer tarjetas hay que
+ * usar `textContent` (que incluye lo no pintado) o llevar la tarjeta a la vista primero.
+ */
+@utility card-fuera-de-vista {
+  content-visibility: auto;
+  /* 440px = alto REAL medido de una tarjeta de la lista (420–448 px en la app abierta). Si se estima
+     de menos, la barra de scroll se estira a medida que bajás y un `scrollIntoView` a una tarjeta
+     lejana aterriza mal, porque las tarjetas intermedias —que nunca se pintaron— se miden con esta
+     estimación. */
+  contain-intrinsic-size: auto 440px;
+}
+
 @utility animate-in { animation: enter 0.15s ease-out; }
 @utility animate-out { animation: exit 0.15s ease-in; }
 @utility running { animation-play-state: running; }

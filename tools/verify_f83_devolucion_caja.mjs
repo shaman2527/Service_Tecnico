@@ -114,12 +114,15 @@ console.log(`· orden de prueba #${sid} (${marca}) cobrada Bs. ${bs} por Pago M�
 const abrirDevolucion = async () => {
   await entrar(); // recarga: escribir por IPC saltea el bus de datos (F90) y la tarjeta no aparecería
   await clickCenter(`[...document.querySelectorAll('aside button')].find(b => b.innerText.trim().startsWith('Servicio Técnico'))`).catch(() => {});
-  const hayTarjeta = await waitFor(`document.body.innerText.includes('${marca}')`, 15000);
+  // OJO (F96): las tarjetas llevan `content-visibility: auto`, así que una tarjeta FUERA de la
+  // pantalla tiene `innerText === ''` (su subárbol está «saltado»). Para encontrarla se usa
+  // `textContent`, que incluye lo que no se pintó.
+  const hayTarjeta = await waitFor(`document.body.textContent.includes('${marca}')`, 15000);
   const abierto = await evalx(`(() => {
-    const cards = [...document.querySelectorAll('div')].filter(d => d.innerText && d.innerText.includes('${marca}') && d.querySelector('button'));
-    const card = cards.sort((a, b) => a.innerText.length - b.innerText.length)[0];
+    const cards = [...document.querySelectorAll('div')].filter(d => d.textContent && d.textContent.includes('${marca}') && d.querySelector('button'));
+    const card = cards.sort((a, b) => a.textContent.length - b.textContent.length)[0];
     if (!card) return 'sin tarjeta';
-    const b = [...card.querySelectorAll('button')].find(x => x.innerText.trim().startsWith('Devolución'));
+    const b = [...card.querySelectorAll('button')].find(x => (x.textContent || '').trim().startsWith('Devolución'));
     if (!b) return 'sin botón de Devolución';
     b.click(); return 'ok';
   })()`);

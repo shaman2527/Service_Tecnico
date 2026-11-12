@@ -220,9 +220,17 @@ if (hayPago) {
     // F94 — LA REGLA CAMBIÓ A PROPÓSITO: antes este botón estaba APAGADO (el cobro de hoy se rechazaba
     // porque hoy no tenía caja). Ahora el abono de hoy ENTRA en la caja de hoy (el sistema se la crea,
     // cerrada y sin contar) y lo que se conserva es el AVISO: a qué caja va y qué sigue bloqueando.
-    await evalx(`(() => { const i = document.querySelector('[role="dialog"] [data-field="pay-monto"]'); if (i) { const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; s.call(i, '2'); i.dispatchEvent(new Event('input', { bubbles: true })); } return true; })()`);
+    //
+    // OJO (medido 2026-11-12): el campo del monto arranca en la MONEDA EN QUE EL CLIENTE VIENE PAGANDO
+    // (F38), así que en una orden cuyos abonos fueron en Bs. el campo dice «Monto (Bs.)». Escribir «2»
+    // ahí son Bs. 2 = $0,00 y el botón se apaga por un motivo LEGÍTIMO (monto 0 en dólares) — la
+    // comprobación fallaba por el DATO, no porque la caja vieja bloqueara. Se escribe un monto real
+    // en la moneda del campo: lo que este tramo prueba es que la caja vieja NO bloquea el cobro.
+    const campoEnBs = await evalx(`/Monto \\(Bs\\.\\)/.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`);
+    const montoDePrueba = campoEnBs ? '5000' : '2';
+    await evalx(`(() => { const i = document.querySelector('[role="dialog"] [data-field="pay-monto"]'); if (i) { const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; s.call(i, ${JSON.stringify(montoDePrueba)}); i.dispatchEvent(new Event('input', { bubbles: true })); } return true; })()`);
     await sleep(800);
-    check('F94: «Guardar Pago» está HABILITADO con la caja vieja abierta (el abono de hoy entra en la caja de HOY)',
+    check(`F94: «Guardar Pago» está HABILITADO con la caja vieja abierta (el abono de hoy entra en la caja de HOY) — monto de prueba ${montoDePrueba}${campoEnBs ? ' Bs' : ' $'}`,
       await evalx(`(() => { const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Guardar Pago/.test(x.innerText || '')); return !!b && !b.disabled; })()`)
       && await evalx(`!!document.querySelector('[data-field="aviso-turno-viejo-pago"]')`));
     await keyNav('Escape', 'Escape', 27);

@@ -78,6 +78,8 @@ commands::get_sales_stats,
             commands::delete_technician,
             commands::get_dashboard_analytics,
             commands::get_service_payments,
+            // F96: el mapa de abonos de toda la lista en UN viaje (antes: uno por tarjeta).
+            commands::get_payments_for_services,
             commands::add_service_payment,
             commands::update_service_payment_date,
             commands::estado_del_dia,

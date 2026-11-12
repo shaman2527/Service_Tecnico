@@ -212,6 +212,8 @@ registro/
 │   ├── verify_*.mjs           # verificaciones EN VIVO por CDP (ver «Verificación en vivo»)
 │   ├── *_test.ts              # pruebas de las reglas PURAS (moneda, arqueo, devoluciones, ficha…)
 │   ├── bench_inventory_ui.mjs # F41: mide en vivo lo que tarda cada pestaña en mostrar datos
+│   ├── bench_buscador_servicios.mjs / diag_servicios_perf.mjs / mk_servicios_bench.mjs
+│   │                          # F96: el buscador de Servicio (latencia por tecla, reposo de la pantalla y SQL)
 │   ├── audit_inventory.mjs / snapshot_db.mjs / seed_dev_db.mjs / canonical_brands.json
 │   │                          # F55: el split de modelos se espeja acá y su paridad con Rust
 │   │                          #   se fija con split_fixtures.json (--gen-split-fixtures)

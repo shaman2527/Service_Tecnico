@@ -4617,6 +4617,72 @@ impl Database {
         Ok(payments)
     }
 
+    /// F96 — EL MAPA DE PAGOS DE TODA LA LISTA, EN UNA SOLA LECTURA.
+    ///
+    /// QUÉ ARREGLA (rendimiento medido en la pantalla): para pintar el chip del método real de cada
+    /// tarjeta, `Services.tsx` pedía los abonos **orden por orden** — hasta 120 llamadas IPC y 120
+    /// consultas por cada búsqueda, y se repetía en CADA tecla del buscador. Con el lote, la misma
+    /// información llega en UN viaje y UNA consulta (`WHERE service_id IN (...)`).
+    ///
+    /// Reglas (las mismas de `get_service_payments`, para que el chip no cambie de significado):
+    ///  · los ids se deduplican; la consulta va **por tandas** (900 por tanda, muy por debajo del tope
+    ///    de variables de SQLite) así que NINGÚN id se pierde en silencio aunque el llamador pida miles,
+    ///  · un id **sin** pagos no aparece en el mapa (el que llama ya sabe que «no tiene abonos»),
+    ///  · cada lista viene ordenada por fecha e id, igual que la consulta de a uno,
+    ///  · una fila con el monto en NULL no tumba el lote: se lee 0 (el mapa es para pintar un chip, no
+    ///    para calcular plata; el saldo sale de `amount - paid_amount` de la orden, no de acá).
+    ///
+    /// El mapa se devuelve con la clave en TEXTO porque así viaja el JSON de Tauri (una clave numérica
+    /// se serializa a string de todas formas): el frontend lo lee con `pagos[id]` sin conversiones.
+    pub fn get_payments_for_services(&self, ids: &[i64]) -> SqlResult<HashMap<String, Vec<ServicePayment>>> {
+        let mut mapa: HashMap<String, Vec<ServicePayment>> = HashMap::new();
+        // Deduplicar conservando el orden de llegada, con un tope de cordura (la UI pide ≤120 + los
+        // entregados de hoy; 10.000 es margen absurdo para no dejar que un error del llamador arme un
+        // trabajo sin fin). El tope se avisa en el mensaje del error, no se aplica en silencio.
+        let mut unicos: Vec<i64> = Vec::new();
+        for id in ids.iter().copied() {
+            if !unicos.contains(&id) { unicos.push(id); }
+        }
+        if unicos.is_empty() { return Ok(mapa); }
+        if unicos.len() > 10_000 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "get_payments_for_services: {} órdenes en una sola lectura (el tope es 10.000)", unicos.len()
+            )));
+        }
+
+        let conn = self.conn.lock().unwrap();
+        // 900 por tanda: SQLite permite 32.766 variables en esta versión, pero por tandas no hay forma
+        // de acercarse al límite ni de depender de la versión que se empaquete mañana.
+        for tanda in unicos.chunks(900) {
+            let marcadores = vec!["?"; tanda.len()].join(",");
+            let sql = format!(
+                "SELECT id, service_id, amount, payment_method, bank_fee_percent, bank_fee_amount, net_amount, zelle_reference, currency, payment_date, notes FROM service_payments WHERE service_id IN ({}) ORDER BY service_id ASC, payment_date ASC, id ASC",
+                marcadores
+            );
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                tanda.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(params_ref.as_slice())?;
+            while let Some(r) = rows.next()? {
+                // `service_id` no puede venir NULL (el `IN` lo descarta); el monto sí podría (es
+                // nullable en el esquema) y una fila así no tiene que tumbar el lote entero.
+                let service_id: i64 = r.get(1)?;
+                let pago = ServicePayment {
+                    id: r.get(0)?, service_id, amount: r.get(2).unwrap_or(0.0),
+                    payment_method: r.get(3)?,
+                    bank_fee_percent: r.get(4).unwrap_or(0.0),
+                    bank_fee_amount: r.get(5).unwrap_or(0.0),
+                    net_amount: r.get(6).unwrap_or(0.0),
+                    zelle_reference: r.get(7).unwrap_or(None),
+                    currency: r.get(8).unwrap_or(Some("USD".into())),
+                    payment_date: r.get(9)?, notes: r.get(10)?,
+                };
+                mapa.entry(service_id.to_string()).or_default().push(pago);
+            }
+        }
+        Ok(mapa)
+    }
+
     /// Búsqueda cruzada de pagos de servicios con filtros opcionales.
     /// Devuelve pagos con info del servicio (orden, cliente, modelo) para UI de búsqueda.
     pub fn search_payments(&self, start_date: Option<&str>, end_date: Option<&str>,
@@ -11029,6 +11095,98 @@ mod tests {
         db.close_day(&hoy, "cierre contado de hoy", 0.0, 60.0, 66.0, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
         let err = db.open_day(0.0, 60.0, 66.0).unwrap_err().to_string();
         assert!(err.contains("ya está CERRADO con su arqueo"), "un cierre contado no se reabre con «Abrir Día»: {err}");
+
+        drop(db);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    /// F96 — EL MAPA DE PAGOS DE TODA LA LISTA, EN UNA SOLA LECTURA (y con EL MISMO resultado).
+    ///
+    /// La pantalla de Servicio Técnico pedía los abonos **orden por orden** para pintar el chip del
+    /// método real: hasta 120 llamadas IPC + 120 consultas, y se repetía en CADA tecla del buscador
+    /// (el «escribe y la búsqueda aparece al rato»). `get_payments_for_services` resuelve el mismo
+    /// dato en un viaje. El test no mide el reloj (eso se mide en vivo): fija las tres cosas que
+    /// pueden romper el chip del método sin que nadie lo note —
+    ///   1. el lote devuelve **exactamente** lo que devuelve la consulta de a uno (mismos abonos,
+    ///      mismo orden por fecha e id),
+    ///   2. una orden **sin** abonos no aparece en el mapa (y no aparece «vacía»: la UI ya sabe),
+    ///   3. ids repetidos no duplican abonos, y un id inexistente no inventa nada.
+    #[test]
+    fn test_f96_mapa_de_pagos_en_un_solo_viaje() {
+        let test_path = PathBuf::from("test_f96_pagos_lote.db");
+        let _ = std::fs::remove_file(&test_path);
+        let db = Database::new(&test_path).expect("Failed to create test DB");
+
+        // Tres órdenes del taller: la 1 con dos abonos, la 2 con uno, la 3 sin ninguno.
+        let ids: Vec<i64> = {
+            let conn = db.conn.lock().unwrap();
+            let mut ids = Vec::new();
+            for (i, orden) in ["DEV-F96-1", "DEV-F96-2", "DEV-F96-3"].iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO services (order_num, client, model, amount, payment_method, currency, status, date_in)
+                     VALUES (?1, ?2, 'Samsung A15', 100.0, 'Divisas (USD Cash)', 'USD', 'Recibido', '2026-10-07')",
+                    params![orden, format!("Cliente {}", i)],
+                ).unwrap();
+                ids.push(conn.last_insert_rowid());
+            }
+            // Abonos de prueba: dos en la primera orden (con fechas distintas, para poder exigir el
+            // orden por fecha) y uno en la segunda. Se insertan por SQL a propósito: este test mide
+            // la LECTURA (la escritura ya tiene sus propias reglas de caja, F94/F35).
+            let pagos = [
+                (ids[0], 40.0, "Pago Móvil", "2026-10-05", "primero"),
+                (ids[0], 10.0, "Divisas (USD Cash)", "2026-10-06", "segundo"),
+                (ids[1], 25.0, "Zelle", "2026-10-06", "unico"),
+            ];
+            for (sid, monto, metodo, fecha, nota) in pagos {
+                conn.execute(
+                    "INSERT INTO service_payments (service_id, amount, payment_method, payment_date, notes)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![sid, monto, metodo, fecha, nota],
+                ).unwrap();
+            }
+            ids
+        };
+
+        // 1) EL LOTE TIENE EXACTAMENTE LO MISMO QUE LA CONSULTA DE A UNO.
+        let lote = db.get_payments_for_services(&ids).unwrap();
+        assert_eq!(lote.len(), 2, "sólo las dos órdenes CON abonos entran al mapa: {:?}", lote.keys());
+        for id in &ids {
+            let de_a_uno = db.get_service_payments(*id).unwrap();
+            let en_lote = lote.get(&id.to_string()).cloned().unwrap_or_default();
+            assert_eq!(en_lote.len(), de_a_uno.len(), "orden {id}: distinta cantidad de abonos");
+            for (a, b) in en_lote.iter().zip(de_a_uno.iter()) {
+                assert_eq!((a.id, a.amount, a.payment_method.clone(), a.payment_date.clone()),
+                           (b.id, b.amount, b.payment_method.clone(), b.payment_date.clone()),
+                           "orden {id}: el lote devolvió otro abono (o en otro orden)");
+            }
+        }
+
+        // 2) EL ORDEN ES POR FECHA (el chip del método y el historial del diálogo lo suponen).
+        let de_la_primera = lote.get(&ids[0].to_string()).unwrap();
+        assert_eq!(de_la_primera.len(), 2);
+        assert_eq!(de_la_primera[0].payment_date.as_deref(), Some("2026-10-05"), "primero el abono más viejo");
+        assert_eq!(de_la_primera[0].amount, 40.0);
+        assert_eq!(de_la_primera[1].payment_date.as_deref(), Some("2026-10-06"));
+
+        // 3) LA ORDEN SIN ABONOS NO APARECE (ni con lista vacía: el mapa es del que TIENE abonos).
+        assert!(!lote.contains_key(&ids[2].to_string()), "una orden sin abonos no puede entrar al mapa");
+
+        // 4) Ids repetidos y basura: no duplican ni inventan.
+        let repetidos = db.get_payments_for_services(&[ids[0], ids[0], ids[1]]).unwrap();
+        assert_eq!(repetidos.len(), 2);
+        assert_eq!(repetidos.get(&ids[0].to_string()).unwrap().len(), 2, "un id repetido no puede duplicar abonos");
+        let con_fantasma = db.get_payments_for_services(&[ids[2], 999_999]).unwrap();
+        assert!(con_fantasma.is_empty(), "ni la orden sin abonos ni un id inexistente entran al mapa");
+        assert!(db.get_payments_for_services(&[]).unwrap().is_empty(), "sin ids no hay consulta ni resultado");
+
+        // 5) MUCHOS ids: la consulta va por tandas de 900, así que un lote grande NO pierde ninguna
+        //    orden por el camino (la versión anterior recortaba a 1000 en silencio).
+        let mut muchos: Vec<i64> = ids.clone();
+        muchos.extend((0..2500).map(|i| 800_000 + i));
+        let grande = db.get_payments_for_services(&muchos).unwrap();
+        assert_eq!(grande.len(), 2, "con 2500 ids de relleno las dos órdenes con abonos siguen enteras");
+        assert_eq!(grande.get(&ids[0].to_string()).unwrap().len(), 2);
+        assert_eq!(grande.get(&ids[1].to_string()).unwrap().len(), 1);
 
         drop(db);
         let _ = std::fs::remove_file(&test_path);

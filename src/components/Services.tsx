@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Search, ShieldCheck, Trash2, Lock, CheckCircle2, Banknote, User, Smartphone, CalendarDays, Wrench, Clock, Check, Users, UserPlus, Printer, Undo2, AlertTriangle, Zap, Camera, Percent } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -78,6 +78,8 @@ import { DEFAULT_PUNTO_FEE } from '@/lib/payment-math';
 // Reglas puras con prueba node (`tools/service_report_test.ts`).
 import { ACTIVE_SENTINEL, matchesWorkFilter, scopeLabel, scopeProblem, serviceReport, rangeFor, scopeSummary, summaryScopeLabel, topWorks } from '@/lib/service-report';
 import type { ScopeInput, ScopeKind } from '@/lib/service-report';
+// F96: la búsqueda del buscador, en memoria (misma regla que el LIKE del backend, con pruebas).
+import { filterServicesBySearch } from '@/lib/service-search';
 // F57: el filtro de trabajos es UN solo selector con buscador (adiós al muro de 49 chips).
 import { WorkPicker } from './WorkPicker';
 import { useEscapeGuard } from './use-escape-guard';
@@ -406,10 +408,17 @@ export default function Services({ role = 'owner', onGoToLedger }: {
   const [dateStart, setDateStart] = useState(DEFAULT_SERVICE_FILTERS.dateStart);
   const [dateEnd, setDateEnd] = useState(DEFAULT_SERVICE_FILTERS.dateEnd);
   /**
-   * ¿La lista está SIN filtros de servidor? (el resumen reusa sus filas en ese caso: son toda la
-   * base y no hace falta otra lectura). Se calcula acá arriba porque el efecto del resumen lo usa.
+   * ¿La lista cargada ES TODA LA BASE? (sin filtros de SERVIDOR). El resumen reusa sus filas en ese
+   * caso y no paga otra lectura. F96: la BÚSQUEDA ya no cuenta — se resuelve en memoria sobre estas
+   * mismas filas, así que escribir en el buscador no cambia qué filas se trajeron del backend.
    */
-  const listaSinFiltros = !search && !statusFilter && !dateStart && !dateEnd;
+  const listaSinFiltros = !statusFilter && !dateStart && !dateEnd;
+  /**
+   * F96 — LA FIRMA DE LOS FILTROS DE SERVIDOR (estado + rango de fechas). Es lo que identifica con
+   * qué consulta se trajeron las filas de `services`: la búsqueda de texto NO entra (es local), así
+   * que el resumen puede confiar en la lista aunque el operario esté escribiendo en el buscador.
+   */
+  const firmaDeFiltros = JSON.stringify([statusFilter, dateStart, dateEnd]);
   // F32: teléfonos entregados HOY (fecha de entrega), para el panel y el KPI del dueño.
   const [entregadosHoy, setEntregadosHoy] = useState<Service[]>([]);
   // F56: RESUMEN DEL DÍA. Se calcula sobre TODA la base (su propio alcance), no sobre la lista
@@ -587,8 +596,20 @@ export default function Services({ role = 'owner', onGoToLedger }: {
 
   // Pagos reales por servicio (para el chip de método honesto en las tarjetas)
   const [paymentsMap, setPaymentsMap] = useState<Record<number, ServicePayment[]>>({});
-  // F44: la lista pasó el tope de 120 filas y no se pudieron traer los pagos (se avisa en pantalla).
-  const [pagosSinCargar, setPagosSinCargar] = useState(false);
+  // F44: la lista pasó el tope de filas y no se pudieron traer los pagos (se avisa en pantalla).
+  // F96: ahora es la lista A LA VISTA (la búsqueda acota qué tarjetas hay), así que buscar un equipo
+  // dentro de una lista larguísima sí devuelve su chip de método — antes no, porque el tope se medía
+  // sobre la lista entera del servidor.
+  const [pagosFallo, setPagosFallo] = useState(false);
+  /** Memoria de abonos ya leídos (F96): un abono no cambia solo, y F76 avisa cuando algo se escribe. */
+  const pagosCache = useRef(new Map<number, ServicePayment[]>());
+  const pagosVersion = useRef(-1);
+  /**
+   * Tope de equipos a los que se les piden los abonos. Por encima no se pide nada (se avisa): traer
+   * los abonos de media base para pintar chips no es gratis y el operario acota con la búsqueda.
+   */
+  const PAGOS_MAX = 120;
+
 
   const techById = (id: number | null | undefined) => technicians.find(t => t.id === id);
 
@@ -613,47 +634,61 @@ export default function Services({ role = 'owner', onGoToLedger }: {
     }
   };
 
-  const load = async () => {
+  /**
+   * F96 — LA CARGA, PARTIDA EN DOS (la otra mitad del arreglo del buscador).
+   *
+   * Qué se midió antes de tocar nada: CADA tecla del buscador esperaba 350 ms, pedía la lista al
+   * backend, volvía a pedir estados y técnicos (que no dependen de la búsqueda) y después pedía los
+   * abonos **orden por orden** — hasta 120 viajes IPC por tecla. Lo que la búsqueda necesita es una
+   * sola cosa: las filas que ya están en memoria. De ahí estas tres piezas:
+   *
+   *   · `cargarLista()`  — lo ÚNICO que depende de los filtros de SERVIDOR (estado, fechas y eje).
+   *                        La búsqueda llega vacía a propósito: el texto se filtra en memoria con la
+   *                        MISMA regla que usaría el backend (`lib/service-search`, con pruebas).
+   *   · `cargarContexto()` — estados, técnicos y nada más: se leen al entrar y cuando los datos
+   *                        cambian (F76), no en cada tecla.
+   *   · `load()`         — las dos: guardar, cobrar, borrar, entregar y el refresco a mano.
+   */
+  /**
+   * Secuencia de la carga de la lista. Dos lecturas pueden cruzarse (un `refrescar()` de F76 y el
+   * rebote de un filtro pedidos casi juntos): si la respuesta VIEJA llegara última, `services`
+   * quedaría con las filas de los filtros anteriores mientras la firma dice que son los de ahora — y
+   * la búsqueda en memoria y el resumen trabajarían sobre el conjunto equivocado. Con la secuencia,
+   * la que llega tarde se descarta.
+   */
+  const listaSeq = useRef(0);
+  const cargarLista = async () => {
     const hoy = localDate();
-    // F56: se anota CON QUÉ filtros se trajeron estas filas: el resumen solo las reusa si la firma
-    // sigue coincidiendo (entre limpiar un filtro y la respuesta nueva, `services` es la lista vieja).
-    firmaFiltros.current = JSON.stringify([search, statusFilter, dateStart, dateEnd]);
-    const [s, st, techs, entregados] = await Promise.all([
-      api.getServices(search, statusFilter, dateStart, dateEnd, dateField),
-      api.getServiceStatuses(),
-      api.getTechnicians().catch(() => [] as Technician[]),
+    const mio = ++listaSeq.current;
+    // La firma se anota CUANDO LLEGA la respuesta, no antes: durante el viaje IPC `services` todavía
+    // tiene las filas del filtro VIEJO, y si la firma ya dijera «estos son los filtros de ahora» el
+    // Resumen del día podría reusar el conjunto equivocado por unos milisegundos (la observación O1).
+    // F96: la BÚSQUEDA no entra en la firma — no cambia qué filas se trajeron.
+    const firmaPedida = firmaDeFiltros;
+    const [s, entregados] = await Promise.all([
+      api.getServices('', statusFilter, dateStart, dateEnd, dateField),
       // F32: los ENTREGADOS de hoy, por fecha de entrega (una sola consulta; alimenta el KPI y
       // el panel «Teléfonos entregados hoy»).
       api.getServices('', 'Entregado', hoy, hoy, 'out').catch(() => [] as Service[]),
     ]);
+    if (listaSeq.current !== mio) return;   // respuesta vieja: la buena ya llegó (o está en camino)
+    firmaFiltros.current = firmaPedida;
     setServices(s);
+    setEntregadosHoy(entregados);
+  };
+
+  const cargarContexto = async () => {
+    const [st, techs] = await Promise.all([
+      // `getServiceStatuses` ya viene cacheado por sesión en el puente (db.ts).
+      api.getServiceStatuses(),
+      api.getTechnicians().catch(() => [] as Technician[]),
+    ]);
     setStatuses(st);
     setTechnicians(techs);
-    setEntregadosHoy(entregados);
-    // Métodos REALES de pago por tarjeta (chip honesto: si pagó por Pago Móvil,
-    // la tarjeta no debe decir "Divisas"). Cap 120 filas para no disparar N queries.
-    //
-    // F32: los ENTREGADOS DE HOY se piden SIEMPRE (son pocos: los del día) aunque la lista
-    // visible pase el tope — si no, al superar las 120 filas el mapa quedaba vacío y el panel
-    // mostraba «Sin pago» en órdenes que sí se cobraron (justo lo que el panel debe decir bien).
-    // F38 (revisión adversarial): por encima de las 120 filas tampoco se sabe la moneda del cobro.
-    // NO es un error de plata: `balanceLabel` sin datos dice las DOS monedas («$80.00 (Bs. 59.903,20)»),
-    // solo cambia el orden; el operario sigue viendo el número en Bs. Lo que sí se pierde es el chip
-    // del método real, y por eso la lista se filtra (el caso normal es un rango corto de fechas).
-    const conPagos = (list: Service[]) => list.length === 0 ? Promise.resolve({}) :
-      Promise.all(list.map(async sv =>
-        [sv.id, await api.getServicePayments(sv.id).catch(() => [] as ServicePayment[])] as const,
-      )).then(Object.fromEntries);
-    const [mapaLista, mapaHoy] = await Promise.all([
-      s.length > 0 && s.length <= 120 ? conPagos(s) : Promise.resolve({}),
-      conPagos(entregados),
-    ]);
-    setPaymentsMap({ ...mapaLista, ...mapaHoy });
-    // F44: se avisa en pantalla cuándo el mapa de pagos NO se pudo cargar (el chip del método real
-    // se pierde por encima del tope). Antes pasaba en silencio y el operario creía que la orden no
-    // se había cobrado: es una limitación, así que se dice.
-    setPagosSinCargar(s.length > 120);
   };
+
+  const load = async () => { await Promise.all([cargarLista(), cargarContexto()]); };
+
 
   // F62: agrega una categoría de trabajo del LOCAL y devuelve el nombre GUARDADO (null si falló).
   // La validación vive en el backend (no vacía, tope de 40, sin duplicados por mayúsculas/acentos) y
@@ -697,10 +732,11 @@ export default function Services({ role = 'owner', onGoToLedger }: {
   // F76 — la lista y los KPIs se recargan SOLOS cuando algo cambia (una venta, un cobro, una entrega,
   // un cambio de técnico…): el operario no tiene que apretar nada.
   useEffect(() => { refrescar(); }, [dataVersion]);
-  // F56: los datos del resumen. SOLO se piden cuando la lista tiene filtros: sin filtros, las filas
-  // de la lista YA son toda la base y se reusan (una sola lectura). Las deps son el BOOLEANO, no los
-  // cuatro filtros: con los strings, cada tecla del buscador disparaba una lectura completa y hacía
-  // parpadear los tiles a «—» (observación de la re-revisión).
+  // F56: los datos del resumen. SOLO se piden cuando la lista tiene filtros de SERVIDOR: sin ellos,
+  // las filas de la lista YA son toda la base y se reusan (una sola lectura). Las deps son el
+  // BOOLEANO, no los filtros: con los strings, cada tecla del buscador disparaba una lectura completa
+  // y hacía parpadear los tiles a «—» (observación de la re-revisión). F96: el buscador tampoco
+  // aparece acá — ya no cambia qué filas hay cargadas.
   useEffect(() => {
     if (listaSinFiltros) return;
     const mio = ++resumenSeq.current;
@@ -726,16 +762,22 @@ export default function Services({ role = 'owner', onGoToLedger }: {
       .then(json => { const l = JSON.parse(json) as string[]; if (Array.isArray(l)) setTiposExtra(l); })
       .catch(() => {});
   }, []);
-  // Debounce: la búsqueda solo consulta tras 350ms de inactividad.
+  // F96: el único debounce que queda es el de los FILTROS DE SERVIDOR (estado, rango de fechas y
+  // eje) y bajó a 120 ms — sirve para agrupar el tipeo de los `<input type="date">`, nada más.
+  // El BUSCADOR NO está en esta lista a propósito: se resuelve en memoria (`lib/service-search`), o
+  // sea que escribir filtra las tarjetas en el mismo cuadro en que se pinta la tecla.
   // F44: la PRIMERA corrida se saltea — el montaje ya cargó la lista, y con el filtro por defecto en
   // «Todos los estados» esa consulta es todo el historial: pagarla dos veces es pagar dos veces la
-  // lista entera (y su mapa de pagos).
+  // lista entera.
   const primerRender = useRef(true);
   useEffect(() => {
     if (primerRender.current) { primerRender.current = false; return; }
-    const t = setTimeout(load, 350);
+    const t = setTimeout(cargarLista, 120);
     return () => clearTimeout(t);
-  }, [search, statusFilter, dateStart, dateEnd, dateField]);
+    // `cargarLista` se rearma en cada render (lee los filtros del cierre): las deps son LAS QUE
+    // IMPORTAN. Si se agrega la función, el efecto corre en cada render y la lista se recarga sin parar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, dateStart, dateEnd, dateField]);
 
   // Períodos rápidos por fecha de RECIBIDO (días=0 → hoy; null → todos)
   const setQuickPeriod = (days: number | null) => {
@@ -803,13 +845,29 @@ export default function Services({ role = 'owner', onGoToLedger }: {
     setResumenKind('hoy');
   };
 
+  // ── F96 — EL BUSCADOR (la tecla ya no espera a nadie) ────────────────────────────────────────────
+  // Lo que se midió: escribir en el buscador retrasaba 350 ms la consulta y, mientras tanto, la lista
+  // seguía mostrando TODO (la búsqueda la resolvía el backend), así que el operario escribía «a
+  // ciegas». Ahora el texto se filtra ACÁ, sobre las filas que ya están cargadas:
+  //   · `porBusqueda`   = filtros de servidor (estado/fechas) + búsqueda → la MISMA lista de antes.
+  //   · `visibleServices` = eso + el chip de trabajo (F44).
+  // `useDeferredValue` deja que el campo de texto responda en el acto: React pinta la tecla primero y
+  // recalcula las tarjetas en el cuadro siguiente cuando la lista es grande.
+  const busquedaDiferida = useDeferredValue(search);
+  const porBusqueda = useMemo(
+    () => filterServicesBySearch(services, busquedaDiferida),
+    [services, busquedaDiferida],
+  );
+
   // F44 — TRABAJOS HECHOS: los contadores cuentan LA LISTA QUE SE ESTÁ VIENDO (búsqueda + estado +
   // rango de fechas), con los ENTREGADOS INCLUIDOS. Antes se contaban solo las órdenes activas
   // (`enTaller`), así que al filtrar por «Entregado» —justo cuando el dueño quiere contar lo que ya
   // salió— desaparecían todos los chips, y los trabajos escritos a mano («Otro») no tenían contador.
   // El reporte y el filtro salen del MISMO módulo puro (`lib/service-report`), así el número del chip
   // no puede mentir: dice exactamente las tarjetas que aparecen al hacerle clic.
-  const report = useMemo(() => serviceReport(services, tiposExtra), [services, tiposExtra]);
+  // F96: la lista que se cuenta es `porBusqueda` (filtros de servidor + la búsqueda de la pantalla),
+  // o sea EXACTAMENTE la misma que antes, cuando la búsqueda la resolvía el backend.
+  const report = useMemo(() => serviceReport(porBusqueda, tiposExtra), [porBusqueda, tiposExtra]);
 
   // ── F56 — EL RESUMEN DEL DÍA ────────────────────────────────────────────────────────────────
   // El alcance es PROPIO (por defecto HOY) y se resuelve con la regla pura `rangeFor`: «hoy»,
@@ -826,7 +884,7 @@ export default function Services({ role = 'owner', onGoToLedger }: {
   // OJO (re-revisión, O1): se reusa SOLO si `services` se trajo con los filtros de AHORA — si no,
   // durante la ventana de recarga el resumen calcularía sobre la lista vieja (filtrada).
   // (`listaSinFiltros` se calcula arriba, junto a los estados: lo usa el efecto del resumen.)
-  const listaConfiable = firmaFiltros.current === JSON.stringify([search, statusFilter, dateStart, dateEnd]);
+  const listaConfiable = firmaFiltros.current === firmaDeFiltros;
   const reusaLista = listaSinFiltros && listaConfiable && services.length > 0;
   const filasResumen = reusaLista ? services : resumenRows;
   const resumen = useMemo(() => scopeSummary(filasResumen, resumenRange, tiposExtra), [filasResumen, resumenRange.start, resumenRange.end, tiposExtra]);
@@ -853,16 +911,80 @@ export default function Services({ role = 'owner', onGoToLedger }: {
   const filtrosActivos = !!(search || statusFilter || dateStart || dateEnd || typeFilter);
   const alcance: ScopeInput = { status: statusFilter, dateField, start: dateStart, end: dateEnd };
   const problemaAlcance = scopeProblem({ status: statusFilter, dateField });
-  // Lista visible: la cargada por backend (búsqueda + estado) filtrada por trabajo client-side.
+  // Lista visible: la cargada por backend (estado + fechas) + la búsqueda, filtrada por trabajo.
   // F44: los KPIs y la línea de reporte usan ESTA lista, no `services`: antes «Total Equipos» y
   // «Monto Total» ignoraban el chip de trabajo activo y mostraban otro número que el de las tarjetas.
   const visibleServices = useMemo(
-    () => (typeFilter ? services.filter(s => matchesWorkFilter(s, typeFilter)) : services),
-    [services, typeFilter],
+    () => (typeFilter ? porBusqueda.filter(s => matchesWorkFilter(s, typeFilter)) : porBusqueda),
+    [porBusqueda, typeFilter],
   );
 
   const totalAmount = visibleServices.reduce((a, s) => a + s.amount, 0);
   const listos = visibleServices.filter(s => s.status === 'Por entregar').length;
+
+  // ── F96 — EL MAPA DE ABONOS: EN UN VIAJE Y CON MEMORIA ────────────────────────────────────────
+  // El chip del método real («pagó por Pago Móvil», no «Divisas») necesita los abonos de las tarjetas
+  // A LA VISTA. Antes se pedían orden por orden — hasta 120 viajes IPC — dentro de `load()`, o sea en
+  // cada búsqueda. Ahora:
+  //   · se piden en UN lote (`getPaymentsForServices`) y SOLO los ids que todavía no se saben,
+  //   · lo leído se recuerda (los abonos de una orden no cambian solos) hasta que la app escribe algo
+  //     — F76 sube `dataVersion` y ahí la memoria se tira y se relee,
+  //   · por encima de `PAGOS_MAX` equipos a la vista no se pide nada y se avisa (la regla de F44),
+  //   · los ENTREGADOS DE HOY se piden siempre (son pocos) aunque la lista pase el tope.
+  const idsVisibles = useMemo(() => [...new Set(visibleServices.map(s => s.id))], [visibleServices]);
+  const idsHoy = useMemo(() => [...new Set(entregadosHoy.map(s => s.id))], [entregadosHoy]);
+  const idsPagos = useMemo(
+    () => [...new Set([...(idsVisibles.length <= PAGOS_MAX ? idsVisibles : []), ...idsHoy])],
+    [idsVisibles, idsHoy],
+  );
+  // La clave del lote: es la DEPENDENCIA del efecto (un string, no un array nuevo en cada render).
+  const clavePagos = idsPagos.join(',');
+  // F44: se avisa en pantalla cuándo el chip del método real no se pudo traer. Antes pasaba en
+  // silencio y el operario creía que la orden no se había cobrado: es una limitación, así que se dice.
+  const pagosSinCargar = idsVisibles.length > PAGOS_MAX || pagosFallo;
+  /**
+   * Lo que ven las TARJETAS de la lista. Con la lista dentro del tope es el mapa completo; por encima
+   * del tope, solo los entregados de hoy: si se pintaran unos chips sí y otros no (los que quedaron en
+   * memoria de una búsqueda anterior), la tarjeta sin chip se leería como «esta orden no tiene abonos».
+   * Los entregados de hoy conservan sus chips porque se piden siempre.
+   */
+  const mapaTarjetas = useMemo(() => {
+    if (idsVisibles.length <= PAGOS_MAX) return paymentsMap;
+    const deHoy = new Set(idsHoy);
+    return Object.fromEntries(
+      Object.entries(paymentsMap).filter(([id]) => deHoy.has(Number(id))),
+    ) as Record<number, ServicePayment[]>;
+  }, [paymentsMap, idsVisibles.length, idsHoy]);
+  useEffect(() => {
+    // ¿La app escribió algo (un abono, una entrega, un cobro)? La memoria de abonos se tira.
+    // OJO: NO se vacía `paymentsMap` acá a propósito. Vaciarlo hacía parpadear TODAS las tarjetas
+    // (sin chip de método y con el saldo en las dos monedas) hasta que llegaba el lote nuevo; el mapa
+    // se reemplaza entero cuando la respuesta llega, un instante después.
+    if (pagosVersion.current !== dataVersion) {
+      pagosVersion.current = dataVersion;
+      pagosCache.current.clear();
+    }
+    const faltan = idsPagos.filter(id => !pagosCache.current.has(id));
+    if (faltan.length === 0) return;
+    let vivo = true;
+    api.getPaymentsForServices(faltan)
+      .then(res => {
+        if (!vivo) return;
+        for (const [id, pagos] of Object.entries(res ?? {})) pagosCache.current.set(Number(id), pagos ?? []);
+        // Una orden que el backend NO devolvió simplemente no tiene abonos (no es un fallo de lectura).
+        for (const id of faltan) if (!pagosCache.current.has(id)) pagosCache.current.set(id, []);
+        setPaymentsMap(Object.fromEntries(pagosCache.current) as Record<number, ServicePayment[]>);
+        setPagosFallo(false);
+      })
+      .catch(() => {
+        // Un fallo SÍ se avisa (y no se inventan abonos): la tarjeta mostrará las dos monedas.
+        if (vivo) setPagosFallo(true);
+      });
+    return () => { vivo = false; };
+    // La dep es la CLAVE del lote (string), no `idsPagos` (un array nuevo en cada render dispararía el
+    // efecto siempre). `dataVersion` es el aviso de escritura de F76: ahí se tira la memoria de abonos.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clavePagos, dataVersion]);
 
   // ── F81 — ver el bloque de arriba (abrirAlta / restaurarFiltrosPrevios / nuevaOrden) ───────────
   // Quitar TODOS los filtros de una vez (F44: antes «Limpiar» borraba solo las fechas y quedaba el
@@ -918,7 +1040,7 @@ export default function Services({ role = 'owner', onGoToLedger }: {
     const balance = s.amount - s.paid_amount;
     // F38: el saldo de la tarjeta se dice en la moneda en que se cobró (+ su equivalencia del día):
     // el operario lee el número en Bs. que le va a pedir al cliente, sin traducir mentalmente.
-    const saldoTexto = balanceLabel(orderBalance(s.amount, s.paid_amount ?? 0, paymentsMap[s.id], tasaDia));
+    const saldoTexto = balanceLabel(orderBalance(s.amount, s.paid_amount ?? 0, mapaTarjetas[s.id], tasaDia));
     const checklist = parseChecklist(s.device_checklist);
     const hasChecklist = Object.keys(checklist).length > 0;
     const entregado = s.status === 'Entregado';
@@ -926,7 +1048,7 @@ export default function Services({ role = 'owner', onGoToLedger }: {
     const warr = entregado && s.date_out ? warrantyStatus(s.date_out) : 'sin';
     const finalized = isFinalized(s.status);
     // Métodos REALES usados en los pagos (chip honesto); fallback al método del form
-    const pays = paymentsMap[s.id] ?? [];
+    const pays = mapaTarjetas[s.id] ?? [];
     const realMethods = pays.length > 0
       ? [...new Set(pays.map(p => p.payment_method).filter(Boolean))].map(shortMethodLabel)
       : null;
@@ -937,7 +1059,10 @@ export default function Services({ role = 'owner', onGoToLedger }: {
       && (nuevaOrden.ids.includes(s.id) || (!!nuevaOrden.groupId && s.group_id === nuevaOrden.groupId));
     return (
       <Card key={s.id} data-nueva={esNueva ? nuevaOrden?.base : undefined} className={cn(
-        'overflow-hidden transition-shadow hover:shadow-md border-l-4',
+        // F96: la tarjeta que está FUERA de la pantalla no se maqueta ni se pinta (ver el comentario
+        // del utility en index.css). Con cientos de órdenes es la diferencia entre una lista que
+        // responde y una que se arrastra.
+        'card-fuera-de-vista overflow-hidden transition-shadow hover:shadow-md border-l-4',
         esNueva && 'ring-2 ring-primary/60 shadow-lg',
         entregado && 'border-emerald-500/40 bg-emerald-500/5 border-l-emerald-500',
         porEntregar && 'border-amber-500/40 bg-amber-500/5 border-l-amber-500',
@@ -1472,7 +1597,7 @@ export default function Services({ role = 'owner', onGoToLedger }: {
           (por trabajo) vive en el Resumen del día, que tiene su propio alcance. */}
       <div className="flex flex-col gap-1.5" data-report="trabajos">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <WorkPicker counts={report.porTrabajo} total={services.length} sinTrabajo={report.sinTrabajo}
+          <WorkPicker counts={report.porTrabajo} total={porBusqueda.length} sinTrabajo={report.sinTrabajo}
             sinTrabajoEntregados={report.sinTrabajoEntregados} sinTrabajoTaller={report.sinTrabajoTaller}
             sinTrabajoAnulados={report.sinTrabajoAnulados}
             value={typeFilter} onChange={setTypeFilter} />
@@ -1486,7 +1611,8 @@ export default function Services({ role = 'owner', onGoToLedger }: {
         <p className="text-xs text-muted-foreground" data-report-scope>{scopeLabel(alcance)}</p>
         {pagosSinCargar && (
           <p className="text-xs text-warning" data-note="pagos-no-cargados">
-            Lista muy larga: el método de pago real se muestra hasta 120 equipos — acotá el rango de fechas para verlo.
+            Lista muy larga: el método de pago real se muestra hasta {PAGOS_MAX} equipos — acotá el
+            rango de fechas o escribí en el buscador para verlo.
           </p>
         )}
       </div>
@@ -1543,7 +1669,7 @@ export default function Services({ role = 'owner', onGoToLedger }: {
               const saldo = total - abonado;
               // F38: el banner de la orden multi-equipo también dice el saldo en la moneda del cobro;
               // los movimientos son POR EQUIPO, así que se concatenan los de toda la orden.
-              const pagosGrupo = activas.flatMap(s => paymentsMap[s.id] ?? []);
+              const pagosGrupo = activas.flatMap(s => mapaTarjetas[s.id] ?? []);
               const allFinalized = activas.length === 0;
               return (
                 <Fragment key={`g-${item.groupId}`}>

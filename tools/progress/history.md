@@ -1012,3 +1012,32 @@ si algo cambia, dice **qué tabla, qué fila y qué columna**.
   copia (por eso «aparecen» al arrancar: artefacto del respaldo, no migración), y `cdp_driver.mjs` no se puede
   importar estáticamente en un script que también corre con la app cerrada (su import abre el WebSocket y falla con
   «fetch failed»): se importa dinámicamente.
+
+## F96 — El buscador de Servicio Técnico responde en el acto (2026-11-12)
+
+**Pedido del dueño:** «optimizacion cuando escribe en filtro buscador de servicio, escribe al rato es que
+aparece la busqueda, deberia ser rapido… tiene 1400 registro no se si se pone lenta por eso no deberia».
+
+**Diagnóstico medido ANTES de tocar nada** (`tools/diag_servicios_perf.mjs` sobre una copia): el SQL no era
+el problema (0,14–0,5 ms con 1400 filas). El «al rato» era el camino de la tecla: 350 ms de espera
+artificial, búsqueda resuelta en el backend (la lista mostraba TODO mientras esperaba), 4 viajes IPC por
+tecla —dos de ellos estados y técnicos, que no dependen de la búsqueda— y hasta 120 viajes más para el
+mapa de abonos (uno por tarjeta).
+
+**Lo que se entregó:** la búsqueda se resuelve en memoria (`src/lib/service-search.ts`, regla pura con
+pruebas y equivalencia demostrada contra el LIKE del backend), la lista del servidor se pide sin texto,
+la carga se parte en lista/contexto, los abonos van en UN viaje (`get_payments_for_services`, Rust) con
+memoria por orden, y las tarjetas fuera de la pantalla ya no se maquetan (`content-visibility: auto`).
+
+**Medido EN VIVO con 1410 órdenes** (`tools/bench_buscador_servicios.mjs`): montaje del módulo 2317 → 1078 ms ·
+pegar la búsqueda 820 → 153 ms · teclas que siguen en <150 ms 22/50 → 40/50 · peor tecla 1945 → 536 ms ·
+y escribir «perez» ahora encuentra a «Pérez» (antes: 0 resultados).
+
+**Pruebas:** `tools/service_search_test.ts` 61/61 · Rust `test_f96_mapa_de_pagos_en_un_solo_viaje` ·
+`cargo test --lib` · `tsc -b` 0 · `oxlint` 0 errores · EN VIVO: bench + `verify_turno_viejo` 42/42 ·
+`verify_alta_limpia_filtros` 29/29 · `verify_auto_refresh` 13/13 · `verify_smoke_integral` 110/110.
+
+**Dos comprobaciones que MENTÍAN y se arreglaron (el producto estaba bien):** `verify_turno_viejo` escribía
+«2» en el monto cuando el campo estaba en Bs. (Bs. 2 = $0,00 → el botón se apaga por un motivo legítimo)
+y `verify_alta_limpia_filtros` buscaba el cliente en los primeros 60 caracteres de la tarjeta, que con una
+orden CON SALDO quedan ocupados por el banner «SIN PAGAR · Falta $…». Las dos fallaban por el DATO.

@@ -382,6 +382,20 @@ export const api = {
   getServicePayments: (serviceId: number) =>
     tauriInvoke<ServicePayment[]>('get_service_payments', { serviceId }),
 
+  /**
+   * F96 — LOS ABONOS DE TODA LA LISTA EN UN SOLO VIAJE.
+   *
+   * Antes la pantalla pedía los abonos **orden por orden** (`getServicePayments` × cada fila visible,
+   * hasta 120) para pintar el chip del método real, y lo repetía en cada búsqueda. Con el lote es
+   * UNA llamada. Devuelve `{ "<id>": [abonos…] }`: las órdenes sin abonos no vienen en el mapa (la
+   * pantalla ya sabe que «no tienen»), así que un `undefined` NUNCA significa «no se pudo leer».
+   * En modo navegador no hay backend: se resuelve vacío (sin abonos, como el resto de los mocks).
+   */
+  getPaymentsForServices: (ids: number[]) => {
+    if (ids.length === 0) return mock<Record<string, ServicePayment[]>>({});
+    return tauriInvoke<Record<string, ServicePayment[]>>('get_payments_for_services', { ids });
+  },
+
   // F35: `paymentDate` (AAAA-MM-DD) permite anotar el abono en la caja del día en que la plata entró
   // de verdad (el cliente pagó el lunes y avisó el martes). Vacío = hoy.
   addServicePayment: (serviceId: number, amount: number, paymentMethod: string,

@@ -341,6 +341,16 @@ pub fn get_service_payments(db: State<Database>, service_id: i64) -> Result<Vec<
     db.get_service_payments(service_id).map_err(|e| e.to_string())
 }
 
+/// F96 — el mapa de abonos de TODA la lista en un solo viaje (antes: una llamada por tarjeta, hasta
+/// 120 por cada tecla del buscador). Devuelve `{ "<service_id>": [abonos…] }`; las órdenes sin abonos
+/// simplemente no aparecen.
+#[tauri::command]
+pub fn get_payments_for_services(
+    db: State<Database>, ids: Vec<i64>,
+) -> Result<std::collections::HashMap<String, Vec<crate::db::ServicePayment>>, String> {
+    db.get_payments_for_services(&ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn add_service_payment(db: State<Database>, service_id: i64, amount: f64, payment_method: String,
                            bank_fee_percent: f64, zelle_reference: String, currency: String,

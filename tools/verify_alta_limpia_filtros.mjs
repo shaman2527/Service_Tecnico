@@ -252,10 +252,14 @@ check('la orden existe en la base (verdad independiente)', !!fila?.id, JSON.stri
 // ── 6) LA TARJETA NUEVA SE VE: resaltada, en la lista, y la pantalla bajó hasta ella ─────────────
 const enLista = await waitFor(`!!document.querySelector('[data-nueva]')`, 12000);
 check('F81: la tarjeta recién creada está en la lista y marcada (data-nueva)', enLista);
-const marcada = await evalx(`(() => { const c = document.querySelector('[data-nueva]'); if (!c) return null; const r = c.getBoundingClientRect(); return { orden: c.getAttribute('data-nueva'), texto: (c.innerText || '').replace(/\\s+/g, ' ').slice(0, 60), enVentana: r.top >= -40 && r.bottom <= window.innerHeight + 40 }; })()`);
+const marcada = await evalx(`(() => { const c = document.querySelector('[data-nueva]'); if (!c) return null; const r = c.getBoundingClientRect(); const t = (c.textContent || '').replace(/\\s+/g, ' '); return { orden: c.getAttribute('data-nueva'), texto: t.slice(0, 60), textoCompleto: t, enVentana: r.top >= -40 && r.bottom <= window.innerHeight + 40 }; })()`);
 check('F81: la marca corresponde a la orden nueva', String(marcada?.orden ?? '') === String(fila?.order_num ?? ''), `marcada=${marcada?.orden} · orden=${fila?.order_num}`);
 check('F81: la lista BAJÓ hasta la tarjeta (quedó dentro de la ventana)', marcada?.enVentana === true, JSON.stringify(marcada));
-check('F81: la tarjeta es la de la orden nueva (dice el cliente)', String(marcada?.texto ?? '').includes(CLIENTE), String(marcada?.texto));
+// OJO (medido 2026-11-12): se busca el cliente en el texto COMPLETO de la tarjeta, no en los primeros
+// 60 caracteres. Una orden con saldo pinta el banner «SIN PAGAR · Falta $…» ANTES del bloque del
+// cliente, así que con la orden sin pagar el nombre caía justo después del carácter 60 y la
+// comprobación fallaba por el DATO (una orden con monto), no porque la tarjeta fuera otra.
+check('F81: la tarjeta es la de la orden nueva (dice el cliente)', String(marcada?.textoCompleto ?? '').includes(CLIENTE), String(marcada?.texto));
 const trasGuardar = await filtrosSucios();
 check('F81: después de guardar, los filtros siguen en el predeterminado',
   trasGuardar.search === '' && /Todos los estados/.test(trasGuardar.estado) && trasGuardar.fechas === '["",""]');
@@ -267,18 +271,18 @@ await sleep(1600);
 check('F81: al escribir en el buscador el resaltado se apaga (no queda mintiendo)',
   !(await evalx(`!!document.querySelector('[data-nueva]')`)));
 // SONDA (para diagnosticar la edición): qué quedó en el buscador y cuántas tarjetas hay a la vista.
-const trasBuscar = await evalx(`JSON.stringify({ busqueda: ${buscarInput}?.value ?? null, editar: [...document.querySelectorAll('main button')].filter(b => (b.innerText || '').trim() === 'Editar').length })`);
+const trasBuscar = await evalx(`JSON.stringify({ busqueda: ${buscarInput}?.value ?? null, editar: [...document.querySelectorAll('main button')].filter(b => (b.textContent || '').trim() === 'Editar').length })`);
 console.log(`   sonda tras buscar al cliente: ${trasBuscar}`);
 
 // ── 8) EDITAR NO TOCA LOS FILTROS DEL OPERARIO ───────────────────────────────────────────────────
-const tarjetaEdit = await waitFor(`[...document.querySelectorAll('main button')].some(b => (b.innerText || '').trim() === 'Editar')`, 10000);
+const tarjetaEdit = await waitFor(`[...document.querySelectorAll('main button')].some(b => (b.textContent || '').trim() === 'Editar')`, 10000);
 if (tarjetaEdit) {
   // El comprobante (F77) y el aviso de política dejan su velo: se cierran antes de pulsar «Editar»,
   // porque el primer clic se lo come el modal (lección documentada del proyecto).
   await cerrarAvisos();
   let abrioEdit = false;
   for (let intento = 0; intento < 3 && !abrioEdit; intento++) {
-    await clickCenter(`[...document.querySelectorAll('main button')].find(b => (b.innerText || '').trim() === 'Editar')`).catch(() => {});
+    await clickCenter(`[...document.querySelectorAll('main button')].find(b => (b.textContent || '').trim() === 'Editar')`).catch(() => {});
     abrioEdit = await waitFor(`/^Editar /m.test(document.querySelector('[role="dialog"]')?.innerText ?? '')`, 8000);
     if (!abrioEdit) await cerrarAvisos();
   }

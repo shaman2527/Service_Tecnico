@@ -1,10 +1,20 @@
-# 📋 Registro — Estado del Proyecto (2026-09-23)
+# 📋 Registro — Estado del Proyecto (2026-11-12)
 
 > Documento vivo de **todo lo que se ha hecho** y **lo que falta**.
 > Complementa a [PRD.md](PRD.md) (qué es el producto), [README.md](README.md) (cómo usarlo)
 > y [AGENTS.md](AGENTS.md) (harness + registro de problemas).
 >
-> 🚚 **SPRINT A ENTREGADO (2026-09-23):** los **3 bloqueantes de la auditoría de entrega** quedaron cerrados,
+>
+> ⚡ **BUSCADOR DE SERVICIO ARREGLADO Y PUBLICADO (2026-11-12) — v0.4.13:** el pedido del dueño («escribo en el
+> filtro de servicio y la búsqueda aparece al rato») quedó cerrado como **F96**. El diagnóstico medido dijo que
+> **los 1400 registros no eran la causa** (la consulta tarda 0,5 ms): eran 350 ms de espera artificial, la
+> búsqueda resuelta en el backend (la lista seguía mostrando todo mientras esperaba), 4 viajes IPC por tecla y
+> hasta **120 viajes más** para los abonos de las tarjetas (uno por orden). Ahora la búsqueda se filtra **en
+> memoria** (con prueba de equivalencia contra el backend), los abonos van **en un solo viaje** y la tarjeta que
+> no se ve no se pinta. **Medido en vivo con 1410 órdenes: montaje 2317 → 1215 ms · pegar la búsqueda 820 → 168 ms
+> · teclas que siguen en <150 ms 22/50 → 39/50 · «perez» ahora encuentra «Pérez» (antes 0).** Cero migraciones y
+> cero escrituras nuevas (auditoría de datos 3/3). Detalle en **§16** y en `AGENTS.md` (sección F96).
+>> 🚚 **SPRINT A ENTREGADO (2026-09-23):** los **3 bloqueantes de la auditoría de entrega** quedaron cerrados,
 > con tests Rust, reglas puras y **verificación en vivo**: **F68** sesiones de caja (Master / Caja N con PIN
 > propio, autor en cada movimiento de plata y visibilidad restringida), **F69** cada caja cuadra su día
 > (desglose del cajón con fondo y gastos, conteo obligatorio y verificación de los digitales), **F70** anular
@@ -872,3 +882,78 @@ sembrados) y la app 0.4.1 funcionando.
    Y revisar que existan `updates\registro.backup_pre_0.4.1.db` y `updates\prev\registro.exe` (red armada).
 4. Si algo fallara: reponer la copia del paso 1, o `updates\prev\registro.exe`, o Ayuda → «Restaurar
    versión anterior».
+
+---
+
+## 16. F96 — El buscador de Servicio responde en el acto (2026-11-12) · CERRADA Y PUBLICADA
+
+**Pedido del dueño (textual):** «optimización cuando escribe en filtro buscador de servicio, escribe al rato es
+que aparece la búsqueda, debería ser rápido… tiene 1400 registros, no sé si se pone lenta por eso, no debería…
+haz tu diagnóstico que todo esté funcionando como debería, mejorado a lo actual sin romper nada».
+
+### 16.1 El diagnóstico (medido antes de tocar una línea)
+
+| Qué se midió | Resultado | Herramienta |
+|---|---|---|
+| La consulta de la lista (LIKE en 5 columnas) con 1400 filas | **0,14–0,5 ms** → **el volumen NO era la causa** | `tools/diag_servicios_perf.mjs` |
+| Espera artificial antes de consultar | **350 ms fijos**, reiniciados en cada tecla | lectura del código |
+| ¿La búsqueda filtraba la pantalla? | **No**: la resolvía el backend → se escribía «a ciegas» | lectura del código |
+| Viajes al backend por tecla | **4** (dos de ellos estados y técnicos, que no dependen de la búsqueda) | lectura del código |
+| Abonos para el chip del método real | **1 viaje POR TARJETA** (hasta 120) en cada búsqueda | lectura del código |
+| Tarjetas repintadas por respuesta | **1410** (todas), sin importar el filtro | banco en vivo |
+| Buscar «perez» | devolvía **0** (el `LIKE` de SQLite no cruza acentos) | banco en vivo |
+
+### 16.2 Lo que se entregó
+
+1. **Búsqueda en memoria** (`src/lib/service-search.ts`, regla pura con pruebas): pliega acentos y mayúsculas,
+   acepta varias palabras en cualquier orden, busca en los **mismos cinco campos** del backend y **nunca** es más
+   restrictiva (lo fija una prueba de equivalencia que reimplementa el `LIKE` de SQLite). Los comodines `%` y `_`
+   se descartan de la consulta (en el backend son comodines).
+2. **La lista se pide sin texto**: escribir en el buscador ya no dispara **ninguna** consulta (ni la del Resumen
+   del día).
+3. **La carga partida en dos**: `cargarLista()` (estado + fechas + eje) y `cargarContexto()` (estados +
+   técnicos), con secuencia para descartar respuestas viejas y la firma de filtros anotada al **llegar** la
+   respuesta.
+4. **Abonos en un viaje**: comando Rust `get_payments_for_services(ids)` (una consulta por tandas de 900,
+   ordenada igual que la de a uno, sin truncar en silencio) + `api.getPaymentsForServices` + memoria por orden que
+   se tira cuando F76 avisa de una escritura.
+5. **La tarjeta que no se ve no se pinta** (`content-visibility: auto` + alto real medido de 440 px).
+6. `useDeferredValue` para que el campo responda en el acto.
+
+### 16.3 Los números (misma copia, 1410 órdenes, build release viejo vs nuevo)
+
+| Métrica | Antes | Ahora |
+|---|---|---|
+| Montaje del módulo (lista visible) | 2317 ms | **1215 ms** |
+| Pegar la búsqueda | 820 ms | **168 ms** |
+| Teclas que la lista sigue en <150 ms | 22/50 | **39/50** |
+| Peor tecla | 1945 ms | **576 ms** |
+| «perez» | 0 tarjetas | **140** |
+
+Reproducible: `node tools/mk_servicios_bench.mjs --db backup/bench_buscador.db --n 1400 --limpiar` y
+`node tools/bench_buscador_servicios.mjs` (con `BENCH_REGLA=sql` mide una build anterior).
+
+### 16.4 La prueba de que no se dañó nada
+
+- **Auditoría de datos** (`tools/audit_la_app_no_cambia_datos.mjs`, build final): **3/3** — recorrer toda la app
+  **no cambia ni una celda** (19 tablas / 776.648 bytes idénticos); el arranque solo agrega dos claves de
+  `settings` del respaldo de prueba. **Cero migraciones, cero escrituras nuevas.**
+- **La base real del taller y el `Registro.exe` instalado quedaron intactos** (fecha y hash del 7/10): todo se
+  midió sobre **copias**.
+- `cargo test --lib` **219/219** (8 ignorados) · `tools/service_search_test.ts` **66/66** · `tsc -b` 0 ·
+  `oxlint` 0 errores · `npm run build` ✓ · `cargo build --release` ✓ · `release_gate` **LISTO**.
+- **En vivo**: `verify_turno_viejo` **42/42** · `verify_alta_limpia_filtros` **29/29** ·
+  `verify_auto_refresh` **13/13** · `verify_smoke_integral` **110/110**.
+- **Revisión adversarial** (2 subagentes de sólo lectura): 0 bloqueantes · 2 mayores + 5 menores, **todos
+  arreglados** (alto estimado de la tarjeta, `innerText` vacío fuera de pantalla, comodines, parpadeo del mapa de
+  abonos, firma de filtros, `amount` NULLABLE, truncado a 1000 ids, chips desparejos sobre el tope).
+- **Dos comprobaciones de verificación que mentían** (el producto estaba bien) y se arreglaron: el monto «2»
+  cuando el campo estaba en Bs. y el cliente buscado en los primeros 60 caracteres de la tarjeta.
+
+### 16.5 Qué queda anotado (no es deuda de F96)
+
+- `pagosFallo` no se reintenta solo mientras la ventana siga enfocada: se reintenta al volver a la ventana (F76
+  avisa `inmediato` al recuperar el foco) o al cambiar un filtro.
+- Si algún día la lista pasa de ~2000 órdenes, el siguiente paso natural es **paginar o virtualizar** la lista
+  (hoy se pintan todas las tarjetas, aunque las de fuera de pantalla ya no se maquetan).
+- **F40 fase 2** (feature 95) sigue abierta esperando una decisión de negocio del dueño.
